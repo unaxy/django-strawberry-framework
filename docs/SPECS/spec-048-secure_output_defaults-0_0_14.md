@@ -663,7 +663,7 @@ Four surfaces, each mirroring a resource-policy one:
   `resource_policy.py::resolve_resource_policy`'s contract through
   `utils/policies.py::resolve_policy`: the `DjangoSchema(error_policy=…)` argument >
   `DJANGO_STRAWBERRY_FRAMEWORK["ERROR_POLICY"]` > package defaults, an instance from either
-  slot re-validated into a private copy and a mapping applied over the defaults, with an
+  slot used as it stands and a mapping applied over the defaults, with an
   unknown key raising [`ConfigurationError`][glossary-configurationerror] naming it.
 - **`conf.py::error_policy_setting()`** with `ERROR_POLICY_KEY = "ERROR_POLICY"` — a thin
   reader that validates nothing, exactly like `resource_policy_setting()`. `conf.py` stays a
@@ -675,13 +675,12 @@ Four surfaces, each mirroring a resource-policy one:
   `extensions/resource_policy.py::DjangoResourcePolicyExtension._resolved_policy` guards its
   own: a schema carrying something that is not an `ErrorPolicy` — or none, as a plain
   `strawberry.Schema` a consumer wired the extension into by hand — falls back to the
-  package's own masking policy (`error_policy.py #"_PACKAGE_ERROR_POLICY = canonical_policy("`,
-  the values `DEFAULT_ERROR_POLICY` declares, held in an object no export names) rather than
-  being read for truthiness, which could silently disable masking.
+  package's own masking policy, `DEFAULT_ERROR_POLICY`, rather than being read for
+  truthiness, which could silently disable masking.
 - **`schema.py::DjangoSchema.__init__`** takes
   `error_policy: ErrorPolicy | Mapping[str, object] | None = None`, resolves it once at
-  construction, and exposes it as `schema.error_policy` — a per-read copy, so a resolver writing to it
-  changes only its own copy.
+  construction, and exposes it as `schema.error_policy` — a read-only attribute, so assigning
+  it raises `AttributeError`.
 
 **Resolved once at construction** so an invalid deployment fails at startup rather than on
 the first request that happens to raise. **Frozen** so a resolver holding the policy cannot
@@ -696,10 +695,8 @@ builds a fresh `DjangoErrorPolicyExtension` for every operation from its error p
 makes its teardown a no-op. A `DjangoErrorPolicyExtension` class or instance supplied in
 `extensions=` declares the extension the schema installs anyway and is dropped, so there is
 still exactly one masker (a second would mint a second correlation id for an already-masked
-error); a subclass is refused at construction, and a factory that resolves to the masker
-raises `ConfigurationError` when the operation resolves it, because a subclass or a
-factory can override or swap the hook that does the masking while answering every check
-for it. The same rule governs
+error); a subclass, or a factory that resolves to the masker, is an ordinary consumer entry
+behind the schema's own. The same rule governs
 [`DjangoResourcePolicyExtension`][glossary-djangoresourcepolicyextension] ([`spec-047`][spec-047]).
 
 *Alternatives rejected: see the [rationale][rationale] (a boolean `mask_errors=True`, a
@@ -1000,12 +997,12 @@ constants look like they want a setting.
 | 1 | `types/base.py` | `filesystem_path_fields` in the `_ValidatedMeta` snapshot and the `Meta`-key allowlist; the four-failure validation pass; the frozenset threaded into `_build_annotations`. |
 | 1 | `__init__.py`, `types/__init__.py` | Exports for the two public opt-in output types. |
 | 2 | `extensions/debug.py` | `__init__(*, allow_unsafe_production=False)`; the operation-start `settings.DEBUG` gate and its single warning; the six caps, `_TRUNCATION_MARKER`, and the one shared truncation/admission helper called by `_serialize_sql_row` and `_serialize_exception` before `_build_payload` stashes. |
-| 3 | `error_policy.py` | `ErrorPolicy`, `DEFAULT_ERROR_POLICY`, `_PACKAGE_ERROR_POLICY`, `resolve_error_policy`, `new_correlation_id`. |
+| 3 | `error_policy.py` | `ErrorPolicy`, `DEFAULT_ERROR_POLICY`, `resolve_error_policy`, `new_correlation_id`. |
 | 3 | `conf.py` | `ERROR_POLICY_KEY` and `error_policy_setting()`, a thin reader that validates nothing. |
 | 3 | `extensions/error_policy.py` | `DjangoErrorPolicyExtension`: the teardown, the structural classifier, the replacement builder, the log call, and the shared `mask_execution_result` / `masking_is_active` / `is_maskable_result` / `schema_error_policy` helpers. |
 | 3 | `consumers.py` | `_stop_aware_results` masks each streamed result through `mask_execution_result` (under the shared `is_maskable_result` gate) before the transport renders it; the stop-aware schema wrapper defines `subscribe` AND `stream` through one shared wrapping step and hands the real schema through so the policy is the executing schema's (Decision 11). |
 | 3 | `extensions/__init__.py`, `__init__.py` | Exports; the extension is root-exported because it is part of the default recipe. |
-| 3 | `schema.py` | `DjangoSchema(error_policy=…)` resolved at construction, `schema.error_policy` (a per-read copy), `_admitted_chain` (the error policy first), `_consumer_extension_entries` (a supplied masker dropped, a subclass refused), and `_masked_return` on `execute` / `execute_sync`. |
+| 3 | `schema.py` | `DjangoSchema(error_policy=…)` resolved at construction, `schema.error_policy` (read-only), `_admitted_chain` (the error policy first), `_consumer_extension_entries` (a supplied masker dropped), and `_masked_return` on `execute` / `execute_sync`. |
 | 4 | `examples/fakeshop/test_query/`, `examples/fakeshop/apps/*/tests/`, `tests/` | The rows in [Test plan](#test-plan). |
 | 5 | `docs/GLOSSARY.md` (DB), `docs/README.md`, `docs/TREE.md`, `README.md`, `TODAY.md`, `KANBAN.md` (DB) | Fold-in and the migration note. |
 
@@ -1152,8 +1149,8 @@ surface has one live home, so the rows live there:
 - A custom `message` and a custom `correlation_extension_key` both reach the wire.
 - Sync/async parity: the sync and async mounts return byte-identical error entries apart
   from the id itself.
-- A factory entry resolving to the masker raises `ConfigurationError` when the operation
-  resolves it, before any consumer hook or resolver runs.
+- A factory entry resolving to the masker runs as an ordinary entry, and the response is
+  masked once.
 - An exception escaping a consumer HOOK is masked like a resolver exception, on both
   execution colors, with exactly one masked entry and one log record (Decision 11's third
   seam); a hook raising its own `GraphQLError` is untouched.
@@ -1305,7 +1302,7 @@ Each risk's pre-planned fallback position, should a real consumer need appear, i
       `DjangoErrorPolicyExtension` exist; active-policy publication snapshots exclude late
       resolver appends from teardown onward, including during result collection;
       `DjangoSchema` also masks hook-failure results at final return, resolves the policy once at
-      construction, exposes `schema.error_policy` as a copy, and puts the extension FIRST in
+      construction, exposes `schema.error_policy` read-only, and puts the extension FIRST in
       every operation's chain.
 - [ ] Under `DEBUG=False` with the policy enabled, an unexpected exception reaches the
       client as `policy.message` plus a `uuid4().hex` correlation id with its

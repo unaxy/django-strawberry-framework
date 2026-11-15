@@ -35,10 +35,8 @@ Around the matrix sit the properties a single row cannot state: one FRESH id per
 masked error, the id reaching the server log with the original traceback, the
 retained ``path``, sync/async parity, the two ways out (``DEBUG=True`` and
 ``error_policy={"enabled": False}``), a ``DEBUG`` value that is set but is not
-the boolean ``True`` (still masked), a resolver that writes
-``info.schema.error_policy`` (still masked: the attribute is a copy), and an
-extension entry that resolves to the masking authority (``ConfigurationError``
-when the operation resolves it, rather than masked by consumer code), a directly
+the boolean ``True`` (still masked), an extension entry that resolves to the
+masking extension (an ordinary entry: masked once), a directly
 listed masking extension beside a debug factory (one masker, and debug still
 captures the original), and a hand-wired plain ``strawberry.Schema`` carrying the
 exported extension (masked by the package default it falls back to, while a hook
@@ -108,7 +106,6 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.error_policy import DEFAULT_ERROR_POLICY
-from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.extensions import DjangoDebugExtension
 from django_strawberry_framework.testing import AsyncTestClient, Response
 from django_strawberry_framework.testing.relay import global_id_for
@@ -211,13 +208,6 @@ def _probe_query_type() -> type:
             """Succeed, so a partially-failing response has something in ``data``."""
             return "fine"
 
-        @strawberry.field
-        def unmask(self, info: strawberry.Info) -> str:
-            """Write ``enabled=False`` on the schema policy a resolver can reach."""
-            assert isinstance(info.schema, DjangoSchema)
-            info.schema.error_policy.__dict__["enabled"] = False
-            return "written"
-
         boom_non_null: object = strawberry.field(
             resolver=_null_completion_value,
             graphql_type=str,
@@ -286,7 +276,7 @@ _MAX_TOKENS = 4
 
 
 def _error_policy_factory() -> DjangoErrorPolicyExtension:
-    """A factory resolving to the masking authority, which is not a thing an entry can be."""
+    """A factory resolving to the masking extension, an ordinary consumer entry."""
     return DjangoErrorPolicyExtension()
 
 
@@ -310,7 +300,7 @@ class _FactoryHookWitness(SchemaExtension):
 
     @override
     def on_execute(self) -> Iterator[None]:
-        """Note execution, which a refused request must never reach."""
+        """Note execution."""
         _FactoryHookWitness.ran.append("execute")
         yield
 
@@ -835,17 +825,12 @@ def test_the_correlation_id_reaches_the_server_log_with_the_original_exception(
 
 
 @pytest.mark.django_db
-def test_a_factory_resolving_to_the_masker_raises_instead_of_masking() -> None:
-    """A factory cannot become the schema's masker; resolving it raises ``ConfigurationError``.
-
-    The masker is the schema's own, built per operation from its error policy. A
-    factory that resolves to one is refused when the operation resolves it, before
-    any consumer hook or resolver runs.
-    """
+def test_a_factory_resolving_to_the_masker_runs_as_an_ordinary_entry() -> None:
+    """A factory's masker runs beside the schema's own, and the response is masked once."""
     _FactoryHookWitness.ran.clear()
-    with pytest.raises(ConfigurationError, match="builds itself"):
-        _post("/ep-factory/", "{ boom }")
-    assert _FactoryHookWitness.ran == []
+    _, payload = _post("/ep-factory/", "{ boom }")
+    _masked_error(payload)
+    assert "execute" in _FactoryHookWitness.ran
 
 
 @pytest.mark.django_db
@@ -1181,47 +1166,6 @@ def test_a_malformed_debug_setting_keeps_production_masking_end_to_end(
     error = _masked_error(payload)
     assert _SENSITIVE not in json.dumps(payload)
     assert error["path"] == ["boom"]
-
-
-@pytest.mark.django_db
-def test_a_resolver_cannot_turn_masking_off_by_writing_the_schemas_policy() -> None:
-    """``info.schema.error_policy`` is a copy, so a resolver write cannot unmask this request."""
-    response, payload = _post("/ep/", "{ unmask boom }")
-    _masked_error(payload)
-    assert payload["data"] == {"unmask": "written", "boom": None}
-    body = response.content.decode()
-    assert _SENSITIVE not in body, body
-
-
-@pytest.mark.django_db
-def test_a_written_exported_default_cannot_unmask_a_later_schema() -> None:
-    """The exported default is a value template; masking reads the package's own policy.
-
-    ``DEFAULT_ERROR_POLICY`` is a root export, so any consumer module holds it,
-    and a frozen dataclass admits a ``__dict__`` write. The write lands before the
-    schema exists - this mount builds one per request - so a schema that read the
-    exported object would be built with masking off and would put the resolver's
-    own exception text on the wire for every client of the process. The response
-    is masked with the package's message and a correlation id instead.
-
-    The assertions run after the write is undone, because the shared helpers read
-    the exported policy at call time and a row that compared the response against
-    a tampered template would agree with the tampering.
-    """
-    assert _debug_setting() is False
-    declared = dict(DEFAULT_ERROR_POLICY.__dict__)
-    DEFAULT_ERROR_POLICY.__dict__["enabled"] = False
-    DEFAULT_ERROR_POLICY.__dict__["message"] = "Written after startup."
-    try:
-        response, payload = _post("/ep/", "{ boom fine }")
-    finally:
-        # The export is process-global: a write left behind would answer every
-        # later row in the session.
-        DEFAULT_ERROR_POLICY.__dict__.update(declared)
-    error = _masked_error(payload)
-    assert error["path"] == ["boom"]
-    assert payload["data"] == {"boom": None, "fine": "fine"}
-    assert _SENSITIVE not in response.content.decode()
 
 
 @pytest.mark.django_db

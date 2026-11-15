@@ -121,10 +121,9 @@ inverts the goal).
 - **Validating in the settings reader rather than the dataclass.** Two gates drift; the
   argument [`spec-047`][spec-047] makes for its own policy applies unchanged.
 - **Letting a supplied `DjangoErrorPolicyExtension` entry replace the schema's masker.** An
-  entry is consumer configuration, and a subclass or a factory can override or swap the one
-  hook that masks while answering every inheritance check for it. The masker is therefore
-  built by the schema per operation from its error policy, a supplied exact entry is a no-op
-  declaration, and a subclass or a factory that resolves to the masker is refused.
+  entry is consumer configuration. The masker is therefore built by the schema per operation
+  from its error policy, a supplied exact entry is a no-op declaration, and a subclass or a
+  factory that resolves to the masker is an ordinary entry behind it.
 - **Raising on a wrong-shaped policy instead of guarding the read.** `DjangoSchema` already
   validates at construction; `schema_error_policy`'s `isinstance` guard exists for the
   schemas construction cannot see — a plain `strawberry.Schema` carrying the exported

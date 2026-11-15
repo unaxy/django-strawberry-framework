@@ -108,10 +108,6 @@ if TYPE_CHECKING:
         """Return whether the value is a ``collections.abc.Set`` (registered virtual subclasses included)."""
         ...
 
-    def is_memoryview(_value: object, /) -> TypeIs[memoryview]:
-        """Return whether the value is a ``memoryview`` (subclasses included)."""
-        ...
-
     def is_iterable(_value: object, /) -> TypeIs[Iterable[object]]:
         """Return whether the value is a ``collections.abc.Iterable`` (declares ``__iter__``)."""
         ...
@@ -268,7 +264,6 @@ else:
     is_mapping = Mapping.__instancecheck__
     is_iterable = Iterable.__instancecheck__
     is_abstract_set = AbstractSet.__instancecheck__
-    is_memoryview = memoryview.__instancecheck__
     is_concrete_field = models.Field.__instancecheck__
     is_queryset = models.QuerySet.__instancecheck__
     is_options = Options.__instancecheck__
@@ -331,7 +326,6 @@ __all__ = (
     "is_list_or_tuple",
     "is_lookup",
     "is_mapping",
-    "is_memoryview",
     "is_options",
     "is_queryset",
     "is_real_collection",

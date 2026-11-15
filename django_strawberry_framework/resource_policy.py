@@ -27,11 +27,7 @@ startup and no resolver re-reads or re-validates a setting per request.
 the operation's authoritative budget by ``begin_resource_budget`` and read back
 by ``policy_from_info`` and ``check_deadline``. The authority is a ``ContextVar``
 rather than a request-context key, so a resolver cannot widen the budget by
-REPLACING it; and the armed object is reachable from no consumer-visible name,
-so a resolver cannot widen it by MUTATING it either. Everything a resolver can
-reach - the schema attribute, the published mirror, whatever
-``policy_from_info`` returns - is a ``copy.copy`` duplicate sharing no state with it.
-The same call publishes the
+REPLACING it, and the policy is a frozen dataclass. The same call publishes the
 policy and its derived deadline under ``DST_RESOURCE_POLICY`` /
 ``DST_RESOURCE_DEADLINE``, mirroring the optimizer's ``DST_OPTIMIZER_*`` context
 seam; those keys are a consumer-readable mirror, and no enforcement seam trusts
@@ -53,8 +49,6 @@ a safety one.
 
 from __future__ import annotations
 
-import contextlib
-import copy
 import math
 import time
 from contextvars import ContextVar, Token
@@ -69,14 +63,14 @@ from typing_extensions import override
 from .conf import resource_policy_setting
 from .exceptions import ConfigurationError, DjangoStrawberryFrameworkError
 from .utils import truth
-from .utils._narrowing import iter_of, read_attr
+from .utils._narrowing import iter_of, read_attr, require_instance
 from .utils.context import get_context_value, stash_on_context
 from .utils.errors import coded_error_extensions
-from .utils.policies import canonical_policy, resolve_policy
+from .utils.policies import resolve_policy
 from .utils.querysets import _is_queryset, is_async_only_iterable
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterable, Iterable, Iterator, Mapping
+    from collections.abc import AsyncIterable, Iterable, Mapping
 
 __all__ = (
     "DEFAULT_RESOURCE_POLICY",
@@ -177,19 +171,8 @@ def _is_builtin_number(value: object) -> TypeGuard[int | float]:
 
     The test is EXACT, not ``isinstance``, everywhere a number crosses into the
     budget machinery - a deployment's configured bound, a consumer-written
-    deadline mirror, an uploaded file's reported size. A numeric SUBCLASS is
-    consumer code wearing a number's type, and every dunder the package then
-    reaches for is that code: a raising ``__le__`` / ``__gt__`` replaces a typed
-    ``ConfigurationError`` with a raw error out of schema construction, a
-    raising ``__ceil__`` / ``__format__`` replaces a typed
-    ``ResourceLimitExceeded`` with one out of a collection resolver, a lying
-    ``__float__`` answers a domain check for a value it does not hold, a lying
-    ``__lt__`` / ``__le__`` makes an expired instant compare as a future one,
-    and a reflected ``__radd__`` - which takes priority over the built-in's own
-    - turns ``x + value`` into ``nan``, which no later comparison against a
-    bound can ever exceed. Admitting only the built-in types is what keeps every
-    comparison, conversion, arithmetic and format the package performs on a
-    value the package owns.
+    deadline mirror, an uploaded file's reported size - which also keeps
+    ``bool`` out.
     """
     return type(value) is int or type(value) is float
 
@@ -211,21 +194,10 @@ def _is_valid_deadline(value: object) -> bool:
         return False
 
 
-#: The largest value any bound may hold: the signed 64-bit maximum.
-#:
-#: A bound is not an abstract number. Every collection bound is handed to the
-#: database as ``LIMIT`` / ``OFFSET``, where the adapter must bind it as an
-#: integer the backend has - SQLite's is 64-bit signed, and PostgreSQL's
-#: ``bigint`` is the same width - so a wider one fails inside the driver as a
-#: backend error, on the query the bound was supposed to be permitting. Every
-#: bound is also rendered into the message and ``extensions`` of the
-#: ``ResourceLimitExceeded`` it drives, and CPython refuses to render an integer
-#: past ``sys.get_int_max_str_digits`` (4300 digits by default), so a wider one
-#: raises a bare ``ValueError`` out of the constructor of the typed rejection
-#: that was the deployment's whole reason for configuring it. A bound this
-#: package cannot put in a query or in an error is not a looser bound, it is a
-#: configuration with no working rejection, and it fails at construction where
-#: the deployment can still fix it.
+#: The largest value any bound may hold: the signed 64-bit maximum. Every
+#: collection bound is handed to the database as ``LIMIT`` / ``OFFSET``, where
+#: SQLite's integer and PostgreSQL's ``bigint`` are that width, so a wider one
+#: would fail inside the driver on the query it was supposed to permit.
 MAX_RESOURCE_BOUND = 2**63 - 1
 
 
@@ -238,14 +210,7 @@ def _require_positive_int(value: object, label: str) -> None:
 
     The type test is EXACT, which is what rejects ``True``
     (``isinstance(True, int)`` is ``True``, and a bound of ``True`` would
-    silently become ``1``) and equally what keeps a hostile ``int`` subclass out
-    of a policy. A subclass whose ``__lt__`` raises would replace this typed
-    rejection with a raw error; worse, one whose ``__lt__`` answers normally
-    would be STORED, and every later use of the bound then dispatches consumer
-    dunders - ``narrowed``'s ``>`` comparison, and the ``limit`` / ``charged``
-    values ``ResourceLimitExceeded`` formats into the message and ``extensions``
-    of every rejection the bound drives. Admitting only the built-in type is
-    what keeps those on values the package owns.
+    silently become ``1``).
 
     The domain is bounded ABOVE as well, at :data:`MAX_RESOURCE_BOUND`, because
     a bound is only as configurable as the query and the rejection it has to
@@ -442,6 +407,17 @@ class ResourcePolicy:
                 )
             _require_positive_int(value, f"ResourcePolicy.{field.name}")
 
+    def check(
+        self,
+        bound: str,
+        charged: int,
+        detail: str,
+    ) -> None:
+        """Raise ``ResourceLimitExceeded`` when ``charged`` exceeds this policy's ``bound``."""
+        limit = require_instance(read_attr(self, bound), int)
+        if charged > limit:
+            raise ResourceLimitExceeded(bound, limit, charged, detail)
+
     def narrowed(self, **overrides: object) -> ResourcePolicy:
         """Return a copy with ``overrides`` applied, rejecting any that widen a bound.
 
@@ -479,30 +455,10 @@ class ResourcePolicy:
         return candidate
 
 
-#: The package's fail-closed baseline, exported as an inspectable value template:
-#: a deployment reads it to learn which bound it gets by doing nothing, and copies
-#: it to build a policy of its own.
-#:
-#: It is a TEMPLATE and not the authority. It is exported, so consumer code holds
-#: it, and a frozen dataclass admits
-#: ``DEFAULT_RESOURCE_POLICY.__dict__["max_list_rows"] = 999`` - which, on an
-#: object every miss path read, would be one write after startup that widens the
-#: baseline for every schema in the process, including schemas built before it.
-#: Nothing in the package reads this name: what the miss paths read is
-#: :data:`_PACKAGE_RESOURCE_POLICY`, and what a schema stores is a fresh copy
-#: taken at resolution (``utils/policies.py::resolve_policy``).
+#: The package's fail-closed baseline: what a deployment gets by configuring
+#: nothing, the miss path of :func:`policy_from_info` and the resource extension's
+#: answer for a schema that carries no policy.
 DEFAULT_RESOURCE_POLICY = ResourcePolicy()
-
-#: The package's own fail-closed budget, and the one every seam in the package
-#: falls back to: the miss path of :func:`policy_from_info` and the resource
-#: extension's unconfigured schema. Built once, at import, from the values the
-#: template was declared with, so it carries the package's bounds rather than
-#: whatever the exported object holds now; being reachable from no exported name is
-#: what makes enforcing a tampered default impossible rather than merely discouraged.
-_PACKAGE_RESOURCE_POLICY = canonical_policy(
-    DEFAULT_RESOURCE_POLICY,
-    policy_cls=ResourcePolicy,
-)
 
 
 def resolve_resource_policy(
@@ -513,10 +469,9 @@ def resolve_resource_policy(
     Precedence, highest first: the ``DjangoSchema(resource_policy=...)``
     argument, the ``DJANGO_STRAWBERRY_FRAMEWORK["RESOURCE_POLICY"]`` mapping, and
     the package defaults. A ``ResourcePolicy`` instance from either override slot
-    supplies its values to a private duplicate that validates them again
-    (``utils/policies.py::canonical_policy``), never the object a bound is then
-    read from; a mapping from either source is applied over the package defaults
-    so a deployment overrides only the bounds it cares about.
+    is used as it is, having validated itself at construction; a mapping from
+    either source is applied over the package defaults so a deployment overrides
+    only the bounds it cares about.
 
     Both override sources are *trusted declarations* and may therefore widen a
     package default - that is the distinction the narrowing rule draws between a
@@ -530,7 +485,7 @@ def resolve_resource_policy(
     return resolve_policy(
         explicit,
         policy_cls=ResourcePolicy,
-        default=_PACKAGE_RESOURCE_POLICY,
+        default=DEFAULT_RESOURCE_POLICY,
         read_setting=resource_policy_setting,
         display_name="resource policy",
         unit="bound",
@@ -617,7 +572,7 @@ class _BudgetScope:
     come. Once that has happened this scope no longer has a binding of its own
     to end, and ending it again would be a used token rather than a restore.
 
-    ``policy`` is the private snapshot the budget holds, kept here so
+    ``policy`` is the policy the budget holds, kept here so
     the arming caller charges the operation's own policy without a second read
     of the variable it has just set.
 
@@ -668,49 +623,23 @@ def _publish_budget_mirror(
     policy: ResourcePolicy,
     deadline: float | None,
 ) -> None:
-    """Write the consumer-readable mirror of a budget onto the request context.
-
-    The policy published here is a COPY. The mirror exists to be read by consumer
-    code, which means every resolver in the request holds whatever object is put
-    under this key; publishing the armed one would make a key documented as a
-    mirror into a write seam onto the authority it mirrors.
-    """
-    stash_on_context(context, DST_RESOURCE_POLICY, copy.copy(policy))
+    """Write the consumer-readable mirror of a budget onto the request context."""
+    stash_on_context(context, DST_RESOURCE_POLICY, policy)
     stash_on_context(context, DST_RESOURCE_DEADLINE, deadline)
-
-
-def _operation_policy(policy: ResourcePolicy) -> ResourcePolicy:
-    """Return the private, exact policy one operation is bounded by.
-
-    Taken once per operation rather than per bound read, so the per-field seams
-    pay nothing for it. ``utils/policies.py::canonical_policy`` establishes both
-    properties an armed budget needs: the object is an exact ``ResourcePolicy``,
-    so every field read a bound performs is the package's own rather than a
-    subclass's, and it is a fresh object no caller of
-    :func:`begin_resource_budget` retained a reference to, so the budget cannot
-    be widened afterwards by writing the object that was passed in.
-    """
-    return canonical_policy(policy, policy_cls=ResourcePolicy)
 
 
 def begin_resource_budget(context: object, policy: ResourcePolicy) -> _BudgetScope:
     """Arm ``policy`` as this operation's budget and publish it; returns its scope.
-
-    What is armed is a private snapshot (:func:`_operation_policy`), never the
-    object the caller passed: the schema's policy is process-lived and reachable
-    from ``info.schema``, so arming it directly would put the operation's ceiling
-    behind a name every resolver in every later request can write.
 
     One derived absolute deadline reaches both the armed budget and the
     published mirror, so the authority and the mirror cannot disagree about when
     the operation's budget ends. :func:`end_resource_budget` closes the scope,
     restoring whatever budget an enclosing operation had armed.
     """
-    armed = _operation_policy(policy)
-    deadline = _absolute_deadline(armed)
-    _publish_budget_mirror(context, armed, deadline)
-    budget = _RequestBudget(armed, deadline, _AdmissionVerdict())
-    return _BudgetScope(armed, budget, _active_budget.set(budget))
+    deadline = _absolute_deadline(policy)
+    _publish_budget_mirror(context, policy, deadline)
+    budget = _RequestBudget(policy, deadline, _AdmissionVerdict())
+    return _BudgetScope(policy, budget, _active_budget.set(budget))
 
 
 def budget_resume_binding(
@@ -751,23 +680,13 @@ def adopt_budget_binding(scope: _BudgetScope) -> None:
 
 
 def armed_resource_policy() -> ResourcePolicy | None:
-    """Return the snapshot armed for this operation, or ``None`` when nothing armed one.
+    """Return the policy armed for this operation, or ``None`` when nothing armed one.
 
     The package's own way of asking "which policy is this operation being
     bounded by", for the seams that run inside an armed scope but hold no
     ``info``: :func:`policy_from_info` answers the same question for a resolver
     and falls back to the published mirror, while a caller of this one wants to
     know whether a budget is armed at all.
-
-    What comes back is the armed object itself rather than a copy, and it is not
-    exported: it has already been through :func:`_operation_policy`, so its
-    fields are the package's own, and the callers are package code charging
-    against the budget in force rather than consumer code that could retain it.
-    Charging the armed snapshot is what keeps one operation's accounting on ONE
-    policy - a hook that re-resolves its configuration per call can be handed a
-    different answer each time by a policy object whose reads are consumer code,
-    and then the document is scanned against one budget while the request runs
-    under another.
     """
     budget = _armed_budget()
     return None if budget is None else budget.policy
@@ -824,64 +743,6 @@ def end_resource_budget(scope: _BudgetScope) -> None:
             raise
 
 
-def _effective_deadline(armed: float | None, mirror: object) -> float | None:
-    """Return the tighter of the operation's own deadline and a consumer-written one.
-
-    The narrowing rule the rest of the module already states for bounds
-    (``effective_bound``, ``ResourcePolicy.narrowed``), applied to the one piece
-    of budget state a consumer can write: a resolver that stashes an EARLIER
-    instant under ``DST_RESOURCE_DEADLINE`` is shortening its own request, which
-    it is always entitled to do; one that stashes a later instant, clears the
-    key, or writes a value outside the deadline domain is asking to run past the
-    budget the operation started with, which no caller is entitled to. The armed
-    value is the ceiling either way, so the seam cannot be widened by anything
-    reachable from ``info.context``.
-
-    The written value is admitted only if it is an exact built-in number
-    (:func:`_is_builtin_number`). A numeric SUBCLASS answers the comparison the
-    narrowing rule is decided by, so it can present itself as EARLIER than the
-    armed instant while answering every later comparison as a future one - a
-    narrowing on the way in and a widening on the way out, which is the one
-    thing this seam exists to refuse.
-    """
-    if not _is_builtin_number(mirror):
-        return armed
-    if armed is None:
-        return mirror
-    return min(armed, mirror)
-
-
-def _deadline_expired(deadline: object) -> bool | None:
-    """Whether ``deadline`` has passed, or ``None`` when it is not a deadline at all.
-
-    Only an exact built-in number is placed against the clock
-    (:func:`_is_builtin_number`); a non-finite one is expired, since no
-    configured policy derives it and no comparison can certify the request is
-    inside it.
-
-    A value that is numeric-SHAPED but outside that domain - an ``int`` or
-    ``float`` SUBCLASS, whose comparison, conversion and format are all consumer
-    code - is likewise a deadline the seam cannot certify the request is inside,
-    and reads as passed rather than being asked. Absent, cleared, ``bool``, or
-    anything non-numeric is not a deadline at all and leaves the request
-    running.
-    """
-    if deadline is None:
-        return None
-    if _is_builtin_number(deadline):
-        try:
-            return not math.isfinite(deadline) or time.monotonic() >= deadline
-        except OverflowError:
-            # ``isfinite`` overflows converting an integer too large for a
-            # double, which is therefore an instant no comparison can place.
-            return True
-    if truth.is_instance(deadline, bool) or not (
-        truth.is_instance(deadline, int) or truth.is_instance(deadline, float)
-    ):
-        return None
-    return True
-
-
 def policy_from_info(info: object) -> ResourcePolicy:
     """Return the request's policy, or the package default when none was published.
 
@@ -892,33 +753,17 @@ def policy_from_info(info: object) -> ResourcePolicy:
     ``DjangoSchema`` always installs the extension that arms one, so only a
     schema that never installed it reaches the mirror.
 
-    What comes back is always a COPY, never the armed object or the package
-    default singleton. This function is the package's own way of reading a bound
-    and it is equally the way a consumer resolver reads one, so whatever it
-    returns is in reach of consumer code for the rest of the operation; returning
-    the authority would let one ``__dict__`` write on it widen every bound for
-    the rest of the request, and returning the singleton would widen them for
-    every request the process serves afterwards.
-
-    A mirror value is admitted only when it is an EXACT ``ResourcePolicy``. A
-    subclass answers every field read with consumer code, which is the same
-    domain rule the module applies to a number crossing into the budget
-    (:func:`_is_builtin_number`); an armed budget has been through
-    :func:`_operation_policy` already, so this is the one path where a foreign
-    object could still arrive.
-
-    Fail-closed by construction: the miss path returns a copy of the package's
-    own baseline (``_PACKAGE_RESOURCE_POLICY``), never ``None`` and never the
-    exported ``DEFAULT_RESOURCE_POLICY`` a consumer holds. A field consulting the
-    policy is
-    therefore always bounded, including under a plain ``strawberry.Schema`` that
-    never installed the extension, and never needs a ``None`` branch of its own.
+    Fail-closed by construction: the miss path returns the package's own
+    baseline (``DEFAULT_RESOURCE_POLICY``), never ``None``. A field consulting
+    the policy is therefore always bounded, including under a plain
+    ``strawberry.Schema`` that never installed the extension, and never needs a
+    ``None`` branch of its own.
     """
     budget = _armed_budget()
     if budget is not None:
-        return copy.copy(budget.policy)
+        return budget.policy
     value = get_context_value(getattr(info, "context", None), DST_RESOURCE_POLICY)
-    return copy.copy(value if type(value) is ResourcePolicy else _PACKAGE_RESOURCE_POLICY)
+    return value if isinstance(value, ResourcePolicy) else DEFAULT_RESOURCE_POLICY
 
 
 def check_deadline(info: object) -> None:
@@ -927,17 +772,11 @@ def check_deadline(info: object) -> None:
     Cooperative and called first at every seam that is about to hand work to the
     database (the seams are enumerated at ``ResourcePolicy``'s
     ``execution_deadline_seconds`` entry). The armed
-    budget is the ceiling: a resolver may SHORTEN its own request by stashing an
-    earlier instant under ``DST_RESOURCE_DEADLINE``, and cannot lengthen or
-    clear it (:func:`_effective_deadline`). Where no budget is armed, the
-    published mirror is all there is and answers alone.
-
-    Guarding the *answer* rather than a spelling of the input
-    (:func:`_deadline_expired`): an absent, cleared, or non-numeric deadline
-    leaves the request running rather than rejecting it, while one that has
-    passed - and equally one that is numeric but not placeable on the clock,
-    which no configured policy can derive and which no comparison can certify
-    the request is inside - always rejects.
+    budget is the ceiling: the earliest of it and an exact built-in number a
+    resolver stashed under ``DST_RESOURCE_DEADLINE`` decides, so a resolver may
+    SHORTEN its own request and cannot lengthen or clear it. Where no budget is
+    armed, the published mirror is all there is and answers alone. Anything
+    under the key that is not an exact built-in number is not a deadline.
 
     The rejection reports the CONFIGURED budget, never the clock: ``limit`` is
     the policy's own ``execution_deadline_seconds`` and ``charged`` is one second
@@ -951,8 +790,9 @@ def check_deadline(info: object) -> None:
     """
     budget = _armed_budget()
     mirror = get_context_value(getattr(info, "context", None), DST_RESOURCE_DEADLINE)
-    deadline = mirror if budget is None else _effective_deadline(budget.deadline, mirror)
-    if not _deadline_expired(deadline):
+    armed = None if budget is None else budget.deadline
+    deadlines = [value for value in (armed, mirror) if _is_builtin_number(value)]
+    if not deadlines or time.monotonic() < min(deadlines):
         return
     source = budget.policy if budget is not None else policy_from_info(info)
     configured = source.execution_deadline_seconds
@@ -970,48 +810,27 @@ def check_deadline(info: object) -> None:
     )
 
 
-#: The collection representations whose own slice is the operation that bounds
-#: them. The exact built-in sequences are sliced because at an exact type
-#: ``[a:b]`` is the interpreter's own subscript rather than a method the value
-#: brought with it. Any ``QuerySet`` is sliced too (``_bounds_by_its_own_slice``),
-#: because slicing is the only thing that carries the bound into SQL as ``LIMIT``,
-#: so a queryset is never evaluated unbounded. Everything else is bounded by
-#: COUNTING instead - see ``_windowed_rows``.
-_SLICE_BOUNDED_ROW_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
-    (
-        list,
-        tuple,
-        str,
-        bytes,
-        bytearray,
-    ),
-)
-
-
 def _bounds_by_its_own_slice(
     result: object,
 ) -> TypeGuard[
     list[object] | tuple[object, ...] | str | bytes | bytearray | QuerySet[Model, object]
 ]:
-    """Whether slicing ``result`` carries the bound: an exact built-in sequence, or a ``QuerySet``.
+    """Whether slicing ``result`` carries the bound: a built-in sequence, or a ``QuerySet``.
 
-    The sequences by exact type: a subclass of any of them brings its own
-    ``__getitem__``. A ``QuerySet`` of any class, a project's own included, is
-    sliced so the bound reaches SQL as ``LIMIT`` rather than being counted out
-    of a fully fetched table. Both tests read the real class, so a ``__class__``
-    property on an object that is none of these cannot answer.
+    A ``QuerySet`` of any class, a project's own included, is sliced so the bound
+    reaches SQL as ``LIMIT`` rather than being counted out of a fully fetched
+    table. Everything else is bounded by COUNTING instead (``_windowed_rows``).
     """
-    return truth.is_exact_one_of(result, _SLICE_BOUNDED_ROW_TYPES) or _is_queryset(result)
-
-
-def _consumer_rows(result: object) -> Iterator[object]:
-    """Iterate a consumer resolver's return, whatever shape it declared.
-
-    ``iter`` is the iterability check: a non-iterable raises the same
-    ``TypeError`` ``islice`` would, and an object iterable only through
-    ``__getitem__`` iterates through it, exactly as ``islice`` would have.
-    """
-    return iter_of(result)
+    return isinstance(
+        result,
+        (
+            list,
+            tuple,
+            str,
+            bytes,
+            bytearray,
+        ),
+    ) or _is_queryset(result)
 
 
 def _raw_list_bound(info: object, declared: int | None, *, trusted: bool = False) -> int:
@@ -1089,18 +908,12 @@ def _windowed_rows(
     are an accepted-coordinate ceiling on skipped and returned items, not a
     guarantee on total physical rows scanned by the underlying database query.
 
-    The window is applied with an operation this package owns. Slicing a value
-    runs whatever ``__getitem__`` the value brought with it, so on a consumer's
-    own sequence type the bound is enforced by consumer code and a slice can
-    answer with every row it was asked to drop; ``[start:stop]`` is therefore
-    reached only for the exact representations in ``_SLICE_BOUNDED_ROW_TYPES``
-    and for a ``QuerySet``, whose slice is what pushes ``LIMIT`` into SQL.
-    Every other shape - a subclass of those sequence types, a mapping, a bare iterable, a
+    ``[start:stop]`` is reached for a built-in sequence (``list``, ``tuple``,
+    ``str``, ``bytes``, ``bytearray``) and for a ``QuerySet``, whose slice is what
+    pushes ``LIMIT`` into SQL. Every other shape - a mapping, a bare iterable, a
     relation accessor's sequence proxy - is bounded by COUNTING through
-    ``islice`` into a list this package built, which cannot return more items
-    than it was asked for whatever the source does, and a zero-width window on
-    such a shape is the empty list rather than a subscript nobody can predict
-    the answer to.
+    ``islice`` into a list this package built, and a zero-width window on such a
+    shape is the empty list.
 
     A source that arrives evaluated is windowed from the rows it already holds,
     because ``QuerySet.__getitem__`` reads a populated ``_result_cache`` directly,
@@ -1120,14 +933,14 @@ def _windowed_rows(
         return None
     by_slice = _bounds_by_its_own_slice(result)
     if offset is None and requested_limit is None:
-        return result[:limit] if by_slice else list(islice(_consumer_rows(result), limit))
+        return result[:limit] if by_slice else list(islice(iter_of(result), limit))
 
     start = offset if offset is not None else 0
     window = requested_limit if requested_limit is not None else limit
     if window == 0:
         return result[start:start] if by_slice else []
     stop = start + window
-    return result[start:stop] if by_slice else list(islice(_consumer_rows(result), start, stop))
+    return result[start:stop] if by_slice else list(islice(iter_of(result), start, stop))
 
 
 @overload
@@ -1188,13 +1001,10 @@ def bounded_rows(
     costs no second query. A queryset a ``DjangoListField`` resolver returns is
     not such a value even when the resolver evaluated it: the visibility seal in
     front of the window drops its result cache, so its window is a query.
-    Which operation does the truncating follows from what the value IS, never
-    from whether a subscript happened to answer: an exact ``list``, ``tuple``,
-    ``str``, ``bytes`` or ``bytearray`` is sliced, and every
-    other shape - a subclass of one of the sequence types, a mapping, a bare
-    iterable - is counted into a fresh list instead, which is how the ceiling
-    stays a ceiling on a sequence type whose own ``__getitem__`` is consumer
-    code. A ``QuerySet`` of a project's own class is sliced too, so it keeps the
+    Which operation does the truncating follows from what the value IS: a
+    ``list``, ``tuple``, ``str``, ``bytes`` or ``bytearray`` is sliced, and every
+    other shape - a mapping, a bare iterable - is counted into a fresh list
+    instead. A ``QuerySet`` of a project's own class is sliced too, so it keeps the
     SQL ``LIMIT`` a counted truncation would lose. The slice answers in the
     sliced value's own type, except on a
     queryset whose rows are already fetched: there ``QuerySet.__getitem__``
@@ -1212,69 +1022,14 @@ def bounded_rows(
     return _windowed_rows(result, info, declared, trusted=trusted)
 
 
-def _attach_cleanup_note(primary_error: BaseException, note: str) -> None:
-    """Record a cleanup diagnostic on an error that is already being propagated.
-
-    ``BaseException.add_note`` is 3.11+, and cleanup runs inside ``finally``
-    blocks: on the 3.10 support floor the resulting ``AttributeError`` would
-    REPLACE the error this call exists to preserve. Writing the ``__notes__``
-    list the note protocol is built on is what ``add_note`` does on 3.11+ (same
-    list, same traceback rendering) and is the only form that carries the
-    diagnostic across the whole supported range.
-
-    The existing notes are read from the error's own namespace; a value there
-    that is not a list (the note protocol's type) is replaced by a fresh list,
-    as ``add_note`` would refuse to extend it.
-
-    The note is an attachment, never a failure of its own: an unassignable
-    ``__notes__`` on the primary error (a read-only descriptor) must not mask
-    the error the caller is already propagating.
-    """
-    notes = truth.static_attr(primary_error, "__notes__", None)
-    existing: list[object] = notes if truth.is_exact(notes, list) else []
-    with contextlib.suppress(Exception):
-        # ``setattr``, not an attribute write: 3.10's typeshed declares no ``__notes__``
-        # (the attribute is 3.11+ API), and the floor check reads 3.10's.
-        setattr(primary_error, "__notes__", [*existing, note])  # noqa: B010 - 3.10's typeshed has no __notes__
+async def _close_async_iterator(iterator: object) -> None:
+    """Invoke ``iterator.aclose()`` if present."""
+    close = getattr(iterator, "aclose", None)
+    if close is not None:
+        await close()
 
 
-async def _close_async_iterator(
-    iterator: object,
-    *,
-    primary_error: BaseException | None = None,
-    caller: str = "bounded_rows_async",
-) -> None:
-    """Safely invoke ``iterator.aclose()`` if present.
-
-    When ``primary_error`` is provided (iteration failed), ordinary cleanup
-    errors are attached to ``primary_error.__notes__`` rather than replacing the
-    primary error. When ``primary_error`` is None (iteration completed normally
-    or short-circuited), cleanup errors are propagated directly. A control
-    signal raised by ``aclose`` propagates either way.
-    """
-    try:
-        close = getattr(iterator, "aclose", None)
-        if close is not None:
-            await close()
-    except Exception as close_error:
-        # Only an ordinary failure may be demoted to a note: ``CancelledError``,
-        # ``KeyboardInterrupt``, ``SystemExit`` and ``GeneratorExit`` are control
-        # signals addressed to the task and bypass this arm by inheritance, taking
-        # precedence over the primary error (reachable as their ``__context__``).
-        if primary_error is None:
-            raise
-        _attach_cleanup_note(
-            primary_error,
-            f"{caller} iterator cleanup failed: {close_error!r}",
-        )
-
-
-async def _cleanup_rejected_async_iterable(
-    iterable: AsyncIterable[object],
-    primary_error: BaseException,
-    *,
-    caller: str,
-) -> None:
+async def _cleanup_rejected_async_iterable(iterable: AsyncIterable[object]) -> None:
     """Close an async-only source that is being rejected before it is ever advanced.
 
     Sits below every caller that can reject such a source: the list field's
@@ -1282,29 +1037,8 @@ async def _cleanup_rejected_async_iterable(
     bound check. An iterator that has not yet produced an item can still own an
     open external resource, so the rejection owes it a close even though no row
     was ever requested.
-
-    The rejection stays primary throughout. Acquiring the iterator is itself a
-    consumer call that can fail, and when it does the failure becomes a note on
-    the rejection rather than the error the caller sees - the same posture
-    ``_close_async_iterator`` takes for a failing ``aclose``, and for the same
-    reason: the caller is already propagating the useful failure. Both notes
-    name ``caller``, because more than one seam reaches this one and a note that
-    cannot say which produced it describes nothing. A control signal raised by
-    acquisition is not that kind of failure and propagates.
     """
-    try:
-        iterator = aiter(iterable)
-    except Exception as aiter_err:  # noqa: BLE001 - consumer code may raise anything
-        _attach_cleanup_note(
-            primary_error,
-            f"{caller} iterator acquisition failed: {aiter_err!r}",
-        )
-        return
-    await _close_async_iterator(
-        iterator,
-        primary_error=primary_error,
-        caller=caller,
-    )
+    await _close_async_iterator(aiter(iterable))
 
 
 @overload
@@ -1381,16 +1115,12 @@ async def _windowed_rows_async(
         )
     try:
         limit = _raw_list_bound(info, declared, trusted=trusted)
-    except BaseException as rejection:
+    except BaseException:
         # The source was handed over before this seam looked at the clock, so a
         # rejection here abandons an iterator the resolver has already built.
         # Nothing has been advanced, but an unadvanced iterator can still hold
         # an open external resource, and no later seam will ever see it again.
-        await _cleanup_rejected_async_iterable(
-            result,
-            rejection,
-            caller="bounded_rows_async",
-        )
+        await _cleanup_rejected_async_iterable(result)
         raise
     start = offset if offset is not None else 0
     window = requested_limit if requested_limit is not None else limit
@@ -1402,7 +1132,6 @@ async def _windowed_rows_async(
 
     rows: list[object] = []
     exhausted = False
-    primary_error: BaseException | None = None
     skipped = 0
     try:
         async for item in iterator:
@@ -1414,16 +1143,9 @@ async def _windowed_rows_async(
                 break
         else:
             exhausted = True
-    except BaseException as exc:
-        primary_error = exc
-        raise
     finally:
         if not exhausted:
-            await _close_async_iterator(
-                iterator,
-                primary_error=primary_error,
-                caller="bounded_rows_async",
-            )
+            await _close_async_iterator(iterator)
     return rows
 
 
@@ -1476,17 +1198,11 @@ async def bounded_rows_async(
     protocols) stay on ``bounded_rows`` so lazy querysets retain their SQL
     ``LIMIT`` instead of being materialized through the async iterator.
 
-    When the prefix ends early, the iterator is closed. A cleanup failure is
-    raised when iteration itself succeeded; when iteration already failed, the
-    source error remains primary and an ordinary cleanup failure is attached as
-    a note rather than masking the useful failure. A cancellation arriving
-    during cleanup is not demoted that way: it keeps precedence, so a torn-down
-    request cannot report itself as an ordinary field error.
+    When the prefix ends early, or iteration fails, the iterator is closed.
 
     The deadline and row bound are read here, after the resolver has already
     produced its source, so a rejection at that read abandons an async-only
     source the same way an early prefix end does and owes it the same close.
-    The rejection keeps precedence over anything acquisition or closure raises.
 
     Like ``bounded_rows``, this surface carries no client page coordinates:
     ``_windowed_rows_async`` is where a validated ``offset`` / ``limit`` pair

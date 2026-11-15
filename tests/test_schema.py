@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, NoReturn, TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
-import pytest_django
 import strawberry
 from apps.library.models import Branch, Shelf
 from django import forms
@@ -64,14 +63,10 @@ from django_strawberry_framework.schema import (
     DjangoMutationExecutionContext,
     DjangoSchema,
     _consumer_extension_entries,
-    _entry_type,
-    _extension_entry_matches,
 )
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import (
-    ClaimsClassBase,
-    ClassReadRaisesBase,
     ModelSerializerBase,
     declare_django_type,
 )
@@ -89,37 +84,6 @@ class CustomErrorPolicyExtension(DjangoErrorPolicyExtension):
 
 class CustomResourcePolicyExtension(DjangoResourcePolicyExtension):
     """A consumer subclass of the bounding authority, which is not one."""
-
-
-# basedpyright: cooperative MRO: ``DjangoResourcePolicyExtension.__init__`` calls
-# ``super().__init__()``, which reaches ``_OperationBoundExtension.__init__`` exactly once
-# through ``DjangoErrorPolicyExtension`` (which defines none), so every base is initialized
-class HybridPolicyExtension(  # pyright: ignore[reportUnsafeMultipleInheritance]
-    DjangoResourcePolicyExtension,
-    DjangoErrorPolicyExtension,
-):
-    """One class answering to both authorities, of which it can dispatch one."""
-
-
-# basedpyright: cooperative MRO: ``DjangoErrorPolicyExtension`` defines no ``__init__``, so
-# construction runs ``DjangoResourcePolicyExtension.__init__``, whose ``super().__init__()``
-# reaches ``_OperationBoundExtension.__init__`` exactly once, so every base is initialized;
-# the bases' ``_policy`` properties answer different policy types and the MRO takes the
-# first base's, the hook this reversed order proves
-class ReversedHybridPolicyExtension(  # pyright: ignore[reportUnsafeMultipleInheritance, reportIncompatibleVariableOverride]
-    DjangoErrorPolicyExtension,
-    DjangoResourcePolicyExtension,
-):
-    """The same class with its bases the other way round, which picks the other hook."""
-
-
-class _ClassClaimingResourcePolicy(ClaimsClassBase, DjangoResourcePolicyExtension):
-    """An authority subclass whose instances claim to be a class, which ``isinstance`` believes.
-
-    The claim is ``type``, so an ``isinstance`` classifier sees a class entry.
-    """
-
-    claimed = type
 
 
 #: Every marker extension that ran, in order, since a test last cleared it.
@@ -202,6 +166,10 @@ def test_consumer_extension_entries_shapes() -> None:
     assert _consumer_extension_entries([DjangoResourcePolicyExtension]) == ([], None)
     assert _consumer_extension_entries([DjangoErrorPolicyExtension]) == ([], None)
     assert _consumer_extension_entries([DjangoErrorPolicyExtension()]) == ([], None)
+    assert _consumer_extension_entries([CustomResourcePolicyExtension]) == (
+        [CustomResourcePolicyExtension],
+        None,
+    )
 
     entries, declared = _consumer_extension_entries(
         [_MarkerExtension, DjangoResourcePolicyExtension(policy=ResourcePolicy(max_list_rows=4))],
@@ -210,63 +178,17 @@ def test_consumer_extension_entries_shapes() -> None:
     assert declared == ResourcePolicy(max_list_rows=4)
 
 
-def test_an_entry_is_classified_by_its_real_type_whatever_its_class_property_says() -> None:
-    """A consumer object decides what ``isinstance`` sees, and ``type()`` ignores it.
-
-    A ``__class__`` that raises, and one that claims to be a class, both come
-    back as the instance's real type.
-    """
-
-    class _HostileClass(ClassReadRaisesBase):
-        pass
-
-    assert _entry_type(_HostileClass(TypeError)) is _HostileClass
-    assert _entry_type(_ClassClaimingResourcePolicy()) is _ClassClaimingResourcePolicy
-    assert _entry_type(DjangoResourcePolicyExtension) is DjangoResourcePolicyExtension
-
-
-def test_extension_entry_matches_adversarial() -> None:
-    assert _extension_entry_matches(DjangoErrorPolicyExtension(), DjangoErrorPolicyExtension)
-    assert not _extension_entry_matches(
-        DjangoResourcePolicyExtension(),
-        DjangoErrorPolicyExtension,
-    )
-    assert not _extension_entry_matches(object(), DjangoErrorPolicyExtension)
-    assert not _extension_entry_matches(123, DjangoErrorPolicyExtension)
-    assert not _extension_entry_matches("string", DjangoErrorPolicyExtension)
-    assert not _extension_entry_matches(None, DjangoErrorPolicyExtension)
-
-
 @pytest.mark.parametrize(
     "entry",
-    [
-        CustomErrorPolicyExtension,
-        CustomResourcePolicyExtension,
-        CustomResourcePolicyExtension(),
-        HybridPolicyExtension,
-        ReversedHybridPolicyExtension,
-        HybridPolicyExtension(),
-    ],
-    ids=[
-        "error-subclass-class",
-        "resource-subclass-class",
-        "resource-subclass-instance",
-        "hybrid-class",
-        "hybrid-class-reversed-bases",
-        "hybrid-instance",
-    ],
+    [CustomErrorPolicyExtension, CustomResourcePolicyExtension],
+    ids=["error-subclass-class", "resource-subclass-class"],
 )
-def test_a_subclass_of_an_enforcement_extension_is_refused_at_construction(entry: object) -> None:
-    """Inheriting an authority is not being one, and the census cannot tell them apart.
+def test_a_subclass_of_an_enforcement_extension_is_an_ordinary_entry(entry: object) -> None:
+    """Only the exact class, or an exact instance of it, is read as configuration."""
+    schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(entry))
 
-    A subclass overriding the single hook that charges a document or masks a
-    result answers every ``issubclass`` question correctly while enforcing
-    nothing, and one class inheriting BOTH answers for two authorities of which
-    ordinary method resolution runs exactly one. Neither is distinguishable from
-    the real thing by anything but exact type, so neither is admitted as one.
-    """
-    with pytest.raises(ConfigurationError, match="subclasses the package"):
-        DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(entry))
+    assert schema.extensions == (entry,)
+    assert schema.execute_sync("{ hello }").data == {"hello": "world"}
 
 
 def _field_node(name: str) -> FieldNode:
@@ -408,7 +330,6 @@ def test_get_extensions_gives_an_unrelated_factory_both_package_authorities() ->
         "DjangoErrorPolicyExtension",
         "_MarkerExtension",
         "DjangoResourcePolicyExtension",
-        "AdmissionGuard",
         "_OperationModeMarker",
     ]
 
@@ -448,23 +369,14 @@ class _PolicyKeyword(TypedDict, total=False):
     ],
     ids=["resource", "error"],
 )
-def test_a_schema_policy_attribute_answers_with_a_copy(row: _PolicyKeyword) -> None:
-    """``info.schema`` reaches this attribute from every resolver in every request.
-
-    A frozen dataclass refuses ``setattr`` and accepts ``policy.__dict__[name] =
-    value``, and the resolved object outlives the request, so handing the stored
-    one out would make an attribute documented as configuration into a write seam
-    onto every later request's authority.
-    """
+def test_a_schema_policy_attribute_is_read_only(row: _PolicyKeyword) -> None:
+    """The attribute answers the resolved policy and refuses assignment."""
     [(attribute, policy)] = row.items()
     schema = DjangoSchema(query=DummyQuery, **row)
 
-    first = read_attr(schema, attribute)
-    second = read_attr(schema, attribute)
-
-    assert first == second
-    assert first is not second
-    assert first is not policy
+    assert read_attr(schema, attribute) == policy
+    with pytest.raises(AttributeError):
+        setattr(schema, attribute, policy)
 
 
 @strawberry.type
@@ -575,88 +487,9 @@ def test_an_extension_entry_strawberry_could_not_resolve_is_refused(entry: objec
         DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(entry))
 
 
-@pytest.mark.parametrize(
-    ("row", "field", "widened"),
-    [
-        ({"resource_policy": ResourcePolicy(max_list_rows=1)}, "max_list_rows", 999),
-        ({"error_policy": ErrorPolicy()}, "enabled", False),
-    ],
-    ids=["resource", "error"],
-)
-def test_a_retained_policy_argument_is_not_the_one_the_schema_enforces(
-    row: _PolicyKeyword,
-    field: str,
-    widened: object,
-) -> None:
-    """The caller keeps their object; the schema keeps a duplicate of its values.
-
-    Intake copies even an exact instance, so a caller who retained the argument -
-    or who left one in ``settings`` - does not hold the object any bound is read
-    from, although a frozen dataclass admits ``policy.__dict__[bound] = wider``
-    by the same route the schema attribute does.
-    """
-    [(argument, policy)] = row.items()
-    schema = DjangoSchema(query=DummyQuery, **row)
-
-    policy.__dict__[field] = widened
-
-    assert read_attr(read_attr(schema, argument), field) != widened
-
-
-def test_a_policy_behind_the_setting_is_snapshotted_like_an_explicit_one(
-    settings: pytest_django.Settings,
-) -> None:
-    """The two override slots are one ladder, so they detach on the same terms.
-
-    A settings-supplied instance is the one a deployment is most likely to keep
-    a reference to: it lives at module scope for the life of the process.
-    """
-    policy = ResourcePolicy(max_list_rows=2)
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RESOURCE_POLICY": policy}
-    schema = DjangoSchema(query=DummyQuery)
-
-    policy.__dict__["max_list_rows"] = 999
-
-    assert schema.resource_policy.max_list_rows == 2
-
-
-def test_an_exact_policy_corrupted_before_intake_is_rejected_at_construction() -> None:
-    """``__post_init__`` spoke for the values an instance was BUILT with.
-
-    Admitting an exact instance without re-reading it made the type the evidence
-    and the fields an assumption, so a bound written onto the object after it
-    validated reached the schema as configuration.
-    """
-    policy = ResourcePolicy()
-    policy.__dict__["max_list_rows"] = 0
-
-    with pytest.raises(ConfigurationError):
-        DjangoSchema(query=DummyQuery, resource_policy=policy)
-
-
-def test_widening_a_schema_policy_copy_leaves_the_schemas_own_bound() -> None:
-    """The write lands on the reader's duplicate and nowhere a bound is read from."""
-    schema = DjangoSchema(query=DummyQuery, resource_policy=ResourcePolicy(max_list_rows=7))
-
-    schema.resource_policy.__dict__["max_list_rows"] = 999
-
-    assert schema.resource_policy.max_list_rows == 7
-
-
 # ---------------------------------------------------------------------------
 # The resolved chain
 # ---------------------------------------------------------------------------
-
-
-class _HybridFactory:
-    """A factory returning one object that answers to both authorities."""
-
-    def __init__(self, hybrid_type: type[HybridPolicyExtension]) -> None:
-        super().__init__()
-        self._hybrid_type = hybrid_type
-
-    def __call__(self) -> HybridPolicyExtension:
-        return self._hybrid_type()
 
 
 def _narrow_resource_factory() -> DjangoResourcePolicyExtension:
@@ -700,17 +533,17 @@ def _optimizer_singleton_factory() -> DjangoOptimizerExtension:
 
 @pytest.mark.parametrize(
     "entry",
-    [_narrow_resource_factory, _first_error_factory, _HybridFactory(HybridPolicyExtension)],
-    ids=["resource-factory", "error-factory", "hybrid-factory"],
+    [_narrow_resource_factory, _first_error_factory],
+    ids=["resource-factory", "error-factory"],
 )
-def test_a_factory_producing_an_enforcement_authority_raises_when_the_operation_resolves_it(
+def test_a_factory_producing_an_enforcement_extension_is_an_ordinary_entry(
     entry: object,
 ) -> None:
-    """A factory is opaque until it runs, so what it produces is typed at resolution."""
+    """A factory's member runs between the schema's own two authorities."""
     schema = DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(entry))
 
-    with pytest.raises(ConfigurationError, match="builds itself"):
-        schema.execute_sync("{ hello }")
+    assert len(schema.get_extensions(sync=True)) == 4
+    assert schema.execute_sync("{ hello }").data == {"hello": "world"}
 
 
 @pytest.mark.parametrize(
@@ -745,7 +578,7 @@ def test_every_supported_entry_spelling_still_resolves_into_one_chain(entry: obj
     assert schema.execute_sync("{ hello }").data == {"hello": "world"}
     assert sum(truth.is_instance(e, DjangoErrorPolicyExtension) for e in resolved) == 1
     assert sum(truth.is_instance(e, DjangoResourcePolicyExtension) for e in resolved) == 1
-    assert len(resolved) == 5
+    assert len(resolved) == 4
 
 
 class _UpstreamRunnerSchema(DjangoSchema):

@@ -31,7 +31,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, NoReturn, TypeAlias, TypedDict, TypeGuard
+from typing import TYPE_CHECKING, TypeAlias, TypedDict, TypeGuard
 
 import pytest
 import strawberry
@@ -90,14 +90,13 @@ from django_strawberry_framework.resource_policy import (
     DST_RESOURCE_POLICY,
     RESOURCE_LIMIT_ERROR_CODE,
     ResourcePolicy,
-    policy_from_info,
 )
 from django_strawberry_framework.schema import DjangoSchema
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
-from django_strawberry_framework.utils.context import get_context_value, stash_on_context
+from django_strawberry_framework.utils.context import stash_on_context
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 if TYPE_CHECKING:
@@ -1366,39 +1365,6 @@ async def test_async_a_rejection_names_the_argument_in_the_schema_spelling() -> 
     assert payload["data"] is None, payload
     assert json_at(payload, "errors", 0, "extensions", "argument") == "offset"
     assert json_at(payload, "errors", 0, "extensions", "reason") == "order_required"
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_async_a_failing_aclose_does_not_displace_the_argument_rejection() -> None:
-    """The rejection the client can act on stays primary when cleanup also fails."""
-
-    class _FailingAcloseIterator(_ClosableAsyncIterator):
-        @override
-        async def aclose(self) -> NoReturn:
-            await super().aclose()
-            raise RuntimeError("simulated cleanup failure")
-
-    branches = [
-        await sync_to_async(library_models.Branch.objects.create)(name="B0", city="Boston"),
-    ]
-
-    @strawberry.type
-    class _CleanupFailQuery:
-        branches: list[library_schema.BranchType] = DjangoListField(
-            library_schema.BranchType,
-            resolver=_list_resolver(lambda _root, _info: _FailingAcloseIterator(branches)),
-        )
-
-    payload = await _post_async(
-        DjangoSchema(query=_CleanupFailQuery, config=strawberry_config()),
-        "{ branches(offset: 1) { name } }",
-    )
-
-    assert "errors" in payload
-    assert payload["data"] is None, payload
-    error = json_object(payload, "errors", 0)
-    assert json_at(error, "extensions", "code") == "LIST_ARGUMENT_INVALID"
-    assert json_at(error, "extensions", "reason") == "order_required"
 
 
 _ASYNC_OFFSET_WITH_ACTIVE_ORDER = (
@@ -3865,67 +3831,6 @@ async def test_async_child_delegated_impure_ordering_is_rejected(
     assert payload["data"] is None
     assert "BranchOrder._normalize_input is not pure" in json_str(payload, "errors", 0, "message")
     assert calls["n"] == 2
-
-
-def _async_policy_from_info_object(info: strawberry.Info[object, object]) -> ResourcePolicy:
-    """The policy the package's own bound readers get."""
-    return policy_from_info(info)
-
-
-def _async_schema_attribute_object(info: strawberry.Info[object, object]) -> ResourcePolicy:
-    """The resolved schema policy, which ``info.schema`` puts in every resolver's reach."""
-    assert isinstance(info.schema, DjangoSchema)
-    return info.schema.resource_policy
-
-
-def _async_context_mirror_object(info: strawberry.Info[object, object]) -> object:
-    """The published mirror, which the spec invites a consumer to read."""
-    return get_context_value(info.context, DST_RESOURCE_POLICY)
-
-
-_ASYNC_REACHABLE_POLICIES = (
-    _async_policy_from_info_object,
-    _async_schema_attribute_object,
-    _async_context_mirror_object,
-)
-_ASYNC_REACHABLE_POLICY_IDS = ("policy-from-info", "schema-attribute", "context-mirror")
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("reach", _ASYNC_REACHABLE_POLICIES, ids=_ASYNC_REACHABLE_POLICY_IDS)
-async def test_async_a_resolver_cannot_widen_the_row_bound_by_writing_a_policy_it_can_reach(
-    reach: Callable[[strawberry.Info[object, object]], object],
-) -> None:
-    """The bounded field reads its source only after that resolver attempted the policy write."""
-    for i in range(5):
-        await sync_to_async(library_models.Branch.objects.create)(name=f"B{i}", city="Boston")
-
-    holder: dict[str, bool] = {"awaited": False}
-
-    async def _branches(
-        _root: object,
-        info: strawberry.Info[object, object],
-    ) -> models.QuerySet[library_models.Branch]:
-        await asyncio.sleep(0)
-        holder["awaited"] = True
-        reach(info).__dict__["max_list_rows"] = 999
-        return library_models.Branch.objects.order_by("id")
-
-    @strawberry.type
-    class _WideningQuery:
-        branches: list[library_schema.BranchType] = DjangoListField(
-            library_schema.BranchType,
-            resolver=_branches,
-        )
-
-    schema = DjangoSchema(
-        query=_WideningQuery,
-        config=strawberry_config(),
-        resource_policy={"max_list_rows": 2},
-    )
-    payload = await _post_async(schema, "{ branches { name } }")
-    assert holder["awaited"] is True, "the resolver never reached its await"
-    assert payload == {"data": {"branches": [{"name": "B0"}, {"name": "B1"}]}}
 
 
 # ---------------------------------------------------------------------------

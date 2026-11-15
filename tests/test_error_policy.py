@@ -218,34 +218,8 @@ def test_a_schema_refuses_a_policy_option_carrying_a_str_subclass() -> None:
         DjangoSchema(query=_Query, error_policy={"message": _HostileMessage("Nope.")})
 
 
-def test_a_str_subclass_cannot_survive_into_the_schema_policy() -> None:
-    """The bypass shape: a policy built without ever running the validation.
-
-    ``object.__new__`` plus a ``__dict__`` write produces an ``isinstance``-valid
-    ``ErrorPolicy`` whose fields were never checked, which is how a subclass would
-    reach a schema even with construction closed. Canonicalization re-validates
-    what it reads, so the object an enforcement seam ends up with cannot carry
-    one.
-    """
-    smuggled = object.__new__(ErrorPolicy)
-    smuggled.__dict__.update(
-        enabled=True,
-        message=_HostileMessage("Nope."),
-        correlation_extension_key="correlationId",
-    )
-    with pytest.raises(
-        ConfigurationError,
-        match=r"ErrorPolicy\.message must be a non-empty string",
-    ):
-        resolve_error_policy(smuggled)
-
-
 def test_the_policy_is_frozen_so_a_plain_assignment_raises() -> None:
-    """Frozen rejects the accident, not the adversary: a plain assignment raises.
-
-    The ``__dict__`` write frozen admits touches only the object held, never
-    the policy the schema stores.
-    """
+    """Frozen rejects the accident, not the adversary: a plain assignment raises."""
     with pytest.raises(Exception, match="cannot assign to field"):
         # basedpyright: the write to the frozen dataclass field is the mutation under test; the
         # checker rejects assignment to a frozen field
@@ -257,18 +231,6 @@ def test_the_policy_is_frozen_so_a_plain_assignment_raises() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_an_explicit_instance_is_taken_as_a_private_duplicate() -> None:
-    """An ``ErrorPolicy`` argument supplies values, never the object enforcement reads.
-
-    The caller keeps what they passed, so what a schema masks with cannot be
-    rewritten afterwards through the reference they still hold.
-    """
-    policy = ErrorPolicy(message="Nope.")
-    resolved = resolve_error_policy(policy)
-    assert resolved == policy
-    assert resolved is not policy
-
-
 def test_an_explicit_mapping_is_applied_over_the_package_defaults() -> None:
     """A deployment overrides only what it cares about."""
     policy = resolve_error_policy({"message": "Nope."})
@@ -278,39 +240,7 @@ def test_an_explicit_mapping_is_applied_over_the_package_defaults() -> None:
 
 
 def test_no_source_at_all_resolves_to_the_package_defaults() -> None:
-    """The values of the exported template, in an object the exported name is not.
-
-    A deployment that configures nothing is on exactly the same footing as one
-    that passes an instance: what the schema masks with is a private duplicate.
-    """
-    resolved = resolve_error_policy(None)
-    assert resolved == DEFAULT_ERROR_POLICY
-    assert resolved is not DEFAULT_ERROR_POLICY
-
-
-def test_a_written_exported_default_reaches_no_resolution() -> None:
-    """The exported constant is a value template, never the object masking reads.
-
-    ``DEFAULT_ERROR_POLICY`` is a public export, so consumer code holds it, and a
-    frozen dataclass admits a ``__dict__`` write. Were the no-override path to
-    answer with it, one write after startup would disable masking for every
-    schema in the process - including schemas already built - and put raw
-    exception text on the wire. The resolution carries the package's own values
-    instead.
-    """
-    declared = dict(DEFAULT_ERROR_POLICY.__dict__)
-    DEFAULT_ERROR_POLICY.__dict__["enabled"] = False
-    DEFAULT_ERROR_POLICY.__dict__["message"] = "Written after startup."
-    try:
-        resolved = resolve_error_policy(None)
-        assert resolved.enabled is True
-        assert resolved.message == "An unexpected error occurred."
-        assert resolved is not DEFAULT_ERROR_POLICY
-        assert schema_error_policy(SimpleNamespace()).enabled is True
-    finally:
-        # The export is process-global: a write left behind would answer every
-        # later test in the session.
-        DEFAULT_ERROR_POLICY.__dict__.update(declared)
+    assert resolve_error_policy(None) == DEFAULT_ERROR_POLICY
 
 
 def test_the_setting_supplies_the_policy_when_no_argument_does(
@@ -387,20 +317,6 @@ def test_the_schema_resolves_and_exposes_its_policy_once() -> None:
     assert schema.error_policy.message == "Nope."
 
 
-def test_reading_schema_error_policy_answers_a_copy() -> None:
-    """The object a resolver can reach is not the stored policy.
-
-    Writing ``__dict__["enabled"]`` on the handed-out object must not change a
-    later read. The wire-visible consequence (a resolver write cannot unmask the
-    response) lives in ``examples/fakeshop/test_query/test_error_policy_api.py``.
-    """
-    schema = DjangoSchema(query=_Query, error_policy=ErrorPolicy())
-    reached = schema.error_policy
-    reached.__dict__["enabled"] = False
-    assert reached.enabled is False
-    assert schema.error_policy.enabled is True
-
-
 def test_an_invalid_policy_fails_the_deployment_at_schema_construction() -> None:
     """Startup, not the first request that happens to raise."""
     with pytest.raises(ConfigurationError, match=r"Unknown error-policy option\(s\): nope"):
@@ -421,7 +337,7 @@ def test_the_error_policy_extension_runs_first_in_every_chain() -> None:
     schema = DjangoSchema(query=_Query)
     resolved = schema.get_extensions(sync=True)
     assert isinstance(resolved[0], DjangoErrorPolicyExtension)
-    assert isinstance(resolved[-3], DjangoResourcePolicyExtension)
+    assert isinstance(resolved[-2], DjangoResourcePolicyExtension)
 
 
 def test_a_consumer_extension_is_prepended_behind_the_policy_not_in_front_of_it() -> None:
@@ -436,7 +352,6 @@ def test_a_consumer_extension_is_prepended_behind_the_policy_not_in_front_of_it(
         "DjangoErrorPolicyExtension",
         "_ConsumerExtension",
         "DjangoResourcePolicyExtension",
-        "AdmissionGuard",
         "_OperationModeMarker",
     ]
 
@@ -573,57 +488,13 @@ async def test_an_async_pre_execution_error_carries_no_original_error(
 
 
 # ---------------------------------------------------------------------------
-# The exact-type-gated policy read
+# The schema policy read
 # ---------------------------------------------------------------------------
-
-
-class _PolicySubclass(ErrorPolicy):
-    """An ``ErrorPolicy`` subclass: its field reads would be code of its own."""
-
-
-@pytest.mark.parametrize(
-    "attribute",
-    [
-        "not a policy",
-        {"enabled": False},
-        None,
-        0,
-        _PolicySubclass(enabled=False),
-    ],
-    ids=[
-        "string",
-        "mapping",
-        "none",
-        "zero",
-        "disabled-subclass",
-    ],
-)
-def test_a_schema_attribute_that_is_not_a_policy_falls_back_to_the_default(
-    attribute: object,
-) -> None:
-    """A wrong ``schema.error_policy`` must not become a silent way to stop masking.
-
-    ``getattr(schema, "error_policy", DEFAULT)`` alone answers the default only
-    when the attribute is ABSENT; anything present is returned whatever it is, and
-    a mapping or a string would then be asked ``policy.enabled`` (raising) or read
-    for its truthiness (disabling masking). The fallback is therefore gated on
-    the exact ``ErrorPolicy`` class - a subclass could answer ``enabled`` with
-    code of its own, so even a disabled one is not read - and it lands on the
-    MASKING default in every wrong-shape case, the fail-closed direction.
-    ``DjangoSchema`` cannot produce any of these (it stores a canonical exact
-    copy); a consumer subclass or a stray assignment can.
-    """
-    schema = SimpleNamespace(error_policy=attribute)
-    fallback = schema_error_policy(schema)
-    assert fallback == DEFAULT_ERROR_POLICY
-    assert fallback is not DEFAULT_ERROR_POLICY
 
 
 def test_an_absent_attribute_and_a_real_policy_are_both_read_correctly() -> None:
     """The two shapes that are not failures: no attribute at all, and a real policy."""
-    fallback = schema_error_policy(SimpleNamespace())
-    assert fallback == DEFAULT_ERROR_POLICY
-    assert fallback is not DEFAULT_ERROR_POLICY
+    assert schema_error_policy(SimpleNamespace()) == DEFAULT_ERROR_POLICY
     policy = ErrorPolicy(message="Mine.")
     assert schema_error_policy(SimpleNamespace(error_policy=policy)) is policy
 

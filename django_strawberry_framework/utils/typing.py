@@ -144,6 +144,7 @@ __all__ = (
     "strawberry_schema_from_info",
     "strawberry_schema_from_schema",
     "unwrap_non_null",
+    "wrapped_resolver",
 )
 
 _T = TypeVar("_T")
@@ -326,6 +327,17 @@ def _definition_backref(owner: "GraphQLField | GraphQLArgument | GraphQLInputFie
     """Return the Strawberry definition Strawberry filed on ``owner``, or ``None``."""
     extensions: Mapping[str, object] = owner.extensions
     return extensions.get(GraphQLCoreConverter.DEFINITION_BACKREF)
+
+
+def wrapped_resolver(field: "GraphQLField | None") -> object:
+    """Return the function a built field's Strawberry resolver wraps, or ``None``.
+
+    The ``base_resolver.wrapped_func`` of the ``StrawberryField`` filed under
+    ``DEFINITION_BACKREF``: the function a package field factory stamps with its
+    marker. ``None`` for a missing field or one with no resolver.
+    """
+    backref = None if field is None else _definition_backref(field)
+    return read_attr(read_attr(backref, "base_resolver", None), "wrapped_func", None)
 
 
 # A type- or callable-wrapper stack (``GraphQLNonNull`` / ``GraphQLList`` / a

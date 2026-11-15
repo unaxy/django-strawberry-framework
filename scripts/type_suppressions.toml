@@ -423,26 +423,19 @@
 "tests/test_resource_policy.py::_AmountNoBoundCanExceed.__radd__" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_resource_policy.py::_AmountNoBoundCanExceed.__rmul__" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_resource_policy.py::_Probe.blob" = { reportArgumentType = 1 }
-"tests/test_resource_policy.py::_UnreadablePolicy.max_list_rows" = { reportIncompatibleVariableOverride = 1 }
-"tests/test_resource_policy.py::test_a_custom_mapping_is_measurable_at_the_largest_bound_a_policy_admits._CountingMapping.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_resource_policy.py::test_a_falsy_non_bool_opt_in_also_narrows" = { reportArgumentType = 1 }
-"tests/test_resource_policy.py::test_a_mapping_is_charged_for_the_entries_the_walk_queues._LyingWidth.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_resource_policy.py::test_a_non_mapping_policy_argument_is_rejected" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::test_a_non_positive_integer_bound_is_rejected_at_construction" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::test_a_non_string_query_is_declined_not_scanned" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::test_a_policy_argument_whose_class_read_raises_is_rejected" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::test_a_policy_is_frozen" = { reportAttributeAccessIssue = 1 }
-"tests/test_resource_policy.py::test_a_windowed_sequence_subclass_is_bounded_on_every_coordinate._Escape.__getitem__" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_resource_policy.py::test_an_invalid_execution_deadline_is_rejected" = { reportArgumentType = 1 }
-"tests/test_resource_policy.py::test_bounded_rows_async_hostile_notes_property_getter_does_not_mask_the_source.HostileError" = { reportAssignmentType = 1 }
 "tests/test_resource_policy.py::test_only_the_literal_true_widens_a_declared_bound_past_the_request_policy" = { reportArgumentType = 1 }
 "tests/test_routers.py::_actor_lease" = { reportArgumentType = 1 }
 "tests/test_routers.py::test_a_non_conformant_header_shape_propagates_instead_of_denying" = { reportArgumentType = 1 }
 "tests/test_routers.py::test_construction_requires_the_django_application_argument" = { reportCallIssue = 1 }
 "tests/test_routers.py::test_control_frame_send_serializes_with_a_concurrent_revocation" = { reportArgumentType = 1 }
 "tests/test_routers.py::test_the_websocket_pattern_is_keyword_only_with_no_legacy_url_pattern_alias" = { reportCallIssue = 1 }
-"tests/test_schema.py::HybridPolicyExtension" = { reportUnsafeMultipleInheritance = 1 }
-"tests/test_schema.py::ReversedHybridPolicyExtension" = { reportIncompatibleVariableOverride = 1, reportUnsafeMultipleInheritance = 1 }
 "tests/test_schema.py::_unchecked_entries" = { reportReturnType = 1 }
 "tests/test_sets_mixins.py::test_a_longer_related_order_reaching_a_target_path_is_refused._ShelfOrder" = { reportArgumentType = 1 }
 "tests/test_sets_mixins.py::test_a_non_string_field_name_claims_no_relation._Owner" = { reportArgumentType = 2 }

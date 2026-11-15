@@ -78,7 +78,7 @@ Each top-level item maps to one commit / PR.
       key, and the shared context dispatch lifted to `utils/context.py`.
 - [x] **Slice 2 — the enforcement extension**
       `extensions/resource_policy.py`: the pre-parse text scan, the iterative
-      fragment-expanding document walk, and the iterative cycle-safe value walker.
+      fragment-expanding document walk, and the iterative value walker.
       `DjangoSchema` resolves the policy once and builds the extension into every
       operation's chain.
 - [x] **Slice 3 — bounded collections**
@@ -207,7 +207,7 @@ schema = DjangoSchema(
 
 `resource_policy=` also accepts a plain mapping of bound names to values, applied over the
 package defaults, so a deployment overrides only what it cares about. `schema.resource_policy`
-answers every read with a copy of the resolved policy.
+is a read-only attribute holding the resolved policy.
 
 ### The setting
 
@@ -329,89 +329,30 @@ these properties is load-bearing:
   rejection it drives, so a value past the signed 64-bit maximum is a configuration whose
   rejection cannot be constructed, not a looser one.
 
-- **Owned representations only.** The same rule reaches past numbers to the shapes the
-  package measures and bounds. A width is charged from the members the value walk queues
-  rather than from a container's own `__len__`; text is sized with `str.encode` and a buffer
-  through the C buffer protocol rather than through methods the value carries; and a row
-  window is applied by slicing only a queryset or an exact built-in sequence, with every
-  other shape counted through `islice` into a list the package built. A `list`, `Mapping`,
-  `str` or `bytes` SUBCLASS reaches those positions from an in-process caller's
-  `variable_values` and from whatever a consumer's collection resolver returns, and a bound
-  whose measurement or whose enforcement calls that object's own code is a bound the bounded
-  party decides the value of.
+- **Text is measured as its encoding.** A string leaf is sized with `str.encode`, and a
+  row window is applied by slicing a queryset or a built-in sequence (`list`, `tuple`,
+  `str`, `bytes`, `bytearray`), with every other shape counted through `islice` into a list
+  the package built.
 
-- **Measuring is inside the budget too.** A container that is not an exact built-in is read
-  one member past the width bound and no further, so an over-wide value is refused for what
-  it proved rather than enumerated in full to report a size nothing downstream will use, and
-  a value whose iterator does not end is refused just as quickly. Nothing is asked about how
-  many members there are: materializing the container would consult `__len__` as a sizing
-  hint, which is the answer the rule above exists to ignore, and a `__len__` that raises
-  would replace the typed refusal with a raw error. A container that cannot be read at all is
-  unmeasurable rather than free, and is refused on the same terms as an upload whose size
-  cannot be read. The lookahead is the walk's own counter rather than a stop argument handed
-  to a slicing helper, because the largest bound a policy accepts is `MAX_RESOURCE_BOUND` and
-  one past that is one past what such an argument can express — a reader that asked for it
-  would turn its own argument error into an unmeasurable-input refusal, at the one setting
-  that was supposed to permit everything. What this cannot bound is a single arbitrary
-  advance that neither returns nor raises, and it does not claim to.
+Freezing is an accident guard: a frozen dataclass rejects `setattr`.
+`schema.py::DjangoSchema.resource_policy` and `error_policy` are read-only properties over
+the policies the schema resolved, so assigning either raises `AttributeError` and changes no
+later request. Application Python that writes a policy's `__dict__` or the schema's private
+attributes is trusted code, outside what the package defends.
 
-Freezing is an accident guard, never an authority boundary: a frozen dataclass rejects
-`setattr` and admits `policy.__dict__[bound] = wider` and `object.__setattr__`. What keeps
-a write through a read from widening a later request is that every public read answers with
-a copy; application Python that writes the schema's private attributes is trusted code.
-
-- **The schema's policies.** `schema.py::DjangoSchema` resolves both of its policies at
-  construction and keeps them on the schema. `schema.py::DjangoSchema.resource_policy` and
-  `error_policy` answer every read with a copy (`copy.copy`). `error_policy.py::ErrorPolicy`
-  is held on the same terms, because a write to it would turn masking off and put raw
-  exception text on the wire.
-- **The operation's copies.** The operation's own budget is a private snapshot taken at
-  the arm point; the published context mirror is a second copy; and `policy_from_info`
-  returns a copy of the snapshot. A resolver may write any of them and writes only its own
-  duplicate.
 - **The enforcement extensions are not entries.** `schema.py::DjangoSchema.get_extensions`
   builds both enforcement extensions fresh for every operation from the schema's policies
   ([Decision 11](#decision-11--one-typed-rejection-and-no-per-transport-translation)), so
   the consumer entries in `schema.extensions` do not decide what bounds or masks a request.
 - **An extension instance on a plain `strawberry.Schema`.** Strawberry hands an instance
-  entry back unchanged, so it stays reachable through `info.schema.extensions` and its
-  policy is what the next operation arms. Its explicit policy is canonicalized at
-  construction into an exact `ResourcePolicy` and read back as a copy
-  (`extensions/resource_policy.py::DjangoResourcePolicyExtension._policy`); an extension
+  entry back unchanged, so its explicit policy is what the next operation arms; an extension
   built with no override enforces its schema's policy per operation.
-
-The policy object a schema stores is also held to the EXACT class. `isinstance` admits a
-subclass, and a subclass's field reads are consumer code that `__post_init__` cannot speak
-for: a read that validates honestly at construction and answers differently afterwards
-passes every check the class performs on itself and then hands a bound whatever it likes. So
-a policy is read out once at schema construction and an exact instance is built from those
-values (`utils/policies.py::canonical_policy`), which is the object-level statement of the
-same rule the bounds themselves follow below. That happens for an EXACT instance too, and
-for the same reason twice over: `__post_init__` speaks for the values an object was built
-with and not for the ones it carries now, and a caller who keeps the instance they passed —
-or who leaves one at module scope in `settings` — would otherwise still hold the object every
-bound is read from.
 
 The integer-bound domain is the EXACT built-in type, `type(value) is int`. That is what
 rejects `bool` — `isinstance(True, int)` is `True`, so a bound accepting `True` would
-silently become `1`, a bound so tight it presents as an unrelated bug — and equally what
-keeps a deployment-supplied `int` SUBCLASS out of a policy. A subclass whose comparison
-raises would replace the typed `ConfigurationError` with a raw error out of schema
-construction; worse, one whose comparison answers normally would be STORED, and every later
-use of the bound would then run consumer dunders — `narrowed()`'s comparison, and the
-`limit` / `charged` values `ResourceLimitExceeded` formats into the message and `extensions`
-of every rejection that bound drives.
-
-The same reasoning is why every amount CHARGED against a bound is one the package itself
-produced — a counter the walk keeps, the length of a list it built, a size read through an
-operation the type defines. A charge is compared (`charged > limit`), accumulated into a
-running total, and formatted into a rejection, so a subclass reaching one would answer all
-three: its `__gt__` decides the rejection that would have caught it, and its reflected
-`__radd__` / `__rmul__` — which take priority over the built-in's own — turn the running total
-into `nan`, which is over no limit ever again. The guarantee is therefore established at each
-measurement, not re-checked at the comparison; the one amount read off a value the request
-carried in is an uploaded file's `size`, which is refused there when it is not a size, at one
-past its limit.
+silently become `1`, a bound so tight it presents as an unrelated bug. The one amount read
+off a value the request carried in is an uploaded file's `size`, which is refused when it is
+not an exact non-negative `int`, at one past its limit.
 
 *Alternatives rejected: see the [rationale][rationale] (a per-bound settings read, a
 mutable dataclass with `freeze()`, Pydantic).*
@@ -442,21 +383,12 @@ again around each of them (`extensions/operation_state.py::OperationState.rebind
 and a budget whose operation has ended answers nothing.
 
 **The mirror may narrow, never widen.** A resolver stashing an EARLIER instant under
-`DST_RESOURCE_DEADLINE` is shortening its own request, which it is always entitled to do, and
-`resource_policy.py::_effective_deadline` honours it. A later instant, a cleared key, or a
-value outside the deadline domain leaves the armed deadline standing. This is the narrowing
-rule `effective_bound` and `narrowed()` already state, applied to the one piece of budget state
-a consumer can write. A numeric deadline that is **not finite** is refused rather than treated
-as a distant future: no configured policy can derive one, and no comparison against it can
-certify the request is inside its budget.
-
-The written value is admitted only as an exact built-in number, which is what makes the
-narrowing rule hold rather than merely read as though it does. A numeric SUBCLASS answers the
-comparison the rule is decided by AND the one that decides whether the deadline has passed, so
-it can present as EARLIER than the armed instant and then answer every later reading as time
-remaining — a narrowing on the way in and a widening on the way out. Outside the domain it
-narrows nothing, and where nothing is armed it fails closed: a value the seam cannot place on
-the clock is not a deadline it can certify the request is inside.
+`DST_RESOURCE_DEADLINE` is shortening its own request, which it is always entitled to do:
+`resource_policy.py::check_deadline` takes the earliest of the armed deadline and an exact
+built-in number under the key. A later instant, a cleared key, or a value that is not an
+exact built-in number leaves the armed deadline standing. This is the narrowing rule
+`effective_bound` and `narrowed()` already state, applied to the one piece of budget state a
+consumer can write.
 
 **A published policy with nothing armed still answers**, which is the path a plain
 `strawberry.Schema` with no extension, whose consumer may publish a policy under the key, takes.
@@ -477,8 +409,7 @@ the single place a new shape lands. *Why it is shared rather than copied is in t
 [rationale][rationale].*
 
 **The miss path is fail-closed.** With nothing armed and no exact `ResourcePolicy` published,
-`policy_from_info` returns a copy of the package's own baseline - the bounds
-`DEFAULT_RESOURCE_POLICY` declares, held in an object no export names - never `None`. A plain
+`policy_from_info` returns the package's own baseline, `DEFAULT_RESOURCE_POLICY` - never `None`. A plain
 `strawberry.Schema` that never installed the extension and a resolver invoked outside an
 operation both read back a *bounded* policy; a frozen context that refused the stash changes
 nothing, because the armed budget never depended on it. Returning `None` would have forced every caller to write its own
@@ -659,28 +590,19 @@ takes over.
 The single name-based rule — `ids` — exists because node refetch is a Relay convention with
 no distinguishing type.
 
-**An ancestor-path cycle guard makes the value walk cycle-safe, and every reference is
-charged.** Each entry on the walker's stack carries the ANCESTOR PATH of the value it
-describes — the tuple of containers that value hangs under, held by strong reference and
-compared by `is`. A container that is one of its own ancestors closes a cycle: it is not
-charged again and its children are not queued. Every OTHER reference to a container is
-charged in full, including a second reference to one already charged elsewhere in the
-request, because a container reached twice is two references' worth of work for the
-coercer, the walkers and the ORM.
-
-A cycle guard needs ancestor-scoped lifetime and owning references; a charge-once cache
-needs neither. They are therefore two separate mechanisms — a path for termination, and no
-cache at all for charging. *Why an `id()`-keyed charge-once cache is rejected is in the
-[rationale][rationale].*
+**Every reference is charged.** A reference to a container is charged in full, including
+a second reference to one already charged elsewhere in the request, because a container
+reached twice is two references' worth of work for the coercer, the walkers and the ORM. A
+wire value is JSON or a parsed literal, so it is acyclic. *Why an `id()`-keyed charge-once
+cache is rejected is in the [rationale][rationale].*
 
 **Value depth is its own bound.** `max_depth` counts brackets in the document TEXT, and a
 value arriving through a variable has none: the document `query($p: JSON!) { blob(payload:
 $p) }` is three brackets deep however deep `$p` is.
 [`max_value_depth`][glossary-max_value_depth] (default `20`) is
-charged from the ancestor path's own length during the walk, so a 10,000-deep
+charged from the nesting depth each stack entry carries, so a 10,000-deep
 list-of-list-of-… payload is bounded even though every level is one node wide and the node
-total stays small. It also bounds the identity scan each container performs over its
-ancestors, which is what keeps that scan from being a cost of its own.
+total stays small.
 
 **Introspection is charged like any other document shape.** `__schema`, `__type` and
 `__typename` resolve to graphql-core's own `SchemaMetaFieldDef` / `TypeMetaFieldDef` /
@@ -756,11 +678,10 @@ coordinates are checked against.
   positive-width window executes it again, once per resolution and so once per parent row
   when nested.
 - **What truncates follows from what the value IS**, never from whether a subscript
-  happened to answer. An exact `list`, `tuple`, `str`, `bytes` or `bytearray`, and any
+  happened to answer. A `list`, `tuple`, `str`, `bytes` or `bytearray`, and any
   `QuerySet` (a project's own class included, so it keeps its SQL `LIMIT`), is sliced;
-  every other shape (a subclass of one of the sequence types, a mapping, a bare iterable)
-  is counted through `islice` into a list the package built, so neither an unsliceable
-  value nor a sequence whose own `__getitem__` is consumer code escapes the bound.
+  every other shape (a mapping, a bare iterable) is counted through `islice` into a list
+  the package built, so an unsliceable value does not escape the bound.
 - **Ordering against the visibility hook is a correctness constraint, not a preference.**
   The bound is applied AFTER
   [`get_queryset`][glossary-get_queryset-visibility-hook] and after the consumer-resolver
@@ -870,7 +791,7 @@ deadline is a seam the deadline does not cover:
   starts the subtree below it. The async `sync_to_async` closures carry no check of their own:
   the head has run in both execution modes before any closure is built. Because the hop checks
   on every call, a deadline that passes mid-operation also fails a generated mutation's payload
-  relation hop, and `schema.py::DjangoMutationExecutionContext._rollback_for_new_errors` then
+  relation hop, and `schema.py::DjangoMutationExecutionContext._run_window` then
   rolls the write back, and fails every subscription frame's relation hops once the original
   budget is spent — the behavior the many-side and connection hops already had;
 - `connection.py::DjangoConnection.resolve_connection` — the single head every connection
@@ -917,10 +838,8 @@ both are public for that purpose.
 **The deadline read guards the answer.** `resource_policy.py::check_deadline` reads the
 armed deadline, narrowed by the published mirror only where that mirror is an earlier exact
 built-in number ([Decision 2](#decision-2--armed-for-the-operation-published-on-the-request-context));
-with nothing armed, the mirror answers alone. Of the value that answers, an absent, cleared,
-`bool` or non-numeric one is not a deadline and leaves the request running; a non-finite
-number, or an `int` / `float` SUBCLASS whose comparisons are consumer code, is a deadline the
-seam cannot place on the clock, and it rejects rather than being asked.
+with nothing armed, the mirror answers alone. A mirror value that is absent, cleared,
+`bool` or not an exact built-in number is not a deadline and leaves the request running.
 
 **The rejection reports the CONFIGURED budget, never the clock.** `limit` is the policy's
 own `execution_deadline_seconds` and `charged` is one second past it. The monotonic deadline
@@ -938,14 +857,7 @@ It is the only optional bound, and the only one whose domain is not the positive
 `None`, or a **finite** positive number of seconds. `float("inf")` is refused like any other
 invalid value — an infinite deadline is a deadline that never fires, which is the disabling
 spelling [Goals](#goals) 3 says no bound has. `bool` is refused here as it is at every
-integer bound, and a numeric SUBCLASS is outside the domain by the same exact-type rule the
-integer bounds take. The deadline has two escapes of its own that make the rule load-bearing
-rather than tidy: `resource_policy.py::_absolute_deadline` derives the absolute deadline as
-`time.monotonic() + seconds`, where Python gives a subclass's reflected `__radd__` priority
-over `float`'s own and a `nan` result silently disarms the budget of a policy the deployment
-believes it configured; and an expired rejection renders the configured value through
-`math.ceil` and an f-string, where a hostile `__ceil__` or `__format__` replaces the typed
-`ResourceLimitExceeded` with a raw error out of a collection resolver.
+integer bound, by the same exact-type rule the integer bounds take.
 
 *Why its default is `None` rather than a number is in the [rationale][rationale].*
 
@@ -1028,12 +940,11 @@ different envelope from the package's other typed failures.
 `schema.py::DjangoSchema.get_extensions` answers every operation with
 `schema.py::_admitted_chain`: a fresh `DjangoErrorPolicyExtension` first, the consumer's
 resolved extensions, a fresh `DjangoResourcePolicyExtension` reading the schema's own
-policy, the package's admission guard, and the operation's
-executor-mode marker. The extension is fresh per operation because a shared instance would
+policy, and the operation's executor-mode marker. The extension is fresh per operation because a shared instance would
 share one set of charge counters across concurrent requests, and it is last so it sets up
 last, with its budget armed around every consumer hook.
 
-An extension entry cannot claim either enforcement role:
+An extension entry configures the enforcement roles in one spelling only:
 
 - An exact `DjangoResourcePolicyExtension` in `extensions=` is read once at construction as
   a declaration (`schema.py::_consumer_extension_entries`) and never travels into the chain:
@@ -1041,12 +952,8 @@ An extension entry cannot claim either enforcement role:
   the schema's policy. So exactly one budget is armed per operation.
 - Declaring the policy twice — the `resource_policy=` argument and an entry, or two entries —
   is a `ConfigurationError`, because two declarations do not compose into one ceiling.
-- A subclass of either enforcement extension, as a class or an instance, is a
-  `ConfigurationError` at construction (`schema.py::_declared_authority`): a subclass can
-  override the hook that enforces while answering every check for it.
-- A factory cannot be identified without calling it, so a resolved member that claims
-  either role (`schema.py::_claimed_authority`) raises `ConfigurationError` when the
-  operation resolves it.
+- A subclass of either enforcement extension, or a factory returning one, is an ordinary
+  consumer entry: it runs beside the schema's own two and configures nothing.
 
 The consumer's `extensions` iterable is **never consulted through truthiness**: a container
 whose `__bool__` answers `False` still has its entries read, because Strawberry reads them.
@@ -1146,12 +1053,6 @@ stack entry and charges a node before it descends, and a literal is walked as it
 subtree is converted or dropped before its nodes are charged — a value engineered to blow the
 walk up runs out of node budget first, a repeated input-object field name included.
 
-**Why the cycle guard and the charge counter are two mechanisms and cannot be one.** They have
-different lifetime requirements — ancestor-scoped and owning, versus request-scoped — and only
-one of them is a contract, so one object cannot correctly be both. A path tuple terminates the
-walk; **no cache at all** charges it. *Why one object doing both is rejected is in the
-[rationale][rationale].*
-
 **Three constants whose values are decisions, not defaults.** `max_value_depth` is `20`, matching
 `max_depth`, because the two bound the same idea on the two sides of the text/variable divide and
 a value nested deeper than a document may be is not a shape any legitimate client sends. The
@@ -1179,9 +1080,9 @@ check runs rather than about how long anything takes.
 | 1 | `resource_policy.py` (new) | `ResourcePolicy`, `DEFAULT_RESOURCE_POLICY`, `ResourceLimitExceeded`, `RESOURCE_LIMIT_ERROR_CODE`, `DST_RESOURCE_POLICY` / `DST_RESOURCE_DEADLINE`, `resolve_resource_policy`, `begin_resource_budget` / `end_resource_budget` / `policy_from_info`, `effective_bound`, `validate_collection_bound`, `validate_trusted_flag`, `bounded_rows` / `bounded_rows_async`, `check_deadline`, `MAX_RESOURCE_BOUND`. |
 | 1 | `utils/context.py` (new), `optimizer/_context.py` | The shape-agnostic dispatch lifted out and shared; the optimizer module keeps its keys and its reset and re-exports the helpers. |
 | 1 | `conf.py` | `RESOURCE_POLICY_KEY` and `resource_policy_setting()`, a thin reader that validates nothing. |
-| 2 | `extensions/resource_policy.py` (new) | `scan_document_text`, `charge_document`, `_DocumentBudget`, `_ValueBudget` (per-reference charging, `_closes_a_cycle` ancestor-path guard), introspection meta-fields resolved through graphql-core's `get_field_def`, `_is_connection_type` (full edge shape), [`DjangoResourcePolicyExtension`][glossary-djangoresourcepolicyextension], `AdmissionGuard`. |
+| 2 | `extensions/resource_policy.py` (new) | `scan_document_text`, `charge_document`, `_DocumentBudget`, `_ValueBudget` (per-reference charging), introspection meta-fields resolved through graphql-core's `get_field_def`, `_is_connection_type` (full edge shape), [`DjangoResourcePolicyExtension`][glossary-djangoresourcepolicyextension]. |
 | 2 | `extensions/__init__.py`, `__init__.py` | Exports; the extension is root-exported for a plain `strawberry.Schema`, whose consumer installs it. |
-| 2 | `schema.py` | `DjangoSchema(resource_policy=…)`, `schema.resource_policy` (a copy per read), and the per-operation chain `get_extensions` / `_admitted_chain` build from the schema's policies. |
+| 2 | `schema.py` | `DjangoSchema(resource_policy=…)`, `schema.resource_policy` (read-only), and the per-operation chain `get_extensions` / `_admitted_chain` build from the schema's policies. |
 | 3 | `list_field.py` | `max_rows` / `trusted_max_rows`, constructor-site validation, the bound applied after visibility. |
 | 3 | `types/resolvers.py` | The generated many-side relation resolver bounds both the prefetched and the manager path. |
 | 3 | `utils/connections.py`, `connection.py` | The policy ceiling over `relay_max_results`, resolved once per connection resolve. |
@@ -1204,9 +1105,6 @@ check runs rather than about how long anything takes.
 - `utils/inputs.py::RELATION_MULTI` — the bind-spec kind that classifies a relation list
   ahead of the `ID`-scalar test
   ([Decision 4](#decision-4--the-document-and-value-budgets-are-one-iterative-walk)).
-- `utils/policies.py::canonical_policy` and `copy.copy` — the exact-class rebuild and the
-  per-read copy
-  ([Decision 1](#decision-1--one-immutable-frozen-dataclass-validated-at-construction)).
 
 ## Helper-reuse obligations (DRY)
 
@@ -1232,16 +1130,13 @@ check runs rather than about how long anything takes.
   each — not one rule with an exception.
 - **`resolve_relay_max_results` is the only connection-cap resolution**, and remains shared
   by the plan-time and resolve-time halves so their windows cannot diverge.
-- **`_ValueBudget._reject` is the only THRESHOLD rejection in the value walker**, so every
-  bound that rejects because a charge passed its limit has one message, code, and extension
-  shape. The rejections that sit beside it are a different rule rather than a second copy of
-  this one: `extensions/resource_policy.py::_ValueBudget._bounded_members` and
-  `::_ValueBudget._charge_upload`'s two unmeasurable-size branches have no charge to
-  compare — they synthesize `limit + 1` to say "exceeded a budget integers cannot
-  express" — and `::_DocumentBudget` keeps its own
-  comparisons because a document charge is a running total held on the budget object, not a
-  value the walker is carrying. A new bound charged against a limit goes through `_reject`;
-  nothing else may.
+- **`resource_policy.py::ResourcePolicy.check` is the only THRESHOLD rejection**, so every
+  bound that rejects because a charge passed its limit - in the pre-parse scan, the document
+  walk and the value walk - has one message, code, and extension shape. The rejection that
+  sits beside it is a different rule rather than a second copy of this one:
+  `extensions/resource_policy.py::_ValueBudget._charge_upload`'s unmeasurable-size branch has
+  no charge to compare - it synthesizes `limit + 1` to say "exceeded a budget integers cannot
+  express". A new bound charged against a limit goes through `check`; nothing else may.
 - **`_is_connection_type` is the only connection detection**, and it matches the whole edge
   SHAPE — an `edges` field that is a list whose item type carries both `node` and `cursor` —
   rather than a `...Connection` name or the presence of a field called `edges`. Matching the
@@ -1260,20 +1155,12 @@ check runs rather than about how long anything takes.
 - **A hostile or colliding write to either published key** cannot widen the request: the
   policy key is not consulted at all while a budget is armed, and the deadline key is
   consulted only when it names an EARLIER instant than the one the operation started with.
-- **A write to a policy OBJECT a resolver holds** changes only that resolver's own copy.
-  Every policy a consumer can name is a duplicate — `schema.resource_policy`,
-  `schema.error_policy`, the `dst_resource_policy` mirror, and whatever `policy_from_info`
-  returned — so the write lands nowhere a bound is read from and nowhere a later request on
-  the process will look.
-- **A `ResourcePolicy` or `ErrorPolicy` SUBCLASS** supplied to a schema is read out once and
-  replaced by an exact instance built from those values. A read that raises during that pass
-  is a `ConfigurationError` at schema construction, not a raw error out of a resolver.
-- **A resource extension supplied in `DjangoSchema(extensions=...)` never runs as an
-  entry.** The exact class is dropped and an exact instance's `policy=` becomes the schema's
-  policy, so exactly one budget is armed; a subclass is refused at construction, and a
-  zero-argument FACTORY resolving to either enforcement extension raises `ConfigurationError`
-  when the operation resolves it (`schema.py::DjangoSchema.get_extensions`), because what a factory returns is decided after
-  the schema accepted it.
+- **An assignment to `schema.resource_policy` or `schema.error_policy`** raises
+  `AttributeError`: both are read-only, and every policy is a frozen dataclass.
+- **A resource extension supplied in `DjangoSchema(extensions=...)` as the exact class or an
+  exact instance never runs as an entry.** The class is dropped and an instance's `policy=`
+  becomes the schema's policy, so exactly one budget is armed; a subclass, or a
+  zero-argument FACTORY resolving to either enforcement extension, is an ordinary entry.
 - **An upload that cannot report its size** is *rejected*, not charged as zero bytes. Six
   spellings of unmeasurable, all answered the same way: the attribute is absent, it is
   `None`, it is non-integral, it is negative, it is `True`, or **reading it raises**.
@@ -1292,9 +1179,6 @@ check runs rather than about how long anything takes.
   value depth, and its list family is classified and charged exactly as a written-out
   one-item list would be. `max_container_width` is the one bound it does not pay, because
   that bound is validated at or above 1 and a one-item container can never exceed it.
-- **A bytes-like scalar is charged by its byte count**, `nbytes` where the object reports one
-  and `len` otherwise — so a `bytes` / `bytearray` / `memoryview` value does not ride past
-  `max_scalar_bytes` merely by not being `str`.
 - **`__typename` and the introspection roots** resolve to their graphql-core meta-field
   definitions and are charged like any other field: `__type(name: …)`'s argument value is
   charged as a scalar, and `__schema`'s nested `types { fields { … } }` lists charge
@@ -1424,12 +1308,12 @@ restore's `finally` pinned separately by a row that rejects in the document scan
 the key is absent afterwards, which is the restore-to-cleared half of the same round trip; the
 cooperative deadline armed, unarmed, and passed — the passed row asserting the CONFIGURED
 seconds in `limit` and in the message, with a hand-written-key row for the
-no-policy-behind-it case and a hostile-comparison row proving the check fails closed;
+no-policy-behind-it case;
 `bounded_rows` on a non-subscriptable iterable and under a trusted widening; the exported pair
 refusing `offset` and `requested_limit` in both colors
 (`tests/test_resource_policy.py::test_the_exported_raw_list_bound_takes_no_client_window`);
 `bounded_rows_async` pinned separately on its own shapes — the iterator closed after the
-effective prefix, and a cleanup failure that must not mask the source error; the
+effective prefix, and a cleanup failure raised over the source error; the
 package-private `_windowed_rows` / `_windowed_rows_async` on the window only they receive — a
 zero window that never advances the source, and offset arithmetic; the trusted flag admitted
 only as an exact `bool` and widening only on the literal `True`; the pre-parse scan on an
@@ -1443,9 +1327,7 @@ unmeasurable upload), and the walk's directive work no verdict shows: a fragment
 times reads its own and its field's directives once each and resolves only the directive that
 carries an argument at each expansion. The identity rows are the pointed ones: a container
 referenced twice charged **twice** at a node budget that separates the two contracts, two
-distinct-but-equal containers both charged, a self-referential mapping AND a
-self-referential list terminating, a cycle that closes onto a grandparent rather than a
-parent, an over-and-under value-depth pair, the introspection meta-fields charged
+distinct-but-equal containers both charged, an over-and-under value-depth pair, the introspection meta-fields charged
 (selections, and `__type(name:)`'s own argument value), and the connection shape test from
 both sides — a type whose `edges` is a list of non-edges, asserting the exact charge the
 exemption would have removed, and one whose `edges` is not a list at all, asserting that a
@@ -1457,9 +1339,8 @@ rows in `examples/fakeshop/test_query/test_list_field_api.py`
 (`::test_holder_untrusted_max_rows_caps_an_omitted_limit`,
 `::test_holder_trusted_max_rows_rejects_a_limit_above_the_field_bound`). `tests/test_schema.py`
 pins the schema-owned enforcement: a policy declared by an entry and by the argument, or by
-two entries, refused; an entry's policy becoming the schema's own; a subclass of either
-enforcement extension refused at construction; and a factory producing an enforcement
-authority raising `ConfigurationError` when the operation resolves it.
+two entries, refused; an entry's policy becoming the schema's own; and a subclass of either
+enforcement extension, or a factory producing one, running as an ordinary entry.
 
 ## Doc updates
 
@@ -1510,11 +1391,10 @@ is in the [rationale][rationale].*
       selections, aliases, and multiplicative collection cost are charged after the parse
       and before validation, with fragments, aliases, and directives unable to evade
       accounting.
-- [x] One iterative, cycle-safe value walker charges input nodes, container width, value
+- [x] One iterative value walker charges input nodes, container width, value
       nesting depth, membership items, node-refetch ids, per-mutation and aggregate relation
       ids, nested rows, upload count / per-file bytes / aggregate bytes, and scalar byte
-      size — charging every REFERENCE, cycle-guarded by the ancestor path rather than by a
-      request-lifetime `id()` cache — and rejects before any id is decoded or any queryset is
+      size — charging every REFERENCE rather than once per `id()` — and rejects before any id is decoded or any queryset is
       built, proven by a zero-query assertion. Uploads are the documented exception to
       "before the work": they are charged post-materialization
       ([Goals](#goals) 2).

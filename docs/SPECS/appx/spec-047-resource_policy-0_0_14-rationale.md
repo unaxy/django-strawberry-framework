@@ -51,9 +51,8 @@ input payload arrives). Charging only variables and ignoring literals (a literal
 value too). Recursion with a depth guard (a depth guard on a walker that exists to bound depth
 is circular).
 
-*Why the walk keeps no `id()`-keyed charge-once cache.* One request-lifetime set of
-already-charged `id()` values would serve as both cycle guard and charge-once cache, and it
-fails at both jobs:
+*Why the walk keeps no `id()`-keyed charge-once cache.* A request-lifetime set of
+already-charged `id()` values fails as a charge-once cache:
 
 - **An `id()` is unique only among LIVE objects.** A set of ints keeps none of them alive, and
   every leaf the walk converts from a literal is a temporary; once one is freed the next value
@@ -64,11 +63,6 @@ fails at both jobs:
 - **Charge-once is not the contract.** One variable spliced into two mutation fields resolves
   to the same Python list both times, so charge-once would make the second field's relation ids
   free and the aggregate bound would never fire.
-
-A cycle guard needs ancestor-scoped lifetime and owning references; a charge-once cache needs
-neither, and charging once is not wanted at all. The ancestor path is the same shape the
-document walk uses for fragment spreads (a `path` carried on the stack), with object identity
-in place of fragment names.
 
 ### Decision 5 — `DEFAULT_RELATION_SHAPE` becomes `"connection"`: a clean alpha break
 

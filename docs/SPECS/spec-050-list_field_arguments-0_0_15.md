@@ -1357,12 +1357,11 @@ docstring and the [consumer docs][docs-readme] carry that as the recommendation 
 The public list-field pipeline permits nonzero offset only for a queryset carrying the
 visible order guarantee below; an opaque Python iterable cannot establish it. Once the
 single bounding seam is handed validated coordinates, the window is applied with an operation
-the package owns the meaning of. A value whose exact type is one of
-`django_strawberry_framework/resource_policy.py::_SLICE_BOUNDED_ROW_TYPES` - `list`, `tuple`,
-`str`, `bytes` or `bytearray` - and any `django.db.models.QuerySet` (a project's own class
-included) receives `[start:stop]`: on a queryset, slicing is what carries the bound into SQL as
-`LIMIT`, and each built-in sequence keeps its type. Every other shape - a subclass of one of those sequence types, a mapping, a
-non-subscriptable iterable - is counted into a fresh list with `itertools.islice(start, stop)`.
+the package owns the meaning of. A `list`, `tuple`, `str`, `bytes` or `bytearray`, and any
+`django.db.models.QuerySet` (a project's own class included), receives `[start:stop]`
+(`django_strawberry_framework/resource_policy.py::_bounds_by_its_own_slice`): on a queryset,
+slicing is what carries the bound into SQL as `LIMIT`, and each built-in sequence keeps its
+type. Every other shape - a mapping, a non-subscriptable iterable - is counted into a fresh list with `itertools.islice(start, stop)`.
 Which operation applies follows from what the value IS, never from whether a subscript happened
 to answer, because `__getitem__` on a consumer's own sequence type is consumer code and a bound
 enforced by calling it is a bound the bounded party decides.
@@ -1475,15 +1474,13 @@ If an async-only source is rejected for supplied ordering or nonzero offset befo
 the async raw-list seam, the list pipeline
 (`django_strawberry_framework/list_field.py::_handle_non_queryset_rejections_async`) obtains its
 iterator and invokes/awaits `aclose` when that optional method exists, without calling
-`__anext__`. The `ListArgumentError` remains the primary exception; an ordinary failure to obtain
-or close the iterator is attached as a diagnostic note, and every such note names the seam that
-produced it, because more than one reaches the shared utility. This uses the same
-package-private cleanup utility
-(`django_strawberry_framework/resource_policy.py::_cleanup_rejected_async_iterable`) and
-primary-error precedence as `bounded_rows_async`, so rejection cannot leak a generator or grow a
-second cleanup policy. The close is owed on every rejecting exit, including when constructing
-the `ListArgumentError` itself fails (malformed schema metadata behind the wire-name lookup):
-that failure becomes the primary exception and the same cleanup runs before it propagates.
+`__anext__`. A failure to obtain or close the iterator propagates in place of the
+`ListArgumentError`. This uses the same package-private cleanup utility
+(`django_strawberry_framework/resource_policy.py::_cleanup_rejected_async_iterable`) as
+`bounded_rows_async`, so rejection cannot leak a generator or grow a second cleanup policy. The
+close is owed on every rejecting exit, including when constructing the `ListArgumentError`
+itself fails (malformed schema metadata behind the wire-name lookup): the same cleanup runs
+before that failure propagates.
 
 The same close is owed one seam later, for the same reason. The async raw-list seam
 (`django_strawberry_framework/resource_policy.py::_windowed_rows_async`, the body
@@ -1491,24 +1488,14 @@ The same close is owed one seam later, for the same reason. The async raw-list s
 resolver has already produced its source, so a deadline that expired while that resolver awaited
 rejects while holding an async-only iterable nothing else will ever see. No row has been
 requested, but an async source may own an open external resource from the moment it is
-constructed, so the rejection acquires its iterator solely to close it. The
-`ResourceLimitExceeded` stays primary and complete - its `bound`, `limit` and `charged`
-extensions are what the client acts on - and an acquisition or closure failure rides as a
-diagnostic note. This is the SAME cleanup utility, which therefore lives below both callers
+constructed, so the rejection acquires its iterator solely to close it. An acquisition or
+closure failure propagates in place of the `ResourceLimitExceeded`, which stays reachable as
+its `__context__`. This is the SAME cleanup utility, which therefore lives below both callers
 rather than being restated in a second module, and it is reached through the one deadline check:
 there is no second clock read, and no caller-specific catch in the list field, where the other
 callers of the shared bounding seam would stay exposed. `limit: 0` is included, because the
 empty-window short-circuit sits downstream of the clock and so never gets to perform the close
 it promises on a healthy request.
-
-Primary-error precedence stops at ordinary failures. Cleanup runs while a useful error is
-already on its way out, so a cleanup `Exception` is demoted to a note on it; a `BaseException`
-that is not an `Exception` is not a cleanup diagnostic at all but a control signal addressed
-to the task - cancellation, interrupt, interpreter exit - and it propagates instead. Demoting
-one would let a cancelled request finish carrying an ordinary field error, reporting a
-completed operation to a client whose task was torn down with the source still being closed.
-Both cleanup seams share the one rule, and the primary error stays reachable as the signal's
-`__context__`.
 
 The symmetric SYNC contract is declined, and the decline is stated rather than left as an
 implied promise. A retained sync generator consumed through
@@ -1660,8 +1647,8 @@ schema was constructed with - belongs to the schema.
 driving the request - belongs to the runner built for that one operation and is reachable only
 through a task-local binding while that runner owns it.
 
-The two policies are canonicalized at construction, held on the schema and answered through
-`DjangoSchema.resource_policy` / `DjangoSchema.error_policy` as a copy per read; the consumer
+The two policies are validated at construction, held on the schema and answered through
+the read-only `DjangoSchema.resource_policy` / `DjangoSchema.error_policy`; the consumer
 extension entries are Strawberry's own `schema.extensions`. Operation state is held by
 [`django_strawberry_framework/extensions/operation_state.py::DjangoExtensionsRunner`][operation-state].
 See the [rationale][rationale-d13] for
@@ -1671,24 +1658,17 @@ the rejected extension-attribute and engine-assignment designs.
 
 `DjangoSchema` installs its own error-policy and resource-policy extension on every operation,
 built from the schema's policies, and a consumer entry naming either kind is read once as a
-DECLARATION that does not travel into the chain. Identity evidence about an entry authenticates
-the object, not its future behavior, and the two authorities are the one place that difference
-is fatal: a factory, a closure over a mutable cell, a singleton selector and a subclass all keep
-identity while changing what runs next.
+DECLARATION that does not travel into the chain.
 
-So the admission ladder is exact, and every rung is decided where it is actionable:
+The admission ladder:
 
 | Entry spelling | Where it is answered | Answer |
 |---|---|---|
 | exact class or exact instance of an authority | schema construction | what it declares (an exact resource-policy instance's own policy) is folded into the schema's policy; the entry is dropped |
-| subclass of an authority, as a class or as an instance | schema construction | `ConfigurationError` |
-| factory resolving to either authority, subclasses included | `get_extensions` | `ConfigurationError` |
-| any other class, instance or factory | unchanged | runs between the two authorities |
+| any other class, instance or factory, a subclass of an authority or a factory resolving to one included | unchanged | runs between the two authorities |
 
-A factory cannot be typed without calling it, and calling it at construction would break its
-fresh-per-operation lifecycle, so what a factory PRODUCES can only be checked at resolution:
-the factories run once, through upstream, and the check reads the members that came back. See the [rationale][rationale-d14] for the
-rejected identity-deduplication, subclass-admission and construction-time factory-call designs.
+See the [rationale][rationale-d14] for the rejected identity-deduplication and
+construction-time factory-call designs.
 
 ### Decision 15 — the runner owns every binding, for the operation's whole lifetime
 
@@ -1704,15 +1684,13 @@ given: a class entry and a fresh factory are operation-local there because the o
 shared instance on a raw schema is outside the isolation guarantee. See the
 [rationale][rationale-d15] for the rejected bare-`ContextVar` and operation-scope-only designs.
 
-### Decision 16 — a factory resolving to an authority raises out of extension resolution
+### Decision 16 — a factory resolving to an authority is an ordinary entry
 
-`DjangoSchema.get_extensions` raises `ConfigurationError` for a resolved member of either
-enforcement kind. Upstream calls `get_extensions` outside the block that turns an exception into
-a response, so the error reaches the caller of `execute`, `execute_sync` or `stream` (the
-package view answers it as a server error) before the request's document is parsed and before
-any consumer hook or resolver runs. A factory that raises, or returns something that is not an
-extension, is upstream's to answer. See the [rationale][rationale-d16] for the rejected
-wire-refusal design.
+`DjangoSchema.get_extensions` places whatever a factory resolves to between the schema's own two
+authorities, an enforcement extension included: application Python is trusted (Decision 19), so
+the schema's own authorities still bound and mask the request. A factory that raises, or returns
+something that is not an extension, is upstream's to answer. See the [rationale][rationale-d16]
+for the rejected refusal designs.
 
 ### Decision 17 — the configuration code stays exported
 
@@ -1782,8 +1760,8 @@ ordinary configuration. Three trust levels follow.
 
 - **Untrusted: the wire.** Every GraphQL document, variable, header, upload and transport
   frame. Every bound in this spec and in [`spec-047`][spec-047] exists for that input.
-- **Validated, then trusted: configuration.** The two policies are canonicalized at
-  construction and read back as copies (Decision 13).
+- **Validated, then trusted: configuration.** The two policies are validated at
+  construction and exposed read-only (Decision 13).
 - **Trusted: application Python.** A resolver, a `get_queryset` hook, an `OrderSet.apply_*`
   override, a project `QuerySet` class, an extension factory. The package validates what it
   can establish mechanically about their RESULTS - shape, model, routing, evaluation state -
@@ -1825,13 +1803,9 @@ through `DjangoSchema(resource_policy=..., error_policy=...)`; the schema builds
 authority extension per operation from those policies (Decision 14). An exact instance of an
 authority in `extensions=[...]` is a package-specific compatibility reading - read once as a
 declaration, dropped from the chain before upstream sees it, so upstream's deprecation warning
-does not fire for it. A SUBCLASS of either authority is refused at schema construction with
-`ConfigurationError` - supplied as a class or as an instance, and whether or not it supplies a
-policy of its own, because what disqualifies it is the override it may carry on the hook that
-charges or masks. Only a factory is opaque until it is called, so a factory resolving to an
-authority, subclasses included, is the one spelling refused at the operation instead, with
-`ConfigurationError` (Decision 14's ladder). Moving such an instance
-into a factory is therefore NOT a migration; the migration is to the keyword argument, and the
+does not fire for it. A SUBCLASS of either authority, or a factory resolving to an authority,
+is an ordinary entry that runs beside the schema's own and configures nothing. Moving such an
+instance into a factory is therefore NOT a migration; the migration is to the keyword argument, and the
 docs say so.
 
 **Ordinary extensions follow upstream's spellings.** A class or a factory; an instance carries
@@ -2025,12 +1999,10 @@ Where each part of the surface lives, keyed to the slice checklist:
 - `trusted_max_rows=True` with no `max_rows` is inert: the limit ceiling and the returned-row
   bound stay the request policy's `max_list_rows`.
 - `trusted_max_rows=True, max_rows=P+N` widens returned rows but not accepted offset.
-- The row window is applied only through an operation the package owns. A queryset and an
-  exact `list` / `tuple` / `str` / `bytes` / `bytearray` are sliced; a subclass of one of
-  those, a mapping, and any other iterable are counted through `islice` into a fresh list, so
-  a sequence type whose `__getitem__` ignores the slice cannot answer a bounded request with
-  every row it holds. The zero-width window follows the same split, because
-  `result[start:start]` is as much a consumer call as `result[start:stop]`.
+- The row window is applied only through an operation the package owns. A queryset and a
+  `list` / `tuple` / `str` / `bytes` / `bytearray` are sliced; a mapping and any other
+  iterable are counted through `islice` into a fresh list. The zero-width window follows the
+  same split.
 - The exported `bounded_rows` / `bounded_rows_async` take no `offset` or `requested_limit`;
   supplying either is a `TypeError` from the signature itself. The client window rides only
   on the package-private seam beneath them, behind the argument normalizer's ceiling check.
@@ -2282,9 +2254,6 @@ which are functions in `test_list_field_async_api.py`, or given with their modul
     limit/zero-offset behavior, any non-null `orderBy` (including `[]`) returning
     `queryset_required`, and nonzero offset returning `order_required`, with the nullable field
     preserving `None` under limit/zero offset.
-    `test_holder_materialized_sequence_subclass_is_still_row_bounded` proves the row ceiling
-    holds over a `list` SUBCLASS overriding `__getitem__`, with the unwindowed, windowed, and
-    zero-limit requests each bounded.
 11. `test_holder_presliced_configuration_error_under_pass_through` proves, under the
     [error-policy pass-through][glossary-production-error-policy] fixture, that both omitted
     and active arguments receive the shared visibility boundary's actionable
@@ -2557,13 +2526,7 @@ which are functions in `test_list_field_async_api.py`, or given with their modul
     row count; `test_async_a_resolver_cannot_buy_more_wall_clock_through_the_context` pushes
     `DST_RESOURCE_DEADLINE` into the far future after sleeping past its budget and requires the
     `execution_deadline_seconds` rejection, under a far-future instant and a narrowing `float`
-    subclass alike. Nor is the budget reachable from any policy OBJECT the request can name:
-    `test_a_resolver_cannot_widen_the_row_bound_by_writing_a_policy_it_can_reach` and its
-    `test_async_` twin have a sibling field write `max_list_rows` on each of
-    `policy_from_info`'s answer, `info.schema.resource_policy`, and the `dst_resource_policy`
-    mirror, and require the bounded field to answer with the operation's ceiling;
-    `test_a_policy_a_resolver_widened_does_not_outlive_its_own_request` requires the request
-    after it to answer with the same ceiling.
+    subclass alike.
 
 Every test-local sync/async schema mount uses the module-level current-schema holder under
 `override_settings(ROOT_URLCONF=...)`, resets that holder in `finally`, and uses the
@@ -2643,11 +2606,7 @@ item has been requested (`test_async_generator_cleanup_and_finally_witness`), an
 exhaustion leaves `aclose` uncalled
 (`test_async_generator_natural_exhaustion_does_not_call_aclose`).
 
-Cleanup diagnostics stay out of the HTTP assertions. The production GraphQL JSON error envelope
-does not serialize `BaseException.__notes__`, so exact note content and precedence are
-package-tier subjects; live HTTP asserts the public `extensions` payload and that a cleanup
-failure did not displace the primary domain error
-(`test_async_a_failing_aclose_does_not_displace_the_argument_rejection`). Package-level
+Cleanup failures are package-tier subjects. Package-level
 adapter inspection pins the optimized inner queryset's SQL/low/high marks without pretending a
 [thread-local async DB capture][glossary-async-sql-capture-boundary] observes worker-thread
 SQL.
@@ -2707,11 +2666,10 @@ sync or async HTTP request cannot isolate:
   (`test_async_http_rejects_a_sync_resolver_that_returns_a_coroutine`,
   `test_async_http_rejects_a_sync_resolver_that_returns_a_custom_awaitable`,
   `test_async_http_rejects_an_async_resolver_that_resolves_to_another_awaitable`);
-- exact rejected-async-iterator no-advance and optional-`aclose` counts and
-  primary-versus-cleanup exception notes, whose exact `__notes__` content and precedence live
-  only here (`test_list_field_rejected_async_iterator_cleanup_and_notes`,
-  `test_list_field_rejected_async_iterator_is_closed_when_building_the_rejection_fails`,
-  `test_async_iterable_early_cleanup_hostile_aclose_lookup_notes`);
+- exact rejected-async-iterator no-advance and optional-`aclose` counts, and a cleanup
+  failure raised in place of the rejection
+  (`test_list_field_rejected_async_iterator_cleanup`,
+  `test_list_field_rejected_async_iterator_is_closed_when_building_the_rejection_fails`);
 - async-only queryset adapter protocol - `__aiter__` present, `__iter__` absent
   (`test_async_completion_adapter_semantics`) - and the
   `DjangoOptimizerExtension._optimize` unwrap/rewrap identity and inner low/high marks,
@@ -2843,21 +2801,20 @@ here: the public field refuses it, the helper supports it. The same module pins:
   (`test_the_exported_raw_list_bound_takes_no_client_window`);
 - the deadline at the bounding seam: a directly expired deadline closes a source never
   advanced (`test_bounded_rows_async_closes_a_source_the_deadline_rejects_before_any_row`),
-  and a failing close leaves the resource error primary with the cleanup failure attached as a
-  note (`test_bounded_rows_async_keeps_the_deadline_primary_when_the_close_fails`), beside
+  and a failing close raises over the resource error
+  (`test_bounded_rows_async_closes_the_rejected_source_whatever_the_window`), beside
   the natural-exhaustion control (`test_bounded_rows_async_exhausted_iterator_without_truncation`);
 - cancellation during async cleanup staying observable: a task cancelled while `aclose` is
-  suspended, after the source has already raised, ends cancelled with nothing written onto the
-  source error (`test_bounded_rows_async_lets_a_cancellation_during_cleanup_reach_the_task`),
+  suspended, after the source has already raised, ends cancelled
+  (`test_bounded_rows_async_lets_a_cancellation_during_cleanup_reach_the_task`),
   and an acquisition interrupted by cancellation at the pre-iteration seam propagates
-  instead of annotating the rejection
   (`test_cleanup_rejected_async_iterable_lets_a_cancelled_acquisition_through`); an ordinary
-  `Exception` raised by cleanup is still demoted to a note
-  (`test_bounded_rows_async_preserves_source_errors_when_cleanup_fails`);
+  `Exception` raised by cleanup propagates over the source error
+  (`test_bounded_rows_async_raises_a_cleanup_failure_over_the_source_error`);
 - the budget arms a request cannot express: a cleared deadline key
   (`test_deleting_the_deadline_key_outright_does_not_disarm_the_budget`,
-  `test_an_armed_deadline_cannot_be_widened_or_cleared_from_the_context`), `nan` and infinite
-  deadlines (`test_a_non_finite_deadline_with_no_budget_armed_fails_closed`), the narrowing
+  `test_an_armed_deadline_cannot_be_widened_or_cleared_from_the_context`), `nan` and
+  negative-infinite deadlines (`test_a_non_finite_deadline_with_no_budget_armed_fails_closed`), the narrowing
   positive control (`test_a_resolver_may_shorten_its_own_request`), a nested budget restoring
   the outer one on exit (`test_ending_a_budget_restores_the_one_it_was_opened_inside`), the
   bound read from inside a `sync_to_async` worker thread
@@ -3126,21 +3083,13 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       the request can rewrite: a resolver that replaces `DST_RESOURCE_POLICY` on `info.context`
       changes neither the returned-row bound nor the `offset` ceiling derived from the same
       field, and one that pushes `DST_RESOURCE_DEADLINE` forward or clears it does not outlive
-      its budget. A resolver writing an EARLIER deadline still shortens its own request; a
-      numeric deadline that is not finite, or that is not an exact built-in number, is refused
-      rather than read as a distant future - a subclass answers both the comparison the
-      narrowing rule is decided by and the one deciding whether time is up.
-- [ ] No policy object a resolver can name is the object a bound is read from. The schema
-      attributes answer with a copy, the operation's budget is a private snapshot, the
-      published mirror is a third object, and `policy_from_info` returns a copy - so a
-      `__dict__` write on any of them, which a frozen dataclass admits, changes only the
-      writer's own duplicate and nothing a later request reads. A `ResourcePolicy` or
-      `ErrorPolicy` SUBCLASS is read out once at schema construction and replaced by an exact
-      instance. The extension that arms the budget is the schema's own, built per operation
-      from the schema's policies: an enforcement authority is never an extension ENTRY. A
-      subclass supplied directly, as a class or as an instance, is refused with
-      `ConfigurationError` at construction, and an entry that RESOLVES into one raises
-      `ConfigurationError` when the operation resolves it.
+      its budget. A resolver writing an EARLIER exact built-in number still shortens its own
+      request; anything else under the key is not a deadline.
+- [ ] The schema's policy attributes are read-only, so an assignment raises and changes no
+      later request. The extension that arms the budget is the schema's own, built per
+      operation from the schema's policies: an exact enforcement extension in `extensions=` is
+      a declaration, never an ENTRY, and a subclass or a factory resolving to one is an
+      ordinary entry.
 - [ ] A bound stored on a `ResourcePolicy`, and a field's declared `max_rows`, is an exact
       built-in `int` (or `float` for the deadline); every numeric subclass is refused with a
       typed `ConfigurationError` before any comparison, arithmetic or formatting runs, so no
@@ -3230,8 +3179,8 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       async-only iterables are bounded without over-consuming beyond the accepted window.
       Leak-free early-exit cleanup is promised for ASYNC-ONLY sources on every exit that
       abandons the source, argument rejection and deadline rejection alike, through one shared
-      cleanup utility that sits below both callers and demotes only an ordinary `Exception` to
-      a note on the primary error, letting a control signal propagate; a retained sync
+      cleanup utility that sits below both callers and lets whatever cleanup raises propagate;
+      a retained sync
       generator is documented and tested as still suspended after truncation, and the
       symmetric sync contract is declined.
 - [ ] The exported `bounded_rows` / `bounded_rows_async` signatures carry no client window;
@@ -3240,8 +3189,8 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
 - [ ] Async queryset results complete over `AsyncDjangoGraphQLView` through an async-only
       adapter, with optimizer-on/off parity; no list-field async suite and no
       `tests/test_relay_connection.py` row sets `DJANGO_ALLOW_ASYNC_UNSAFE`.
-- [ ] A factory entry resolving to an enforcement authority raises `ConfigurationError` when
-      the operation resolves it (Decision 16, [`tests/test_schema.py`][test-schema]).
+- [ ] A factory entry resolving to an enforcement extension is an ordinary entry
+      (Decision 16, [`tests/test_schema.py`][test-schema]).
 - [ ] Which GraphQL executor drives a resolver is carried from the entry point into the chain
       and bound by the runner for the operation, result collection, every streamed frame and
       every stream resume, restoring the enclosing operation's answer on the way out. Every
@@ -3358,7 +3307,7 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
 [rationale-d13]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-13--configuration-authority-is-schema-state-everything-per-request-is-operation-state
 [rationale-d14]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-14--an-enforcement-authority-is-a-declaration-never-an-extension-entry
 [rationale-d15]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-15--the-runner-owns-every-binding-for-the-operations-whole-lifetime
-[rationale-d16]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-16--a-factory-resolving-to-an-authority-raises-out-of-extension-resolution
+[rationale-d16]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-16--a-factory-resolving-to-an-authority-is-an-ordinary-entry
 [rationale-d17]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-17--the-configuration-code-stays-exported
 [rationale-d18]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-18--execution-mode-is-operation-state-the-ambient-event-loop-is-a-different-fact
 [rationale-d19]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-19--application-code-is-trusted-the-wire-is-not-a-finding-is-admitted-by-reachability

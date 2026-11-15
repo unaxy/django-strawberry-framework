@@ -1343,11 +1343,8 @@ async def _handle_non_queryset_rejections_async(
     """Reject a non-queryset source, closing an async-only one on EVERY rejecting exit.
 
     spec-050 Decision 8 promises a rejected async-only source is never advanced and is
-    closed when possible, with the primary error keeping precedence. Building
-    the rejection can itself fail (malformed schema metadata behind the wire
-    name lookup), and that exit owes the same close: the source is being
-    rejected either way, so the failure becomes the primary error the cleanup
-    utility attaches its notes to.
+    closed when possible. Building the rejection can itself fail (malformed schema
+    metadata behind the wire name lookup), and that exit owes the same close.
     """
     try:
         err = _build_non_queryset_rejection_error(
@@ -1355,13 +1352,13 @@ async def _handle_non_queryset_rejections_async(
             info,
             orderset_class=orderset_class,
         )
-    except BaseException as primary:
+    except BaseException:
         if is_async_only_iterable(source):
-            await _cleanup_rejected_async_iterable(source, primary, caller="DjangoListField")
+            await _cleanup_rejected_async_iterable(source)
         raise
     if err is not None:
         if is_async_only_iterable(source):
-            await _cleanup_rejected_async_iterable(source, err, caller="DjangoListField")
+            await _cleanup_rejected_async_iterable(source)
         raise err
 
 

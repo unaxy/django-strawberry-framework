@@ -1337,10 +1337,10 @@ def _install_stop_aware_schema(handler: _SchemaSeat) -> None:
 
 async def _contain_message_loop_failure(
     handler: _ContainedHandler,
-    exc: Exception,
+    loop: Callable[[], Awaitable[None]],
     protocol: str,
 ) -> None:
-    """Refuse a connection whose message loop escaped, saying honestly whose fault it was.
+    """Run a handler's message ``loop``; refuse the connection if it escapes, saying whose fault.
 
     The wire boundary for what a frame can BE: a client-supplied frame is
     untrusted input, and this is where its shape failures end. Neither protocol
@@ -1381,7 +1381,7 @@ async def _contain_message_loop_failure(
     Why neither close is a revocation: the frame was invalid or the server
     broke, and in neither case was the actor in question, so ``4403`` would
     misstate the refusal. Cancellation and the other process-level exceptions
-    never arrive at all - the callers' arm is ``except Exception``, so
+    never arrive at all - the arm is ``except Exception``, so
     ``CancelledError``, ``KeyboardInterrupt``, ``SystemExit``, and
     ``GeneratorExit`` all bypass BY INHERITANCE rather than by a hard-coded name
     list that a future ``BaseException`` subclass would fall through, and a
@@ -1409,42 +1409,43 @@ async def _contain_message_loop_failure(
     unwound the deep parse frames, and the refusal below runs from this
     shallow frame.
     """
-    if isinstance(exc, _CLIENT_FRAME_SHAPE_ESCAPES):
-        code = _INVALID_MESSAGE_CLOSE_CODE
-        reason = _INVALID_FRAME_CLOSE_REASON
-        logger.error(
-            "GraphQLWebSocketConsumer: a client-supplied frame escaped the %s message loop "
-            "with a raw exception; the connection is refused with the protocol's own "
-            "invalid-message close (fail-closed) rather than left open with a message loop "
-            "that can never run again.",
-            protocol,
-            exc_info=exc,
-        )
-    else:
-        code = _INTERNAL_ERROR_CLOSE_CODE
-        reason = _INTERNAL_ERROR_CLOSE_REASON
-        logger.error(
-            "GraphQLWebSocketConsumer: a server-side failure escaped the %s message loop; "
-            "the connection is refused with the transport's internal-error close, which "
-            "tells the client nothing about the failure. This is a package or consumer bug "
-            "rather than a malformed frame, and the traceback recorded here is the only "
-            "place it is reported.",
-            protocol,
-            exc_info=exc,
-        )
     try:
-        await handler.websocket.close(code=code, reason=reason)
-    except Exception:
-        # ``Exception`` for the same reason the callers' guard does: an ordinary
-        # failure is contained, while a process-level exception (cancellation
-        # included) bypasses by inheritance and unwinds the teardown.
-        logger.exception(
-            "GraphQLWebSocketConsumer: the %s message loop was contained, but the refusal "
-            "close could not be committed to the transport; the connection is ending "
-            "without a close frame rather than staying open with a message loop that can "
-            "never run again.",
-            protocol,
-        )
+        await loop()
+    except Exception as exc:
+        if isinstance(exc, _CLIENT_FRAME_SHAPE_ESCAPES):
+            code = _INVALID_MESSAGE_CLOSE_CODE
+            reason = _INVALID_FRAME_CLOSE_REASON
+            logger.exception(
+                "GraphQLWebSocketConsumer: a client-supplied frame escaped the %s message loop "
+                "with a raw exception; the connection is refused with the protocol's own "
+                "invalid-message close (fail-closed) rather than left open with a message loop "
+                "that can never run again.",
+                protocol,
+            )
+        else:
+            code = _INTERNAL_ERROR_CLOSE_CODE
+            reason = _INTERNAL_ERROR_CLOSE_REASON
+            logger.exception(
+                "GraphQLWebSocketConsumer: a server-side failure escaped the %s message loop; "
+                "the connection is refused with the transport's internal-error close, which "
+                "tells the client nothing about the failure. This is a package or consumer bug "
+                "rather than a malformed frame, and the traceback recorded here is the only "
+                "place it is reported.",
+                protocol,
+            )
+        try:
+            await handler.websocket.close(code=code, reason=reason)
+        except Exception:
+            # ``Exception`` for the same reason the loop's guard does: an ordinary
+            # failure is contained, while a process-level exception (cancellation
+            # included) bypasses by inheritance and unwinds the teardown.
+            logger.exception(
+                "GraphQLWebSocketConsumer: the %s message loop was contained, but the refusal "
+                "close could not be committed to the transport; the connection is ending "
+                "without a close frame rather than staying open with a message loop that can "
+                "never run again.",
+                protocol,
+            )
 
 
 async def _refreshed_actor(scope: Mapping[str, object]) -> object:
@@ -1593,23 +1594,8 @@ def build_revalidating_consumer_class(
             cannot be shaped per-message - the ``RecursionError`` a nested
             document raises inside ``iter_json`` - unwinds the loop from the
             ``async for`` itself, where no per-message wrapper runs.
-
-            The containment catches every ordinary escape but does not describe
-            them all the same way: ``_contain_message_loop_failure`` spends the
-            invalid-message close only for a client frame-shape escape, and the
-            transport's internal-error close for a server-side failure, so the
-            reason on the wire is never a false accusation against the frame.
             """
-            try:
-                await super().handle()
-            except Exception as exc:  # noqa: BLE001 - boundary fails closed
-                # ``Exception``, not ``BaseException`` minus a hard-coded trio:
-                # the containment's contract is "ordinary non-cancellation
-                # failure", and the language already draws that line. Cancellation
-                # (a ``BaseException``), ``KeyboardInterrupt``, ``SystemExit`` and
-                # ``GeneratorExit`` all bypass by inheritance, present and future
-                # subclasses included - no hand-maintained list can drift.
-                await _contain_message_loop_failure(self, exc, "graphql-transport-ws")
+            await _contain_message_loop_failure(self, super().handle, "graphql-transport-ws")
 
     class _RevalidatingGraphQLWSHandler(graphql_ws_handler_base):
         """Legacy ``graphql-ws``: revalidated admission, stoppable results."""
@@ -1635,10 +1621,7 @@ def build_revalidating_consumer_class(
             client-shape / server-side close split - see the transport-ws
             override above for the full rationale.
             """
-            try:
-                await super().handle()
-            except Exception as exc:  # noqa: BLE001 - boundary fails closed
-                await _contain_message_loop_failure(self, exc, "legacy graphql-ws")
+            await _contain_message_loop_failure(self, super().handle, "legacy graphql-ws")
 
     class _RevocationGatedWebSocketAdapter(websocket_adapter_base):
         """The outbound checkpoint, on the seam both protocols share.

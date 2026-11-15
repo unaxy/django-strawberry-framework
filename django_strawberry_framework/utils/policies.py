@@ -3,12 +3,9 @@
 ``resource_policy.py::resolve_resource_policy`` and ``error_policy.py::
 resolve_error_policy`` are deliberately the same shape - a consumer who has
 learned how one schema-construction policy is configured has learned both -
-so that shape lives here once: an explicit policy instance is canonicalized into
-a private validated duplicate and used, an absent one falls back to the
-configured setting and then to the fail-closed package default - which is
-canonicalized on exactly the same terms, so no resolution hands back an object
-another schema, or a consumer, already holds - a non-mapping
-override is rejected, unknown keys are rejected naming the valid vocabulary, and
+so that shape lives here once: an explicit policy instance is used, an absent
+one falls back to the configured setting and then to the fail-closed package
+default, a non-mapping override is rejected, unknown keys are rejected naming the valid vocabulary, and
 a mapping is applied over the dataclass defaults. A mapping override is
 MATERIALIZED ONCE into a plain ``dict`` before
 anything reads it, so validation and construction see the same keys even when
@@ -36,40 +33,9 @@ if TYPE_CHECKING:
 
     from _typeshed import DataclassInstance
 
-__all__ = ("canonical_policy", "resolve_policy")
+__all__ = ("resolve_policy",)
 
 PolicyT = TypeVar("PolicyT", bound="DataclassInstance")
-
-
-def canonical_policy(policy: object, *, policy_cls: type[PolicyT]) -> PolicyT:
-    """Return a private, validated ``policy_cls`` built from ``policy``'s fields.
-
-    ALWAYS a new object, never the one handed in, and the exact type is not a
-    reason to skip the copy. What an enforcement seam reads has to be an object
-    no one outside this package holds a reference to: a caller who keeps the
-    instance they passed to ``DjangoSchema(resource_policy=...)`` - or who
-    leaves one in ``settings`` - still holds the thing every bound would be read
-    from, and a frozen dataclass admits ``policy.__dict__[bound] = wider`` by
-    the same route the schema attribute does. The copy is what makes a bound
-    settled at construction stay settled; the schema is process-lived, so
-    without it one write after startup widens every later request.
-
-    The fields are also re-read and re-validated rather than trusted, for two
-    reasons that meet here. ``isinstance`` admits a SUBCLASS, whose field reads
-    are consumer code: a ``__getattribute__`` or property answering honestly
-    while the constructor validates and differently afterwards passes every
-    check the class performs on itself and then hands an enforcement seam
-    whatever it likes - an ``int`` subclass whose ``__gt__`` raises turns a
-    bound comparison into a raw error out of a collection resolver. And an
-    EXACT instance's ``__post_init__`` is a statement about the values it was
-    built with, never about the ones it carries now. Each field is therefore
-    read once, here, and those values build an instance that validates them on
-    the ordinary terms; the original is discarded and no seam downstream ever
-    calls it again. A field read that raises is the subclass's own behaviour
-    and propagates.
-    """
-    values = {field.name: getattr(policy, field.name) for field in fields(policy_cls)}
-    return policy_cls(**values)
 
 
 def _article(name: str) -> str:
@@ -90,39 +56,26 @@ def resolve_policy(
 
     Precedence, highest first: the ``explicit`` argument, the deployment value
     read through ``read_setting``, and ``default``. An instance from either
-    override slot is put through :func:`canonical_policy` first, so what the
-    schema stores is a private, freshly validated ``policy_cls`` that no caller
-    holds a reference to.
+    override slot is returned as it is: its ``__post_init__`` validated it.
 
     ``display_name`` is the human name used in messages ("resource policy") and
     ``unit`` is what one override key is called there ("bound" / "option"); the
     wire-visible wording of both rejections is produced from these, so the two
     resolvers cannot drift apart in text any more than in behavior.
 
-    The no-override path is canonicalized like every other one. ``default`` is a
-    module-level object shared by every schema in the process, so returning it
-    would make one schema's stored policy the same object as another's - and the
-    same object as whatever name the package exposes it under, which is the one
-    thing :func:`canonical_policy` exists to prevent. A deployment that
-    configures nothing gets the same guarantee as one that configures
-    everything.
-
     Either override is recognised by its real class, never a ``__class__`` read,
     so a Django lazy proxy (``SimpleLazyObject``) of a policy or a mapping is the
     typed rejection below, like any other value of the wrong class.
     """
     if truth.is_instance(explicit, policy_cls):
-        return canonical_policy(explicit, policy_cls=policy_cls)
+        return explicit
     overrides = explicit if explicit is not None else read_setting()
     if overrides is None:
-        return canonical_policy(default, policy_cls=policy_cls)
+        return default
     if truth.is_instance(overrides, policy_cls):
         # An instance behind the SETTING slot is the same declaration the
-        # explicit argument accepts - the two override sources are one ladder
-        # with two spellings, so an instance from either is canonicalized on the
-        # same terms. (Rejecting it here made the typed message name the policy
-        # class as the received type while claiming it must be one.)
-        return canonical_policy(overrides, policy_cls=policy_cls)
+        # explicit argument accepts: one ladder with two spellings.
+        return overrides
     # The mapping protocol is asked of the real class, so a value whose
     # ``__class__`` raises or lies is the typed rejection below, never its own error.
     if not is_real_mapping(overrides):

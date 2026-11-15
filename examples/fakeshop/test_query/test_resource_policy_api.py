@@ -57,16 +57,14 @@ Row groups, in the order a request meets them:
   sits at the resolver head rather than on the lazy-load path alone, and the
   session-auth fields (``login``, ``logout``, ``me``) and Strawberry's own
   ``relay.node()`` fields on both transports;
-- a private copy of the policy the deployment supplied, proven across two
-  requests, and the ``max_list_rows`` an extension ENTRY declared,
+- the ``max_list_rows`` an extension ENTRY declared,
   which the schema reads once and bounds the request with while the entry itself
   never reaches the chain, alongside the boundary the value budget sits on -
   the raw argument the request carried, charged before a custom scalar converts
   it, whichever of the three places a request can carry one it came from, and
   in an unselected operation or a shadowed variable default too - the
-  largest configurable bound executing as a real ``LIMIT``, an explicit policy
-  handed to the extension on a plain schema bounding the request by its first
-  read, and an inner schema run on the request's context restoring the outer
+  largest configurable bound executing as a real ``LIMIT``, and an inner schema
+  run on the request's context restoring the outer
   policy, deadline and budget (``/rp-nested/``, sync and async); and
 - the cross-cutting proofs: zero ORM work after a rejection, and one typed error
   code shared by the sync and async transports.
@@ -149,7 +147,6 @@ from django_strawberry_framework.resource_policy import (
 )
 from django_strawberry_framework.testing import AsyncTestClient, Response, TestClient
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of, object_result
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
@@ -698,30 +695,13 @@ _OPAQUE_SCALAR = strawberry.scalar(
 _NO_OPAQUE_VALUE = OpaqueValue(None)
 
 
-#: A raw list longer than the package's default ``max_list_rows`` and shorter
-#: than the widened bound the tampering row writes over the exported default, so
-#: a response bounded by one cannot be mistaken for a response bounded by the
-#: other.
-_UNCONFIGURED_SOURCE_ROWS = [str(index) for index in range(150)]
-
-
 @strawberry.type
 class _AuthorityQuery:
-    """A bounded list, an unbounded-source list and an opaque scalar argument."""
+    """A bounded list and an opaque scalar argument."""
 
     @strawberry.field
     def rows(self, info: strawberry.Info) -> list[str]:
         return list(bounded_rows(["a", "b", "c"], info, None))
-
-    @strawberry.field
-    def many_rows(self, info: strawberry.Info) -> list[str]:
-        """A raw list long enough to meet the package's OWN default row ceiling.
-
-        The source is longer than ``max_list_rows`` leaves on a schema that
-        configured nothing, so the rows a response carries name the ceiling the
-        request was actually held to.
-        """
-        return list(bounded_rows(_UNCONFIGURED_SOURCE_ROWS, info, None))
 
     @strawberry.field
     def take(self, payload: OpaqueValue = _NO_OPAQUE_VALUE) -> str:
@@ -928,43 +908,6 @@ def _cache_async_view(order: str) -> Callable[..., Coroutine[object, object, Htt
         return await built(request, *args, **kwargs)
 
     return view
-
-
-#: The policy object a deployment hands to a schema and then keeps a reference to.
-RETAINED_POLICY = ResourcePolicy(max_list_rows=1, max_container_width=MAX_CONTAINER_WIDTH)
-
-
-@cache
-def _retained_schema() -> DjangoSchema:
-    return DjangoSchema(
-        query=_AuthorityQuery,
-        config=strawberry_config(extra_scalar_map={OpaqueValue: _OPAQUE_SCALAR}),
-        resource_policy=RETAINED_POLICY,
-    )
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _retained_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
-    built = DjangoGraphQLView.as_view(schema=_retained_schema())
-    return built(request, *args, **kwargs)
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _unconfigured_view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
-    """Mount a schema that configures NO resource policy at all, built per request.
-
-    Deliberately not cached, unlike every other schema factory here: the row this
-    mount serves writes the exported default BEFORE the schema exists, and a
-    schema built once per worker would be one that write could never have
-    reached.
-    """
-    built = DjangoGraphQLView.as_view(
-        schema=DjangoSchema(
-            query=_AuthorityQuery,
-            config=strawberry_config(extra_scalar_map={OpaqueValue: _OPAQUE_SCALAR}),
-        ),
-    )
-    return built(request, *args, **kwargs)
 
 
 #: Aliases one operation may carry on the shared-entry mounts. An ordinary
@@ -1179,81 +1122,10 @@ async def _nested_async_view(
     return await AsyncDjangoGraphQLView.as_view(schema=_nested_schema())(request, *args, **kwargs)
 
 
-class _DriftingPolicy(ResourcePolicy):
-    """A valid policy whose first read of ``max_document_tokens`` is narrow and the rest wide.
-
-    Every check a ``ResourcePolicy`` performs on itself happens at construction,
-    so a subclass answering honestly then and differently afterwards is a policy
-    that passed validation and enforces nothing unless it is read out once. The
-    drift starts only once ``_armed`` is set, which is what lets
-    ``__post_init__`` validate real values.
-    """
-
-    @override
-    def __getattribute__(self, name: str) -> object:
-        state = truth.instance_state(self)
-        if name == "max_document_tokens" and state.get("_armed"):
-            reads = state.get("_reads", 0)
-            assert isinstance(reads, int)
-            state["_reads"] = reads + 1
-            return 1 if reads == 0 else 1_000_000
-        return object_result(object.__getattribute__, self, name)
-
-
-def _drifting_extension() -> DjangoResourcePolicyExtension:
-    """A resource-policy extension over a FRESH drifting policy, once per operation."""
-    policy = _DriftingPolicy()
-    truth.instance_state(policy)["_armed"] = True
-    return DjangoResourcePolicyExtension(policy=policy)
-
-
-@strawberry.type
-class _EchoQuery:
-    """A one-field surface: any document of it is a handful of tokens."""
-
-    @strawberry.field
-    def echo(self) -> str:
-        return "ok"
-
-
-#: A plain ``strawberry.Schema`` whose consumer hands the extension an explicit
-#: policy through a factory, the supported spelling outside ``DjangoSchema``.
-_DRIFTING_SCHEMA = strawberry.Schema(query=_EchoQuery, extensions=[_drifting_extension])
-
-
-class _PolicySchema(strawberry.Schema):
-    """A plain ``strawberry.Schema`` declaring the ``resource_policy`` the extension reads."""
-
-    resource_policy: ResourcePolicy
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _drifting_schema_view(
-    request: HttpRequest,
-    *args: object,
-    **kwargs: object,
-) -> HttpResponseBase:
-    """Mount a plain schema carrying a FRESH armed drifting policy, built per request.
-
-    The extension is configured with no policy, so it reads the schema's: whatever
-    object the consumer stored there, its reads its own code. Built per request
-    because the drifting policy counts its reads; a schema shared across requests
-    would hand the second request a policy already past its narrow first read.
-    """
-    policy = _DriftingPolicy()
-    truth.instance_state(policy)["_armed"] = True
-    schema = _PolicySchema(query=_EchoQuery, extensions=[DjangoResourcePolicyExtension])
-    schema.resource_policy = policy
-    built = DjangoGraphQLView.as_view(schema=schema)
-    return built(request, *args, **kwargs)
-
-
 urlpatterns = [
     path("", include("config.urls")),
     path("rp-nested/", _nested_view),
     path("rp-nested-async/", _nested_async_view),
-    path("rp-drifting/", DjangoGraphQLView.as_view(schema=_DRIFTING_SCHEMA)),
-    path("rp-drifting-schema/", _drifting_schema_view),
     path("rp-authority/", _authority_view),
     # Mounted from ``ENTRY_MOUNTS`` rather than spelled out, so the mounts and the
     # parametrized rows cannot disagree about which spellings exist.
@@ -1262,9 +1134,7 @@ urlpatterns = [
         for (spelling, color), mount in ENTRY_MOUNTS.items()
     ),
     path("rp-entry-rows/", _entry_rows_view),
-    path("rp-retained/", _retained_view),
     path("rp-factory-entry/", _factory_view),
-    path("rp-unconfigured/", _unconfigured_view),
     path("rp-witness-cache-first/", _witness_view("cache-first")),
     path("rp-witness-cache-last/", _witness_view("cache-last")),
     path("rp-witness-cache-last-async/", _witness_async_view("cache-last")),
@@ -3949,54 +3819,6 @@ def test_a_bound_declared_by_an_entry_is_the_one_a_request_is_held_to() -> None:
     assert payload["data"] == {"rows": ["a"]}
 
 
-def test_a_policy_the_deployment_still_holds_cannot_widen_a_later_request() -> None:
-    """Configuration intake copies; the object a deployment keeps is not the authority.
-
-    Intake copies even an exact policy instance, so the reference a deployment
-    keeps - a module-level object, or one a resolver can reach through any
-    import - is not the object any bound is read from, although a frozen
-    dataclass admits ``policy.__dict__[bound] = wider``.
-    """
-    first = _post("/rp-retained/", "{ rows }")
-    _no_rejection(first)
-    assert json_at(first, "data", "rows") == ["a"]
-
-    RETAINED_POLICY.__dict__["max_list_rows"] = 999
-    try:
-        second = _post("/rp-retained/", "{ rows }")
-    finally:
-        RETAINED_POLICY.__dict__["max_list_rows"] = 1
-    _no_rejection(second)
-    assert json_at(second, "data", "rows") == ["a"]
-
-
-def test_a_written_exported_default_cannot_widen_an_unconfigured_schema() -> None:
-    """The exported default is a value template; a bound is read from the package's own.
-
-    ``DEFAULT_RESOURCE_POLICY`` is a root export, so any consumer module holds
-    it, and a frozen dataclass admits ``policy.__dict__[bound] = wider``. The
-    write lands before this mount's schema exists - it builds one per request -
-    so a schema that read the exported object would serve every later request of
-    the process on a bound no deployment configured. The response carries the
-    package's own ceiling instead.
-    """
-    declared = dict(DEFAULT_RESOURCE_POLICY.__dict__)
-    DEFAULT_RESOURCE_POLICY.__dict__["max_list_rows"] = 999
-    try:
-        widened = _post("/rp-unconfigured/", "{ manyRows }")
-    finally:
-        # The export is process-global: a write left behind would answer every
-        # later row in the session.
-        DEFAULT_RESOURCE_POLICY.__dict__.update(declared)
-    _no_rejection(widened)
-    assert len(_UNCONFIGURED_SOURCE_ROWS) > declared["max_list_rows"]
-    assert len(json_list(widened, "data", "manyRows")) == declared["max_list_rows"]
-
-    control = _post("/rp-unconfigured/", "{ manyRows }")
-    _no_rejection(control)
-    assert json_at(control, "data", "manyRows") == json_at(widened, "data", "manyRows")
-
-
 def _opaque_request(source: str, width: int) -> tuple[str, dict[str, list[int]] | None, list[int]]:
     """One request carrying ``width`` members to the scalar argument, by ``source``.
 
@@ -4665,34 +4487,3 @@ def test_a_nested_schema_restores_the_outer_policy_and_deadline(mount: str, fiel
     rows = NESTED_POLICY.max_list_rows
     deadline = NESTED_POLICY.execution_deadline_seconds
     assert payload["data"] == {field: f"{rows}:{rows}:{rows}:{deadline}:{deadline}:None"}
-
-
-def test_an_explicit_extension_policy_bounds_the_request_by_its_first_read() -> None:
-    """One operation is bounded by ONE policy, whatever its configuration answers later.
-
-    The extension reads an explicit policy out once, when it accepts it. A policy
-    whose first read of the token bound is one token and every later read a
-    million is therefore a one-token budget for the whole request: the document
-    scan refuses an ordinary one-field document rather than admitting it under a
-    bound re-read from the consumer object. Three guards stand in series: the
-    canonical copy taken at construction, the copy the extension hands out, and
-    the scan reading the armed snapshot
-    (``extensions/resource_policy.py::DjangoResourcePolicyExtension.on_operation``).
-    """
-    extensions = _rejection(_post("/rp-drifting/", "{ echo }"))
-    assert extensions["bound"] == "max_document_tokens"
-
-
-def test_a_schema_policy_bounds_the_request_by_the_snapshot_arming_took() -> None:
-    """The pre-parse scan charges the policy ``begin_resource_budget`` armed, not its source.
-
-    A plain ``strawberry.Schema`` answers ``resource_policy`` with whatever the
-    consumer stored there, so the policy the extension resolves can be a subclass
-    whose reads are its own code. Arming snapshots it (its first read, here the
-    one-token bound); a scan handed the resolved object instead would read it a
-    second time, be answered with a million tokens and admit the document the
-    armed budget refuses
-    (``extensions/resource_policy.py::DjangoResourcePolicyExtension.on_operation``).
-    """
-    extensions = _rejection(_post("/rp-drifting-schema/", "{ echo }"))
-    assert extensions["bound"] == "max_document_tokens"

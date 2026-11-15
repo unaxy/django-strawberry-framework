@@ -52,9 +52,7 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.extensions.operation_state import (
     DjangoExtensionsRunner,
     OperationState,
-    _binding,
     _OperationBoundExtension,
-    _unbind,
     operation_is_nested,
 )
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
@@ -286,26 +284,6 @@ def test_a_hook_that_raises_while_setting_up_still_resets_every_binding() -> Non
     assert result.errors is not None
     assert shared.execution_context is None
     assert shared._operation_state() is None
-
-
-def test_a_reset_that_fails_strands_no_other_binding() -> None:
-    """One reset raising still attempts every other reset.
-
-    A token this context cannot reset is a bookkeeping defect, raised as Python's own
-    error, but only once the rest of the scope is unwound: this context gets every
-    other variable back.
-    """
-    first: contextvars.ContextVar[str | None] = contextvars.ContextVar("first", default=None)
-    second: contextvars.ContextVar[str | None] = contextvars.ContextVar("second", default=None)
-    second_token = second.set("bound")
-    bindings = [_binding(first, first.set("bound")), _binding(second, second_token)]
-    # Used up here, so the unwind's own reset of it raises RuntimeError.
-    second.reset(second_token)
-
-    with pytest.raises(RuntimeError):
-        _unbind(bindings)
-
-    assert first.get() is None
 
 
 @pytest.mark.asyncio

@@ -85,11 +85,10 @@ from typing_extensions import override
 from django_strawberry_framework import logger
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.error_policy import (
-    _PACKAGE_ERROR_POLICY,
+    DEFAULT_ERROR_POLICY,
     ErrorPolicy,
     new_correlation_id,
 )
-from django_strawberry_framework.utils import truth
 
 from .operation_state import OperationState, _OperationBoundExtension
 
@@ -218,18 +217,12 @@ def schema_error_policy(schema: object) -> ErrorPolicy:
 
     A plain ``strawberry.Schema`` a consumer wired the extension into by hand has
     no ``error_policy`` attribute; that is a supported standalone use, so it falls
-    back rather than raising. The exact-type gate is the same fail-closed
-    reasoning applied to a WRONG attribute: something that is not exactly an
-    ``ErrorPolicy`` cannot be asked whether masking is enabled - a subclass could
-    answer ``enabled`` / ``message`` with code of its own - and treating its
-    truthiness as an answer would let an unrelated ``schema.error_policy``
-    silently disable masking. Either way the fallback is the MASKING one -
-    the package's own policy - because an extension whose whole job is to mask
-    must not become a no-op because it could not find its configuration.
-    ``DjangoSchema`` always supplies a valid one, validated at construction.
+    back rather than raising, to the MASKING policy, because an extension whose
+    whole job is to mask must not become a no-op because it could not find its
+    configuration. ``DjangoSchema`` always supplies one, validated at construction.
     """
     policy = getattr(schema, "error_policy", None)
-    return policy if truth.is_exact(policy, ErrorPolicy) else _PACKAGE_ERROR_POLICY
+    return policy if isinstance(policy, ErrorPolicy) else DEFAULT_ERROR_POLICY
 
 
 def mask_execution_result(
@@ -268,13 +261,9 @@ class DjangoErrorPolicyExtension(_OperationBoundExtension[OperationState]):
 
     ``DjangoSchema`` installs one of these on every operation and is the only
     thing that can: the policy object is resolved once at schema construction
-    and read from ``schema.error_policy``, and an entry that resolves to one of
-    these on a request already running raises ``ConfigurationError``. A
-    ``DjangoSchema(extensions=[...])`` entry that IS this class, or an exact
-    instance of it, is read as a declaration of the schema's own masker and
-    does not travel into the chain; a subclass is refused at construction, and a
-    factory resolving to either raises ``ConfigurationError`` when the operation
-    resolves it.
+    and read from ``schema.error_policy``. A ``DjangoSchema(extensions=[...])``
+    entry that IS this class, or an exact instance of it, is read as a
+    declaration of the schema's own masker and does not travel into the chain.
 
     **Which result is masked is per-operation state, not an attribute.** The
     teardown reads the completed result off the operation's engine context, and

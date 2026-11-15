@@ -35,9 +35,8 @@ Three passes, in the order a request meets them:
    multi-relation write input is charged against the relation-id bounds
    whether its ids render as Relay ``GlobalID``s or as raw pks, which a
    scalar-name rule cannot see (a raw-pk relation list is ``[Int!]`` on the
-   wire). The walk is iterative and every container is cycle-guarded against
-   its own ancestor path, so a self-referential value cannot spin it while
-   every reference is still charged. It runs entirely on the input as the
+   wire). The walk is iterative and charges every reference. It runs entirely
+   on the input as the
    request spelled it - a literal as its AST, so an input object repeating a
    field name is charged for every occurrence, and a variable as the
    transport decoded it - so no id is decoded and no queryset is built before
@@ -70,8 +69,8 @@ Where each pass reaches, stated as the boundary rather than as parity:
   writes (``resource_policy.py::admission_rejection``). Upstream decides whether
   to execute from INSIDE the validation stage, so restating it has to happen as
   a validation hook sets up and the last one to do so has the last word:
-  ``schema.py::DjangoSchema`` appends :class:`AdmissionGuard` behind every
-  consumer entry for exactly that position. It is read once more at the hook
+  ``schema.py::DjangoSchema`` puts this extension behind every consumer entry
+  for exactly that position. It is read once more at the hook
   execution begins from, so a plain ``strawberry.Schema`` whose consumer placed a
   validation cache after this extension, which the pre-execution check then
   waves through, still meets it there.
@@ -85,8 +84,7 @@ Where each pass reaches, stated as the boundary rather than as parity:
 
 from __future__ import annotations
 
-import copy
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 import graphql
 from graphql import (
@@ -94,7 +92,6 @@ from graphql import (
     FieldNode,
     FragmentDefinitionNode,
     FragmentSpreadNode,
-    GraphQLError,
     GraphQLInputObjectType,
     GraphQLList,
     GraphQLObjectType,
@@ -113,12 +110,12 @@ from graphql import (
     is_leaf_type,
     visit,
 )
+from graphql.error import GraphQLSyntaxError
 from graphql.language.lexer import Lexer
 from graphql.language.source import Source
 from graphql.language.token_kind import TokenKind
 from graphql.utilities import value_from_ast_untyped
 from graphql.utilities.type_info import TypeInfo, TypeInfoVisitor
-from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.file_uploads import Upload
 from strawberry.relay import GlobalID
 from strawberry.scalars import ID
@@ -128,12 +125,11 @@ from typing_extensions import override
 
 from django_strawberry_framework.mutations.fields import MUTATION_CLASS_MARKER
 from django_strawberry_framework.resource_policy import (
-    _PACKAGE_RESOURCE_POLICY,
+    DEFAULT_RESOURCE_POLICY,
     DST_RESOURCE_DEADLINE,
     DST_RESOURCE_POLICY,
     ResourceLimitExceeded,
     ResourcePolicy,
-    _operation_policy,
     admission_rejection,
     adopt_budget_binding,
     armed_resource_policy,
@@ -143,11 +139,8 @@ from django_strawberry_framework.resource_policy import (
     record_admission_rejection,
 )
 from django_strawberry_framework.utils._narrowing import (
-    is_exact_dict,
-    is_exact_list_or_tuple,
     is_list_or_tuple,
     is_mapping,
-    is_memoryview,
     is_str,
     mapping_get,
     read_attr,
@@ -163,6 +156,7 @@ from django_strawberry_framework.utils.typing import (
     published_python_name,
     strawberry_schema_from_schema,
     unwrap_non_null,
+    wrapped_resolver,
 )
 
 from .operation_state import OperationState, _OperationBoundExtension
@@ -187,22 +181,18 @@ if TYPE_CHECKING:
         TypeNode,
         VariableDefinitionNode,
     )
-    from strawberry.types import ExecutionContext
 
     from django_strawberry_framework.utils.inputs import InputFieldSpec
 
-    #: One pending input node: its declared type, its value, the containers it sits
-    #: in, and the mutation input spec (and nested spec map) it decodes through.
+    #: One pending input node: its declared type, its value, how many containers it
+    #: sits in, and the mutation input spec (and nested spec map) it decodes through.
     _ValueFrame = tuple[
         GraphQLType | None,
         object,
-        tuple[object, ...],
+        int,
         InputFieldSpec | None,
         Mapping[str, InputFieldSpec] | None,
     ]
-
-#: The member type a bounded container enumeration yields.
-_MemberT = TypeVar("_MemberT")
 
 __all__ = ("DjangoResourcePolicyExtension",)
 
@@ -295,8 +285,6 @@ def scan_document_text(policy: ResourcePolicy, query: str | None) -> None:
     """
     if not isinstance(query, str):
         return
-    if not query:
-        return
     lexer = Lexer(Source(query))
     tokens = 0
     depth = 0
@@ -304,39 +292,32 @@ def scan_document_text(policy: ResourcePolicy, query: str | None) -> None:
         token = lexer.advance()
         while token.kind is not TokenKind.EOF:
             tokens += 1
-            if tokens > policy.max_document_tokens:
-                raise ResourceLimitExceeded(
-                    "max_document_tokens",
-                    policy.max_document_tokens,
-                    tokens,
-                    "the document carries more lexical tokens than the policy allows",
-                )
-            if token.kind is TokenKind.NAME and token.end - token.start > policy.max_name_bytes:
-                raise ResourceLimitExceeded(
+            policy.check(
+                "max_document_tokens",
+                tokens,
+                "the document carries more lexical tokens than the policy allows",
+            )
+            if token.kind is TokenKind.NAME:
+                policy.check(
                     "max_name_bytes",
-                    policy.max_name_bytes,
                     token.end - token.start,
                     "a name in the document is longer than the policy allows",
                 )
             if token.kind in _OPEN_TOKEN_KINDS:
                 depth += 1
-                if depth > policy.max_depth:
-                    raise ResourceLimitExceeded(
-                        "max_depth",
-                        policy.max_depth,
-                        depth,
-                        "the document nests deeper than the policy allows",
-                    )
+                policy.check(
+                    "max_depth",
+                    depth,
+                    "the document nests deeper than the policy allows",
+                )
             elif token.kind in _CLOSE_TOKEN_KINDS:
                 depth -= 1
             token = lexer.advance()
-    except GraphQLError as exc:
-        if isinstance(exc, ResourceLimitExceeded):
-            raise
+    except GraphQLSyntaxError:
         return
 
 
-def _mutation_input_specs(field_def: object) -> Mapping[str, InputFieldSpec] | None:
+def _mutation_input_specs(field_def: GraphQLField | None) -> Mapping[str, InputFieldSpec] | None:
     """Return the bound mutation's per-input-field spec map, or ``None``.
 
     The bridge from the walker's graphql-core view to the bind-time reverse map
@@ -360,14 +341,7 @@ def _mutation_input_specs(field_def: object) -> Mapping[str, InputFieldSpec] | N
     a consumer field declared without ``name=`` is named by the executing
     schema's converter, so only the attr is the same on both sides.
     """
-    extensions: object = getattr(field_def, "extensions", None)
-    strawberry_field = (
-        mapping_get(extensions, GraphQLCoreConverter.DEFINITION_BACKREF)
-        if is_mapping(extensions)
-        else None
-    )
-    resolver = getattr(getattr(strawberry_field, "base_resolver", None), "wrapped_func", None)
-    mutation_cls = getattr(resolver, MUTATION_CLASS_MARKER, None)
+    mutation_cls = getattr(wrapped_resolver(field_def), MUTATION_CLASS_MARKER, None)
     # The marker is stamped by ``mutations/fields.py::DjangoMutationField`` with a
     # package mutation class, which declares ``_input_field_specs`` (``mutations/sets.py``).
     specs: Sequence[InputFieldSpec] | None = getattr(mutation_cls, "_input_field_specs", None)
@@ -390,19 +364,6 @@ def _nested_specs_map(spec: InputFieldSpec | None) -> Mapping[str, InputFieldSpe
     if not nested:
         return None
     return {nested_spec.input_attr: nested_spec for nested_spec in nested}
-
-
-def _closes_a_cycle(container: object, path: tuple[object, ...]) -> bool:
-    """Return whether ``container`` is one of the containers it hangs under.
-
-    Identity by ``is``, never by ``==`` or by ``id()``: an input value's
-    ``__eq__`` is arbitrary consumer / library code (two distinct equal lists are
-    not a cycle), and an ``id()`` is unique only among objects that are still
-    alive - which the path's strong references are exactly what guarantees for
-    the ancestors, and which nothing guarantees for an object the walk has
-    already left.
-    """
-    return any(container is ancestor for ancestor in path)
 
 
 def _popped_value(value: object, variables: Mapping[str, object] | None) -> object:
@@ -428,28 +389,12 @@ class _ValueBudget:
     """Running charges for one request's argument values.
 
     One instance per operation walk. ``charge`` is iterative, so a deep value
-    cannot recurse it, and every container is cycle-guarded against its own
-    ANCESTOR PATH - the chain of containers it hangs under, held by strong
-    reference and compared by ``is`` - which is the same shape
-    ``charge_document`` uses for fragment spreads, with object identity in place
-    of fragment names.
+    cannot recurse it.
 
     **Every reference is charged.** A container reached twice - through two
     variable references, two fields of one input object, or two arguments - is
     two references' worth of work for the walkers, the coercer, and the ORM, and
-    is charged twice. Only the one reference that closes a cycle back onto an
-    ancestor is not: that object is already accounted for on this path, and
-    following it is what would not terminate.
-
-    Why not a request-lifetime set of already-charged ``id()`` values: an
-    ``id()`` is only unique among LIVE objects, and a set of ints keeps none of
-    them alive. Every leaf this walk converts from a literal is a temporary
-    whose address the next conversion can reuse, so a set keyed on ``id()``
-    silently reports a fresh value as already charged; a walk over converted
-    containers does the same to whole lists, measured as thousands of relation
-    ids charged as dozens. A cycle guard needs
-    ancestor-scoped lifetime and owning references; a charge-once cache needs
-    neither, because charging once is not the contract.
+    is charged twice.
     """
 
     def __init__(self, policy: ResourcePolicy, graphql_schema: GraphQLSchema) -> None:
@@ -464,65 +409,6 @@ class _ValueBudget:
         self.relation_ids_this_field: int = 0
         self.upload_count: int = 0
         self.upload_bytes: int = 0
-
-    def _reject(
-        self,
-        bound: str,
-        charged: int,
-        detail: str,
-    ) -> None:
-        """Reject unless ``charged`` is within ``bound``.
-
-        Every amount reaching here is a built-in integer this walk produced - a
-        counter it keeps, the length of a list it built, or a size read through
-        an operation the type itself defines - and that is a property of the
-        measurements, not a check performed here. It has to be: the ``>`` that
-        decides this rejection and the ``__format__`` the rejection's own
-        message runs are both the amount's own code, so a numeric SUBCLASS
-        arriving as a charge would be consumer code answering for whether it is
-        over the limit. The one place an amount is read off a value the request
-        carried in - an uploaded file's ``size`` - refuses a non-integer where
-        it reads it (:meth:`_charge_upload`), which is the only place that can
-        say what an unusable answer there means.
-        """
-        limit = require_instance(read_attr(self.policy, bound), int)
-        if charged > limit:
-            raise ResourceLimitExceeded(bound, limit, charged, detail)
-
-    def _bounded_members(
-        self,
-        members: Callable[[], Iterable[_MemberT]],
-        bound: str,
-    ) -> list[_MemberT]:
-        """Read ``members()`` until ``bound`` is proven exceeded, and no further.
-
-        The measurement is itself work the request asked for, so it is bounded
-        by the same number the width is bounded by: the read stops one member
-        past the limit, which is the smallest count that distinguishes "within"
-        from "over". A container that would answer a million members costs two
-        advances against a width bound of one.
-
-        Nothing here consults the container's own idea of its size.
-        ``list(value)`` would: it asks for a length hint first, so a ``__len__``
-        that raises turns a width check into a raw error out of the request,
-        and one that lies sizes the allocation. The counter is this walk's own,
-        which is also why the full declared bound domain works - ``islice``
-        refuses a stop argument above ``sys.maxsize``, and the largest bound a
-        policy accepts is exactly ``sys.maxsize``.
-
-        What this cannot bound is ONE advance: a container whose ``__next__``
-        blocks or runs forever before yielding anything is inside consumer code
-        the framework has no seam under. Every advance after the first is what
-        this bounds; whatever the container's own iteration raises is its
-        behaviour, and propagates.
-        """
-        limit = require_instance(read_attr(self.policy, bound), int)
-        collected: list[_MemberT] = []
-        for member in members():
-            collected.append(member)
-            if len(collected) > limit:
-                break
-        return collected
 
     def begin_mutation_field(self) -> None:
         """Reset the per-mutation-field relation-id counter.
@@ -559,11 +445,8 @@ class _ValueBudget:
         is coerced at this position, and every reference is charged as
         ``None``.
 
-        Each stack entry carries the ANCESTOR PATH of the value it describes -
-        the tuple of containers it hangs under - which is both the cycle guard
-        and the value's nesting depth. The path is bounded by
-        ``max_value_depth``, so the identity scan a container performs over it is
-        bounded too, and the total number of entries the walk ever pops is
+        Each stack entry carries the value's nesting depth, bounded by
+        ``max_value_depth``, and the total number of entries the walk ever pops is
         bounded by ``max_input_nodes``: a value that reaches the same container
         through many references pays a node per reference and runs out of node
         budget rather than running long.
@@ -581,22 +464,22 @@ class _ValueBudget:
             (
                 input_type,
                 value,
-                (),
+                0,
                 None,
                 specs,
             ),
         ]
         while stack:
-            node_type, node_value, path, spec, spec_map = stack.pop()
+            node_type, node_value, depth, spec, spec_map = stack.pop()
             self.nodes += 1
-            self._reject(
+            self.policy.check(
                 "max_input_nodes",
                 self.nodes,
                 "the request's argument values carry more input nodes than the policy allows",
             )
-            self._reject(
+            self.policy.check(
                 "max_value_depth",
-                len(path),
+                depth,
                 "an argument value nests lists or input objects deeper than the policy allows",
             )
             node_type = unwrap_non_null(node_type)
@@ -609,7 +492,7 @@ class _ValueBudget:
                     node_value,
                     stack,
                     list_type,
-                    path,
+                    depth,
                     in_mutation=in_mutation,
                     node_ids=node_ids,
                     spec=spec,
@@ -622,7 +505,7 @@ class _ValueBudget:
                     # charged: it is validated at or above 1, so a one-item
                     # container can never exceed it.
                     self.nodes += 1
-                    self._reject(
+                    self.policy.check(
                         "max_input_nodes",
                         self.nodes,
                         "the request's argument values carry more input nodes than the policy allows",
@@ -638,7 +521,7 @@ class _ValueBudget:
                         (
                             list_type.of_type,
                             node_value,
-                            (*path, object()),
+                            depth + 1,
                             None,
                             _nested_specs_map(spec),
                         ),
@@ -657,7 +540,7 @@ class _ValueBudget:
                     node_value,
                     stack,
                     node_type,
-                    path,
+                    depth,
                     in_mutation=in_mutation,
                     node_ids=node_ids,
                     spec=spec,
@@ -671,7 +554,7 @@ class _ValueBudget:
         value: object,
         stack: list[_ValueFrame],
         node_type: GraphQLType | None,
-        path: tuple[object, ...],
+        depth: int,
         *,
         in_mutation: bool,
         node_ids: bool,
@@ -680,31 +563,9 @@ class _ValueBudget:
     ) -> bool:
         """Charge a list or mapping's width and queue its children; ``False`` if neither.
 
-        A container that IS one of its own ancestors closes a cycle: it is not
-        charged again and its children are not queued, which is the only thing
-        keeping a self-referential value from spinning the walk. Every other
-        reference to a container - including a second reference to one already
-        charged elsewhere in the request - is charged in full.
-
-        The width charged is the number of members this walk is about to QUEUE,
-        never the number the container reports. At an EXACT ``list``, ``tuple``
-        or ``dict`` those are the same thing, because ``len`` is then the
-        interpreter's own and the members are already a sequence this package
-        can queue from; the container is used exactly as it stands and nothing
-        is copied.
-
-        Anything else is read out by :meth:`_bounded_members`, one member past
-        the width bound and no further. Such an object's ``__len__`` is consumer
-        code answering for the size of work the request is asking for: one that
-        says zero while iteration yields a hundred members charges every
-        width-shaped bound - the container width itself, and the membership,
-        node-id, nested-row and relation-id families ``_charge_list_family``
-        derives from it - at a number no part of the request costs. Counting
-        what is enumerated is what makes the charge and the queued work the same
-        quantity, and stopping one past the bound is what keeps the counting
-        itself inside the budget: an over-wide container is refused for what it
-        proved, at one past the limit, rather than enumerated in full so the
-        refusal can quote an exact size nothing downstream will use.
+        Every reference to a container - including a second reference to one
+        already charged elsewhere in the request - is charged in full, for its
+        length.
 
         A literal list or input object the request spelled is a container too,
         and its width is the number of members it SPELLED: an input object
@@ -713,28 +574,15 @@ class _ValueBudget:
         whatever a name-keyed conversion keeps of it.
         """
         if isinstance(value, ObjectValueNode) or is_mapping(value):
-            # A literal is a tree the parser built, so only a Python value can
-            # close a cycle.
             entries: Iterable[tuple[object, object]]
             if isinstance(value, ObjectValueNode):
-                mapping: object = value
                 fields = value.fields
                 entries = ((field.name.value, field.value) for field in fields)
                 width = len(fields)
             else:
-                mapping = value
-                if _closes_a_cycle(value, path):
-                    return True
-                if is_exact_dict(value):
-                    entries = value.items()
-                    width = len(value)
-                else:
-                    entries = self._bounded_members(
-                        lambda: value.items(),  # noqa: PLW0108 - read inside _bounded_members' containment
-                        "max_container_width",
-                    )
-                    width = len(entries)
-            self._reject(
+                entries = value.items()
+                width = len(value)
+            self.policy.check(
                 "max_container_width",
                 width,
                 "an input object carries more fields than the policy allows",
@@ -744,7 +592,6 @@ class _ValueBudget:
                 if isinstance(node_type, GraphQLInputObjectType)
                 else None
             )
-            child_path = (*path, mapping)
             for name, item in entries:
                 # A key is whatever the value carried; one that is not a name names no
                 # field, so it is charged like any other entry and classified as none.
@@ -761,7 +608,7 @@ class _ValueBudget:
                     (
                         field_type,
                         item,
-                        child_path,
+                        depth + 1,
                         field_spec,
                         _nested_specs_map(field_spec),
                     ),
@@ -769,22 +616,13 @@ class _ValueBudget:
             return True
         members: Collection[object]
         if isinstance(value, ListValueNode):
-            sequence: object = value
             members = value.values
         elif is_list_or_tuple(value):
-            sequence = value
-            if _closes_a_cycle(value, path):
-                return True
-            # An exact list / tuple's ``__len__`` and iteration are the interpreter's own,
-            # so a member list does not have to be built to count it honestly.
-            if is_exact_list_or_tuple(value):
-                members = value
-            else:
-                members = self._bounded_members(lambda: value, "max_container_width")
+            members = value
         else:
             return False
         width = len(members)
-        self._reject(
+        self.policy.check(
             "max_container_width",
             width,
             "a list argument is wider than the policy allows",
@@ -801,7 +639,6 @@ class _ValueBudget:
             item_type: GraphQLType | None = list_type.of_type
         else:
             item_type = None
-        child_path = (*path, sequence)
         # List items hang under the FIELD that declared the list, so each item
         # carries that field's spec map: a nested row's own fields classify from
         # the row's own specs. The item itself is not a field value, so its spec
@@ -811,7 +648,7 @@ class _ValueBudget:
             (
                 item_type,
                 item,
-                child_path,
+                depth + 1,
                 None,
                 item_specs_map,
             )
@@ -855,7 +692,7 @@ class _ValueBudget:
         """
         named = get_named_type(item_type) if item_type is not None else None
         if isinstance(named, GraphQLInputObjectType):
-            self._reject(
+            self.policy.check(
                 "max_nested_rows",
                 width,
                 "a nested input-object list carries more rows than the policy allows",
@@ -869,13 +706,13 @@ class _ValueBudget:
                 self._charge_relation_ids(width)
                 return
             if node_ids:
-                self._reject(
+                self.policy.check(
                     "max_node_ids",
                     width,
                     "a node-refetch id list is longer than the policy allows",
                 )
                 return
-        self._reject(
+        self.policy.check(
             "max_membership_items",
             width,
             "a membership list carries more items than the policy allows",
@@ -891,12 +728,12 @@ class _ValueBudget:
         """
         self.relation_ids_this_field += width
         self.relation_ids_total += width
-        self._reject(
+        self.policy.check(
             "max_relation_ids_per_mutation",
             self.relation_ids_this_field,
             "one mutation field carries more relation ids than the policy allows",
         )
-        self._reject(
+        self.policy.check(
             "max_relation_ids_total",
             self.relation_ids_total,
             "the request carries more relation ids in aggregate than the policy allows",
@@ -919,34 +756,16 @@ class _ValueBudget:
         the reach honestly is the point, since a bound the package does not own
         is not a bound it can promise.
 
-        Both sizes are taken through the operation the type itself defines, not
-        through a method the value carries. An in-process caller's
-        ``variable_values`` may carry a ``str`` or ``bytes`` SUBCLASS, and on
-        one of those ``value.encode(...)`` and ``len(value)`` are consumer code:
-        an ``encode`` answering one byte for a hundred thousand characters is a
-        charge the bound cannot reject, and a ``__len__`` that raises replaces a
-        typed rejection with a raw error out of the value walk. ``str.encode``
-        is the unbound built-in applied to the value, and ``memoryview`` reads a
-        buffer's size through the C buffer protocol, which a ``bytes`` subclass
-        cannot answer for. Neither size is reached for as
-        ``getattr(value, "nbytes", len(value))``: that default argument
-        evaluates a hostile ``__len__`` before the attribute it stands in for is
-        ever looked at.
+        A string is measured as its UTF-8 encoding.
         """
         named = get_named_type(node_type) if node_type is not None else None
         if named is not None and named is self.upload_scalar:
             self._charge_upload(value)
             return
         if isinstance(value, str):
-            self._reject(
+            self.policy.check(
                 "max_scalar_bytes",
                 len(str.encode(value, "utf-8", errors="surrogatepass")),
-                "a scalar value is larger than the policy allows",
-            )
-        elif isinstance(value, (bytes, bytearray)) or is_memoryview(value):
-            self._reject(
-                "max_scalar_bytes",
-                memoryview(value).nbytes,
                 "a scalar value is larger than the policy allows",
             )
 
@@ -968,7 +787,7 @@ class _ValueBudget:
         can ever exceed.
         """
         self.upload_count += 1
-        self._reject(
+        self.policy.check(
             "max_upload_count",
             self.upload_count,
             "the request carries more files than the policy allows",
@@ -981,13 +800,13 @@ class _ValueBudget:
                 self.policy.max_upload_file_bytes + 1,
                 "an uploaded file does not report a usable size, so its bytes cannot be bounded",
             )
-        self._reject(
+        self.policy.check(
             "max_upload_file_bytes",
             size,
             "an uploaded file is larger than the policy allows",
         )
         self.upload_bytes += size
-        self._reject(
+        self.policy.check(
             "max_upload_total_bytes",
             self.upload_bytes,
             "the request's uploads exceed the aggregate byte budget the policy allows",
@@ -1007,23 +826,19 @@ class _DocumentBudget:
     def charge_selection(self, *, aliased: bool) -> None:
         """Charge one expanded field selection, and its alias when it has one."""
         self.selections += 1
-        if self.selections > self.policy.max_selections:
-            raise ResourceLimitExceeded(
-                "max_selections",
-                self.policy.max_selections,
-                self.selections,
-                "the document selects more fields after fragment expansion than the policy allows",
-            )
+        self.policy.check(
+            "max_selections",
+            self.selections,
+            "the document selects more fields after fragment expansion than the policy allows",
+        )
         if not aliased:
             return
         self.aliases += 1
-        if self.aliases > self.policy.max_aliases:
-            raise ResourceLimitExceeded(
-                "max_aliases",
-                self.policy.max_aliases,
-                self.aliases,
-                "the document carries more aliases after fragment expansion than the policy allows",
-            )
+        self.policy.check(
+            "max_aliases",
+            self.aliases,
+            "the document carries more aliases after fragment expansion than the policy allows",
+        )
 
     def charge_fragment(self) -> None:
         """Charge one fragment spread or inline fragment the shape walk enters.
@@ -1035,25 +850,20 @@ class _DocumentBudget:
         unchanged.
         """
         self.fragments += 1
-        if self.fragments > self.policy.max_selections:
-            raise ResourceLimitExceeded(
-                "max_selections",
-                self.policy.max_selections,
-                self.fragments,
-                "the document enters more fragments after fragment expansion than the policy allows",
-            )
+        self.policy.check(
+            "max_selections",
+            self.fragments,
+            "the document enters more fragments after fragment expansion than the policy allows",
+        )
 
     def charge_collection(self, rows: int) -> None:
         """Charge one collection selection's multiplicative row cost."""
         self.cost += rows
-        if self.cost > self.policy.max_collection_cost:
-            raise ResourceLimitExceeded(
-                "max_collection_cost",
-                self.policy.max_collection_cost,
-                self.cost,
-                "the document's collections would fetch more rows in aggregate "
-                "than the policy allows",
-            )
+        self.policy.check(
+            "max_collection_cost",
+            self.cost,
+            "the document's collections would fetch more rows in aggregate than the policy allows",
+        )
 
 
 def _bound_scalar(graphql_schema: GraphQLSchema, python_type: object) -> GraphQLNamedType | None:
@@ -1660,19 +1470,6 @@ def charge_document(
             walk.fragment(definition)
 
 
-def restate_admission_verdict(execution_context: ExecutionContext) -> None:
-    """Republish this operation's admission verdict over whatever replaced it.
-
-    One statement of what a rejected operation's pre-execution error is, applied
-    at the two positions in the validation stage that can be answered for: the
-    enforcing extension's own hook, and the package-appended guard behind every
-    consumer entry.
-    """
-    rejection = admission_rejection()
-    if rejection is not None:
-        execution_context.pre_execution_errors = [rejection]
-
-
 class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
     """Enforce the schema's ``ResourcePolicy`` on every operation.
 
@@ -1687,10 +1484,7 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
 
     **On a ``DjangoSchema`` this is not a consumer entry at all.** An entry that
     IS this class, or an exact instance of it, is read once as a declaration of
-    the schema's bound and does not travel into the chain. A subclass is refused
-    at construction and a factory resolving to one raises ``ConfigurationError``
-    when the operation resolves it: both would decide enforcement from consumer
-    code on a request already running.
+    the schema's bound and does not travel into the chain.
 
     A plain ``strawberry.Schema`` builds none of that, so a consumer on one adds
     the extension explicitly and may hand it its own policy::
@@ -1707,9 +1501,7 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
     ``DjangoSchema`` builds the runner that gives such an object per-operation
     state (``extensions/operation_state.py``). A factory that returns a new
     extension per call - or the bare class, when no override is needed - is
-    operation-local on any schema, because the instance itself is. Copied onto a
-    ``DjangoSchema`` the same factory raises ``ConfigurationError`` when an
-    operation resolves it, by the rule above.
+    operation-local on any schema, because the instance itself is.
 
     Without an explicit policy the extension reads the one the schema resolved at
     construction, falling back to the package defaults for a schema that carries
@@ -1720,44 +1512,21 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
     def __init__(self, *, policy: ResourcePolicy | None = None) -> None:
         """Hold the policy this extension enforces; ``None`` defers to the schema's policy."""
         super().__init__()
-        # An explicit policy is canonicalized HERE, where the configuration is
-        # accepted, rather than at each hook that reads it. It arrives straight
-        # from a consumer and has been through none of the schema-construction
-        # normalization ``DjangoSchema(resource_policy=...)`` applies, so until
-        # it is read out once into an exact ``ResourcePolicy`` every bound read
-        # off it is consumer code that may answer differently each time it is
-        # asked.
-        self._explicit_policy: ResourcePolicy | None = (
-            None if policy is None else _operation_policy(policy)
-        )
-
-    @property
-    def _policy(self) -> ResourcePolicy | None:
-        """The explicit policy this extension was configured with, as a copy.
-
-        ``DjangoSchema`` reads a direct instance entry once through this
-        property and keeps the bound as its own canonical state; each read
-        hands out a duplicate. ``None`` means this extension was given no
-        policy and reads its schema's.
-        """
-        return None if self._explicit_policy is None else copy.copy(self._explicit_policy)
+        self._explicit_policy: ResourcePolicy | None = policy
 
     def _resolved_policy(self) -> ResourcePolicy:
         """Return the explicit policy, else the schema's, else the package defaults.
 
         Consulted once per operation, by :meth:`on_operation`, which arms what
         it returns; every later charge in that operation reads the armed
-        snapshot instead (:func:`resource_policy.armed_resource_policy`).
+        policy instead (:func:`resource_policy.armed_resource_policy`).
         """
-        explicit = self._policy
-        if explicit is not None:
-            return explicit
+        if self._explicit_policy is not None:
+            return self._explicit_policy
         schema_policy = read_attr(self._hook_context().schema, "resource_policy", None)
-        return (
-            schema_policy
-            if isinstance(schema_policy, ResourcePolicy)
-            else (_PACKAGE_RESOURCE_POLICY)
-        )
+        if isinstance(schema_policy, ResourcePolicy):
+            return schema_policy
+        return DEFAULT_RESOURCE_POLICY
 
     @override
     def on_operation(self) -> Iterator[None]:
@@ -1877,12 +1646,14 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
         validation stage rather than after it, so the last word belongs to
         whichever validation hook SET UP last - which is why this restates
         before yielding rather than after, and why it can only answer for
-        entries ahead of this one. ``schema.py::DjangoSchema`` closes the rest
-        by appending :class:`AdmissionGuard` after every consumer entry; a
+        entries ahead of this one. ``schema.py::DjangoSchema`` puts this
+        extension behind every consumer entry, so that is all of them; a
         plain ``strawberry.Schema`` whose consumer placed a validation cache
         after this extension has :meth:`on_execute` as the backstop instead.
         """
-        restate_admission_verdict(self._hook_context())
+        rejection = admission_rejection()
+        if rejection is not None:
+            self._hook_context().pre_execution_errors = [rejection]
         yield
 
     @override
@@ -1891,8 +1662,8 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
 
         A rejection is a statement that nothing runs. Where a validation hook
         set up after this extension erased the published rejection - a plain
-        ``strawberry.Schema`` with a later validation cache, which has no
-        appended :class:`AdmissionGuard` - the pre-execution check waves the
+        ``strawberry.Schema`` with a later validation cache - the pre-execution
+        check waves the
         operation through, and execution BEGINNING is the contradiction, so the
         refusal is restated at the hook execution starts from, which every
         upstream execution path converts into an error entry. Raising is correct
@@ -1902,24 +1673,4 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
         rejection = admission_rejection()
         if rejection is not None:
             raise rejection
-        yield
-
-
-class AdmissionGuard(SchemaExtension):
-    """Restate the operation's admission verdict after every consumer validation hook.
-
-    Not a second enforcement stage: it charges nothing, arms nothing, and
-    changes nothing about what any consumer entry does. It exists because
-    upstream decides whether to execute from inside the validation stage, so the
-    published rejection has to survive the LAST validation hook to set up, and a
-    validation extension that runs the pass itself assigns its own result over
-    that field. ``schema.py::DjangoSchema.get_extensions`` appends this after
-    every consumer entry, which is the position that answers for all of them
-    without moving any of them.
-    """
-
-    @override
-    def on_validate(self) -> Iterator[None]:
-        """Put the recorded verdict back, last, before the pre-execution check reads it."""
-        restate_admission_verdict(self.execution_context)
         yield

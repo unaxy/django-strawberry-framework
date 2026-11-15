@@ -1046,11 +1046,6 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     column, and a value holding nothing the column converts, answer ``False`` without
     calling ``using`` or touching ``django.db.connections``.
     """
-    return _refused_temporal(column, value, using)
-
-
-def _refused_temporal(column: object, value: object, using: Callable[[], str]) -> bool:
-    """Return whether ``using()`` refuses temporal ``value`` for ``column`` at a save."""
     column, depth = array_leaf_field(column)
     values = _leaf_elements(value, depth)
     kinds = _converted_kinds(column)
@@ -1122,11 +1117,6 @@ def unstorable_decimal(column: object, value: object, using: Callable[[], str]) 
     holding no decimal the validators accept, answer ``False`` without calling ``using`` or
     touching ``django.db.connections``.
     """
-    return _refused_decimal(column, value, using)
-
-
-def _refused_decimal(column: object, value: object, using: Callable[[], str]) -> bool:
-    """Return whether ``using()`` refuses decimal ``value`` for ``column`` at a save."""
     column, depth = array_leaf_field(column)
     if not isinstance(column, models.DecimalField):
         return False

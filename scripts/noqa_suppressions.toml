@@ -17,15 +17,11 @@
 "django_strawberry_framework/connection.py::_synthesized_signature" = { PLC0415 = 2 }
 "django_strawberry_framework/consumers.py::DjangoWebSocketHostValidator.__call__" = { PLC0415 = 1, TRY401 = 1 }
 "django_strawberry_framework/consumers.py::_refreshed_actor" = { PLC0415 = 1 }
-"django_strawberry_framework/consumers.py::build_revalidating_consumer_class._RevalidatingGraphQLWSHandler.handle" = { BLE001 = 1 }
-"django_strawberry_framework/consumers.py::build_revalidating_consumer_class._RevalidatingTransportWSHandler.handle" = { BLE001 = 1 }
 "django_strawberry_framework/exceptions.py::LookupValidationError.__init__" = { PLC0415 = 1 }
 "django_strawberry_framework/exceptions.py::PathResolutionError.__init__" = { PLC0415 = 1 }
 "django_strawberry_framework/exceptions.py::_model_label" = { PLC0415 = 1 }
 "django_strawberry_framework/exceptions.py::_terminal_label" = { PLC0415 = 1 }
 "django_strawberry_framework/extensions/operation_state.py::_binds_operation_state" = { PLC0415 = 1 }
-"django_strawberry_framework/extensions/operation_state.py::_unbind" = { PERF203 = 1 }
-"django_strawberry_framework/extensions/resource_policy.py::_ValueBudget._charge_container" = { PLW0108 = 1 }
 "django_strawberry_framework/filters/base.py::RangeField.default_validators" = { RUF012 = 1 }
 "django_strawberry_framework/filters/base.py::_filter_set_class" = { PLC0415 = 1 }
 "django_strawberry_framework/filters/base.py::_filterset_lookup_operand" = { PLC0415 = 1 }
@@ -76,8 +72,6 @@
 "django_strawberry_framework/relay.py::DjangoNodesField" = { N802 = 1 }
 "django_strawberry_framework/relay.py::_decode_and_coerce" = { BLE001 = 1 }
 "django_strawberry_framework/resource_policy.py::ResourceLimitExceeded" = { N818 = 1 }
-"django_strawberry_framework/resource_policy.py::_attach_cleanup_note" = { B010 = 1 }
-"django_strawberry_framework/resource_policy.py::_cleanup_rejected_async_iterable" = { BLE001 = 1 }
 "django_strawberry_framework/rest_framework/inputs.py::_default_full_shape_identity" = { BLE001 = 1 }
 "django_strawberry_framework/rest_framework/resolvers.py::_scope_specs_over_serializer" = { S101 = 1 }
 "django_strawberry_framework/routers.py::_build_router_class_uncached" = { PLC0415 = 4, PLW0603 = 1 }

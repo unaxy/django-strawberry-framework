@@ -557,21 +557,12 @@ def _reset_binding(variable: ContextVar[_ValueT], token: Token[_ValueT]) -> None
 
 
 def _unbind(bindings: list[_Binding]) -> None:
-    """Reset every binding this scope made.
+    """Reset every binding this scope made, last first.
 
-    The reset is what gives THIS context its enclosing operation back, and each
-    one is attempted independently so a token this context cannot reset does not
-    strand the ones after it; the first reset failure is raised once every reset
-    has been attempted.
+    The reset is what gives THIS context its enclosing operation back.
     """
-    failure: ValueError | RuntimeError | None = None
     for reset in reversed(bindings):
-        try:
-            reset()
-        except (ValueError, RuntimeError) as error:  # noqa: PERF203 - one attempt per reset
-            failure = failure or error
-    if failure is not None:
-        raise failure
+        reset()
 
 
 def _reset_adopted_binding(variable: ContextVar[_ValueT], token: Token[_ValueT]) -> None:

@@ -372,11 +372,6 @@ the next operation, and the three spellings that keep identity while changing be
 stateful factory, a closure over a mutable cell, a singleton selector) are exactly the ones a
 resolver can reach through `info.schema.extensions`.
 
-*Rejected:* Admitting a subclass on the grounds that it passes every inheritance check. That is
-the point: a single-role subclass can override the one hook that masks or charges while
-answering every census correctly, and one class can inherit from both roles, in which case
-method resolution runs one hook and the other authority is present in name only.
-
 *Rejected:* Calling factories at construction so they could be typed there. It breaks the
 fresh-per-operation lifecycle the optimizer's documented singleton-in-a-factory depends on, and
 what a factory returns next is decided after the entry was accepted anyway.
@@ -394,14 +389,13 @@ calls the package's runner factory, so the guarantee would be a claim with nothi
 for a shared instance; a class entry and a fresh factory are operation-local there because the
 object is.
 
-### Decision 16 — a factory resolving to an authority raises out of extension resolution
+### Decision 16 — a factory resolving to an authority is an ordinary entry
 
 Spec: [Decision 16][spec-050-d16].
 
-*Rejected:* Answering such a schema on the wire with a coded refusal. It needs a package-owned
-substitute document, operation selector and transport-policy snapshot, and a refusal chain of
-its own, all to contain a factory the deployment itself wrote; application Python is trusted
-(Decision 19), so the misconfiguration raises like any other.
+*Rejected:* Refusing such a factory, on the wire with a coded refusal or by raising out of
+extension resolution. Either contains a factory the deployment itself wrote; application Python
+is trusted (Decision 19), and the schema's own authorities still bound and mask the request.
 
 ### Decision 17 — the configuration code stays exported
 
@@ -523,9 +517,10 @@ package-defined declaration would build on a spelling upstream is removing.
 drops the spelling.
 
 *Rejected:* Presenting "move the authority instance into a factory" as the migration off the
-deprecated spelling. Decision 14 refuses a factory that resolves to an authority, so that advice
-would walk a consumer from a working compatibility path into a refused operation; the migration
-is the `resource_policy=` / `error_policy=` keyword, which is where enforcement is declared.
+deprecated spelling. A factory that resolves to an authority is an ordinary entry that declares
+nothing (Decision 16), so that advice would walk a consumer from a working declaration to one
+that configures nothing; the migration is the `resource_policy=` / `error_policy=` keyword,
+which is where enforcement is declared.
 
 *Rejected:* Authenticating or containing a third-party extension's object graph. Its lifecycle is
 upstream's, its attributes are its author's, and the package can no more make them thread-safe
@@ -552,7 +547,7 @@ carries the reasons.
 [spec-050-d13]: ../spec-050-list_field_arguments-0_0_15.md#decision-13--configuration-authority-is-schema-state-everything-per-request-is-operation-state
 [spec-050-d14]: ../spec-050-list_field_arguments-0_0_15.md#decision-14--an-enforcement-authority-is-a-declaration-never-an-extension-entry
 [spec-050-d15]: ../spec-050-list_field_arguments-0_0_15.md#decision-15--the-runner-owns-every-binding-for-the-operations-whole-lifetime
-[spec-050-d16]: ../spec-050-list_field_arguments-0_0_15.md#decision-16--a-factory-resolving-to-an-authority-raises-out-of-extension-resolution
+[spec-050-d16]: ../spec-050-list_field_arguments-0_0_15.md#decision-16--a-factory-resolving-to-an-authority-is-an-ordinary-entry
 [spec-050-d17]: ../spec-050-list_field_arguments-0_0_15.md#decision-17--the-configuration-code-stays-exported
 [spec-050-d18]: ../spec-050-list_field_arguments-0_0_15.md#decision-18--execution-mode-is-operation-state-the-ambient-event-loop-is-a-different-fact
 [spec-050-d19]: ../spec-050-list_field_arguments-0_0_15.md#decision-19--application-code-is-trusted-the-wire-is-not-a-finding-is-admitted-by-reachability

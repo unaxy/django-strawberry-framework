@@ -132,7 +132,7 @@ from django_strawberry_framework.resource_policy import (
     ResourcePolicy,
     _windowed_rows,
 )
-from django_strawberry_framework.utils._narrowing import list_of, read_attr
+from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
@@ -145,7 +145,6 @@ from django_strawberry_framework.utils.querysets import (
     unwrap_async_queryset_adapter,
     wrap_async_queryset_adapter,
 )
-from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import (
     ClaimsClassBase,
     ClassReadRaisesBase,
@@ -717,59 +716,6 @@ def test_normalize_list_arguments_names_offset_before_limit_on_direct_call_non_i
         )
     assert exc.value.argument == "offset"
     assert exc.value.reason == "non_integer"
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_async_iterable_early_cleanup_hostile_aclose_lookup_notes() -> None:
-    """Hostile aclose lookup during rejected async iterable cleanup attaches to error notes."""
-
-    class CategoryOrder(OrderSet):
-        class Meta:
-            model = Category
-            fields = ["name"]
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            orderset_class = CategoryOrder
-
-    class HostileTracker:
-        def __aiter__(self) -> Self:
-            return self
-
-        async def __anext__(self) -> NoReturn:
-            raise StopAsyncIteration
-
-        @override
-        def __getattribute__(self, name: str) -> object:
-            if name == "aclose":
-                raise RuntimeError("hostile aclose on tracker")
-            return object_result(super().__getattribute__, name)
-
-    tracker = HostileTracker()
-
-    async def resolver_async_iter(
-        _root: object,
-        _info: object,
-        **_kwargs: object,
-    ) -> HostileTracker:
-        return tracker
-
-    @strawberry.type
-    class Query:
-        cats: list[CategoryType] = DjangoListField(CategoryType, resolver=resolver_async_iter)
-
-    finalize_django_types()
-    schema = strawberry.Schema(query=Query)
-
-    res = await schema.execute("{ cats(offset: 5) { id } }", context_value={})
-    assert res.errors is not None
-    assert "requires an active ordering" in str(res.errors[0])
-    original_error = read_attr(res.errors[0], "original_error", None)
-    if original_error is not None:
-        notes = list_of(read_attr(original_error, "__notes__", []))
-        assert any("hostile aclose on tracker" in str(note) for note in notes)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1375,8 +1321,8 @@ def test_field_label_falls_back_without_a_field_name() -> None:
     assert _field_label(make_info(field_name="items")) == "items"
 
 
-async def test_list_field_rejected_async_iterator_cleanup_and_notes() -> None:
-    """Rejected async-only iterator witnesses 0 anext calls, 1 aclose call, and notes on cleanup error."""
+async def test_list_field_rejected_async_iterator_cleanup() -> None:
+    """Rejected async-only iterator witnesses 0 anext calls and 1 aclose call."""
 
     class InstrumentedAsyncSource:
         def __init__(self, *, fail_close: bool = False) -> None:
@@ -1417,19 +1363,16 @@ async def test_list_field_rejected_async_iterator_cleanup_and_notes() -> None:
     assert src_clean.anext_calls == 0
     assert src_clean.aclose_calls == 1
 
-    # Cleanup error attaches note without masking ListArgumentError
+    # A cleanup error raises in place of the ListArgumentError
     src_fail = InstrumentedAsyncSource(fail_close=True)
-    with pytest.raises(ListArgumentError) as exc_fail:
+    with pytest.raises(RuntimeError, match="aclose error"):
         await _handle_non_queryset_rejections_async(
             src_fail,
             args_record,
             info,
         )
-    assert exc_fail.value.reason == "queryset_required"
     assert src_fail.anext_calls == 0
     assert src_fail.aclose_calls == 1
-    notes = list_of(read_attr(exc_fail.value, "__notes__", []))
-    assert any("DjangoListField iterator cleanup failed" in str(n) for n in notes)
 
 
 def test_list_field_optimizer_adapter_unwrap_rewrap_and_early_returns() -> None:
@@ -2220,9 +2163,8 @@ async def test_list_field_rejected_async_iterator_is_closed_when_building_the_re
     """A failure while CONSTRUCTING the rejection still closes the async-only source.
 
     Once the record says the source must be rejected, the close is owed on every
-    exit: the primary error becomes whatever the error builder raised (here the
-    argument-definition lookup's own exception, which propagates unchanged), and
-    the cleanup utility attaches its notes to that instead.
+    exit, including the error builder's own exception (here the
+    argument-definition lookup's), which propagates unchanged.
     """
 
     class InstrumentedAsyncSource:
@@ -2270,16 +2212,15 @@ async def test_list_field_rejected_async_iterator_is_closed_when_building_the_re
     assert src_clean.aclose_calls == 1
 
     src_fail = InstrumentedAsyncSource(fail_close=True)
-    with pytest.raises(RuntimeError, match="simulated definition lookup failure") as exc_fail:
+    with pytest.raises(RuntimeError, match="aclose error") as exc_fail:
         await _handle_non_queryset_rejections_async(
             src_fail,
             args_record,
             _as_strawberry_info(info),
         )
+    assert "simulated definition lookup failure" in str(exc_fail.value.__context__)
     assert src_fail.anext_calls == 0
     assert src_fail.aclose_calls == 1
-    notes = list_of(read_attr(exc_fail.value, "__notes__", []))
-    assert any("DjangoListField iterator cleanup failed" in str(n) for n in notes)
 
     # A source that is not async-only owes no close on the same exit.
     with pytest.raises(RuntimeError, match="simulated definition lookup failure"):

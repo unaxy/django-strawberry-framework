@@ -74,10 +74,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import copy
 import functools
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, TypeGuard, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import strawberry
 from asgiref.sync import AsyncToSync, async_to_sync, sync_to_async
@@ -87,7 +86,6 @@ from graphql import located_error
 from graphql.execution.executor import to_nodes
 from strawberry.exceptions import DuplicatedTypeName
 from strawberry.extensions.base_extension import SchemaExtension
-from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types.base import StrawberryObjectDefinition
 from strawberry.types.field import StrawberryField
 from strawberry.types.graphql import OperationType
@@ -105,22 +103,20 @@ from .extensions.error_policy import (
     masking_is_active,
 )
 from .extensions.operation_state import DjangoExtensionsRunner, _OperationModeMarker
-from .extensions.resource_policy import AdmissionGuard, DjangoResourcePolicyExtension
+from .extensions.resource_policy import DjangoResourcePolicyExtension
 from .mutations.fields import MUTATION_CLASS_MARKER
 from .relay import refuse_unreturnable_node_targets
 from .resource_policy import ResourcePolicy, resolve_resource_policy
 from .utils import truth
-from .utils._narrowing import is_mapping, mapping_get
 from .utils.execution_mode import OperationMode, async_execution
 from .utils.inputs import field_name_collision_remedy, generated_type_name_collision
-from .utils.typing import call_forwarded
+from .utils.typing import call_forwarded, wrapped_resolver
 from .utils.write_transaction import managed_write_transaction, resolve_write_alias
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
     from typing import Protocol, TypeAlias
 
-    from django.db.transaction import Atomic
     from graphql import FieldNode, GraphQLObjectType
     from graphql.execution import Executor
     from graphql.execution.collect_fields import FieldDetailsList
@@ -241,7 +237,7 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         alias = resolve_write_alias(model)
         if async_execution():
             return self._execute_mutation_field_async(alias, field_nodes, path, execute)
-        return self._execute_mutation_field_sync(alias, field_nodes, path, execute)
+        return self._run_window(alias, field_nodes, path, execute)
 
     def _marked_mutation_class(
         self,
@@ -253,10 +249,8 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         Only TOP-LEVEL mutation fields qualify (``parent_type`` is the schema's
         mutation root; ``execute_field`` also fires for every nested payload
         field, whose completion the already-open transaction covers). The marker
-        is read through Strawberry's field extension
-        (``extensions[GraphQLCoreConverter.DEFINITION_BACKREF].base_resolver.wrapped_func``) -
-        the synthesized ``_resolve`` the ``DjangoMutationField`` factory stamped
-        with its mutation class.
+        is read off the synthesized ``_resolve`` the ``DjangoMutationField``
+        factory stamped with its mutation class (``utils/typing.py::wrapped_resolver``).
         """
         if (
             parent_type is None
@@ -267,32 +261,7 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         if not field_nodes:
             return None
         field_def = self.schema.get_field(parent_type, field_nodes[0].name.value)
-        if field_def is None:
-            return None
-        extensions: object = field_def.extensions
-        strawberry_field = (
-            mapping_get(extensions, GraphQLCoreConverter.DEFINITION_BACKREF)
-            if is_mapping(extensions)
-            else None
-        )
-        base_resolver = getattr(strawberry_field, "base_resolver", None)
-        wrapped = getattr(base_resolver, "wrapped_func", None)
-        return getattr(wrapped, MUTATION_CLASS_MARKER, None)
-
-    def _rollback_for_new_errors(self, errors_before: int, alias: str) -> None:
-        """Roll the window's transaction back when execution collected new errors.
-
-        The window's error rule, consulted by both execution modes through
-        ``_exit_window``: any located error added to the execution during the
-        completion-spanning window - resolver-raised or completion-raised -
-        marks the transaction for rollback before it exits. A resolver failure
-        is a *located* error, not an exception, so an exception-based rollback
-        would miss it; the before/after length comparison over
-        ``collected_errors.errors`` is valid because the list is append-only
-        during execution.
-        """
-        if len(self.collected_errors.errors) > errors_before:
-            transaction.set_rollback(True, using=alias)
+        return getattr(wrapped_resolver(field_def), MUTATION_CLASS_MARKER, None)
 
     def _refuse_uncommitted_window(
         self,
@@ -302,9 +271,8 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
     ) -> None:
         """Fail the field when the window's connection was closed inside its transaction.
 
-        The window's closed-connection rule, the sibling of
-        ``_rollback_for_new_errors`` and consulted after the atomic exited in both
-        execution modes. Closing a connection inside an atomic block marks it
+        The window's closed-connection rule, consulted after the atomic exited in
+        both execution modes. Closing a connection inside an atomic block marks it
         ``closed_in_transaction``, and ``Atomic.__exit__`` then skips the commit
         WITHOUT raising (the database rolls the transaction back itself), so a
         clean exit alone would let the field report a payload - often a node id -
@@ -320,22 +288,6 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
                 path.as_list(),
             )
 
-    def _exit_window(
-        self,
-        atomic: Atomic,
-        errors_before: int,
-        alias: str,
-        field_nodes: list[FieldNode],
-        path: Path,
-    ) -> None:
-        """Exit a window that raised nothing, under the failure rules of both modes.
-
-        The closed-connection rule runs after the atomic has exited.
-        """
-        self._rollback_for_new_errors(errors_before, alias)
-        atomic.__exit__(None, None, None)
-        self._refuse_uncommitted_window(alias, field_nodes, path)
-
     def _run_window(
         self,
         alias: str,
@@ -346,35 +298,22 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         """Hold one window's transaction around ``run`` on the calling thread.
 
         The window body of both execution modes: ``run`` resolves and completes
-        the field under the managed alias; an exception escaping it exits the
-        atomic with that exception (rolled back), and a clean return exits under
-        ``_exit_window``'s failure rules.
+        the field under the managed alias, and an exception escaping it exits the
+        atomic with that exception (rolled back). Any located error added to the
+        execution during the window - resolver-raised or completion-raised - marks
+        the transaction for rollback before it exits: a resolver failure is a
+        located error, not an exception, and ``collected_errors.errors`` is
+        append-only during execution, so comparing its length is enough. The
+        closed-connection rule runs after the atomic has exited.
         """
         errors_before = len(self.collected_errors.errors)
-        atomic = transaction.atomic(using=alias)
-        atomic.__enter__()
-        try:
+        with transaction.atomic(using=alias):
             with managed_write_transaction(alias):
                 result = run()
-        except BaseException as exc:
-            atomic.__exit__(type(exc), exc, exc.__traceback__)
-            raise
-        self._exit_window(atomic, errors_before, alias, field_nodes, path)
+            if len(self.collected_errors.errors) > errors_before:
+                transaction.set_rollback(True, using=alias)
+        self._refuse_uncommitted_window(alias, field_nodes, path)
         return result
-
-    def _execute_mutation_field_sync(
-        self,
-        alias: str,
-        field_nodes: list[FieldNode],
-        path: Path,
-        execute: Callable[[], AwaitableOrValue[object] | UndefinedType],
-    ) -> AwaitableOrValue[object] | UndefinedType:
-        """Sync execution: one window on the calling thread around ``execute_field``.
-
-        graphql-core completes the field's value inside that call, so it covers
-        the whole resolve -> complete span.
-        """
-        return self._run_window(alias, field_nodes, path, execute)
 
     async def _execute_mutation_field_async(
         self,
@@ -533,12 +472,8 @@ class DjangoSchema(strawberry.Schema):
     request. Supplying ``DjangoResourcePolicyExtension(policy=...)`` as an entry
     is read as a declaration of that policy - the entry is
     folded into the schema's policy rather than kept - and declaring the policy twice is
-    refused here, as is a subclass of either enforcement extension -
-    supplied as a class or as an instance, and whether or not it declares a
-    policy of its own - because a subclass can override the hook that does the
-    enforcing while still answering every check for it. A factory returning
-    either enforcement extension raises ``ConfigurationError`` when the operation
-    resolves it (:meth:`get_extensions`).
+    refused here. A subclass of either enforcement extension, or a factory
+    returning one, is an ordinary consumer entry.
 
     **Incremental delivery is refused at construction.** A ``config=`` with
     ``enable_experimental_incremental_execution`` set raises
@@ -645,22 +580,21 @@ class DjangoSchema(strawberry.Schema):
 
     @property
     def resource_policy(self) -> ResourcePolicy:
-        """The resolved execution resource policy, as a copy per read.
+        """The resolved execution resource policy: read-only, and a frozen dataclass.
 
-        Each read answers with a duplicate (``copy.copy``): reading a bound is
-        unchanged, and writing one changes only the reader's own copy, not the
-        policy every later request on the process is bounded by.
+        There is no setter, so assigning the attribute raises ``AttributeError``
+        and changes no later request.
         """
-        return copy.copy(self._resource_policy)
+        return self._resource_policy
 
     @property
     def error_policy(self) -> ErrorPolicy:
-        """The resolved error policy, as a copy per read.
+        """The resolved error policy: read-only, and a frozen dataclass.
 
-        The same per-read copy as :attr:`resource_policy`, for the policy whose
-        ``enabled`` decides whether an unexpected exception is masked at all.
+        Read-only on the same terms as :attr:`resource_policy`, for the policy
+        whose ``enabled`` decides whether an unexpected exception is masked at all.
         """
-        return copy.copy(self._error_policy)
+        return self._error_policy
 
     @override
     def get_extensions(self, sync: bool = False) -> list[SchemaExtension]:
@@ -669,26 +603,9 @@ class DjangoSchema(strawberry.Schema):
         The chain is this schema's two enforcement authorities with the
         consumer's resolved extensions between them (:func:`_admitted_chain`):
         the error policy tears down last, so it is first, and the resource
-        policy sets up last, so it is last but for the guard behind it.
-
-        A factory cannot be identified by type without calling it, and calling it
-        during construction would break its fresh-per-operation lifecycle, so a
-        factory whose resolved member is either enforcement extension (a subclass
-        included) is refused here, when the operation resolves it, with
-        ``ConfigurationError``: the policies are configured with
-        ``DjangoSchema(resource_policy=...)`` and ``error_policy=``.
+        policy sets up last, so it is last.
         """
-        resolved = super().get_extensions(sync=sync)
-        for member in resolved:
-            claimed = _claimed_authority(member)
-            if claimed is not None:
-                raise ConfigurationError(
-                    f"An extension entry of this schema resolved to {truth.describe(member)}, "
-                    f"which is the {claimed} extension this schema builds itself. "
-                    "Configure the policy with DjangoSchema(resource_policy=...) or "
-                    "error_policy=, not with an extension factory.",
-                )
-        return _admitted_chain(resolved, sync=sync)
+        return _admitted_chain(super().get_extensions(sync=sync), sync=sync)
 
     @override
     def create_extensions_runner(
@@ -787,9 +704,7 @@ class DjangoSchema(strawberry.Schema):
         The gates and the masking itself are the extension module's own
         (``extensions/error_policy.py``), so this seam cannot drift from the
         operation teardown or the streamed-result source on what counts as
-        active, what shape is maskable, or what a masked error looks like. The
-        policy is read from the schema's own resolved policy rather than through
-        ``schema.error_policy``, which answers with a per-read copy.
+        active, what shape is maskable, or what a masked error looks like.
 
         **Masking twice preserves error identity.** Already-masked errors carry
         no ``original_error``, so no second correlation id is minted or logged.
@@ -847,25 +762,8 @@ def _is_resolvable_extension_entry(entry: object) -> bool:
     return truth.is_instance(entry, SchemaExtension) or callable(entry)
 
 
-def _claimed_authority(member: object) -> str | None:
-    """Name the enforcement role a RESOLVED member claims, or ``None`` for an ordinary one.
-
-    Both roles are checked and the first match is named, so one class inheriting
-    from both is reported rather than counted twice. What is refused is the
-    claim itself: this schema builds its own authority of each kind, so a
-    resolved member of either kind is a second one whichever way it got there.
-    """
-    for extension_type, kind in (
-        (DjangoResourcePolicyExtension, "resource-policy"),
-        (DjangoErrorPolicyExtension, "error-policy"),
-    ):
-        if truth.is_instance(member, extension_type):
-            return kind
-    return None
-
-
 def _admitted_chain(resolved: list[SchemaExtension], *, sync: bool) -> list[SchemaExtension]:
-    """Return the schema's authorities around ``resolved``, and the guard behind them.
+    """Return the schema's authorities around ``resolved``.
 
     The error policy is FIRST and the resource policy LAST, and both positions
     are the contract (spec-048 Decision 10). Strawberry's ``on_operation``
@@ -877,18 +775,17 @@ def _admitted_chain(resolved: list[SchemaExtension], *, sync: bool) -> list[Sche
     policy is last for the mirror-image reason: it gates BEFORE execution, so it
     wants to set up last, with its own budget armed around every consumer hook.
 
-    The guard goes behind every consumer entry because upstream decides whether
-    to execute from inside the validation stage, so the operation's published
-    rejection has to survive the last validation hook to set up; appending
-    answers for every consumer entry without moving any of them, which is what
-    keeps a supported validation cache working wherever the consumer put it.
+    The resource policy's own validation hook restates a rejection a consumer
+    validation hook ahead of it replaced, and nothing sets up after it, so the
+    published rejection survives every consumer entry wherever the consumer put
+    a validation cache.
 
     Both authorities are constructed fresh per operation and read their
     configuration from this schema. An
     instance shared across operations would share one set of charge counters
     between concurrent requests.
 
-    The mode marker goes behind the guard because it is not a hook at all: it
+    The mode marker goes last because it is not a hook at all: it
     declares which executor is driving this operation, the runner reads it out
     of this list, and nothing in the chain's setup or teardown order has
     anything to say about it (``utils/execution_mode.py``).
@@ -897,7 +794,6 @@ def _admitted_chain(resolved: list[SchemaExtension], *, sync: bool) -> list[Sche
         DjangoErrorPolicyExtension(),
         *resolved,
         DjangoResourcePolicyExtension(),
-        AdmissionGuard(),
         _OperationModeMarker(_operation_mode(sync=sync)),
     ]
 
@@ -976,42 +872,28 @@ def _consumer_extension_entries(
 ) -> tuple[list[object], ResourcePolicy | None]:
     """Split ``extensions`` into the consumer's entries and the policy one of them declared.
 
-    An enforcement extension supplied directly is a CONFIGURATION statement
-    rather than a chain member: the schema installs its own of each kind on
-    every operation, so keeping the entry too would put two of a kind in the
-    chain. So a directly supplied entry is read once, here, where it is being
-    accepted, and what it declared is folded into the schema's policy; the entry
-    itself does not travel.
-
-    Only an EXACT entry can be read that way. A subclass is refused, and refused
-    at construction where it is actionable: its overrides are consumer code on
-    the one hook that charges a document or masks a result, and an override that
-    does nothing passes every check an inheritance census can make. Policy
-    customization has a seam that is not behavior -
-    ``DjangoSchema(resource_policy=...)`` and ``error_policy=`` - while an
-    unrelated consumer extension remains free to implement any hook it likes.
-
-    A bare class entry declares nothing beyond the automatic one and is simply
-    dropped; an instance declares whatever policy it was constructed with.
-    ``None`` comes back when no entry declared one, which is the ordinary case.
+    An enforcement extension supplied directly (the class itself, or an instance
+    of exactly that class) is a CONFIGURATION statement rather than a chain
+    member: the schema installs its own of each kind on every operation, so
+    keeping the entry too would put two of a kind in the chain. Such an entry is
+    read once, here, and what it declared is folded into the schema's policy;
+    the entry itself does not travel. A bare class entry, an error-policy entry
+    and a resource-policy instance built without a policy declare nothing beyond
+    the automatic extension and are dropped; a resource-policy instance declares
+    the policy it was constructed with. ``None`` comes back when no entry
+    declared one, which is the ordinary case.
     """
-    # Do not use truthiness to normalize the consumer's iterable.  A list
-    # subclass can override ``__bool__`` (or be stateful), and extension
-    # installation must not invoke that arbitrary hook before Strawberry sees
-    # the actual entries.  ``None`` is the only omitted-value spelling.
     supplied = [] if extensions is None else list(extensions)
     entries: list[object] = []
     declared: ResourcePolicy | None = None
     for entry in supplied:
-        if _declared_authority(entry) is None:
+        kind = entry if isinstance(entry, type) else type(entry)
+        if kind is not DjangoResourcePolicyExtension and kind is not DjangoErrorPolicyExtension:
             entries.append(entry)
             continue
-        # A declared authority is an exact resource-policy or error-policy entry
-        # (``_declared_authority`` refuses a subclass); the error-policy one
-        # declares nothing beyond the automatic extension and is dropped.
-        if not _is_exact_resource_policy_entry(entry):
+        if not isinstance(entry, DjangoResourcePolicyExtension):
             continue
-        policy = _entry_resource_policy(entry)
+        policy = entry._explicit_policy
         if policy is None:
             continue
         if declared is not None:
@@ -1023,74 +905,3 @@ def _consumer_extension_entries(
             )
         declared = policy
     return entries, declared
-
-
-def _declared_authority(entry: object) -> type[SchemaExtension] | None:
-    """Return the enforcement kind ``entry`` declares directly, or ``None`` for any other entry.
-
-    A class or an instance names its type without anything being run, which is
-    what makes this answerable at construction; a factory is opaque until it is
-    called and is left for :meth:`DjangoSchema.get_extensions`. A subclass of
-    either kind never comes back as a declaration - it is refused here.
-    """
-    for extension_type, kind in (
-        (DjangoResourcePolicyExtension, "resource-policy"),
-        (DjangoErrorPolicyExtension, "error-policy"),
-    ):
-        if _entry_type(entry) is extension_type:
-            return extension_type
-        if _extension_entry_matches(entry, extension_type):
-            raise ConfigurationError(
-                f"{truth.describe(entry)} subclasses the package's {kind} "
-                "extension, and a schema's enforcement authority is not something "
-                "an extension entry can be. A subclass can override the hook that "
-                "does the enforcing while still answering every check for it. "
-                "Configure the policy with DjangoSchema(resource_policy=...) or "
-                "error_policy=, and give an unrelated extension its own hooks.",
-            )
-    return None
-
-
-def _is_exact_resource_policy_entry(
-    entry: object,
-) -> TypeGuard[DjangoResourcePolicyExtension | type[DjangoResourcePolicyExtension]]:
-    """Whether ``entry`` is ``DjangoResourcePolicyExtension`` itself or an exact instance of it.
-
-    The same ``type()`` test ``_declared_authority`` runs, so the narrowing is the
-    check itself. ``TypeGuard``: a subclass entry answers ``False`` while being an
-    instance of the class.
-    """
-    return _entry_type(entry) is DjangoResourcePolicyExtension
-
-
-def _entry_resource_policy(
-    entry: DjangoResourcePolicyExtension | type[DjangoResourcePolicyExtension],
-) -> ResourcePolicy | None:
-    """Return the explicit policy a directly supplied resource-policy INSTANCE was built with.
-
-    ``None`` for a class entry, which was never constructed and therefore
-    declares nothing, and for an instance built without an override, which
-    declares that it inherits its schema's policy. What comes back is a copy of
-    the extension's own canonical policy.
-    """
-    if truth.is_type(entry):
-        return None
-    policy = entry._policy
-    return policy if type(policy) is ResourcePolicy else None
-
-
-def _entry_type(entry: object) -> type[object]:
-    """Return the class an entry names - itself, or the type of the instance it is.
-
-    Read with ``type()``, never ``isinstance``: a consumer instance answers
-    ``__class__`` with whatever it likes, so one claiming to be a class would be
-    classified as that claim, and an authority subclass claiming ``type`` would
-    pass for an entry that declares nothing. ``type()`` cannot be answered and
-    cannot raise.
-    """
-    return entry if truth.is_type(entry) else type(entry)
-
-
-def _extension_entry_matches(extension: object, extension_type: type[SchemaExtension]) -> bool:
-    """Match a class or instance entry by its real type, without invoking factories."""
-    return truth.is_subclass(_entry_type(extension), extension_type)

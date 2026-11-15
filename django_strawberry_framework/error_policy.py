@@ -33,12 +33,6 @@ Resolved once at schema construction (``schema.py::DjangoSchema``) through
 ``resolve_error_policy``, exactly as the resource policy is: an invalid
 deployment fails at startup rather than on a request, and no resolver re-reads
 a setting.
-
-``DEFAULT_ERROR_POLICY`` is exported as an inspectable value TEMPLATE, never as
-the object a mask is decided from. What the package falls back to is
-``_PACKAGE_ERROR_POLICY``, a canonical copy taken at import, so a write to the
-exported constant reaches no schema, no extension, and no request - the same
-separation ``resource_policy.py`` draws for its own default.
 """
 
 from __future__ import annotations
@@ -51,7 +45,7 @@ from .conf import error_policy_setting
 from .exceptions import ConfigurationError
 from .utils import truth
 from .utils._narrowing import read_attr
-from .utils.policies import canonical_policy, resolve_policy
+from .utils.policies import resolve_policy
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -84,9 +78,7 @@ class ErrorPolicy:
         error's ``extensions`` map. Configurable because a deployment with an
         existing error contract may already have a name for this field.
 
-    Writing the object read through ``schema.error_policy`` changes no later
-    request, because that read answers with a copy
-    (``schema.py::DjangoSchema.error_policy``).
+    ``schema.error_policy`` is read-only (``schema.py::DjangoSchema.error_policy``).
     """
 
     enabled: bool = True
@@ -120,29 +112,10 @@ class ErrorPolicy:
                 )
 
 
-#: The package default, as an inspectable value template: masking on, a stable
-#: neutral message, the ``correlationId`` extensions key. A deployment reads it to
-#: learn what it gets by doing nothing, and copies it to build a policy of its own.
-#:
-#: It is a TEMPLATE and not the authority. It is exported, so consumer code holds
-#: it, and a frozen dataclass admits ``DEFAULT_ERROR_POLICY.__dict__["enabled"] =
-#: False`` - which, on an object every masking fallback read, would be one write
-#: after startup that puts raw exception text on the wire for every schema in the
-#: process, including schemas built before it. Nothing in the package reads this
-#: name: what the fallbacks read is :data:`_PACKAGE_ERROR_POLICY`, and what a
-#: schema stores is a fresh copy taken at resolution
-#: (``utils/policies.py::resolve_policy``).
+#: The package default: masking on, a stable neutral message, the
+#: ``correlationId`` extensions key. What a deployment gets by configuring
+#: nothing, and the masking fallback of a schema that carries no policy.
 DEFAULT_ERROR_POLICY = ErrorPolicy()
-
-#: The package's own fail-closed policy, and the one every seam in the package
-#: falls back to. Built once, at import, from the values the template was
-#: declared with, so it carries the package's answer rather than whatever the
-#: exported object holds now; being reachable from no exported name is what makes
-#: reading a tampered default impossible rather than merely discouraged.
-_PACKAGE_ERROR_POLICY = canonical_policy(
-    DEFAULT_ERROR_POLICY,
-    policy_cls=ErrorPolicy,
-)
 
 
 def resolve_error_policy(explicit: ErrorPolicy | Mapping[str, object] | None) -> ErrorPolicy:
@@ -150,11 +123,10 @@ def resolve_error_policy(explicit: ErrorPolicy | Mapping[str, object] | None) ->
 
     Precedence, highest first: the ``DjangoSchema(error_policy=...)`` argument,
     the ``DJANGO_STRAWBERRY_FRAMEWORK["ERROR_POLICY"]`` mapping, and the package
-    defaults. An ``ErrorPolicy`` instance from either override slot supplies its
-    values to a private duplicate that validates them again
-    (``utils/policies.py::canonical_policy``), never the object masking is then
-    decided from; a mapping from either source is applied over the package
-    defaults so a deployment overrides only what it cares about.
+    defaults. An ``ErrorPolicy`` instance from either override slot is used as
+    it is, having validated itself at construction; a mapping from either source
+    is applied over the package defaults so a deployment overrides only what it
+    cares about.
 
     The structural twin of ``resource_policy.py::resolve_resource_policy`` -
     both delegate the shared resolution contract to
@@ -164,7 +136,7 @@ def resolve_error_policy(explicit: ErrorPolicy | Mapping[str, object] | None) ->
     return resolve_policy(
         explicit,
         policy_cls=ErrorPolicy,
-        default=_PACKAGE_ERROR_POLICY,
+        default=DEFAULT_ERROR_POLICY,
         read_setting=error_policy_setting,
         display_name="error policy",
         unit="option",

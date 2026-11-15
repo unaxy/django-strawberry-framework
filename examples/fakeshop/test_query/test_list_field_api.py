@@ -14,7 +14,7 @@ import datetime
 from collections.abc import AsyncIterator, Callable, Generator, Iterator, Mapping
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, SupportsIndex, TypeAlias, overload
+from typing import TYPE_CHECKING, TypeAlias
 
 import pytest
 import strawberry
@@ -66,17 +66,14 @@ from django_strawberry_framework import (
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.orders import Ordering
 from django_strawberry_framework.resource_policy import (
-    DST_RESOURCE_POLICY,
     _windowed_rows,
     bounded_rows,
-    policy_from_info,
 )
 from django_strawberry_framework.schema import DjangoSchema
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
     set_queryset_hints,
 )
-from django_strawberry_framework.utils.context import get_context_value
 from django_strawberry_framework.utils.querysets import apply_type_visibility_sync
 from django_strawberry_framework.views import DjangoGraphQLView
 
@@ -88,8 +85,6 @@ if TYPE_CHECKING:
     from django.views import View
     from strawberry.schema.name_converter import HasGraphQLName
     from strawberry.types.arguments import StrawberryArgument
-
-    from django_strawberry_framework.resource_policy import ResourcePolicy
 
 
 # The surface-specific SyncMisuseError recourse the visibility helpers require; these
@@ -3519,62 +3514,6 @@ def test_holder_trusted_max_rows_without_max_rows_keeps_the_policy_ceiling() -> 
 
 
 @pytest.mark.django_db
-def test_holder_materialized_sequence_subclass_is_still_row_bounded() -> None:
-    """A materialized source is bounded by this package, not by its own subscript.
-
-    ``DjangoListField(resolver=...)`` is a public path: whatever the resolver
-    returns is what the raw-list ceiling is applied to, so the bound cannot
-    come from that value's own ``__getitem__``. The ``list`` subclass below
-    overrides the slice to return every row it holds; a bound read through it
-    would answer a windowed request past the row ceiling and past the client's
-    own ``limit`` - the whole table on the one collection shape Relay
-    pagination does not cover.
-    """
-
-    class _EscapingRows(list[library_models.Branch]):
-        @overload
-        def __getitem__(self, key: SupportsIndex) -> library_models.Branch: ...
-
-        @overload
-        def __getitem__(self, key: slice) -> list[library_models.Branch]: ...
-
-        @override
-        def __getitem__(
-            self,
-            key: SupportsIndex | slice,
-        ) -> library_models.Branch | list[library_models.Branch]:
-            if isinstance(key, slice):
-                return list(self)
-            return super().__getitem__(key)
-
-    @strawberry.type
-    class _EscapeQuery:
-        branches_escaping: list[library_schema.BranchType] = DjangoListField(
-            library_schema.BranchType,
-            max_rows=2,
-            resolver=_list_resolver(
-                lambda _root, _info: _EscapingRows(library_models.Branch.objects.all()),
-            ),
-        )
-
-    schema = DjangoSchema(query=_EscapeQuery, config=strawberry_config())
-    for index in range(9):
-        library_models.Branch.objects.create(name=f"Branch {index}", city="Boston")
-
-    payload = _post_sync(schema, "{ branchesEscaping { name } }")
-    assert "errors" not in payload, payload
-    assert len(json_list(payload, "data", "branchesEscaping")) == 2
-
-    payload_windowed = _post_sync(schema, "{ branchesEscaping(limit: 1) { name } }")
-    assert "errors" not in payload_windowed, payload_windowed
-    assert len(json_list(payload_windowed, "data", "branchesEscaping")) == 1
-
-    payload_zero = _post_sync(schema, "{ branchesEscaping(limit: 0) { name } }")
-    assert "errors" not in payload_zero, payload_zero
-    assert json_at(payload_zero, "data", "branchesEscaping") == []
-
-
-@pytest.mark.django_db
 def test_holder_materialized_and_nullable_none_fields() -> None:
     @strawberry.type
     class _NonQsQuery:
@@ -5305,103 +5244,6 @@ def test_holder_a_frozen_context_still_returns_the_windowed_rows() -> None:
     )
 
     assert json_at(payload, "data", "branches") == [{"name": "Bravo"}]
-
-
-def _policy_from_info_object(info: strawberry.Info[object, object]) -> ResourcePolicy:
-    """The policy the package's own bound readers get."""
-    return policy_from_info(info)
-
-
-def _schema_attribute_object(info: strawberry.Info[object, object]) -> ResourcePolicy:
-    """The resolved schema policy, which ``info.schema`` puts in every resolver's reach."""
-    assert isinstance(info.schema, DjangoSchema)
-    return info.schema.resource_policy
-
-
-def _context_mirror_object(info: strawberry.Info[object, object]) -> object:
-    """The published mirror, which the spec invites a consumer to read."""
-    return get_context_value(info.context, DST_RESOURCE_POLICY)
-
-
-#: Every name a resolver can reach a ``ResourcePolicy`` object by. Each must be a
-#: copy: a frozen dataclass refuses ``setattr`` and accepts a ``__dict__`` write,
-#: so identity with the armed object is the whole question.
-_REACHABLE_POLICIES = (_policy_from_info_object, _schema_attribute_object, _context_mirror_object)
-_REACHABLE_POLICY_IDS = ("policy-from-info", "schema-attribute", "context-mirror")
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("reach", _REACHABLE_POLICIES, ids=_REACHABLE_POLICY_IDS)
-def test_a_resolver_cannot_widen_the_row_bound_by_writing_a_policy_it_can_reach(
-    reach: Callable[[strawberry.Info[object, object]], object],
-) -> None:
-    """A sibling field's write to a policy object leaves the operation's ceiling standing.
-
-    The write lands in the same operation, before the bounded field resolves, and
-    on an object the resolver reached by an ordinary supported name. Freezing the
-    dataclass answers ``setattr`` and nothing else, so what has to hold is that
-    none of these names is the object a bound is read from.
-    """
-    for i in range(5):
-        library_models.Branch.objects.create(name=f"B{i}", city="Boston")
-
-    @strawberry.type
-    class _WideningQuery:
-        branches: list[library_schema.BranchType] = DjangoListField(library_schema.BranchType)
-
-        @strawberry.field
-        def widen(self, info: strawberry.Info[object, object]) -> str:
-            reach(info).__dict__["max_list_rows"] = 999
-            return "written"
-
-    schema = DjangoSchema(
-        query=_WideningQuery,
-        config=strawberry_config(),
-        resource_policy={"max_list_rows": 2},
-    )
-
-    payload = _post_sync(schema, "{ widen branches { name } }")
-
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "widen") == "written"
-    assert [json_at(row, "name") for row in json_list(payload, "data", "branches")] == ["B0", "B1"]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("reach", _REACHABLE_POLICIES, ids=_REACHABLE_POLICY_IDS)
-def test_a_policy_a_resolver_widened_does_not_outlive_its_own_request(
-    reach: Callable[[strawberry.Info[object, object]], object],
-) -> None:
-    """The next request on the same schema is bounded by what the deployment configured.
-
-    The policy objects a request can reach are process-lived or operation-lived,
-    never request-scoped by accident, so a write that stuck would widen every
-    later request the process served rather than the one that made it. This is
-    the same widening as the sibling-field row, read one request later.
-    """
-    for i in range(5):
-        library_models.Branch.objects.create(name=f"B{i}", city="Boston")
-
-    @strawberry.type
-    class _WideningQuery:
-        branches: list[library_schema.BranchType] = DjangoListField(library_schema.BranchType)
-
-        @strawberry.field
-        def widen(self, info: strawberry.Info[object, object]) -> str:
-            reach(info).__dict__["max_list_rows"] = 999
-            return "written"
-
-    schema = DjangoSchema(
-        query=_WideningQuery,
-        config=strawberry_config(),
-        resource_policy={"max_list_rows": 2},
-    )
-
-    assert json_at(_post_sync(schema, "{ widen }"), "data", "widen") == "written"
-    payload = _post_sync(schema, "{ branches { name } }")
-
-    assert "errors" not in payload, payload
-    assert [json_at(row, "name") for row in json_list(payload, "data", "branches")] == ["B0", "B1"]
 
 
 @pytest.mark.django_db

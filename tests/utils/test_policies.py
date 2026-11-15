@@ -49,48 +49,23 @@ def _resolve(
     )
 
 
-def test_an_explicit_instance_supplies_the_values_of_a_private_duplicate() -> None:
-    """The caller keeps their object; what a bound is read from is never it.
-
-    A caller who kept the instance they passed - or left one in ``settings`` -
-    would otherwise hold the object every bound is read from for the life of the
-    process, and a frozen dataclass admits ``policy.__dict__[bound] = wider``.
-    """
+def test_an_explicit_instance_is_used() -> None:
     policy = _ProbePolicy(width=3)
-    resolved = _resolve(policy)
-    assert resolved == policy
-    assert resolved is not policy
+    assert _resolve(policy) is policy
 
 
-def test_no_source_at_all_resolves_to_a_duplicate_of_the_default() -> None:
-    """The no-override path is canonicalized like every other one.
-
-    The ``default`` is one module-level object shared by every schema in the
-    process, and each flavor exports its own under a name consumer code holds, so
-    answering with it would make one schema's policy the same object as another's
-    and as the one a consumer can write.
-
-    Which object each flavor hands in as its ``default`` is that flavor's own
-    decision, pinned in ``tests/test_error_policy.py`` and
-    ``tests/test_resource_policy.py``: this resolver copies whatever it is given.
-    """
-    resolved = _resolve(None, None)
-    assert resolved == _PROBE_DEFAULT
-    assert resolved is not _PROBE_DEFAULT
+def test_no_source_at_all_resolves_to_the_default() -> None:
+    assert _resolve(None, None) is _PROBE_DEFAULT
 
 
 def test_an_instance_through_the_setting_slot_is_taken_on_the_same_terms() -> None:
     """A validated instance behind the setting slot is the same trusted declaration.
 
     The explicit argument and the setting read are two spellings of one override
-    source, so an instance from either supplies the values of a private
-    duplicate; rejecting the setting spelling made the typed message name the
-    policy class as the received type while claiming it must be one.
+    source, so an instance from either is used as it is.
     """
     policy = _ProbePolicy(width=3)
-    resolved = _resolve(None, policy)
-    assert resolved == policy
-    assert resolved is not policy
+    assert _resolve(None, policy) is policy
 
 
 def test_the_setting_supplies_overrides_when_the_argument_is_absent() -> None:

@@ -87,7 +87,6 @@ from django.db import models
 from graphql import GraphQLError, get_named_type, is_object_type
 from strawberry import relay
 from strawberry.schema import Schema
-from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types import Info
 
 from .exceptions import ConfigurationError
@@ -120,6 +119,7 @@ from .utils.typing import (
     graphql_fields,
     graphql_type_of,
     strawberry_schema_from_info,
+    wrapped_resolver,
 )
 from .utils.write_transaction import current_write_pipeline
 
@@ -206,10 +206,8 @@ def refuse_unreturnable_node_targets(schema: Schema) -> None:
 
 def _typed_node_target(field: GraphQLField) -> _NodeTarget | None:
     """Return the ``_NodeTarget`` a built field's resolver carries, else ``None``."""
-    extensions: Mapping[str, object] = field.extensions
-    backref = extensions.get(GraphQLCoreConverter.DEFINITION_BACKREF)
-    wrapped = read_attr(read_attr(backref, "base_resolver", None), "wrapped_func", None)
-    return optional_instance(read_attr(wrapped, NODE_TARGET_MARKER, None), _NodeTarget)
+    marker = read_attr(wrapped_resolver(field), NODE_TARGET_MARKER, None)
+    return optional_instance(marker, _NodeTarget)
 
 
 _SYNC_RESOLVER_RECOURSE = (
