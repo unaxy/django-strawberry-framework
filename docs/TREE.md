@@ -310,6 +310,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── imports.py                # Import helpers for best-effort, loaded-only, strict, and guarded optional-dependency lookups.
     ├── input_values.py           # Set-input traversal substrate shared by the FilterSet and OrderSet families.
     ├── inputs.py                 # Generated-input construction and lifecycle primitives shared by set and write families.
+    ├── introspection.py          # Class and callable identity for the package's own reads, and the spellings error messages use.
     ├── lazy.py                   # Django lazy-proxy unwrapping: the object a ``LazyObject`` stands for, before a type check.
     ├── permissions.py            # Shared permission traversal and Django/Channels request-context decoding.
     ├── policies.py               # Shared schema-construction policy normalization.
@@ -454,6 +455,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── imports.py                # Import helpers for best-effort, loaded-only, strict, and guarded optional-dependency lookups.
     ├── input_values.py           # Set-input traversal substrate shared by the FilterSet and OrderSet families.
     ├── inputs.py                 # Generated-input construction and lifecycle primitives shared by set and write families.
+    ├── introspection.py          # Class and callable identity for the package's own reads, and the spellings error messages use.
     ├── lazy.py                   # Django lazy-proxy unwrapping: the object a ``LazyObject`` stands for, before a type check.
     ├── permissions.py            # Shared permission traversal and Django/Channels request-context decoding.
     ├── policies.py               # Shared schema-construction policy normalization.
@@ -687,6 +689,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_init.py              # Package-init tests pinning the ``utils`` package's re-export surface.
     ├── test_input_values.py      # Tests for the neutral set-input traversal substrate (``utils/input_values.py``).
     ├── test_inputs.py            # Tests for the shared generated-input substrate (``utils/inputs.py``).
+    ├── test_introspection.py     # Tests for ``django_strawberry_framework/utils/introspection.py``.
     ├── test_lazy.py              # Tests for Django lazy-proxy unwrapping (``utils/lazy.py::unwrap_lazy_object``).
     ├── test_narrowing.py         # Tests for ``django_strawberry_framework/utils/_narrowing.py``'s checked narrowings.
     ├── test_permissions.py       # Tests for input permissions, relation-path gates, and Django/Channels request decoding.
@@ -1091,6 +1094,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_init.py              # Package-init tests pinning the ``utils`` package's re-export surface.
     ├── test_input_values.py      # Tests for the neutral set-input traversal substrate (``utils/input_values.py``).
     ├── test_inputs.py            # Tests for the shared generated-input substrate (``utils/inputs.py``).
+    ├── test_introspection.py     # Tests for ``django_strawberry_framework/utils/introspection.py``.
     ├── test_lazy.py              # Tests for Django lazy-proxy unwrapping (``utils/lazy.py::unwrap_lazy_object``).
     ├── test_narrowing.py         # Tests for ``django_strawberry_framework/utils/_narrowing.py``'s checked narrowings.
     ├── test_permissions.py       # Tests for input permissions, relation-path gates, and Django/Channels request decoding.

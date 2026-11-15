@@ -92,9 +92,11 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import BigInt
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._array_field import array_element_field
 from django_strawberry_framework.utils._narrowing import (
+    get_item,
+    is_class,
     is_iterable,
     is_list_or_tuple,
     is_text_atom,
@@ -357,8 +359,8 @@ _HSTORE_FIELD_CLS = cast(
 def _field_label(field: object) -> str:
     """Return ``Model.field`` for diagnostics; an unbound field reads ``<unbound>``."""
     model = getattr(field, "model", None)
-    model_name = truth.name(model) if truth.is_type(model) else "<unbound>"
-    return f"{model_name}.{truth.text(getattr(field, 'name', '<unknown>'), '<unknown>')}"
+    model_name = model.__name__ if is_class(model) else "<unbound>"
+    return f"{model_name}.{introspection.text(getattr(field, 'name', '<unknown>'), '<unknown>')}"
 
 
 def _generated_output_issue(column: "ConcreteField") -> str | None:
@@ -368,9 +370,9 @@ def _generated_output_issue(column: "ConcreteField") -> str | None:
     element = array_element_field(column)
     if element is not None:
         return "array_choices" if element.choices else None
-    if _HSTORE_FIELD_CLS is not None and truth.is_instance(column, _HSTORE_FIELD_CLS):
+    if _HSTORE_FIELD_CLS is not None and isinstance(column, _HSTORE_FIELD_CLS):
         return None
-    if truth.mro_entry(SCALAR_MAP, truth.class_of(column)) is None:
+    if introspection.mro_entry(SCALAR_MAP, type(column)) is None:
         return "unregistered"
     return None
 
@@ -402,11 +404,11 @@ def generated_output_field(field: object) -> "ConcreteField | None":
     column = generated_column(field)
     if column is None:
         return None
-    output = truth.kind(column)
+    output = introspection.kind(column)
     issue = _generated_output_issue(column)
     if issue == "file":
         raise ConfigurationError(
-            f"GeneratedField {_field_label(column)} has a file output_field {truth.render(output)}; "
+            f"GeneratedField {_field_label(column)} has a file output_field {output!r}; "
             "a database expression stores no file. Exclude the field via Meta.exclude.",
         )
     if issue == "array_choices":
@@ -417,7 +419,7 @@ def generated_output_field(field: object) -> "ConcreteField | None":
         )
     if issue == "unregistered":
         raise ConfigurationError(
-            f"Unsupported output_field type {truth.render(output)} on GeneratedField "
+            f"Unsupported output_field type {output!r} on GeneratedField "
             f"{_field_label(column)}. Add an entry to SCALAR_MAP or exclude this field via "
             "Meta.exclude.",
         )
@@ -437,7 +439,7 @@ def _registered_scalar_entry(
     (``generated_output_field``). ``None`` for a field class no entry covers.
     """
     column = generated_output_field(field) or field
-    return truth.mro_entry(SCALAR_MAP, truth.class_of(column))
+    return introspection.mro_entry(SCALAR_MAP, type(column))
 
 
 def holds_values_as_given(field: "ModelField") -> bool:
@@ -461,9 +463,9 @@ def holds_values_as_given(field: "ModelField") -> bool:
         return False
     entry = _registered_scalar_entry(field)
     return (
-        entry is not None and truth.is_among(entry[1], (strawberry.scalars.JSON,))
-    ) and not truth.overrides(
-        truth.class_of(field),
+        entry is not None and get_item(entry, 1) is strawberry.scalars.JSON
+    ) and not introspection.overrides(
+        type(field),
         models.Field,
         "to_python",
         "get_prep_value",
@@ -480,7 +482,7 @@ def _scalar_map_entry(field: "ModelField") -> "tuple[type[ConcreteField], TypeFo
         return entry
     column = generated_output_field(field) or field
     raise ConfigurationError(
-        f"Unsupported Django field type {truth.render(truth.kind(column))} on "
+        f"Unsupported Django field type {introspection.kind(column)!r} on "
         f"{_field_label(column)}. Add an entry to "
         "SCALAR_MAP or exclude this field via Meta.exclude.",
     )
@@ -548,7 +550,7 @@ def scalar_route(field: "ConcreteField") -> ScalarRoute:
     element = array_element_field(field)
     if element is not None:
         return ArrayRoute(element)
-    if _HSTORE_FIELD_CLS is not None and truth.is_instance(field, _HSTORE_FIELD_CLS):
+    if _HSTORE_FIELD_CLS is not None and isinstance(field, _HSTORE_FIELD_CLS):
         return HStoreRoute()
     key, scalar = _scalar_map_entry(field)
     return MapRoute(key, scalar, choices=bool(field.choices))
@@ -702,9 +704,9 @@ def _field_output_type_for(field: "ModelField") -> type[DjangoFileType] | None:
     ``scalar_for_field`` walks ``SCALAR_MAP`` -- so an ``ImageField`` (and any
     consumer ``ImageField`` subclass) resolves to ``DjangoImageType`` before
     ``FileField`` is reached -- and returns ``None`` for a non-file column. Both
-    walks compose ``utils/truth.py::mro_entry``, so the map walk is written once.
+    walks compose ``utils/introspection.py::mro_entry``, so the map walk is written once.
     """
-    entry = truth.mro_entry(FIELD_OUTPUT_TYPE_MAP, truth.class_of(field))
+    entry = introspection.mro_entry(FIELD_OUTPUT_TYPE_MAP, type(field))
     return None if entry is None else entry[1]
 
 
@@ -915,8 +917,7 @@ def build_enum_from_choices(
             members[member] = value
     if collisions:
         details = ", ".join(
-            f"{truth.render(member)} from values "
-            f"[{', '.join(sorted(truth.render(value) for value in vals))}]"
+            f"{member!r} from values [{', '.join(sorted(repr(value) for value in vals))}]"
             for member, vals in sorted(collisions.items())
         )
         raise ConfigurationError(
@@ -939,7 +940,7 @@ def _is_choice_group(label: object) -> TypeGuard[list[object] | tuple[object, ..
     load-bearing distinction: in the grouped form the first slot is the human-readable group
     name (a string), so testing it produces a false negative.
     """
-    return truth.is_one_of(label, (list, tuple))
+    return isinstance(label, (list, tuple))
 
 
 def _unpack_choice_entry(entry: object, *, source_label: str) -> tuple[object, object]:
@@ -968,7 +969,7 @@ def _unpack_choice_entry(entry: object, *, source_label: str) -> tuple[object, o
             malformed = True
     if malformed:
         raise ConfigurationError(
-            f"{source_label} declares a malformed choice {truth.render(entry)}; "
+            f"{source_label} declares a malformed choice {entry!r}; "
             "choices must be a flat sequence of (value, label) pairs.",
         )
     return value, label
@@ -1023,7 +1024,7 @@ def _normalize_choice_pairs(
     if not value_pairs:
         only_empty = (
             ", holding only the empty option "
-            f"{', '.join(truth.render(label) for label in empty_labels)} (a None value labels "
+            f"{', '.join(repr(label) for label in empty_labels)} (a None value labels "
             "the empty option and is never a member)"
             if empty_labels
             else ""
@@ -1042,7 +1043,7 @@ def _insert_blank_pair(
 ) -> None:
     """Prepend ``("", "")`` when ``include_blank`` is set and no declared value is ``""``."""
     if include_blank and not any(
-        truth.is_instance(value, str) and value == "" for value, _label in normalized_pairs
+        isinstance(value, str) and value == "" for value, _label in normalized_pairs
     ):
         normalized_pairs.insert(0, ("", ""))
 

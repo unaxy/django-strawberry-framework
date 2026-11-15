@@ -12,7 +12,9 @@ from strawberry.relay.exceptions import NodeIDAnnotationError
 from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import class_namespace, is_str
+from django_strawberry_framework.utils.typing import object_result
 
 from .relay import _STRAWBERRY_RESOLVE_ID
 
@@ -46,7 +48,7 @@ def _check_graphql_name(name: str, subject: str) -> None:
     reserves for introspection is enforced by graphql-core only while validating a
     built schema, so it is checked here, where the name is declared.
     """
-    message = f"{subject} must be a valid GraphQL name; got {truth.render(name)}."
+    message = f"{subject} must be a valid GraphQL name; got {name!r}."
     try:
         _ = assert_name(name)
     except GraphQLError as exc:
@@ -71,7 +73,7 @@ def surface_type_name(origin: type, name: str | None) -> str:
     before the definition exists) both derive the name here, so a ``Meta.name``'d
     type names its enums after the name it publishes.
     """
-    return name if name is not None else to_camel_case(truth.name(origin))
+    return name if name is not None else to_camel_case(origin.__name__)
 
 
 @dataclass
@@ -299,14 +301,13 @@ class DjangoTypeDefinition:
         copies cannot diverge across renames. This property also checks the
         name is a non-empty string and a GraphQL Name.
         """
-        published = surface_type_name(self.origin, self.name)
-        label = truth.kind(self.origin)
-        if not truth.is_instance(published, str):
+        published = object_result(surface_type_name, self.origin, self.name)
+        label = introspection.kind(self.origin)
+        if not is_str(published):
             raise ConfigurationError(
-                f"GraphQL type name for {label} must be a non-empty string; "
-                f"got {truth.render(published)}.",
+                f"GraphQL type name for {label} must be a non-empty string; got {published!r}.",
             )
-        normalized = truth.text(published)
+        normalized = introspection.text(published)
         if not normalized:
             raise ConfigurationError(
                 f"GraphQL type name for {label} must be a non-empty string; got an empty name.",
@@ -333,9 +334,9 @@ class DjangoTypeDefinition:
         Returns ``None`` when no ``DjangoType`` is registered for the
         target model.
         """
-        if not truth.is_instance(field_name, str):
+        if not is_str(field_name):
             return None
-        field_name = truth.text(field_name)
+        field_name = introspection.text(field_name)
 
         # In-function import: ``registry`` stays a method-local edge so this
         # module does not depend on it at import time (no load cycle exists
@@ -433,7 +434,7 @@ def origin_has_custom_id_resolver(
     )
     if any(
         _class_has_custom_id_resolver(cls, name)
-        for cls in truth.mro(origin)
+        for cls in origin.__mro__
         for name in resolver_names
     ):
         return True
@@ -442,9 +443,9 @@ def origin_has_custom_id_resolver(
 
 def _normalize_pk_name(pk_name: object) -> str | None:
     """Return a plain primary-key or id attribute name, or ``None`` for malformed input."""
-    if not truth.is_instance(pk_name, str):
+    if not is_str(pk_name):
         return None
-    return truth.text(pk_name) or None
+    return introspection.text(pk_name) or None
 
 
 def _resolves_id_off_pk(origin: type[object], pk_name: str) -> bool:
@@ -458,7 +459,7 @@ def _resolves_id_off_pk(origin: type[object], pk_name: str) -> bool:
     safe; a Relay target with no ``NodeID`` annotation resolves to ``"pk"`` and
     is likewise safe.
     """
-    if not truth.is_subclass(origin, relay.Node):
+    if not issubclass(origin, relay.Node):
         return False
     try:
         # A consumer ``Node`` may override ``resolve_id_attr`` to return anything, so the
@@ -473,7 +474,7 @@ def _resolves_id_off_pk(origin: type[object], pk_name: str) -> bool:
 
 def _class_has_custom_id_resolver(type_cls: type[object], name: str) -> bool:
     """Return whether ``type_cls``'s own namespace defines a consumer id resolver marker."""
-    class_dict = truth.class_dict(type_cls)
+    class_dict = class_namespace(type_cls)
     if name not in class_dict:
         return False
     if name != "resolve_id":
@@ -483,4 +484,4 @@ def _class_has_custom_id_resolver(type_cls: type[object], name: str) -> bool:
 
 def _is_framework_relay_id_resolver(value: object) -> bool:
     """Return whether ``value`` holds Strawberry's own ``Node.resolve_id`` (installed or re-exported)."""
-    return truth.stored_function(value) is _STRAWBERRY_RESOLVE_ID
+    return introspection.stored_function(value) is _STRAWBERRY_RESOLVE_ID

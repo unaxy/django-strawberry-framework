@@ -485,7 +485,6 @@
 "tests/types/test_definition_relations.py::_malformed_definition" = { reportArgumentType = 2 }
 "tests/types/test_definition_relations.py::test_custom_id_detection_normalizes_the_resolve_id_attr_result_under_its_guard._Node.resolve_id_attr" = { cast = 1 }
 "tests/types/test_definition_relations.py::test_custom_id_detection_propagates_and_flags_consumer_relay_resolver._NonStringNode.resolve_id_attr" = { reportIncompatibleMethodOverride = 1 }
-"tests/types/test_definition_relations.py::test_custom_id_detection_reads_hostile_class_metadata_truthfully" = { reportArgumentType = 1 }
 "tests/types/test_definition_relations.py::test_custom_id_resolver_guards_reject_malformed_pk_names" = { reportArgumentType = 2 }
 "tests/types/test_finalizer.py::test_field_surface_names_ignores_field_without_python_or_graphql_name" = { reportArgumentType = 1 }
 "tests/types/test_finalizer.py::test_finalize_rerun_after_phase3_raise_keeps_finalized_sets_wired" = { reportAttributeAccessIssue = 1 }

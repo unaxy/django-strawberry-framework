@@ -12,7 +12,7 @@ helpers split by lifecycle phase:
   ``types/base.py``).
 - Finalization Phase 2.5 (``finalize_django_types()``): ``apply_interfaces``,
   ``_check_composite_pk_for_relay_node``, ``install_relay_node_resolvers``.
-  The last uses the stored-function identity test (``truth.stored_function``)
+  The last uses the stored-function identity test (``introspection.overrides``)
   that distinguishes consumer-overridden ``resolve_*`` methods from the
   ``relay.Node`` defaults inherited through MRO.
 - Request time: the ``type``-strategy GlobalID naming authority -
@@ -28,7 +28,6 @@ package is not imported at runtime.
 
 from __future__ import annotations
 
-from types import GetSetDescriptorType
 from typing import TYPE_CHECKING, TypeGuard, TypeVar, cast
 from weakref import WeakKeyDictionary
 
@@ -44,9 +43,10 @@ from django_strawberry_framework.conf import relay_globalid_strategy_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.resource_policy import check_deadline
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    class_namespace,
     is_str,
     read_attr,
     require,
@@ -99,7 +99,7 @@ def implements_relay_node(type_cls: type[DjangoType]) -> TypeGuard[type[_RelayDj
     runs pre-base-injection at collection time against the validated
     ``Meta.interfaces`` tuple.
     """
-    return truth.is_subclass(type_cls, relay.Node)
+    return issubclass(type_cls, relay.Node)
 
 
 def install_is_type_of(type_cls: type[DjangoType]) -> None:
@@ -129,7 +129,7 @@ def install_is_type_of(type_cls: type[DjangoType]) -> None:
     function inherited from a base does not count as "declared on this
     class" and is overwritten by the framework default.
     """
-    if "is_type_of" in truth.class_dict(type_cls):
+    if "is_type_of" in type_cls.__dict__:
         return
     model = model_for(type_cls)
 
@@ -138,7 +138,7 @@ def install_is_type_of(type_cls: type[DjangoType]) -> None:
         type_cast = get_strawberry_type_cast(obj)
         if type_cast is not None:
             return type_cast is type_cls
-        return truth.is_instance(obj, type_cls) or truth.is_instance(obj, model)
+        return isinstance(obj, (type_cls, model))
 
     type_cls.is_type_of = is_type_of
 
@@ -162,22 +162,16 @@ def apply_interfaces(type_cls: type[DjangoType], definition: DjangoTypeDefinitio
             (spec-015 Decision 1 #"never as a raw layout error").
 
     """
-    additions = tuple(
-        iface for iface in definition.interfaces if not truth.is_subclass(type_cls, iface)
-    )
+    additions = tuple(iface for iface in definition.interfaces if not issubclass(type_cls, iface))
     if not additions:
         return
-    # Written through the ``type`` slot itself, so a metaclass ``__setattr__``
-    # cannot intercept the assignment.
-    # ``type.__bases__`` is a C getset descriptor in ``type``'s own namespace.
-    set_bases = require_instance(truth.class_dict(type)["__bases__"], GetSetDescriptorType).__set__
     try:
-        set_bases(type_cls, (*truth.bases(type_cls), *additions))
+        type_cls.__bases__ = (*type_cls.__bases__, *additions)
     except TypeError as exc:
-        offending = ", ".join(truth.name(iface) for iface in additions)
+        offending = ", ".join(iface.__name__ for iface in additions)
         raise ConfigurationError(
-            f"{truth.name(type_cls)}: cannot add interface(s) {offending} to bases. "
-            f"Python rejected the resulting MRO ({truth.render(exc)}). Either drop the "
+            f"{type_cls.__name__}: cannot add interface(s) {offending} to bases. "
+            f"Python rejected the resulting MRO ({exc!r}). Either drop the "
             "incompatible interface from Meta.interfaces or rework the class "
             "hierarchy.",
         ) from exc
@@ -205,7 +199,7 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
     if not has_composite_pk(model) or _stamp_relay_id_attr(type_cls) != "pk":
         return
     raise ConfigurationError(
-        f"{truth.name(model)}: relay.Node is not supported on models with a "
+        f"{model.__name__}: relay.Node is not supported on models with a "
         "composite primary key. Either declare an explicit id: "
         "relay.NodeID[...] annotation on the DjangoType or remove "
         "relay.Node from Meta.interfaces.",
@@ -263,11 +257,14 @@ def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> str:
     """
     type_cls._id_attr = None
     try:
-        id_attr = require(call_method(relay.Node.resolve_id_attr, "__func__", type_cls), is_str)
+        id_attr = require_instance(
+            call_method(relay.Node.resolve_id_attr, "__func__", type_cls),
+            str,
+        )
     except NodeIDAnnotationError as exc:
         if not exc.message.startswith(_NO_NODE_ID_MESSAGE):
             raise ConfigurationError(
-                f"{truth.name(type_cls)}: Strawberry refused the type's relay.NodeID "
+                f"{type_cls.__name__}: Strawberry refused the type's relay.NodeID "
                 f"annotations ({exc.message}). A Relay node takes at most one "
                 "relay.NodeID[...] annotation (none keeps the primary key as its id); "
                 "keep the one that names the id column.",
@@ -299,11 +296,11 @@ def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
     behaves identically at every inheritance depth.
     """
     # Only ``_stamp_relay_id_attr`` writes the slot, with the scanned ``str``.
-    stamped = truth.class_dict(cls).get(_RELAY_ID_ATTR_SLOT)
-    if truth.is_instance(stamped, str):
+    stamped = class_namespace(cls).get(_RELAY_ID_ATTR_SLOT)
+    if isinstance(stamped, str):
         return stamped
     raise ConfigurationError(
-        f"{truth.name(cls)} has no Relay id attribute yet: finalize_django_types() has not "
+        f"{cls.__name__} has no Relay id attribute yet: finalize_django_types() has not "
         "finished for it. Run finalize_django_types() before reading its ids.",
     )
 
@@ -312,13 +309,13 @@ def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
 # installed beside the package's defaults so a stale ``resolve_id = relay.Node.resolve_id``
 # re-export (a method bound to ``relay.Node``) is re-bound to the concrete type.
 _STRAWBERRY_RESOLVE_ID = require(
-    truth.stored_function(truth.class_dict(relay.Node)["resolve_id"]),
+    introspection.stored_function(class_namespace(relay.Node)["resolve_id"]),
     callable,
 )
 
 
 def _coerce_node_id(node_id: object) -> object:
-    if truth.is_instance(node_id, relay.GlobalID):
+    if isinstance(node_id, relay.GlobalID):
         return node_id.node_id
     return node_id
 
@@ -373,7 +370,7 @@ def _raise_if_required(
         return
     model = model_for(cls)
     raise model.DoesNotExist(
-        f"{truth.name(model)}: no row matching {id_attr}={truth.render(node_id)}.",
+        f"{model.__name__}: no row matching {id_attr}={node_id!r}.",
     )
 
 
@@ -577,16 +574,16 @@ def encode_typename(
     """
     if callable(strategy):
         result = strategy(type_cls, definition.model, root)
-        if not truth.is_instance(result, str):
+        if not isinstance(result, str):
             raise ConfigurationError(
                 f"{definition.graphql_type_name}: the Meta.globalid_strategy callable "
-                f"returned {truth.render(result)}; a (type_cls, model, root) -> str encoder "
+                f"returned {result!r}; a (type_cls, model, root) -> str encoder "
                 "must return a non-empty string for the GlobalID type-name slot.",
             )
         if not result:
             raise ConfigurationError(
                 f"{definition.graphql_type_name}: the Meta.globalid_strategy callable "
-                f"returned {truth.render(result)}; a (type_cls, model, root) -> str encoder "
+                f"returned {result!r}; a (type_cls, model, root) -> str encoder "
                 "must return a non-empty string for the GlobalID type-name slot.",
             )
         return result
@@ -800,9 +797,7 @@ def require_returned_node(
 # closure fail the stored-function identity test and be misclassified ``custom``
 # (silently encode-only, audit-blind, and spuriously both-declared when the
 # child carries its own ``Meta.globalid_strategy``). The attribute lives on the
-# plain function, which ``truth.stored_function`` reads out of any wrapper, and is
-# read back with ``truth.static_attr`` so a consumer override object's own
-# ``__getattr__`` never runs.
+# plain function, which ``introspection.stored_function`` reads out of any wrapper.
 _FRAMEWORK_CLOSURE_MARKER = "_dsf_globalid_framework_closure"
 
 
@@ -817,14 +812,16 @@ def _inherits_framework_closure(type_cls: type[relay.Node]) -> bool:
     emit the PARENT's payload (the parent ``definition`` is captured in the
     inherited closure).
     """
-    existing_func = truth.stored_function(truth.static_attr(type_cls, "resolve_typename"))
-    return truth.static_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER) is True
+    existing_func = introspection.stored_function(
+        introspection.mro_attr(type_cls, "resolve_typename"),
+    )
+    return read_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER, None) is True
 
 
 def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     """Return whether ``type_cls`` declares its own ``resolve_typename``.
 
-    ``utils/truth.py::overrides`` against ``relay.Node`` (MRO-aware identity of
+    ``utils/introspection.py::overrides`` against ``relay.Node`` (MRO-aware identity of
     the stored functions) - the same discriminator ``install_relay_node_resolvers`` uses for the
     ``resolve_*`` installs. Every declared shape counts: a ``classmethod``, a
     ``staticmethod`` and a plain function taking ``(root, info)`` are all
@@ -840,13 +837,12 @@ def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     installed closure). A consumer override inherited from an abstract base
     lacks the marker, so it still classifies ``custom``.
     """
-    existing_func = truth.stored_function(truth.static_attr(type_cls, "resolve_typename"))
-    if (
-        existing_func is None
-        or truth.static_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER) is True
-    ):
+    existing_func = introspection.stored_function(
+        introspection.mro_attr(type_cls, "resolve_typename"),
+    )
+    if existing_func is None or read_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER, None) is True:
         return False
-    return truth.overrides(type_cls, relay.Node, "resolve_typename")
+    return introspection.overrides(type_cls, relay.Node, "resolve_typename")
 
 
 def install_globalid_typename_resolver(
@@ -1058,20 +1054,20 @@ def decode_global_id(
     ``DjangoType`` class (``definition.origin``) and ``node_id`` is the parsed id
     string.
     """
-    is_str_gid = truth.is_instance(gid, str)
-    if not (is_str_gid or truth.is_instance(gid, relay.GlobalID)):
+    is_str_gid = is_str(gid)
+    if not (is_str_gid or isinstance(gid, relay.GlobalID)):
         raise ConfigurationError(
             f"decode_global_id: expected a relay.GlobalID or its base64 string, got "
-            f"{truth.kind(gid)}. A GlobalID must be the encoded id, not a raw payload.",
+            f"{introspection.kind(gid)}. A GlobalID must be the encoded id, not a raw payload.",
         )
 
     if is_str_gid:
-        raw_gid = truth.text(gid)
+        raw_gid = introspection.text(gid)
         try:
             decoded = relay.GlobalID.from_id(raw_gid)
         except ValueError as exc:
             raise ConfigurationError(
-                f"decode_global_id: {truth.render(raw_gid)} is not a valid GlobalID (malformed base64 or "
+                f"decode_global_id: {raw_gid!r} is not a valid GlobalID (malformed base64 or "
                 "not a 'type_name:node_id' shape).",
             ) from exc
     else:
@@ -1082,8 +1078,8 @@ def decode_global_id(
     node_id = decoded.node_id
     if not type_name or not node_id:
         raise ConfigurationError(
-            f"decode_global_id: GlobalID has an empty slot (type_name={truth.render(type_name)}, "
-            f"node_id={truth.render(node_id)}); both must be non-empty.",
+            f"decode_global_id: GlobalID has an empty slot (type_name={type_name!r}, "
+            f"node_id={node_id!r}); both must be non-empty.",
         )
 
     is_model_label = "." in type_name
@@ -1137,7 +1133,7 @@ def decode_global_id(
     # (``install_globalid_typename_resolver``), so a candidate that is not one is a defect.
     if not implements_relay_node(target_type):
         raise ConfigurationError(
-            f"decode_global_id: {type_name!r} resolves to {truth.name(target_type)}, which records "
+            f"decode_global_id: {type_name!r} resolves to {target_type.__name__}, which records "
             f"the {strategy!r} GlobalID strategy but is not a Relay Node.",
         )
     return target_type, node_id
@@ -1184,7 +1180,7 @@ def _order_nodes(
         found = index.get(identity_key(field, value))
         if required and found is None:
             raise model.DoesNotExist(
-                f"{truth.name(model)}: no row matching {id_attr}={str(value)!r}.",
+                f"{model.__name__}: no row matching {id_attr}={str(value)!r}.",
             )
         output.append(found)
     return output
@@ -1320,7 +1316,7 @@ def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
     - Look up the inherited method on ``type_cls`` (resolves through MRO
       to ``relay.Node``'s default if no consumer override exists).
     - Compare its stored function with ``relay.Node``'s
-      (``utils/truth.py::overrides``). When they match (or ``existing`` is
+      (``utils/introspection.py::overrides``). When they match (or ``existing`` is
       ``None``), the consumer has not overridden the
       method and the framework default is installed via
       ``setattr(type_cls, attr, classmethod(default))``.
@@ -1335,6 +1331,6 @@ def install_relay_node_resolvers(type_cls: type[relay.Node]) -> None:
     """
     _ = _stamp_relay_id_attr(type_cls)
     for attr, default_impl in _RELAY_RESOLVER_DEFAULTS:
-        existing = truth.static_attr(type_cls, attr)
-        if existing is None or not truth.overrides(type_cls, relay.Node, attr):
+        existing = introspection.mro_attr(type_cls, attr)
+        if existing is None or not introspection.overrides(type_cls, relay.Node, attr):
             setattr(type_cls, attr, classmethod(default_impl))

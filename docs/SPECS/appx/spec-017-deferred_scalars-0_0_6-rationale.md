@@ -17,7 +17,7 @@ Companion to [`spec-017-deferred_scalars-0_0_6.md`][spec-017]. The spec states t
 - **Multi-dimensional `ArrayField` rejected as scope.** A nested array raises `ConfigurationError`.
 - **Outer `choices` rejected, not ignored.** Outer-array `choices` have no unambiguous GraphQL shape; loud over silent. Element-level enums come from `choices` on `base_field`, which the recursive `convert_scalar` call handles.
 - **The recursion is left `force_nullable`-unset.** `Meta.nullable_overrides` / `Meta.required_overrides` describe the outer column; threading the override into `base_field` would silently change element nullability.
-- **Truthful diagnostic labels.** `_field_label` names `Model.field` from truthful reads of the bound model class and the field name, so a field's model class cannot misreport itself in a rejection; `array_element_field` recognizes an `ArrayField` through `utils/truth.py::is_instance`, so a field class cannot claim to be one.
+- **Diagnostic labels.** `_field_label` names `Model.field` from the bound model class's name and the field name; `array_element_field` recognizes an `ArrayField` through `utils/truth.py::is_instance`, so a field class cannot claim to be one.
 
 ## Decision 3 — `JSONField` target type
 

@@ -61,7 +61,7 @@ from django_strawberry_framework.resource_policy import (
     bounded_rows_async,
     check_deadline,
 )
-from django_strawberry_framework.utils._narrowing import is_queryset, is_str, read_attr, require
+from django_strawberry_framework.utils._narrowing import is_queryset, read_attr, require
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
@@ -376,7 +376,7 @@ def _name_resolver(resolver: _NamedFieldResolverT, field_name: str) -> _NamedFie
     ``resolver`` is a module-local ``def`` closure, so its ``__name__`` is
     writable (``_NamedFieldResolver``).
     """
-    resolver.__name__ = f"resolve_{field_name}"  # truth: ok writes a framework-built closure
+    resolver.__name__ = f"resolve_{field_name}"
     return resolver
 
 
@@ -453,7 +453,7 @@ def _visible_related_object(
         return None
     source = related_queryset(model_for(target_type))
     alias = read_attr(read_attr(related, "_state", None), "db", None)
-    if is_str(alias):
+    if isinstance(alias, str):
         source = source.using(alias)
     pk = getattr(related, "pk", None)
     source = source.filter(pk=pk)

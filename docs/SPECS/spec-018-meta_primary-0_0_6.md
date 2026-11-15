@@ -359,7 +359,7 @@ def _audit_primary_ambiguity(multi_type_models: tuple[type[models.Model], ...]) 
     ]
     if not offenders:
         return
-    offenders.sort(key=lambda entry: truth.name(entry[0]))
+    offenders.sort(key=lambda entry: entry[0].__name__)
     raise ConfigurationError(_format_ambiguity_error(offenders))
 ```
 

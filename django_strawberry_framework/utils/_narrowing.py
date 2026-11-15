@@ -24,7 +24,12 @@ type. ``isinstance`` falls back to a ``__class__`` read when the real type does 
 match, and a ``__class__`` property can raise or claim a class the value is not;
 the real type can do neither, so these are the predicates for a value whose answer
 gates an operation that itself checks the real type (``str.__eq__`` refuses a value
-that is not really a ``str``). Whether a value is a class is ``utils/truth.py::is_type``.
+that is not really a ``str``).
+
+``is_class`` asks the same of ``type``: a Django lazy proxy forwards ``__class__`` and
+passes ``isinstance(proxy, type)``, yet ``issubclass`` refuses it. ``class_namespace`` and
+``instance_state`` are ``vars``, typed ``Mapping[str, object]`` for a class's own namespace
+and ``dict[str, object]`` for an instance's ``__dict__``.
 
 The typed slots (``dict_items``, ``list_iter``, ...) are the builtin base
 methods themselves at runtime, so a subclass override of ``items`` /
@@ -172,6 +177,14 @@ if TYPE_CHECKING:
         """``Mapping.get`` read through the ABC's own method."""
         ...
 
+    def class_namespace(_cls: type[object], /) -> Mapping[str, object]:
+        """Return the namespace ``cls`` defines in its own body (``vars(cls)``)."""
+        ...
+
+    def instance_state(_value: object, /) -> dict[str, object]:
+        """Return the value's own ``__dict__`` (``vars(value)``)."""
+        ...
+
     def is_awaitable(_value: object, /) -> TypeIs[Awaitable[object]]:
         """Return whether ``await`` accepts the value (``inspect.isawaitable``).
 
@@ -269,6 +282,8 @@ else:
     frozenset_iter = frozenset.__iter__
     mapping_get = Mapping.get
     is_awaitable = inspect.isawaitable
+    class_namespace = vars
+    instance_state = vars
     read_attr = getattr
     pk_of = attrgetter("pk")
     enum_value = attrgetter("value")
@@ -288,6 +303,7 @@ else:
 
 __all__ = (
     "call_method",
+    "class_namespace",
     "del_item",
     "dict_get",
     "dict_items",
@@ -295,9 +311,11 @@ __all__ = (
     "enum_value",
     "frozenset_iter",
     "get_item",
+    "instance_state",
     "is_abstract_set",
     "is_awaitable",
     "is_char_wise",
+    "is_class",
     "is_concrete_field",
     "is_dict",
     "is_exact_dict",
@@ -413,6 +431,11 @@ def is_str(value: object) -> TypeIs[str]:
     ``True`` answer is one the base ``str`` slots accept.
     """
     return issubclass(type(value), str)
+
+
+def is_class(value: object) -> TypeIs[type[object]]:
+    """Return whether ``value`` IS a class, asked of its real type."""
+    return issubclass(type(value), type)
 
 
 def is_char_wise(value: object) -> TypeIs[str | bytes | bytearray | memoryview]:

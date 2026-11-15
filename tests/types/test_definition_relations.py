@@ -53,8 +53,6 @@ from django_strawberry_framework.types.definition import (
     DjangoTypeDefinition,
     origin_has_custom_id_resolver,
 )
-from django_strawberry_framework.utils.typing import object_result
-from tests._idioms import ClaimsClass, ClassReadRaises
 
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
@@ -206,25 +204,6 @@ def _malformed_definition(
     )
 
 
-def test_graphql_type_name_reads_the_origin_name_past_a_hostile_metaclass() -> None:
-    """A metaclass ``__getattribute__`` that raises for ``__name__`` never runs.
-
-    The fallback name is read from the class's own slot (``utils/truth.py::name``).
-    """
-
-    class _HostileMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__name__":
-                raise RuntimeError("name exploded")
-            return object_result(super().__getattribute__, name)
-
-    class HostileOrigin(metaclass=_HostileMeta):
-        pass
-
-    assert _malformed_definition(origin=HostileOrigin).graphql_type_name == "HostileOrigin"
-
-
 def test_related_target_lookup_propagates_malformed_model_and_relation_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -291,55 +270,6 @@ def test_related_target_lookup_propagates_malformed_model_and_relation_metadata(
         _ = definition.related_target_for("relation")
 
 
-def test_custom_id_detection_reads_hostile_class_metadata_truthfully() -> None:
-    """Hostile ``__mro__`` / ``__dict__`` / ``__class__`` hooks never run.
-
-    The real MRO and namespaces are read (``utils/truth.py``), and none of these classes
-    declares an id resolver, so none counts as custom.
-    """
-
-    class _HostileMroMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__mro__":
-                raise RuntimeError("mro exploded")
-            return object_result(super().__getattribute__, name)
-
-    class _HostileMro(metaclass=_HostileMroMeta):
-        pass
-
-    class _HostileDictMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__dict__":
-                raise RuntimeError("dict exploded")
-            return object_result(super().__getattribute__, name)
-
-    class _HostileDict(metaclass=_HostileDictMeta):
-        pass
-
-    class _UnreadableMro:
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("mro iteration exploded")
-
-    class _UnreadableMroMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__mro__":
-                return _UnreadableMro()
-            return object_result(super().__getattribute__, name)
-
-    class _UnreadableMroOrigin(metaclass=_UnreadableMroMeta):
-        pass
-
-    assert origin_has_custom_id_resolver(_HostileMro, "id") is False
-    assert origin_has_custom_id_resolver(_HostileDict, "id") is False
-    assert origin_has_custom_id_resolver(_UnreadableMroOrigin, "id") is False
-    # basedpyright: the object whose __class__ raises is the hostile input under test;
-    # origin_has_custom_id_resolver types the parameter as type[object]
-    assert origin_has_custom_id_resolver(ClassReadRaises(message="class exploded"), "id") is False  # pyright: ignore[reportArgumentType]
-
-
 def test_graphql_type_name_rejects_empty_name() -> None:
     """An empty ``name`` is a typed failure naming the origin class."""
     with pytest.raises(ConfigurationError) as exc_info:
@@ -391,17 +321,6 @@ class _LoudStr(str):
 
 
 _UNREADABLE_ID_ATTRS = [
-    pytest.param(
-        lambda: ClassReadRaises(RuntimeError, "class read"),
-        True,
-        id="class-read-raises-runtime",
-    ),
-    pytest.param(
-        lambda: ClassReadRaises(KeyboardInterrupt, "class read"),
-        True,
-        id="class-read-raises-base-exception",
-    ),
-    pytest.param(lambda: ClaimsClass(str), True, id="class-claims-str"),
     pytest.param(lambda: SimpleLazyObject(lambda: "id"), True, id="lazy-str"),
     pytest.param(lambda: "id", False, id="pk-name"),
     pytest.param(lambda: "pk", False, id="pk-alias"),
@@ -419,9 +338,8 @@ def test_custom_id_detection_normalizes_the_resolve_id_attr_result_under_its_gua
 ) -> None:
     """The ``resolve_id_attr`` result is read under the guard that contains the call.
 
-    A result whose class cannot be read, one that only claims ``str`` and a lazy proxy of a
-    string all fail closed (the type counts as custom); a plain or ``str``-subclass name
-    that is the pk name or ``pk`` does not.
+    A lazy proxy of a string fails closed (the type counts as custom); a plain or
+    ``str``-subclass name that is the pk name or ``pk`` does not.
     """
     id_attr = make_id_attr()
 

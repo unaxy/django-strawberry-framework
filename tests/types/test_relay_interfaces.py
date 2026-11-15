@@ -97,25 +97,6 @@ def _as_definition(stand_in: object) -> DjangoTypeDefinition:
     return stand_in  # pyright: ignore[reportReturnType]
 
 
-def test_class_name_reads_the_slot_past_a_non_string_metaclass_name() -> None:
-    """A metaclass answering ``__name__`` with a non-string never reaches a rendered name.
-
-    ``utils/truth.py::name`` reads the class's own slot, so the hook never runs.
-    """
-
-    class _NonStringNameMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__name__":
-                return 42
-            return object_result(super().__getattribute__, name)
-
-    class _MalformedName(metaclass=_NonStringNameMeta):
-        pass
-
-    assert truth.name(_MalformedName) == "_MalformedName"
-
-
 # ---------------------------------------------------------------------------
 # Validation + storage
 # ---------------------------------------------------------------------------
@@ -3182,23 +3163,6 @@ def test_decode_non_str_input_raises(bad_input: object) -> None:
     """A non-``str`` / non-``GlobalID`` argument raises from the runtime input-type gate."""
     with pytest.raises(ConfigurationError, match=r"relay\.GlobalID or its base64 string"):
         decode_global_id(bad_input)
-
-
-def test_decode_hostile_input_type_name_stays_typed() -> None:
-    """A hostile input metaclass's ``__name__`` hook never runs at the GlobalID type gate."""
-
-    class HostileMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__name__":
-                raise RuntimeError("hostile type name")
-            return object_result(super().__getattribute__, name)
-
-    class BadInput(metaclass=HostileMeta):
-        pass
-
-    with pytest.raises(ConfigurationError, match=r"relay\.GlobalID or its base64 string"):
-        decode_global_id(BadInput())
 
 
 def test_decode_hostile_globalid_slots_propagate() -> None:

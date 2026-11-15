@@ -527,18 +527,8 @@ def test_convert_choices_to_enum_propagates_hostile_choices_truthiness(
         convert_choices_to_enum(field, "FixtureType")
 
 
-def test_field_label_reads_the_model_name_truthfully() -> None:
-    """A model metaclass's ``__name__`` hook never runs; unreadable field attributes propagate."""
-
-    class _HostileModelMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__name__":
-                raise RuntimeError("model name exploded")
-            return object_result(super().__getattribute__, name)
-
-    class _HostileModel(metaclass=_HostileModelMeta):
-        pass
+def test_field_label_propagates_unreadable_field_attributes() -> None:
+    """A field whose ``model`` or ``name`` read raises propagates that error."""
 
     class _UnreadableModel:
         @property
@@ -554,9 +544,6 @@ def test_field_label_reads_the_model_name_truthfully() -> None:
         def name(self) -> NoReturn:
             raise RuntimeError("name exploded")
 
-    assert _field_label(type("Field", (), {"model": _HostileModel, "name": "field"})()) == (
-        "_HostileModel.field"
-    )
     with pytest.raises(RuntimeError, match="model exploded"):
         _ = _field_label(_UnreadableModel())
     with pytest.raises(RuntimeError, match="name exploded"):
