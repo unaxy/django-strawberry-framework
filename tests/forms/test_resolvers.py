@@ -126,7 +126,14 @@ from django_strawberry_framework.utils.querysets import SyncMisuseError, visible
 from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
-from tests._idioms import TEST_ASYNC_RECOURSE, is_object_dict, is_object_list, saved_pk
+from tests._idioms import (
+    TEST_ASYNC_RECOURSE,
+    AllowAll,
+    PingQuery,
+    is_object_dict,
+    json_at,
+    saved_pk,
+)
 from tests._info import make_info, unread_info
 from tests._postgres_fields import FakeArrayField, FakeSplitArrayWidget, patch_array_field
 from tests._postgresql_stand_in import numeric_refusing_postgresql
@@ -161,25 +168,7 @@ if TYPE_CHECKING:
     _M = TypeVar("_M", bound=models.Model)
 
 
-def _json_at(value: object, *path: str | int) -> object:
-    """``value`` followed down ``path``: a ``str`` key into an object, an ``int`` index into a list."""
-    found = value
-    for key in path:
-        if isinstance(key, str):
-            assert is_object_dict(found), found
-            found = found[key]
-        else:
-            assert is_object_list(found), found
-            found = found[key]
-    return found
-
-
-@pytest.fixture(autouse=True)
-def _isolate_registry() -> Iterator[None]:
-    """Reset the registry (co-clears the form + mutation ledgers) per test."""
-    registry.clear()
-    yield
-    registry.clear()
+pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
 
 _name_counter = itertools.count(1)
@@ -187,27 +176,6 @@ _name_counter = itertools.count(1)
 
 def _uniq(prefix: str) -> str:
     return f"{prefix}-{next(_name_counter)}"
-
-
-class _AllowAll:
-    """A permission class that authorizes every write (isolates the pipeline from auth)."""
-
-    def has_permission(
-        self,
-        _info: object,
-        _mutation: type[object],
-        _operation: str,
-        _data: object,
-        _instance: object = None,
-    ) -> bool:
-        return True
-
-
-@strawberry.type
-class _Query:
-    @strawberry.field
-    def ping(self) -> int:
-        return 1
 
 
 def _schema(mutation_type: type) -> strawberry.Schema:
@@ -223,7 +191,7 @@ def _schema(mutation_type: type) -> strawberry.Schema:
     """
     optimizer = DjangoOptimizerExtension()
     return DjangoSchema(
-        query=_Query,
+        query=PingQuery,
         mutation=mutation_type,
         extensions=[lambda: optimizer],
         error_policy={"enabled": False},
@@ -260,7 +228,7 @@ def _build_item_form_schema(
     ],
 ]:
     """Declare Item/Category Relay primaries + a create/update ModelForm mutation."""
-    perms = permission_classes if permission_classes is not None else [_AllowAll]
+    perms = permission_classes if permission_classes is not None else [AllowAll]
 
     category_body: dict[str, object] = {
         "Meta": type(
@@ -392,7 +360,7 @@ def test_decode_split_upload_lands_in_files_never_data() -> None:
         class Meta:
             form_class = MediaForm
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -448,7 +416,7 @@ def test_decode_unwraps_choice_enum_to_raw_value() -> None:
         class Meta:
             form_class = BookForm
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -629,7 +597,7 @@ def test_partial_reconstruction_excludes_every_file_field_flavor(file_field_name
         class Meta:
             form_class = MediaForm
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -687,7 +655,7 @@ def _update_media_file_schema(
         class Meta:
             form_class = MediaForm
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -731,7 +699,7 @@ def test_update_explicit_null_on_an_optional_file_clears_it() -> None:
         },
     )
     assert res.errors is None, res.errors
-    assert _json_at(res.data, "updateMedia", "errors") == []
+    assert json_at(res.data, "updateMedia", "errors") == []
     specimen.refresh_from_db()
     assert specimen.optional_attachment.name == ""
     assert specimen.attachment.name == "scalar_media/files/stored.txt"
@@ -837,7 +805,7 @@ def test_update_keeps_a_disabled_file_fields_stored_file(
                 opened.close()
         counted = (_CountingStorage.sizes, len(_CountingStorage.opened))
     assert res.errors is None, res.errors
-    assert _json_at(res.data, "updateMedia", "errors") == []
+    assert json_at(res.data, "updateMedia", "errors") == []
     assert counted == (1, opens)
     specimen.refresh_from_db()
     assert specimen.label == "Renamed"
@@ -918,7 +886,7 @@ def _save_refusal_schema(flavor: str) -> tuple[strawberry.Schema, str, str, str]
         class SubmitItem(DjangoFormMutation):
             class Meta:
                 form_class = ItemSubmitForm
-                permission_classes = [_AllowAll]
+                permission_classes = [AllowAll]
 
             @override
             def perform_mutate(
@@ -1139,7 +1107,7 @@ def test_sync_create_meeting_async_get_queryset_raises_the_sync_misuse_class() -
         class Meta:
             form_class = form_cls
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -1275,7 +1243,7 @@ def test_visible_related_object_no_primary_uses_default_manager() -> None:
 
     A relation whose related model has no primary ``DjangoType`` carries no
     visibility contract, so existence is checked against the default manager.
-    Driven directly (the autouse fixture leaves the registry empty). The helper
+    Driven directly (the module's registry fixture leaves the registry empty). The helper
     lives in ``utils/querysets.py`` so the form +
     serializer relation decoders share one object-returning visibility query.
     """
@@ -1727,13 +1695,13 @@ def _pg_one_value_schema(*, presents_initial: bool) -> strawberry.Schema:
         class Meta:
             form_class = note_form
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class UpdateNote(DjangoModelFormMutation):
         class Meta:
             form_class = note_form
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
         @override
         def get_form_kwargs(
@@ -1794,7 +1762,7 @@ def test_single_value_fields_over_array_columns_create_the_wrapped_list() -> Non
             variable_values={"d": {"title": "New", "tags": "x", "labels": "y"}},
         )
         assert res.errors is None, res.errors
-        assert _json_at(res.data, "createNote") == {"result": {"title": "New"}, "errors": []}
+        assert json_at(res.data, "createNote") == {"result": {"title": "New"}, "errors": []}
         assert list(model._base_manager.values_list("tags", "labels")) == [(["x"], ["y"])]
 
 
@@ -1865,7 +1833,7 @@ def test_single_value_fields_over_array_columns_update(
             variable_values={"id": str(saved_pk(note)), "d": data},
         )
         assert res.errors is None, res.errors
-        assert _json_at(res.data, "updateNote", "errors") == errors
+        assert json_at(res.data, "updateNote", "errors") == errors
         assert list(model._base_manager.values_list("tags", "labels")) == [stored]
 
 
@@ -2853,7 +2821,7 @@ def test_modelform_blank_consumer_code_sets_is_the_columns_own_refusal(
         res = _blank_setting_write(model_class, shape, sent=sent, stored=stored)
         assert res.errors is None, res.errors
         root = "createRow" if operation == "create" else "updateRow"
-        assert _json_at(res.data, root) == {
+        assert json_at(res.data, root) == {
             "result": None,
             "errors": [
                 {
@@ -3748,7 +3716,7 @@ def test_modelform_create_binds_and_reads_through_the_form_add_prefix(
         },
     )
     assert res.errors is None, res.errors
-    assert _json_at(res.data, "createItem", "errors") == errors
+    assert json_at(res.data, "createItem", "errors") == errors
     written = product_models.Item.objects.filter(name="DottedPrefix")
     assert list(written.values_list("is_private", flat=True)) == stored
 
@@ -3796,7 +3764,7 @@ def _update_prefixed_media_schema(
         class Meta:
             form_class = MediaForm
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
         @override
         def get_form_kwargs(
@@ -3894,7 +3862,7 @@ def test_update_under_a_half_rekeyed_prefix_binds_both_mappings(
         variable_values={"id": global_id_for(media_type, saved_pk(specimen)), "d": change},
     )
     assert res.errors is None, res.errors
-    assert _json_at(res.data, "updateMedia", "errors") == errors
+    assert json_at(res.data, "updateMedia", "errors") == errors
     specimen.refresh_from_db()
     assert specimen.label == (new_label or label)
     assert specimen.attachment.name == _STORED_ATTACHMENT
@@ -3919,7 +3887,7 @@ def test_update_under_a_prefix_never_mutates_the_bound_files_mapping() -> None:
         },
     )
     assert res.errors is None, res.errors
-    assert _json_at(res.data, "updateMedia", "errors") == [
+    assert json_at(res.data, "updateMedia", "errors") == [
         {"field": "attachment", "codes": ["required"]},
     ]
     assert seen == [{"attachment": False}]
@@ -4667,7 +4635,7 @@ def test_modelform_null_the_consumer_form_resolves_is_written(
         class Meta:
             form_class = chosen_form
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
         @override
         def get_form_kwargs(
@@ -4954,7 +4922,7 @@ def _update_loan_schema(
         class Meta:
             form_class = loan_form
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
         @override
         def get_form(
@@ -5144,7 +5112,7 @@ def _m2m_init_sets_key() -> _Probe:
         class Meta:
             form_class = BookGenresForm
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -5512,7 +5480,7 @@ def _declare_write(
     meta: dict[str, object] = {
         "form_class": form_class,
         "operation": operation,
-        "permission_classes": [_AllowAll],
+        "permission_classes": [AllowAll],
     }
     if fields is not None:
         meta["fields"] = fields
@@ -5608,7 +5576,7 @@ def _refuse_get_form_kwargs_override() -> str:
         class Meta:
             form_class = ticket_form
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
         @override
         def get_form_kwargs(
@@ -5635,7 +5603,7 @@ def _declare_rebuilding_write(
         class Meta:
             form_class = ticket_form
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
         @override
         def get_form(
@@ -5844,7 +5812,7 @@ def _admit_hook_basis_over_another_model() -> _AdmittedWrite:
         class Meta:
             form_class = ticket_form
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
         @classmethod
         @override
@@ -6138,7 +6106,7 @@ def _write_keyed_row(
         res = _execute_in_mode(schema, query, {"id": str(saved_pk(row)), "d": data}, mode=mode)
         root = "updateRow"
     assert res.errors is None, res.errors
-    return _json_at(res.data, root)
+    return json_at(res.data, root)
 
 
 def _array_column_and_field(shape: str) -> tuple[models.Field[object, object], forms.Field]:
@@ -7005,7 +6973,7 @@ def _row_model_schema(
         class Meta:
             form_class = forms.modelform_factory(backing, fields=("name",))
             operation = op
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     def get_form(
         _self: object,
@@ -8428,13 +8396,13 @@ def _write_amount_via_form(
         class Meta:
             form_class = amount_form
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class UpdateAmount(DjangoModelFormMutation):
         class Meta:
             form_class = amount_form
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -8616,7 +8584,7 @@ def _create_specimen(
         class Meta:
             form_class = specimen_form
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -8822,7 +8790,7 @@ def _write_via_form(
         class Meta:
             form_class = writing_form
             operation = "create" if pk is None else "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
         @override
         def get_form(
@@ -8861,7 +8829,7 @@ def _write_via_form(
         variables = {"id": str(pk), "d": data}
     result = _schema(Mutation).execute_sync(document, variable_values=variables)
     assert result.errors is None, result.errors
-    return _json_at(result.data, "writeRow")
+    return json_at(result.data, "writeRow")
 
 
 def _unstorable_payload(field: str) -> dict[str, object]:
@@ -8922,7 +8890,7 @@ def test_decimal_past_postgresql_numeric_is_refused_before_its_uniqueness_check(
         assert payload == _unstorable_payload("amount")
         assert amounts == ([] if pk is None else [decimal.Decimal(7)])
     else:
-        assert _json_at(payload, "errors") == []
+        assert json_at(payload, "errors") == []
         assert amounts == [stored]
 
 
@@ -9052,7 +9020,7 @@ def test_model_validation_overrides_run_once_with_the_refused_column_excluded(
         assert payload == _unstorable_payload("opened")
         assert rows == 0
     else:
-        assert _json_at(payload, "errors") == []
+        assert json_at(payload, "errors") == []
         assert rows == 1
 
 
@@ -9103,7 +9071,7 @@ def test_a_validate_unique_a_get_form_hook_sets_on_the_instance_runs_and_is_kept
     if refused:
         assert payload == _unstorable_payload("opened")
     else:
-        assert _json_at(payload, "errors") == []
+        assert json_at(payload, "errors") == []
 
 
 @pytest.mark.django_db(transaction=True)

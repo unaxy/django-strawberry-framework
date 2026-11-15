@@ -38,7 +38,7 @@ import logging
 import threading
 import time
 import zoneinfo
-from collections.abc import Callable, Collection, Generator, Iterator, Sequence
+from collections.abc import Callable, Collection, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from types import SimpleNamespace
@@ -117,8 +117,12 @@ from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._idioms import (
     FETCH_MODES,
     TEST_ASYNC_RECOURSE,
+    AllowAll,
+    PingQuery,
     is_object_dict,
-    is_object_list,
+    json_at,
+    json_list,
+    json_object,
     requires_fetch_modes,
     saved_pk,
 )
@@ -141,12 +145,7 @@ if TYPE_CHECKING:
     _DecimalSet: TypeAlias = str | float | Decimal | Combinable
 
 
-@pytest.fixture(autouse=True)
-def _isolate_registry() -> Iterator[None]:
-    """Reset the registry (co-clears the mutation ledger + declaration registry) per test."""
-    registry.clear()
-    yield
-    registry.clear()
+pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
 
 _category_name_counter = itertools.count(1)
@@ -163,32 +162,11 @@ def _category_name() -> str:
     return f"Cat-{next(_category_name_counter)}"
 
 
-class _AllowAll:
-    """A permission class that authorizes every write (isolates the resolver from auth)."""
-
-    def has_permission(
-        self,
-        _info: object,
-        _mutation: type[object],
-        _operation: str,
-        _data: object,
-        _instance: object = None,
-    ) -> bool:
-        return True
-
-
-@strawberry.type
-class _Query:
-    @strawberry.field
-    def ping(self) -> int:
-        return 1
-
-
 def _schema(mutation_type: type) -> strawberry.Schema:
     """Build a finalized schema with the optimizer extension installed."""
     optimizer = DjangoOptimizerExtension()
     return DjangoSchema(
-        query=_Query,
+        query=PingQuery,
         mutation=mutation_type,
         extensions=[lambda: optimizer],
     )
@@ -231,19 +209,19 @@ def _build_item_schema(
     create_meta: dict[str, object] = {
         "model": product_models.Item,
         "operation": "create",
-        "permission_classes": [_AllowAll],
+        "permission_classes": [AllowAll],
     }
     if input_cls is not None:
         create_meta["input_class"] = input_cls
     update_meta = {
         "model": product_models.Item,
         "operation": "update",
-        "permission_classes": [_AllowAll],
+        "permission_classes": [AllowAll],
     }
     delete_meta = {
         "model": product_models.Item,
         "operation": "delete",
-        "permission_classes": [_AllowAll],
+        "permission_classes": [AllowAll],
     }
 
     CreateItem = type("CreateItem", (DjangoMutation,), {"Meta": type("Meta", (), create_meta)})
@@ -260,33 +238,6 @@ def _build_item_schema(
     return _schema(Mutation), (CategoryT, ItemT)
 
 
-def _json_at(value: object, *path: str | int) -> object:
-    """``value`` followed down ``path``: a ``str`` key into an object, an ``int`` index into a list."""
-    found = value
-    for key in path:
-        if isinstance(key, str):
-            assert is_object_dict(found), found
-            found = found[key]
-        else:
-            assert is_object_list(found), found
-            found = found[key]
-    return found
-
-
-def _json_object(value: object, *path: str | int) -> dict[object, object]:
-    """The JSON object at ``path`` under ``value`` (see ``_json_at``)."""
-    found = _json_at(value, *path)
-    assert is_object_dict(found), found
-    return found
-
-
-def _json_list(value: object, *path: str | int) -> list[object]:
-    """The JSON list at ``path`` under ``value`` (see ``_json_at``)."""
-    found = _json_at(value, *path)
-    assert is_object_list(found), found
-    return found
-
-
 def assert_mutation_field_error(
     result: ExecutionResult,
     payload_key: str,
@@ -301,10 +252,10 @@ def assert_mutation_field_error(
     """
     assert result.errors is None, result.errors
     assert result.data is not None
-    payload = _json_object(result.data, payload_key)
+    payload = json_object(result.data, payload_key)
     assert payload["node"] is None
-    errors = _json_list(payload, "errors")
-    assert [_json_at(error, "field") for error in errors] == [field], errors
+    errors = json_list(payload, "errors")
+    assert [json_at(error, "field") for error in errors] == [field], errors
     return payload
 
 
@@ -346,13 +297,13 @@ def _build_category_node_schema() -> tuple[strawberry.Schema, type[DjangoType]]:
         class Meta:
             model = product_models.Category
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class DeleteCategory(DjangoMutation):
         class Meta:
             model = product_models.Category
             operation = "delete"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -654,7 +605,7 @@ def _create_row(model: type[Model], fields: tuple[str, ...], data: dict[str, obj
                     "model": model,
                     "fields": fields,
                     "operation": "create",
-                    "permission_classes": [_AllowAll],
+                    "permission_classes": [AllowAll],
                 },
             ),
         },
@@ -671,7 +622,7 @@ def _create_row(model: type[Model], fields: tuple[str, ...], data: dict[str, obj
         variable_values={"d": data},
     )
     assert res.errors is None, res.errors
-    return _json_at(res.data, "createRow", "errors")
+    return json_at(res.data, "createRow", "errors")
 
 
 #: The envelope a create answers when its row's key is taken at the INSERT.
@@ -980,7 +931,7 @@ def test_update_of_a_columnless_child_table_deleted_after_the_locate_is_conflict
         stored = list(BareDesk._base_manager.values_list("pk", "name"))
 
     assert res.errors is None, res.errors
-    assert _json_at(res.data, "updateDesk") == {
+    assert json_at(res.data, "updateDesk") == {
         "result": None,
         "errors": [{"field": "id", "codes": ["conflict"]}],
     }
@@ -1307,7 +1258,7 @@ def _write_row(
         "model": model,
         "fields": fields,
         "operation": "create" if pk is None else "update",
-        "permission_classes": [_AllowAll],
+        "permission_classes": [AllowAll],
     }
     if pk is not None:
         meta["select_for_update"] = False
@@ -1331,7 +1282,7 @@ def _write_row(
         assert res.errors is not None
         return [error.message for error in res.errors]
     assert res.errors is None, res.errors
-    return _json_at(res.data, "writeRow")
+    return json_at(res.data, "writeRow")
 
 
 def _unique_together_errors(label: str) -> list[dict[str, object]]:
@@ -1809,7 +1760,7 @@ def test_sync_misuse_async_get_queryset_from_sync_path() -> None:
         class Meta:
             model = product_models.Item
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     finalize_django_types()
     cat = catalog_categories[0]
@@ -1931,7 +1882,7 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
         class Meta:
             model = product_models.Item
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     def _all_items() -> QuerySet[product_models.Item]:
         return product_models.Item.objects.all()
@@ -1994,7 +1945,7 @@ async def test_async_mutation_does_not_leak_into_later_read_optimizer_execution(
     # Exactly the one row this test wrote - no phantom leaked rows.
     assert read.data is not None
     names = sorted(
-        require_instance(_json_at(row, "name"), str) for row in _json_list(read.data, "allItems")
+        require_instance(json_at(row, "name"), str) for row in json_list(read.data, "allItems")
     )
     assert names == ["LeakProbe"], names
     # The relation round-trips through the optimizer plan (the leak's failure mode
@@ -2992,7 +2943,7 @@ def test_assign_m2m_integrity_error_contained_in_envelope() -> None:
         class Meta:
             model = product_models.Category
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     finalize_django_types()
     cat = product_models.Category(name=_category_name())
@@ -3136,7 +3087,7 @@ def _build_link_child_schema(
             "Meta": type(
                 "Meta",
                 (),
-                {"model": child_model, "operation": "create", "permission_classes": [_AllowAll]},
+                {"model": child_model, "operation": "create", "permission_classes": [AllowAll]},
             ),
         },
     )
@@ -3147,7 +3098,7 @@ def _build_link_child_schema(
             "Meta": type(
                 "Meta",
                 (),
-                {"model": child_model, "operation": "update", "permission_classes": [_AllowAll]},
+                {"model": child_model, "operation": "update", "permission_classes": [AllowAll]},
             ),
         },
     )
@@ -3202,7 +3153,7 @@ def test_all_fields_mutation_writes_a_foreign_object_through_its_carriers(
         )
         assert created.errors is None, created.errors
         assert created.data is not None
-        node = _json_object(created.data, "createChild", "node")
+        node = json_object(created.data, "createChild", "node")
         assert created.data["createChild"]["errors"] == []
         assert (node["name"], node["parent"]) == ("new", {"label": "pb"})
         row = child_model.objects.get(name="new")
@@ -3261,21 +3212,21 @@ def _build_link_key_schema(
             model = _link_models.LnkSlugChild
             operation = "create"
             fields = ("name", "parent")
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class UpdateSlugChild(DjangoMutation):
         class Meta:
             model = _link_models.LnkSlugChild
             operation = "update"
             fields = ("name", "parent")
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class UpdateParentTags(DjangoMutation):
         class Meta:
             model = _link_models.LnkParent
             operation = "update"
             fields = ("tags",)
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -3375,7 +3326,7 @@ def test_to_field_relation_input_stores_the_key_of_the_visible_row_it_names(
             )
         assert result.errors is None, result.errors
         assert result.data is not None
-        answer = _json_object(result.data, f"{operation}SlugChild")
+        answer = json_object(result.data, f"{operation}SlugChild")
         assert answer["errors"] == expected_errors
         expected_node = (
             {"name": name, "parent": {"label": target}} if not expected_errors else None
@@ -3546,7 +3497,7 @@ def _spelled_key_schema(stored: object) -> strawberry.Schema:
             model = owner
             operation = "create"
             fields = ("name", f"{prefix}_target", f"{prefix}_targets")
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -3763,7 +3714,7 @@ def _write_amount(operation: str, data: dict[str, object], pk: object = None) ->
                 "floored",
                 "rounded",
             )
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class UpdateUnboundedAmount(DjangoMutation):
         class Meta:
@@ -3777,7 +3728,7 @@ def _write_amount(operation: str, data: dict[str, object], pk: object = None) ->
                 "floored",
                 "rounded",
             )
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -4043,7 +3994,7 @@ def _create_cleaned_stamp(data: dict[str, object], written: str) -> ExecutionRes
             model = CleanedStamp
             operation = "create"
             fields = ("label", written)
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -4138,7 +4089,7 @@ def test_model_clean_datetime_the_unique_date_column_cannot_store_is_the_field_e
         stored = _stored_cleaned_stamps()
 
     assert result.errors is None, result.errors
-    assert _json_at(result.data, "createCleanedStamp", "errors") == errors
+    assert json_at(result.data, "createCleanedStamp", "errors") == errors
     assert stored == ([] if stored_day is None else [(label, stored_day, None)])
 
 
@@ -4210,7 +4161,7 @@ def test_text_scalar_duration_parsed_past_the_backend_integer_is_the_field_error
         written = _stored_cleaned_stamps()
 
     assert result.errors is None, result.errors
-    assert _json_at(result.data, "createCleanedStamp", "errors") == errors
+    assert json_at(result.data, "createCleanedStamp", "errors") == errors
     assert written == stored
 
 
@@ -4249,7 +4200,7 @@ def test_date_field_date_check_in_year_9999_west_of_utc_is_written() -> None:
         )
         stored = list(DayStampedSlug._base_manager.values_list("day", flat=True))
 
-    assert _json_at(payload, "errors") == []
+    assert json_at(payload, "errors") == []
     assert stored == [datetime.date(9999, 12, 31)]
 
 

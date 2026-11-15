@@ -154,12 +154,7 @@ def _restore_converter_registry() -> Iterator[None]:
     serializer_converter._SERIALIZER_FIELD_CONVERTERS.update(snapshot)
 
 
-@pytest.fixture(autouse=True)
-def _isolate_registry() -> Iterator[None]:
-    """Reset the registry so each test's products / fixture ``DjangoType``s start clean."""
-    registry.clear()
-    yield
-    registry.clear()
+pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
 
 def _concrete_field(model: type[models.Model], name: str) -> ConcreteField:

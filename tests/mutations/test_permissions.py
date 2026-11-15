@@ -10,7 +10,7 @@ cannot encode. The in-process schema rows read only that hidden state.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Generator, Iterator
+from collections.abc import Awaitable, Generator
 from types import SimpleNamespace
 
 import pytest
@@ -48,16 +48,10 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
-from tests._idioms import saved_pk
+from tests._idioms import PingQuery, saved_pk
 from tests._info import make_info
 
-
-@pytest.fixture(autouse=True)
-def _isolate_registry() -> Iterator[None]:
-    """Reset the registry (co-clears the mutation declaration registry) per test."""
-    registry.clear()
-    yield
-    registry.clear()
+pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
 
 def _info_for(user: object) -> strawberry.Info[object, object]:
@@ -188,13 +182,6 @@ def test_model_permission_checks_the_model_the_class_declared(
 # ---------------------------------------------------------------------------
 
 
-@strawberry.type
-class _Query:
-    @strawberry.field
-    def ping(self) -> int:
-        return 1
-
-
 #: Every probe schema in this file opts out of the spec-048 response-boundary error
 #: policy. The subject here is the AUTHORIZATION pipeline - whether a coroutine or a
 #: non-bool permission result is refused rather than silently treated as ALLOW - and
@@ -255,7 +242,7 @@ def _build_auth_schema(
         delete_item = DjangoMutationField(DeleteItem)
 
     finalize_django_types()
-    schema = DjangoSchema(query=_Query, mutation=Mutation, error_policy=_NO_ERROR_MASKING)
+    schema = DjangoSchema(query=PingQuery, mutation=Mutation, error_policy=_NO_ERROR_MASKING)
     return schema, (CategoryT, ItemT)
 
 
@@ -643,7 +630,7 @@ def test_permission_slot_refusal_preserves_snapshot_and_original_error() -> None
         create_item = DjangoMutationField(CreateItem)
 
     finalize_django_types()
-    schema = DjangoSchema(query=_Query, mutation=Mutation, error_policy=_NO_ERROR_MASKING)
+    schema = DjangoSchema(query=PingQuery, mutation=Mutation, error_policy=_NO_ERROR_MASKING)
     cat = product_models.Category.objects.earliest("pk")
 
     res = _execute(

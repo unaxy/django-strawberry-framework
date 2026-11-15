@@ -33,7 +33,6 @@ from __future__ import annotations
 import importlib
 import re
 import sys
-from collections.abc import Iterator
 from typing import ClassVar
 
 import pytest
@@ -93,7 +92,10 @@ from django_strawberry_framework.types.base import (
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR
 from tests._idioms import (
+    AllowAll,
+    PingQuery,
     canonical_order,
+    declare_products_primaries,
     definition_raises,
     module_binding,
     pickle_roundtrip,
@@ -101,20 +103,7 @@ from tests._idioms import (
 )
 from tests.optimizer import _link_models
 
-
-@pytest.fixture(autouse=True)
-def _isolate_registry() -> Iterator[None]:
-    """Reset the registry (co-clearing mutation ledgers + the shape build cache).
-
-    ``registry.clear()`` co-clears ``clear_mutation_input_namespace`` (input +
-    payload globals ledger), ``clear_mutation_registry`` (declaration registry),
-    and ``clear_mutation_shape_build_cache`` (per-pass input build cache), so a
-    single ``registry.clear()`` resets every mutation-side ledger. The products
-    ``DjangoType``s register on import, so the clear is needed before/after.
-    """
-    registry.clear()
-    yield
-    registry.clear()
+pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
 
 # ---------------------------------------------------------------------------
@@ -583,17 +572,6 @@ def test_permission_classes_defaults_to_django_model_permission() -> None:
 def test_permission_classes_explicit_override_honored() -> None:
     """An explicit ``permission_classes`` list is stored verbatim (as the immutable tuple)."""
 
-    class AllowAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _operation: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return True
-
     class CreateItem(DjangoMutation):
         class Meta:
             model = product_models.Item
@@ -605,17 +583,6 @@ def test_permission_classes_explicit_override_honored() -> None:
 
 def test_permission_classes_sequence_is_normalized_to_an_immutable_tuple() -> None:
     """A tuple ``permission_classes`` is normalized to the stored tuple (immutable snapshot)."""
-
-    class AllowAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _operation: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return True
 
     class CreateItem(DjangoMutation):
         class Meta:
@@ -633,18 +600,6 @@ def test_permission_classes_bare_class_raises() -> None:
     iterate as a ``TypeError`` inside ``check_permission`` at request time, so it is
     rejected up front naming the sequence requirement.
     """
-
-    class AllowAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _operation: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return True
-
     with pytest.raises(ConfigurationError, match="must be a sequence of"):
 
         @definition_raises
@@ -674,18 +629,6 @@ def test_permission_classes_instance_entry_raises() -> None:
     INSTANTIATES each entry - so an already-instantiated object is invalid and is
     rejected at class creation rather than as a request-time ``TypeError``.
     """
-
-    class AllowAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _operation: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return True
-
     with pytest.raises(ConfigurationError, match="not a permission class exposing has_permission"):
 
         @definition_raises
@@ -791,24 +734,6 @@ def test_late_declaration_after_finalize_raises() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _declare_products_primaries() -> tuple[type[DjangoType], type[DjangoType]]:
-    """Register primary ``DjangoType``s for ``Item`` and ``Category`` (Relay-shaped)."""
-
-    class CategoryT(DjangoType, strawberry.relay.Node):
-        class Meta:
-            model = product_models.Category
-            fields = ("id", "name")
-            primary = True
-
-    class ItemT(DjangoType, strawberry.relay.Node):
-        class Meta:
-            model = product_models.Item
-            fields = ("id", "name")
-            primary = True
-
-    return CategoryT, ItemT
-
-
 def test_bind_materializes_input_and_payload_globals() -> None:
     """After finalize, the create/update/delete classes are materialized into inputs.
 
@@ -820,7 +745,7 @@ def test_bind_materializes_input_and_payload_globals() -> None:
     shared parked-globals lifecycle), so a prior test's parked ``ItemInput`` would
     make a bare ``hasattr`` pass spuriously.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     class CreateItem(DjangoMutation):
         class Meta:
@@ -886,7 +811,7 @@ def test_bind_is_retry_idempotent_after_fixable_later_phase_failure(
     Resetting the materialization ledgers in ``finalize_django_types`` before the
     bind sequence makes the rerun clean.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     class CreateItem(DjangoMutation):
         class Meta:
@@ -925,7 +850,7 @@ def test_bind_merges_consumer_input_class_with_generated_remainder() -> None:
     consumer's ``name`` (with its custom description preserved) AND the generated
     ``category_id`` - under the canonical ``ItemInput`` name, never just ``name``.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class CustomItemInput:
@@ -963,7 +888,7 @@ def test_bind_merges_an_input_class_that_overrides_every_selected_column() -> No
     consumer's alone, so an empty generated remainder is a valid build, never the
     empty-input refusal (that belongs to an empty selection).
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class CustomCategoryName:
@@ -987,7 +912,7 @@ def test_bind_merges_an_input_class_that_overrides_every_selected_column() -> No
 
 def test_bind_merges_consumer_partial_input_class_for_update() -> None:
     """A consumer ``partial_input_class`` is likewise merged on the update side."""
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class CustomItemPartial:
@@ -1023,7 +948,7 @@ def test_bind_rejects_raw_pk_relation_override_for_relay_target() -> None:
     phase-2.5 bind (``_validate_input_class`` name-checks at class creation but cannot
     know the id type then - it passes ``related_primary_type=None``).
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class RawPkItemInput:
@@ -1044,7 +969,7 @@ def test_bind_rejects_raw_pk_relation_override_for_relay_target() -> None:
 
 def test_bind_rejects_raw_pk_relation_override_on_partial_input() -> None:
     """The type-lock applies to ``partial_input_class`` (update) too (Decision 10)."""
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class RawPkItemPartial:
@@ -1070,7 +995,7 @@ def test_bind_rejects_strawberry_parsed_globalid_relation_override() -> None:
     of reaching the package decode as the ``categoryId`` relation ``FieldError`` the
     generated ``strawberry.ID`` input answers. The bind rejects the divergent core.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class ParsedGidItemInput:
@@ -1097,7 +1022,7 @@ def test_bind_accepts_id_relation_override_for_relay_target() -> None:
     the GlobalID decode and the Decision-10 visibility contract still ride the merged
     field. The merge honors the consumer's field, and the generator fills the remainder.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class GidItemInput:
@@ -1123,7 +1048,7 @@ def test_bind_accepts_id_relation_override_for_relay_target() -> None:
 def _declare_book_m2m_primaries() -> tuple[type[DjangoType], type[DjangoType], type[DjangoType]]:
     """Register Relay-Node primaries for ``Genre`` / ``Shelf`` / ``Book`` (Book has a real M2M).
 
-    The M2M analogue of ``_declare_products_primaries``: ``Book.genres`` is a forward
+    The M2M analogue of ``declare_products_primaries``: ``Book.genres`` is a forward
     M2M to ``Genre`` (a Relay-Node primary), so the generated relation input is
     ``list[strawberry.ID]`` - the shape an override must keep.
     """
@@ -1211,7 +1136,7 @@ def test_bind_rejects_fk_relation_override_as_id_list() -> None:
     decode, and every request would be the invalid-relation ``FieldError``. The
     shape-lock rejects it at the bind.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class BadItemInput:
@@ -1236,7 +1161,7 @@ def test_bind_accepts_optional_fk_relation_override() -> None:
     Optional wrapper is nullability, so the nullable scalar keeps depth 0 and the
     merged input honors the consumer's field.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class NullableItemInput:
@@ -1315,7 +1240,7 @@ def test_bind_accepts_m2m_relation_override_as_id_list() -> None:
 
 def test_bind_dedupes_identical_full_shapes() -> None:
     """Two create mutations over the same model with the full shape share one ``ItemInput``."""
-    _declare_products_primaries()
+    declare_products_primaries()
 
     class CreateItemA(DjangoMutation):
         class Meta:
@@ -1344,7 +1269,7 @@ def test_bind_dedupes_full_set_fields_with_bare_create() -> None:
     (spec-036 Edge cases and constraints) rather than spuriously raising a
     distinct-shape collision on the shared name.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     class CreateBare(DjangoMutation):
         class Meta:
@@ -1378,7 +1303,7 @@ def test_bind_dedupes_fields_with_complementary_exclude() -> None:
     dedupe to one materialized type (spec-036 Decision 6 / Edge cases and
     constraints), not raise a spurious distinct-shape collision on the shared name.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     class CreateViaFields(DjangoMutation):
         class Meta:
@@ -1418,7 +1343,7 @@ def test_bind_merged_and_generated_same_shape_distinct_representations_raise() -
     collision check fires at finalize (a consumer class name can neither dodge nor
     forge a collision).
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class CustomItemInput:
@@ -1443,13 +1368,6 @@ def test_bind_merged_and_generated_same_shape_distinct_representations_raise() -
         finalize_django_types()
 
 
-@strawberry.type
-class _PingQuery:
-    @strawberry.field
-    def ping(self) -> int:
-        return 1
-
-
 def test_bind_merged_narrowed_input_publishes_the_canonical_shape_name() -> None:
     """A merged narrowed input publishes ``shape.type_name`` verbatim, escapes and all.
 
@@ -1458,7 +1376,7 @@ def test_bind_merged_narrowed_input_publishes_the_canonical_shape_name() -> None
     ``to_camel_case(__name__)``, which would publish ``ItemIsUprivatenameinput`` while
     the ledger holds the canonical name. The merge pins ``name=shape.type_name``.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     @strawberry.input
     class CustomItemInput:
@@ -1483,7 +1401,7 @@ def test_bind_merged_narrowed_input_publishes_the_canonical_shape_name() -> None
     assert get_object_definition(merged, strict=True).name == shape.type_name
     assert shape.type_name in _materialized_names
 
-    sdl = DjangoSchema(query=_PingQuery, mutation=Mutation).as_str()
+    sdl = DjangoSchema(query=PingQuery, mutation=Mutation).as_str()
     assert "input ItemIs_uprivateNameInput " in sdl
 
 
@@ -1493,7 +1411,7 @@ def test_bind_duplicate_payload_name_distinct_shapes_raises() -> None:
     Same class name in different "modules" -> same ``<Name>Payload`` name but a
     distinct object slot/type, so the payload ledger collision fires at finalize.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     # Two distinct mutation classes that resolve to the same payload name
     # ``CreateThingPayload`` over distinct primary object types (Item vs Category).
@@ -1516,7 +1434,7 @@ def test_bind_duplicate_payload_name_distinct_shapes_raises() -> None:
 
 def test_registry_clear_co_clears_mutation_namespace_and_declarations() -> None:
     """``registry.clear()`` resets the materialized ledger AND the declaration registry."""
-    _declare_products_primaries()
+    declare_products_primaries()
 
     class CreateItem(DjangoMutation):
         class Meta:
@@ -1776,7 +1694,7 @@ def test_model_flavor_input_seams_produce_model_defaults() -> None:
     input materialized in ``mutations.inputs`` under the canonical ``<Model>Input``
     name, reached through the overridable seam.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     class CreateItem(DjangoMutation):
         class Meta:
@@ -1924,7 +1842,7 @@ def test_django_mutation_validate_meta_rejects_unhashable_and_non_string_operati
     invalid_op: object,
 ) -> None:
     """DjangoMutation._validate_meta raises ConfigurationError for unhashable or non-string operations."""
-    _declare_products_primaries()
+    declare_products_primaries()
 
     with pytest.raises(
         ConfigurationError,
@@ -1981,7 +1899,7 @@ def test_django_mutation_validate_meta_reads_a_hostile_hash_operation_as_its_tex
     ``str`` copy ``truth.text`` makes, so the override never runs and the operation is
     the ``create`` it spells.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     class HashOpMutation(DjangoMutation):
         class Meta:
@@ -2002,7 +1920,7 @@ def test_django_mutation_input_type_name_delete_operation_raises_typed_reject() 
     NON_DELETE_OPERATION_INPUT_KIND. The reject mirrors _materialize_input_for's
     .get() delete short-circuit.
     """
-    _declare_products_primaries()
+    declare_products_primaries()
 
     class DeleteItem(DjangoMutation):
         class Meta:

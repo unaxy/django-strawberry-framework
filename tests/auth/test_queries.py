@@ -18,7 +18,7 @@ is earned in
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 
 import pytest
 import strawberry
@@ -41,16 +41,10 @@ from django_strawberry_framework.auth.queries import (
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import _materialized_names
-from django_strawberry_framework.registry import iter_subsystem_clears, registry
+from django_strawberry_framework.registry import iter_subsystem_clears
 from tests.auth._helpers import _session_request
 
-
-@pytest.fixture(autouse=True)
-def _isolate_registry() -> Iterator[None]:
-    """Reset the registry (co-clearing the auth declaration ledger) per test."""
-    registry.clear()
-    yield
-    registry.clear()
+pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
 
 class _IsAuthenticated:

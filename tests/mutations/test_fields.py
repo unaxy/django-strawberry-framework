@@ -13,7 +13,6 @@ A request cannot observe ``CreateItemPayload!`` bind identity or a
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
 
 import pytest
 import strawberry
@@ -44,33 +43,14 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import resolvers as serializer_resolvers
 from django_strawberry_framework.rest_framework.inputs import SERIALIZER_INPUTS_MODULE_PATH
 from django_strawberry_framework.utils._narrowing import read_attr, require, require_instance
-from tests._idioms import ModelSerializerBase, is_object_dict
+from tests._idioms import (
+    AllowAll,
+    ModelSerializerBase,
+    PingQuery,
+    is_object_dict,
+)
 
-
-@pytest.fixture(autouse=True)
-def _isolate_registry() -> Iterator[None]:
-    registry.clear()
-    yield
-    registry.clear()
-
-
-class _AllowAll:
-    def has_permission(
-        self,
-        _info: object,
-        _mutation: type[object],
-        _operation: str,
-        _data: object,
-        _instance: object = None,
-    ) -> bool:
-        return True
-
-
-@strawberry.type
-class _Query:
-    @strawberry.field
-    def ping(self) -> int:
-        return 1
+pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
 
 def _declare_item_primaries() -> tuple[type[DjangoType], type[DjangoType]]:
@@ -94,19 +74,19 @@ def _operation_mutations() -> tuple[type[DjangoMutation], ...]:
         class Meta:
             model = product_models.Item
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class UpdateItem(DjangoMutation):
         class Meta:
             model = product_models.Item
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class DeleteItem(DjangoMutation):
         class Meta:
             model = product_models.Item
             operation = "delete"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     return CreateItem, UpdateItem, DeleteItem
 
@@ -148,7 +128,7 @@ def test_no_class_attribute_annotation_builds_and_types_payload() -> None:
         create_item = DjangoMutationField(CreateItem)
 
     finalize_django_types()
-    schema = DjangoSchema(query=_Query, mutation=Mutation)
+    schema = DjangoSchema(query=PingQuery, mutation=Mutation)
     assert str(read_attr(_mutation_field(schema, "createItem"), "type")) == "CreateItemPayload!"
 
 
@@ -166,7 +146,7 @@ def test_payload_lazy_ref_resolves_to_materialized_payload_after_bind() -> None:
     # ``mutations.inputs``; building the schema resolves the lazy ref to it.
     inputs_module = sys.modules[INPUTS_MODULE_PATH]
     assert hasattr(inputs_module, "CreateItemPayload")
-    schema = DjangoSchema(query=_Query, mutation=Mutation)
+    schema = DjangoSchema(query=PingQuery, mutation=Mutation)
     # The schema's CreateItemPayload type is the one bound to the materialized class.
     payload_definition = schema.get_type_by_name("CreateItemPayload")
     assert isinstance(payload_definition, StrawberryObjectDefinition)
@@ -242,7 +222,7 @@ def test_inherited_meta_target_rejected_at_construction() -> None:
         class Meta:
             model = product_models.Item
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     # Inherits ``_mutation_meta`` without its own ``Meta`` -> unregistered -> rejected HERE.
     class CreateItemSubclass(CreateItem):
@@ -254,7 +234,7 @@ def test_inherited_meta_target_rejected_at_construction() -> None:
     class Submit(DjangoFormMutation):
         class Meta:
             form_class = ContactForm
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class SubmitSubclass(Submit):
         pass
@@ -276,7 +256,7 @@ def test_inherited_meta_target_rejected_at_construction() -> None:
         class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
             model = product_models.Item
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     assert "_mutation_meta" in CreateItemRedeclared.__dict__
     assert CreateItemRedeclared in iter_mutations()
@@ -322,7 +302,7 @@ def _declare_by_name_mutation(flavor: str) -> type[DjangoMutation | DjangoFormMu
             class Meta:
                 model = product_models.Item
                 operation = "create"
-                permission_classes = [_AllowAll]
+                permission_classes = [AllowAll]
 
         return CreateItem
 
@@ -332,7 +312,7 @@ def _declare_by_name_mutation(flavor: str) -> type[DjangoMutation | DjangoFormMu
     class Submit(DjangoFormMutation, metaclass=_ByNameFormMutationMetaclass):
         class Meta:
             form_class = ContactForm
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     return Submit
 
@@ -379,13 +359,13 @@ def test_registered_target_with_raising_metaclass_eq_constructs() -> None:
         class Meta:
             model = product_models.Item
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class UpdateItem(DjangoMutation, metaclass=_RaisingEqMutationMetaclass):
         class Meta:
             model = product_models.Item
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     assert DjangoMutationField(CreateItem) is not None
     assert DjangoMutationField(UpdateItem) is not None
@@ -419,7 +399,7 @@ def test_generalized_target_accepts_modelform_and_plain_form_family() -> None:
         class Meta:
             form_class = ItemModelForm
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class Submit(DjangoFormMutation):
         class Meta:
@@ -449,7 +429,7 @@ def test_model_flavor_names_mutations_inputs_and_model_arguments() -> None:
         delete_item = DjangoMutationField(DeleteItem)
 
     finalize_django_types()
-    schema = DjangoSchema(query=_Query, mutation=Mutation)
+    schema = DjangoSchema(query=PingQuery, mutation=Mutation)
 
     # The model ``data:`` input materializes in ``mutations.inputs`` (NOT
     # ``forms.inputs``); the field args are the per-operation shape.
@@ -490,14 +470,14 @@ def test_django_mutation_field_generalizes_to_serializer_mutation() -> None:
         class Meta:
             serializer_class = ItemSerializer
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
         create_item_via_serializer = DjangoMutationField(CreateItemViaSerializer)
 
     finalize_django_types()
-    schema = DjangoSchema(query=_Query, mutation=Mutation)
+    schema = DjangoSchema(query=PingQuery, mutation=Mutation)
 
     # The serializer `data:` input materializes in `rest_framework.inputs` (NOT
     # `mutations.inputs`); the generated create argument is the serializer input.
@@ -532,7 +512,7 @@ def test_mutation_field_metadata_passthrough() -> None:
         )
 
     finalize_django_types()
-    schema = DjangoSchema(query=_Query, mutation=Mutation)
+    schema = DjangoSchema(query=PingQuery, mutation=Mutation)
     field = _mutation_field(schema, "createItem")
     assert field.description == "Create a new item entity"
     assert field.deprecation_reason == "Use createItemV2 instead"
@@ -598,6 +578,6 @@ def test_valid_directives_reach_the_built_field() -> None:
         create_item = DjangoMutationField(CreateItem, directives=[Tagged(value="x")])
 
     finalize_django_types()
-    schema = DjangoSchema(query=_Query, mutation=Mutation)
+    schema = DjangoSchema(query=PingQuery, mutation=Mutation)
     sdl = str(schema)
     assert '@tagged(value: "x")' in sdl

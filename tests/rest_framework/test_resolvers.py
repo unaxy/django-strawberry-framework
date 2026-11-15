@@ -89,7 +89,7 @@ import sys
 import threading
 import uuid
 import zoneinfo
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
@@ -193,7 +193,9 @@ from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import (
+    AllowAll,
     ModelSerializerBase,
+    PingQuery,
     is_object_dict,
     json_at,
     json_object,
@@ -303,12 +305,7 @@ def _validator_queryset_db(validator: UniqueValidator | UniqueTogetherValidator)
     return queryset_db(require(read_attr(validator, "queryset"), _is_queryset))
 
 
-@pytest.fixture(autouse=True)
-def _isolate_registry() -> Iterator[None]:
-    """Reset the registry (co-clears the serializer-input ledger via the seam) per test."""
-    registry.clear()
-    yield
-    registry.clear()
+pytestmark = pytest.mark.usefixtures("isolate_global_registry")
 
 
 # ===========================================================================
@@ -729,36 +726,19 @@ def _bind_item_serializer_mutation(
             fields = ("id", "name", "category")
             primary = True
 
-    class _AllowAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _op: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return True
-
     class WriteItem(SerializerMutation):
         class Meta:
             serializer_class = serializer_cls
             operation = op_value
             nested_fields = nested_value
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
         write_item = DjangoMutationField(WriteItem)
 
     finalize_django_types()
-    DjangoSchema(query=Query, mutation=Mutation)
+    DjangoSchema(query=PingQuery, mutation=Mutation)
     del CategoryT, ItemT
     return WriteItem
 
@@ -1186,12 +1166,6 @@ def _blank_columns_schema(
     )
 
     @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
     class Mutation:
         create_row = DjangoMutationField(create)
         update_row = DjangoMutationField(update)
@@ -1200,7 +1174,7 @@ def _blank_columns_schema(
     assert create._input_class is not None
     assert update._input_class is not None
     return (
-        DjangoSchema(query=Query, mutation=Mutation),
+        DjangoSchema(query=PingQuery, mutation=Mutation),
         create._input_class.__name__,
         update._input_class.__name__,
     )
@@ -1682,17 +1656,11 @@ def test_serializer_kwargs_merges_override_context_keys_keeping_framework_reques
             primary = True
 
     @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
     class Mutation:
         write_item = DjangoMutationField(OverridingMutation)
 
     finalize_django_types()
-    DjangoSchema(query=Query, mutation=Mutation)
+    DjangoSchema(query=PingQuery, mutation=Mutation)
     del CategoryT, ItemT
 
     request = HttpRequest()
@@ -1904,28 +1872,11 @@ def _build_serializer_refetch_schema() -> tuple[DjangoSchema, type[DjangoType]]:
             fields = ("id", "name", "category")
             primary = True
 
-    class _AllowAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _op: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return True
-
     class WriteItem(SerializerMutation):
         class Meta:
             serializer_class = _basic_item_serializer()
             operation = "create"
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -1933,7 +1884,7 @@ def _build_serializer_refetch_schema() -> tuple[DjangoSchema, type[DjangoType]]:
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension()
-    schema = DjangoSchema(query=Query, mutation=Mutation, extensions=[lambda: optimizer])
+    schema = DjangoSchema(query=PingQuery, mutation=Mutation, extensions=[lambda: optimizer])
     del ItemT
     return schema, CategoryT
 
@@ -3194,35 +3145,18 @@ def _bind_book_genres_mutation(
 
     assert registry.get(library_models.Book) is BookT
 
-    class _AllowAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _op: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return True
-
     class WriteBook(SerializerMutation):
         class Meta:
             serializer_class = serializer_cls
             operation = op_value
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
         write0 = DjangoMutationField(WriteBook)
 
     finalize_django_types()
-    DjangoSchema(query=Query, mutation=Mutation)
+    DjangoSchema(query=PingQuery, mutation=Mutation)
     return WriteBook
 
 
@@ -3679,28 +3613,11 @@ def _build_day_stamp_schema(keep: Callable[[datetime.datetime], object]) -> Djan
                 "external_id",
             )
 
-    class _AllowAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _op: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return True
-
     class WriteDayStamp(SerializerMutation):
         class Meta:
             serializer_class = DayStampSerializer
             operation = "create"
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -3708,7 +3625,7 @@ def _build_day_stamp_schema(keep: Callable[[datetime.datetime], object]) -> Djan
 
     finalize_django_types()
     del SpecimenT
-    return DjangoSchema(query=Query, mutation=Mutation)
+    return DjangoSchema(query=PingQuery, mutation=Mutation)
 
 
 def _write_day_stamp(
@@ -5026,18 +4943,12 @@ def _spelled_key_owner_schema(stored: object) -> DjangoSchema:
             permission_classes = []
 
     @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
     class Mutation:
         create_spelled_key_owner = DjangoMutationField(CreateSpelledKeyOwner)
 
     finalize_django_types()
     del SpelledKeyOwnerT
-    return DjangoSchema(query=Query, mutation=Mutation)
+    return DjangoSchema(query=PingQuery, mutation=Mutation)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -5224,34 +5135,17 @@ def _write_amount_via_serializer(
             )
             primary = True
 
-    class _AllowAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _op: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return True
-
     class CreateAmount(SerializerMutation):
         class Meta:
             serializer_class = UnboundedAmountSerializer
             operation = "create"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     class UpdateAmount(SerializerMutation):
         class Meta:
             serializer_class = UnboundedAmountSerializer
             operation = "update"
-            permission_classes = [_AllowAll]
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
+            permission_classes = [AllowAll]
 
     @strawberry.type
     class Mutation:
@@ -5275,7 +5169,7 @@ def _write_amount_via_serializer(
         variables = {"id": str(pk), "d": data}
     request = HttpRequest()
     request.user = User(username="u")
-    result = DjangoSchema(query=Query, mutation=Mutation).execute_sync(
+    result = DjangoSchema(query=PingQuery, mutation=Mutation).execute_sync(
         document,
         variable_values=variables,
         context_value=SimpleNamespace(request=request),

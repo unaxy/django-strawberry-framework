@@ -177,8 +177,11 @@ from typing import (
 
 import django
 import pytest
+import strawberry
+from apps.products import models as product_models
 from django.db.models import Model, QuerySet
 from django.test.testcases import SimpleTestCase
+from django_filters.filters import Filter
 from rest_framework import serializers
 from strawberry import relay
 from typing_extensions import override
@@ -779,3 +782,55 @@ def bind_unparented(field: _DRFFieldT, name: str) -> _DRFFieldT:
     # BaseSerializer, so bind reads as partially Unknown
     field.bind(name, None)  # pyright: ignore[reportArgumentType, reportUnknownMemberType]
     return field
+
+
+class AllowAll:
+    """A permission class that authorizes every write (isolates the pipeline from auth)."""
+
+    def has_permission(
+        self,
+        _info: object,
+        _mutation: type[object],
+        _operation: str,
+        _data: object,
+        _instance: object = None,
+    ) -> bool:
+        return True
+
+
+@strawberry.type(name="Query")
+class PingQuery:
+    """A root ``Query`` with one ``ping`` field, for schemas that exercise only mutations."""
+
+    @strawberry.field
+    def ping(self) -> int:
+        return 1
+
+
+def respelled(filter_instance: Filter, **values: object) -> Filter:
+    """``filter_instance`` with each of ``values`` set on it as a consumer may set a lazy value.
+
+    The stubs type ``field_name`` and ``lookup_expr`` as ``str``; a project hands Django's lazy
+    text (``gettext_lazy``, ``SimpleLazyObject``) where a ``str`` is read.
+    """
+    for name, value in values.items():
+        setattr(filter_instance, name, value)
+    return filter_instance
+
+
+def declare_products_primaries() -> tuple[type[DjangoType], type[DjangoType]]:
+    """Register primary ``DjangoType``s for ``Item`` and ``Category`` (Relay-shaped)."""
+
+    class CategoryT(DjangoType, relay.Node):
+        class Meta:
+            model = product_models.Category
+            fields = ("id", "name")
+            primary = True
+
+    class ItemT(DjangoType, relay.Node):
+        class Meta:
+            model = product_models.Item
+            fields = ("id", "name")
+            primary = True
+
+    return CategoryT, ItemT
