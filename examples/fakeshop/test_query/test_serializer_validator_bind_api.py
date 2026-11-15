@@ -1451,7 +1451,7 @@ def test_plain_nested_dotted_scalar_uses_the_validators_native_source_leaf(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.usefixtures("_tables")
 @pytest.mark.parametrize("optional_owner", ["root", "child"])
-def test_nested_agreement_uses_its_own_model_and_optional_field_context(
+def test_nested_input_uses_its_own_model_and_optional_field_context(
     optional_owner: str,
 ) -> None:
     """Equal field names at different levels keep each level's model and optionality."""

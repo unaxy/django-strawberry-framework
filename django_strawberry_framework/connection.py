@@ -73,7 +73,7 @@ from strawberry import relay
 from strawberry.relay.types import NodeIterableType
 from strawberry.types import Info, get_object_definition
 from strawberry.types.field import StrawberryField
-from strawberry.utils.await_maybe import AwaitableOrValue
+from strawberry.utils.await_maybe import AwaitableOrValue, await_maybe
 from strawberry.utils.inspect import in_async_context
 from typing_extensions import override
 
@@ -380,6 +380,7 @@ def _is_edge_class(value: object) -> TypeIs[type[relay.Edge[relay.Node]]]:
     return truth.is_subclass(value, relay.Edge)
 
 
+@functools.cache
 def _window_edge_class(cls: type[_ConnectionT]) -> type[relay.Edge[relay.Node]]:
     """Resolve the connection's edge class exactly as ``ListConnection`` does.
 
@@ -388,19 +389,27 @@ def _window_edge_class(cls: type[_ConnectionT]) -> type[relay.Edge[relay.Node]]:
     ``Edge`` subclass via the bounded, container-scoped
     ``peel_strawberry_containers`` (Power-of-Ten capped), so the fast path builds
     edges through Strawberry's own edge type (cursor PREFIX + base64 stay owned
-    there - the fast path passes only the integer offset).
+    there - the fast path passes only the integer offset). Its ``CURSOR_PREFIX``
+    is the prefix ``ListConnection`` mints and decodes under and the window mints
+    under, so ``derive_connection_window_bounds`` and ``validate_offset_pagination``
+    accept exactly the cursors this connection issues: ``arrayconnection`` for
+    every generated connection, a consumer edge class's own ``CURSOR_PREFIX``
+    otherwise.
+
+    An edge class is fixed once its connection is a Strawberry type, so it is
+    memoized per class rather than resolving the ``edges`` field type again on
+    every page; the memo is cleared by ``registry.clear()`` (the documented
+    test-only registry reset), beside the connection-type cache.
     """
-    cached: type[relay.Edge[relay.Node]] | None = _window_edge_class_cache.get(cls)
-    if cached is not None:
-        return cached
     type_def = get_object_definition(cls, strict=True)
     field_def = require_instance(type_def.get_field("edges"), StrawberryField)
-    edge_class = require(
+    return require(
         peel_strawberry_containers(field_def.resolve_type(type_definition=type_def))[1],
         _is_edge_class,
     )
-    _window_edge_class_cache[cls] = edge_class
-    return edge_class
+
+
+register_subsystem_clear(_window_edge_class.cache_clear, owner="connection.edge_class")
 
 
 def _edge_over(
@@ -427,29 +436,6 @@ def _offset_edge_over(
     The row stands for its Node type, as in :func:`_edge_over`.
     """
     return edge_class.resolve_edge(cast("relay.Node", node), cursor=offset)
-
-
-@functools.cache
-def _offset_cursor_prefix(cls: type[_ConnectionT]) -> str:
-    """Return the prefix ``cls``'s offset cursors are minted and decoded under.
-
-    The ``CURSOR_PREFIX`` of the connection's own edge class (``_window_edge_class``),
-    the prefix ``ListConnection`` mints and decodes under and the window mints
-    under, so ``derive_connection_window_bounds`` and
-    ``validate_offset_pagination`` accept exactly the cursors this connection
-    issues: ``arrayconnection`` for every generated connection, a consumer edge
-    class's own ``CURSOR_PREFIX`` otherwise. An edge class is fixed once its
-    connection is a Strawberry type, so the prefix is memoized per class rather
-    than resolving the ``edges`` field type again on every page; the memo is
-    cleared by ``registry.clear()``, beside the connection-type cache.
-    """
-    return _window_edge_class(cls).CURSOR_PREFIX
-
-
-register_subsystem_clear(
-    _offset_cursor_prefix.cache_clear,
-    owner="connection.offset_cursor_prefix",
-)
 
 
 def _resolve_from_window(
@@ -691,7 +677,7 @@ def _resolve_from_window(
         or (
             not range_plan.next_page_probe
             and not constant_false
-            and _has_next_page_requested(info)
+            and _connection_field_requested(info, connection_has_next_page_selected)
         )
     ):
         return None
@@ -699,7 +685,7 @@ def _resolve_from_window(
         keyset_seek_supplied
         and total is not None
         and getattr(last_row, WINDOW_KEYSET_SEEK_COUNT, None) is None
-        and _has_next_page_requested(info)
+        and _connection_field_requested(info, connection_has_next_page_selected)
     ):
         # The counted keyset drift guard, mirroring the count guard above: a
         # counted seek page whose ``hasNextPage`` is observable must carry the
@@ -799,10 +785,7 @@ async def _resolve_awaited_source(
             "a nested awaitable is neither a QuerySet nor an iterable. Return the "
             "queryset (or iterable) directly.",
         )
-    resolved = resolve(value)
-    if is_awaitable(resolved):
-        return await resolved
-    return resolved
+    return await await_maybe(resolve(value))
 
 
 def _consume_window(
@@ -865,7 +848,7 @@ def _consume_window(
             if keyset_mode
             else functools.partial(
                 derive_connection_window_bounds,
-                prefix=_offset_cursor_prefix(cls),
+                prefix=_window_edge_class(cls).CURSOR_PREFIX,
             )
         )
         bounds: ConnectionWindowBounds | None = None
@@ -1015,7 +998,7 @@ def _consume_fallback(
         first=first,
         last=last,
         cap=max_results,
-        prefix=_offset_cursor_prefix(cls),
+        prefix=_window_edge_class(cls).CURSOR_PREFIX,
         info=info,
     )
     if not _page_requested(info):
@@ -1029,7 +1012,7 @@ def _consume_fallback(
             total=0,
         )
         if isinstance(nodes, AsyncIterable) and in_async_context():
-            return _attach_count_async(_ready(empty), nodes, want_count=want_count)
+            return _attach_count_async(empty, nodes, want_count=want_count)
         return _attach_count_sync(empty, nodes, want_count=want_count)
     # The cast states the source as ``ListConnection`` takes it: it slices a ``__getitem__``-only
     # source its iterable annotation leaves out. ``_pipeline_sync`` / ``_pipeline_async`` refuse
@@ -1207,28 +1190,19 @@ def _resolve_keyset_connection(
         # inert. ``totalCount`` is its own sibling selection and still
         # counts when requested. Upstream's wire-name check is not asked: it
         # misses renamed fields and matches a fragment spread named ``edges``.
-        conn = cls(
-            edges=[],
-            page_info=relay.PageInfo(
-                start_cursor=None,
-                end_cursor=None,
-                has_previous_page=False,
-                has_next_page=False,
-            ),
+        empty = _empty_page_connection(
+            cls,
+            offset=0,
+            has_next_page=False,
+            want_count=False,
+            total=0,
+            has_previous_page=False,
         )
         # ``nodes`` was proven a QuerySet above, which is always async-iterable, so the
         # async arm is decided by the execution mode alone.
         if want_count and async_execution():
-
-            async def _resolve_count_only_async() -> _ConnectionT:
-                return _set_total_count(
-                    conn,
-                    want_count=True,
-                    value=await count_source.acount(),
-                )
-
-            return _resolve_count_only_async()
-        return _set_total_count(conn, want_count=want_count, value=count_source.count)
+            return _attach_count_async(empty, count_source, want_count=True)
+        return _attach_count_sync(empty, count_source, want_count=want_count)
 
     def _build(page: _KeysetPage, total: int | None) -> _ConnectionT:
         rows = page.rows[:page_size] if page.overfetched else page.rows
@@ -1316,58 +1290,24 @@ def _connection_field_requested(info: Info[object, object], selected: _Selection
     ``optimizer/selections.py::ast_to_converted_selections`` over the resolver's
     own field nodes, the converted selections that carry each field's Python
     name, so the observers match the connection's fields by the names they were
-    declared under whatever wire names the schema publishes.
+    declared under whatever wire names the schema publishes (``totalCount`` by
+    default, ``total_count`` under ``auto_camel_case=False``, anything a
+    ``NameConverter`` answers).
+
+    The predicates are the per-selection primitives
+    ``optimizer/selections.py::connection_total_count_selected`` and
+    ``::connection_has_next_page_selected``, the SAME implementations the plan-time
+    ``nested_planner.py::plan_connection_relation`` uses, so resolve-time detection
+    cannot drift from the plan. They recurse only THROUGH fragment wrappers and never
+    into a regular field's selections (unlike strawberry-django's
+    ``_should_optimize_total_count``): a node-level ``totalCount`` inside
+    ``edges { node { ... } }`` must not make the OUTER connection count (a spurious
+    ``COUNT`` and, on a non-queryset source, a spurious spec-030 Decision 7 guard
+    raise).
     """
     raw_info = _raw_resolve_info(info)
     selections = ast_to_converted_selections(raw_info, raw_info.field_nodes)
     return any(selected(field) for field in selections)
-
-
-def _total_count_requested(info: Info[object, object]) -> bool:
-    """Return whether the query selects the connection's ``totalCount`` field.
-
-    Checks the connection field's DIRECT children (the count field is a sibling
-    of ``edges`` / the page-info field), matched by the Python name
-    ``total_count`` the field was declared under: the wire name is whatever the
-    schema's ``NameConverter`` publishes (``totalCount`` by default,
-    ``total_count`` under ``auto_camel_case=False``, anything a converter
-    overriding ``get_graphql_name`` answers), so matching it would miss the count
-    and the field would raise for an unset attribute.
-
-    Scoped to the direct children deliberately: unlike
-    strawberry-django's ``_should_optimize_total_count``, which recurses through
-    the WHOLE ``edges { node { ... } }`` subtree, this recurses only THROUGH
-    fragment wrappers (so a fragment-wrapped ``totalCount`` at the connection
-    level still counts) and does NOT descend into a regular field's selections.
-    A node-level ``totalCount`` deep inside ``edges { node { ... } }`` must not
-    make the OUTER connection's predicate fire (a spurious ``COUNT`` and, on a
-    non-queryset source, a spurious spec-030 Decision 7 guard raise).
-
-    Delegates the whole walk to the shared per-selection primitive
-    ``optimizer/selections.py::connection_total_count_selected`` - the SAME
-    implementation the plan-time ``nested_planner.py::plan_connection_relation``
-    uses - so the resolve-time count detection cannot drift from the optimizer's
-    plan-time predicate (the conditional ``_dst_total_count`` contract's invariant).
-    """
-    return _connection_field_requested(info, connection_total_count_selected)
-
-
-def _has_next_page_requested(info: Info[object, object]) -> bool:
-    """Return whether the query selects ``pageInfo { hasNextPage }``.
-
-    The ``hasNextPage`` sibling of ``_total_count_requested``: the window fast
-    path derives ``hasNextPage`` either from a conditional partition count or
-    from the count-free n+1 probe used by a plain ``first: N`` page. When a
-    non-probe window arrives without a required count or keyset-seek annotation,
-    ``_resolve_from_window`` consults this predicate to distinguish observable
-    plan drift (defensive per-parent fallback) from an inert placeholder flag.
-    Delegates the whole walk to the shared per-selection primitive
-    ``optimizer/selections.py::connection_has_next_page_selected`` - the same
-    implementation the plan-time ``nested_planner.py::plan_connection_relation``
-    uses - so the two halves cannot drift independently, and both match the
-    page-info / has-next-page fields by Python name rather than a wire literal.
-    """
-    return _connection_field_requested(info, connection_has_next_page_selected)
 
 
 def _page_requested(info: Info[object, object]) -> bool:
@@ -1524,7 +1464,8 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
             # ``and`` short-circuits: the bare shape never calls the selection
             # walk at all, and the opted shape only reaches it here, past the
             # guard.
-            want_count=cls._resolves_total_count and _total_count_requested(info),
+            want_count=cls._resolves_total_count
+            and _connection_field_requested(info, connection_total_count_selected),
             **kwargs,
         )
 
@@ -1544,37 +1485,16 @@ class _CachedConnectionType(NamedTuple):
     connection_type: type[DjangoConnection[DjangoType]]
 
 
+# The per-target generated-connection-class cache. Cleared by ``registry.clear()``
+# (the documented test-only registry reset; production never reloads the schema) so a
+# registry-clearing test or fixture also drops the generated ``<TypeName>Connection``
+# classes. Each entry records the definition it was generated from and
+# ``_connection_type_for`` verifies that provenance on every warm hit, so a surviving
+# entry can only ever be served to the definition that produced it.
 _connection_type_cache: truth.IdentityMap[type[DjangoType], _CachedConnectionType] = (
     truth.IdentityMap()
 )
-
-
-def clear_connection_type_cache() -> None:
-    """Clear the per-target generated-connection-class cache.
-
-    Test-only - production never reloads the schema. Wired into
-    ``registry.clear()`` (the documented registry reset) so a registry-clearing
-    test or fixture also drops the generated ``<TypeName>Connection`` classes,
-    rather than accumulating dead identity-keyed entries across schema reloads.
-    Each entry records the definition it was generated from and
-    ``_connection_type_for`` verifies that provenance on every warm hit, so a
-    surviving entry can only ever be served to the definition that produced it.
-    """
-    _connection_type_cache.clear()
-
-
-register_subsystem_clear(clear_connection_type_cache, owner="connection.type_cache")
-
-
-# The per-connection-class resolved-edge-class cache. Cleared by
-# ``registry.clear()`` (the documented test-only registry reset) so a
-# registry-clearing test or fixture also drops the resolved edge classes,
-# rather than accumulating dead identity-keyed entries across schema reloads;
-# production never reloads the schema.
-_window_edge_class_cache: truth.IdentityMap[type[object], type[relay.Edge[relay.Node]]] = (
-    truth.IdentityMap()
-)
-register_subsystem_clear(_window_edge_class_cache.clear, owner="connection.edge_class")
+register_subsystem_clear(_connection_type_cache.clear, owner="connection.type_cache")
 
 
 def _generate_connection_class(
@@ -1709,13 +1629,8 @@ def _attach_count_sync(conn: _ConnectionT, nodes: object, *, want_count: bool) -
     return _set_total_count(conn, want_count=True, value=counted.count)
 
 
-async def _ready(conn: _ConnectionT) -> _ConnectionT:
-    """Return an already-built connection from a coroutine, for ``_attach_count_async``."""
-    return conn
-
-
 async def _attach_count_async(
-    conn_awaitable: Awaitable[_ConnectionT],
+    conn_awaitable: AwaitableOrValue[_ConnectionT],
     nodes: object,
     *,
     want_count: bool,
@@ -1728,7 +1643,7 @@ async def _attach_count_async(
     # ``RuntimeWarning`` - a hard failure under ``-W error``). The guard's
     # decision depends only on ``nodes`` / ``want_count``, never on ``conn``,
     # so awaiting first is side-effect-safe.
-    conn = await conn_awaitable
+    conn = await await_maybe(conn_awaitable)
     counted = _guard_total_count_countable(nodes, want_count=want_count)
     if counted is not None:
         # The ``await`` keeps this step explicitly colored (the package's

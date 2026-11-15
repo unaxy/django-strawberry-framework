@@ -76,7 +76,6 @@ from typing import (
     Any,
     Literal,
     NamedTuple,
-    Protocol,
     TypeVar,
     overload,
 )
@@ -88,6 +87,7 @@ from graphql import GraphQLError, get_named_type, is_object_type
 from strawberry import relay
 from strawberry.schema import Schema
 from strawberry.types import Info
+from strawberry.utils.await_maybe import await_maybe
 
 from .exceptions import ConfigurationError
 from .list_field import _validate_relay_djangotype_target
@@ -124,18 +124,13 @@ from .utils.typing import (
 from .utils.write_transaction import current_write_pipeline
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Iterable, Mapping, Sequence, Sized
+    from collections.abc import Awaitable, Iterable, Mapping, Sequence
 
     from graphql import GraphQLField
-    from typing_extensions import TypeIs
 
     from .types.base import DjangoType
     from .types.relay import _RelayDjangoType
     from .utils.typing import ModelField
-
-    class _SizedRows(Sized, Iterable[object], Protocol):
-        """A ``resolve_nodes`` row iterable that also answers ``len()``."""
-
 
 _TargetT = TypeVar("_TargetT")
 
@@ -683,14 +678,6 @@ def _interleave(
     ]
 
 
-def _has_len(rows: Iterable[object]) -> TypeIs[_SizedRows]:
-    """Return whether a ``resolve_nodes`` row iterable answers ``len()``.
-
-    Asked of the row iterable's real class, so an instance ``__getattr__`` never runs.
-    """
-    return truth.mro_attr(type(rows), "__len__") is not None
-
-
 def _check_nodes_result(
     resolved_type: type[_RelayDjangoType],
     result: Iterable[object],
@@ -708,12 +695,11 @@ def _check_nodes_result(
     always satisfies it. (Ordering itself is the documented override contract -
     see ``DjangoNodesField`` - not re-validated here.)
 
-    A generator/iterator return (no ``__len__``) is materialized first so it
-    reaches the length check (and ``_interleave``'s positional indexing)
+    The rows are materialized into a list first, so a generator or iterator
+    return reaches the length check (and ``_interleave``'s positional indexing)
     instead of dying on a bare ``len()`` ``TypeError``.
     """
-    if not _has_len(result):
-        result = list(result)
+    result = list(result)
     if len(result) != len(node_ids):
         raise ConfigurationError(
             f"{truth.name(resolved_type)}.resolve_nodes returned {len(result)} row(s) for "
@@ -1100,16 +1086,14 @@ def DjangoNodesField(  # noqa: N802 - PascalCase for graphene-django parity
                 for resolved_type, node_ids in groups.items():
                     # ``resolve_nodes`` is AwaitableOrValue: the framework
                     # default returns a coroutine in async context, but a valid
-                    # synchronous consumer override returns the list directly -
-                    # await only when the result is actually awaitable, never
-                    # unconditionally.
-                    result = resolved_type.resolve_nodes(
-                        info=info,
-                        node_ids=node_ids,
-                        required=False,
+                    # synchronous consumer override returns the list directly.
+                    result = await await_maybe(
+                        resolved_type.resolve_nodes(
+                            info=info,
+                            node_ids=node_ids,
+                            required=False,
+                        ),
                     )
-                    if inspect.isawaitable(result):
-                        result = await result
                     per_type[resolved_type] = _stamp_nodes(
                         resolved_type,
                         _check_nodes_result(resolved_type, result, node_ids),

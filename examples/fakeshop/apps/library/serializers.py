@@ -281,15 +281,15 @@ class NoteShelfSerializer(ModelSerializerBase[Shelf]):
     ONE serializer class backs TWO ``SerializerMutation`` declarations; each constructs it with
     a different ``note_allow_null`` via BOTH ``get_serializer_for_schema()`` (the schema-time
     field map) AND ``get_serializer_kwargs`` (the per-request construction), so the schema-time
-    ``note`` shape and the runtime ``note`` field AGREE (no schema-only
-    decode-then-drop, which the agreement guard forbids). The only descriptor axis differing
-    between the two generated inputs is ``note``'s EMITTED nullability: ``required=True,
-    allow_null=False`` is a non-null ``String!``, while ``required=True, allow_null=True`` is a
-    nullable, OMITTABLE ``String`` (GraphQL cannot express required-AND-nullable, so it is
-    omittable and null-accepting, DRF enforcing presence/validity in-band). The descriptor
-    identity + the descriptor-derived name must capture that EMITTED nullability, or the second
-    declaration silently reuses the first's cached input class (giving one mutation the other's
-    nullability).
+    ``note`` shape and the runtime ``note`` field AGREE (the schema field map must describe
+    the runtime serializer's fields; a schema-only field would be decoded and dropped). The
+    only descriptor axis differing between the two generated inputs is ``note``'s EMITTED
+    nullability: ``required=True, allow_null=False`` is a non-null ``String!``, while
+    ``required=True, allow_null=True`` is a nullable, OMITTABLE ``String`` (GraphQL cannot
+    express required-AND-nullable, so it is omittable and null-accepting, DRF enforcing
+    presence/validity in-band). The descriptor identity + the descriptor-derived name must
+    capture that EMITTED nullability, or the second declaration silently reuses the first's
+    cached input class (giving one mutation the other's nullability).
 
     ``note`` is a serializer-only WRITE-ONLY field (no backing ``Shelf`` column), decoded +
     validated then popped in ``create()``. ``note_allow_null=None`` (the no-arg DEFAULT
@@ -601,7 +601,7 @@ class StatusStampBookSerializer(ModelSerializerBase[Book]):
     partial input to ``title`` (dropping ``status``) and declares
     ``Meta.injected_fields = ("status",)`` + a ``get_serializer_injected_data`` override; the
     injected spec is resolved under the update's ``PartialInput`` provisional so its generated
-    enum identity matches the runtime-agreement guard's re-derivation. ``update()`` pops the
+    enum name derives from the update's own partial input. ``update()`` pops the
     injected ``status`` and stamps it into ``subtitle`` so the live test can read the injected
     value off the written row.
     """

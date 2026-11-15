@@ -40,7 +40,6 @@ from django_strawberry_framework.connection import (
     DjangoConnectionField,
     _connection_type_cache,
     _connection_type_for,
-    clear_connection_type_cache,
 )
 from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.orders import OrderSet
@@ -1262,7 +1261,7 @@ def test_a_root_connection_uses_only_the_definition_captured_at_construction() -
     node = _node_type("ColdCacheCountedNode", model=Category)
     decoy = _item_node_type("ColdCacheDecoyNode")
     finalize_django_types()
-    clear_connection_type_cache()
+    _connection_type_cache.clear()
 
     field = DjangoConnectionField(node)
     conn_type = _connection_type_cache[node].connection_type

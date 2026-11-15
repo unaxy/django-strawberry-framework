@@ -17,8 +17,7 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
   `test_nested_shelf_alt_branches_visibility_is_one_batched_query_over_http`,
   `test_serializer_m2m_relation_visibility_over_http`);
 - the value-preserving `save()`-called-once capture (a save spy);
-- the private runtime source-collision exception class and the `IntegrityError`
-  diagnosis branch;
+- the `IntegrityError` diagnosis branch;
 - the `IntegrityError` over a `blank=True, null=False` column on synthetic models: an
   integer and an integer-choice column (fakeshop's live `createItemHoldViaSerializer`
   pins the foreign key), a declared `allow_null` field's `null` on update, a model
@@ -71,8 +70,8 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
 write-auth, authorize-before-decode, Upload, request-context, or re-fetch BEHAVIORAL test
 is duplicated here** - those are owned by the live suite.
 
-Consumer save-error mapping, post-save conflict, partial-write rollback and runtime source
-ownership live in ``examples/fakeshop/test_query/test_serializer_runtime_api.py``. The direct
+Consumer save-error mapping, post-save conflict, partial-write rollback and runtime-only
+fields live in ``examples/fakeshop/test_query/test_serializer_runtime_api.py``. The direct
 savepoint rollback timing, private exception classes and raw decoded mappings remain package
 observations.
 """
@@ -2026,6 +2025,54 @@ def test_relation_queryset_scope_pins_unregistered_raw_pk_relation_without_visib
     assert pinned.query.select_for_update is False
 
 
+class _QuerysetlessBranchRelation(serializers.PrimaryKeyRelatedField[library_models.Branch]):
+    """A relation DRF accepts with ``queryset=None`` because it overrides ``get_queryset()``."""
+
+    @override
+    def get_queryset(self) -> QuerySet[library_models.Branch]:
+        return library_models.Branch.objects.all()
+
+
+def test_relation_queryset_scope_refuses_a_relation_with_no_queryset_attribute() -> None:
+    """A relation whose ``queryset`` is ``None`` (a ``get_queryset()`` override) is refused.
+
+    The scope composes onto the field's own ``queryset``, so there is nothing to pin or
+    narrow; the refusal names the field instead of failing on ``None``.
+    """
+
+    class BranchSer(serializers.Serializer[object]):
+        branch = _QuerysetlessBranchRelation(queryset=None)
+
+    fake = type(
+        "QuerysetlessMut",
+        (),
+        {
+            "_injected_field_specs": [],
+            "_input_field_specs": [
+                InputFieldSpec(
+                    input_attr="branch",
+                    graphql_name="branch",
+                    target_name="branch",
+                    kind=RELATION_SINGLE,
+                    related_model=library_models.Branch,
+                ),
+            ],
+        },
+    )
+    with (
+        pytest.raises(
+            ConfigurationError,
+            match=r"relation field 'branch' has no queryset at runtime \(got NoneType\)",
+        ),
+        write_pipeline("default", lock=False),
+    ):
+        serializer_resolvers._scope_relation_querysets_to_visibility(
+            _as_serializer_mutation(fake),
+            BranchSer(),
+            info=unread_info(),
+        )
+
+
 @pytest.mark.django_db
 def test_runtime_relation_over_another_model_is_refused_before_any_write() -> None:
     """A runtime relation queryset over another model than the schema recorded is refused.
@@ -3055,7 +3102,7 @@ def test_relation_queryset_scope_composes_with_author_queryset() -> None:
 
 
 # ===========================================================================
-# Nested serializer inputs - decode + agreement internals
+# Nested serializer inputs - decode internals
 # ===========================================================================
 
 

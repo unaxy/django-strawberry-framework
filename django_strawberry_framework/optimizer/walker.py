@@ -464,9 +464,10 @@ def _build_child_queryset(
     ``seed`` replaces that base with the queryset of a consumer
     ``OptimizerHint.prefetch(Prefetch(...))``: the hint chooses how the relation
     is fetched, never which rows the target type admits, so the hook narrows the
-    consumer's queryset exactly as it narrows the generated base. The seal adopts
-    the seed's explicit ``.using(...)`` as the alias the hook must keep, and a
-    hinted plan is never cached, so a routed seed answers to that one request.
+    consumer's queryset exactly as it narrows the generated base. Under a custom
+    hook the seed is sealed like the generated base, with no alias pinned, so a
+    seed routed by an explicit ``.using(...)`` is refused as an ``alias`` defect
+    before the hook runs; without a hook the seed is installed as given.
     """
     queryset = seed if seed is not None else _relation_child_seed(field)
     if has_custom_qs:

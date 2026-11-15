@@ -1255,28 +1255,6 @@ def _are_deterministic_order_terms(
     return True
 
 
-def _model_from_definition(definition: DjangoTypeDefinition) -> type[models.Model]:
-    """Read the target's Django model off its ONE definition read.
-
-    Called exactly once per field, at construction. The value seeds the default
-    resolver and pins both visibility seals, so the table the field queries and
-    the table those seals validate against are the same object by construction:
-    there is no second read through which another model could be substituted
-    between the seed and the seal.
-    """
-    return definition.model
-
-
-def _orderset_class_from_definition(definition: DjangoTypeDefinition) -> type[OrderSet] | None:
-    """Read the target's declared ``Meta.orderset_class`` off its ONE definition read.
-
-    Called exactly once per field, at construction, from the definition
-    ``_validate_djangotype_target`` returned, so the published ``orderBy``
-    argument and the dispatch come from one answer.
-    """
-    return definition.orderset_class
-
-
 def _field_label(info: Info[object, object]) -> str:
     """Return the resolver field label, or ``"DjangoListField"`` when ``info`` names none."""
     # A consumer ``info_class`` can shadow ``field_name`` with anything.
@@ -1630,8 +1608,8 @@ def DjangoListField(  # noqa: N802 - PascalCase for graphene-django parity
     definition = _validate_djangotype_target(target_type, resolver, field="DjangoListField")
     # The registry keys each definition by its own class, so ``origin`` is ``target_type``.
     node_type = definition.origin
-    target_model = _model_from_definition(definition)
-    orderset_class = _orderset_class_from_definition(definition)
+    target_model = definition.model
+    orderset_class = definition.orderset_class
     directives = validated_field_directives("DjangoListField", directives)
 
     # Factory-site async commitment (spec-020 Decision 3; spec-020 Decision 2

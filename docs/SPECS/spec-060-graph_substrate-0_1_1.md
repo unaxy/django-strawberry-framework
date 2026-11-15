@@ -419,7 +419,7 @@ of the first foundation card.
   exists anywhere (`classify_path(Book, "title__icontains")` raises).
 - **Cascade is forward-only by design.**
   `permissions.py::apply_cascade_permissions` walks concrete `ForeignKey` /
-  one-to-one edges (`_is_cascadable_edge` excludes reverse relations, M2M,
+  one-to-one edges (`utils/relations.py::is_single_column_foreign_key` excludes reverse relations, M2M,
   generic relations); a visible parent exposes every child of a selected
   to-many edge unless the consumer hand-builds a scoped `Prefetch`.
 - **The generated relation resolver reads the accessor-keyed prefetch

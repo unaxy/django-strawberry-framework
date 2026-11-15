@@ -23,7 +23,6 @@ from django_strawberry_framework.utils._narrowing import (
     get_item,
     is_char_wise,
     is_concrete_field,
-    is_exact_list_or_tuple,
     is_exact_set_or_frozenset,
     is_exact_tuple_or_frozenset,
     is_lookup,
@@ -225,8 +224,8 @@ class _ClaimsEveryClass(metaclass=_ClaimsEveryClassMeta):
 
 @pytest.mark.parametrize(
     "predicate",
-    [is_exact_list_or_tuple, is_exact_set_or_frozenset, is_exact_tuple_or_frozenset],
-    ids=["list_or_tuple", "set_or_frozenset", "tuple_or_frozenset"],
+    [is_exact_set_or_frozenset, is_exact_tuple_or_frozenset],
+    ids=["set_or_frozenset", "tuple_or_frozenset"],
 )
 def test_exact_container_predicate_refuses_a_class_whose_metaclass_eq_claims_a_builtin(
     predicate: Callable[[object], bool],

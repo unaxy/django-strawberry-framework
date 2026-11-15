@@ -105,7 +105,7 @@ from __future__ import annotations
 import dataclasses
 from contextvars import ContextVar
 from functools import lru_cache
-from typing import TYPE_CHECKING, NamedTuple, TypeGuard, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 from django.db import models
 from django.db.models import Q
@@ -211,23 +211,6 @@ class _EdgePlan(NamedTuple):
     unsupported: tuple[str, ...]
 
 
-def _is_cascadable_edge(field: ModelField) -> TypeGuard[ForeignKeyField]:
-    """Return whether ``field`` is a single-column concrete forward FK / OneToOne edge.
-
-    The single definition of "cascadable edge" -- the full walk, the
-    ``fields=`` validator, and the preflight all key off the cached
-    ``_edge_plan`` built from this predicate, so scope cannot drift. The edge
-    test itself is ``utils/relations.py::is_single_column_foreign_key``: a
-    cascade edge is one ``__in`` subquery over one column, the same
-    one-column contract the optimizer's correlated fetch links gate on. MTI
-    ``<parent>_ptr`` parent links pass it (a hidden MTI parent must hide its
-    child row, so the parent link cascades like any other O2O edge); reverse
-    relations, M2M, ``GenericForeignKey``, ``GenericRelation`` and plain
-    ``ForeignObject`` relations of any width do not.
-    """
-    return is_single_column_foreign_key(field)
-
-
 def _is_unsupported_forward_edge(field: ModelField) -> bool:
     """Return whether ``field`` is a forward relation the cascade must fail closed on.
 
@@ -241,7 +224,7 @@ def _is_unsupported_forward_edge(field: ModelField) -> bool:
     (``GenericRelation``) are outside parent-row cascade semantics entirely
     (they do not select a parent row's single target) and stay skippable.
     """
-    return is_forward_single_relation(field) and not _is_cascadable_edge(field)
+    return is_forward_single_relation(field) and not is_single_column_foreign_key(field)
 
 
 @lru_cache(maxsize=1024)
@@ -254,11 +237,21 @@ def _edge_plan(model: type[models.Model]) -> _EdgePlan:
     slice. The bounded cache keeps synthetic/dynamic test models from growing
     this process-wide helper without limit; eviction is correctness-neutral
     because the plan can always be recomputed.
+
+    This is the single definition of "cascadable edge" -- the full walk, the
+    ``fields=`` validator, and the preflight all key off this plan, so scope
+    cannot drift. The edge test is ``utils/relations.py::is_single_column_foreign_key``:
+    a cascade edge is one ``__in`` subquery over one column, the same one-column
+    contract the optimizer's correlated fetch links gate on. MTI ``<parent>_ptr``
+    parent links pass it (a hidden MTI parent must hide its child row, so the
+    parent link cascades like any other O2O edge); reverse relations, M2M,
+    ``GenericForeignKey``, ``GenericRelation`` and plain ``ForeignObject``
+    relations of any width do not.
     """
     cascadable: list[ForeignKeyField] = []
     unsupported: list[str] = []
     for field in model._meta.get_fields():
-        if _is_cascadable_edge(field):
+        if is_single_column_foreign_key(field):
             cascadable.append(field)
         elif _is_unsupported_forward_edge(field):
             unsupported.append(field.name)

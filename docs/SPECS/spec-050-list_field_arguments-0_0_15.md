@@ -588,10 +588,8 @@ arguments to consumer resolvers, inspecting consumer signatures).*
 The field reads its target's definition EXACTLY ONCE, at construction, and that one object is
 the field's SOLE construction and execution dependency. The shared target validator
 (`django_strawberry_framework/list_field.py::_validate_djangotype_target`) performs the one read
-and returns it; the factory captures the target's model
-(`django_strawberry_framework/list_field.py::_model_from_definition`) and its
-`Meta.orderset_class` (`django_strawberry_framework/list_field.py::_orderset_class_from_definition`)
-off it, and those two values are what the default resolver seeds
+and returns it; the factory captures the target's model (`definition.model`) and its
+`Meta.orderset_class` (`definition.orderset_class`) off it, and those two values are what the default resolver seeds
 (`django_strawberry_framework/utils/querysets.py::base_queryset`, never the type-keyed
 `initial_queryset`), what both visibility seals and the post-sidecar seal validate against
 (the captured-model seam `django_strawberry_framework/utils/querysets.py::_captured_model`,

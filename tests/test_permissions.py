@@ -112,7 +112,6 @@ from django_strawberry_framework.permissions import (
     _cascade_state,
     _edge_error_renderer,
     _edge_plan,
-    _is_cascadable_edge,
     _is_unsupported_forward_edge,
     _root_error_renderer,
     _validate_fields,
@@ -130,6 +129,7 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
 )
+from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import (
     comparing_metaclass,
@@ -602,19 +602,21 @@ def test_single_column_scope_skips_m2m_reverse_and_generic() -> None:
 
     # Each edge passes / fails the predicates for the documented reason.
     by_name = {f.name: f for f in CirculationDesk._meta.get_fields()}
-    assert _is_cascadable_edge(by_name["branch"]) is True
-    assert _is_cascadable_edge(by_name["shelf"]) is True
-    assert _is_cascadable_edge(by_name["content_type"]) is True  # backing FK, single column
+    assert is_single_column_foreign_key(by_name["branch"]) is True
+    assert is_single_column_foreign_key(by_name["shelf"]) is True
+    assert (
+        is_single_column_foreign_key(by_name["content_type"]) is True
+    )  # backing FK, single column
     assert getattr(by_name["genres"], "many_to_many", False) is True
-    assert _is_cascadable_edge(by_name["genres"]) is False  # M2M, join table
+    assert is_single_column_foreign_key(by_name["genres"]) is False  # M2M, join table
     assert _is_unsupported_forward_edge(by_name["genres"]) is False  # ...and skippable
-    assert _is_cascadable_edge(by_name["content_object"]) is False  # GFK, virtual
+    assert is_single_column_foreign_key(by_name["content_object"]) is False  # GFK, virtual
     assert _is_unsupported_forward_edge(by_name["content_object"]) is True  # fail-closed
-    assert _is_cascadable_edge(by_name["tags"]) is False  # GenericRelation, one-to-many
+    assert is_single_column_foreign_key(by_name["tags"]) is False  # GenericRelation, one-to-many
     assert _is_unsupported_forward_edge(by_name["tags"]) is False
-    assert _is_cascadable_edge(by_name["children"]) is False  # reverse FK
+    assert is_single_column_foreign_key(by_name["children"]) is False  # reverse FK
     assert _is_unsupported_forward_edge(by_name["children"]) is False
-    assert _is_cascadable_edge(by_name["profile"]) is False  # reverse O2O
+    assert is_single_column_foreign_key(by_name["profile"]) is False  # reverse O2O
     assert _is_unsupported_forward_edge(by_name["profile"]) is False
 
 
@@ -628,7 +630,7 @@ def test_a_visible_reverse_generic_relation_stays_skippable() -> None:
     """
     reverse = RpGenericTag._meta.get_field("holder")
 
-    assert _is_cascadable_edge(reverse) is False
+    assert is_single_column_foreign_key(reverse) is False
     assert _is_unsupported_forward_edge(reverse) is False
     assert _edge_plan(RpGenericTag).unsupported == ("content_object",)
 
@@ -979,7 +981,7 @@ def test_error_renderers_build_without_naming_calls() -> None:
     finalize_django_types()
 
     field = Entry._meta.get_field("item")
-    assert _is_cascadable_edge(field)
+    assert is_single_column_foreign_key(field)
     with mock.patch.object(truth, "name", side_effect=AssertionError("named at construction")):
         _root_error_renderer(entry_type, Entry)
         _edge_error_renderer(item_type, field, "default")

@@ -469,6 +469,52 @@ def test_a_policy_declared_by_an_entry_becomes_the_schemas_own() -> None:
     assert schema.execute_sync("{ rows }").data == {"rows": ["a"]}
 
 
+class _SlottedFactory:
+    """A valid extension factory whose layout admits no weak reference.
+
+    ``__slots__`` without ``__weakref__`` is an ordinary, supported way to write
+    a callable, and Strawberry runs one exactly as it runs any other factory.
+    Refusing it would be refusing a memory layout rather than a configuration.
+    """
+
+    __slots__ = ()
+
+    def __call__(self) -> _MarkerExtension:
+        return _MarkerExtension()
+
+
+class _WeakReferenceableFactory:
+    """The control: the same factory, with the layout a weak reference can be taken of."""
+
+    def __call__(self) -> _MarkerExtension:
+        return _MarkerExtension()
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [_SlottedFactory, _WeakReferenceableFactory],
+    ids=["slotted-callable", "weak-referenceable-control"],
+)
+def test_a_slotted_callable_factory_is_accepted_and_runs(
+    factory: type[_SlottedFactory | _WeakReferenceableFactory],
+) -> None:
+    """A callable factory works whatever its object layout is.
+
+    Strawberry accepts either one, so a schema that refused the slotted form
+    would be refusing a configuration for a reason that has nothing to do with
+    what runs the operation. Both build the extension per operation and both
+    run it.
+    """
+    schema = DjangoSchema(
+        query=_RowQuery,
+        resource_policy=ResourcePolicy(max_list_rows=1),
+        extensions=[factory()],
+    )
+
+    assert schema.execute_sync("{ rows }").data == {"rows": ["a"]}
+    assert _MARKS == ["accepted"]
+
+
 @pytest.mark.parametrize(
     "entry",
     [(), "DjangoResourcePolicyExtension", 7],

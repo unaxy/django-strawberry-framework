@@ -35,21 +35,18 @@ from django_strawberry_framework.connection import (
     DjangoConnection,
     DjangoConnectionField,
     _attach_count_async,
+    _connection_field_requested,
     _connection_type_cache,
     _connection_type_for,
     _finalize_queryset,
     _guard_first_and_last,
     _guard_non_queryset_iterable,
-    _offset_cursor_prefix,
     _pipeline_async,
     _pipeline_sync,
     _resolve_awaited_source,
-    _total_count_requested,
     _window_edge_class,
-    _window_edge_class_cache,
     _window_rows_are_annotated,
     _WindowedConnectionRows,
-    clear_connection_type_cache,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import _helper_referenced_filtersets
@@ -58,6 +55,7 @@ from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER,
     _keyset_order_ref,
 )
+from django_strawberry_framework.optimizer.selections import connection_total_count_selected
 from django_strawberry_framework.orders import _helper_referenced_ordersets
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils.input_values import UNSET
@@ -313,7 +311,7 @@ def test_connection_type_for_returns_concrete_subclass_when_total_count_false() 
 
 
 # =============================================================================
-# _total_count_requested selection-gating (unit)
+# totalCount selection-gating (unit)
 # Live COUNT SQL / skip / fragment gating is ``test_library_api.py``
 # (``test_genre_connection_total_count_omitted_no_count``,
 # ``test_genre_connection_total_count_skip_include_no_count``,
@@ -324,35 +322,53 @@ def test_connection_type_for_returns_concrete_subclass_when_total_count_false() 
 
 
 def test_total_count_requested_true_when_selected() -> None:
-    """``_total_count_requested`` is True when ``totalCount`` is in the selection set."""
-    assert _total_count_requested(_info_with_selection("edges", "totalCount")) is True
+    """The ``totalCount`` observer is True when ``totalCount`` is in the selection set."""
+    assert (
+        _connection_field_requested(
+            _info_with_selection("edges", "totalCount"),
+            connection_total_count_selected,
+        )
+        is True
+    )
 
 
 def test_total_count_requested_false_when_absent() -> None:
-    """``_total_count_requested`` is False when ``totalCount`` is not selected."""
-    assert _total_count_requested(_info_with_selection("edges", "pageInfo")) is False
+    """The ``totalCount`` observer is False when ``totalCount`` is not selected."""
+    assert (
+        _connection_field_requested(
+            _info_with_selection("edges", "pageInfo"),
+            connection_total_count_selected,
+        )
+        is False
+    )
 
 
 def test_total_count_requested_scoped_to_direct_children() -> None:
     """A ``totalCount`` nested in ``edges { node { ... } }`` does NOT fire the predicate.
 
-    ``_total_count_requested`` checks only the connection's DIRECT children, so a
+    The ``totalCount`` observer checks only the connection's DIRECT children, so a
     (future) node-level ``totalCount`` deep in the subtree must not make the OUTER
     connection count spuriously. A direct-child ``totalCount`` still counts.
     """
     # Direct-child ``totalCount`` still counts.
-    assert _total_count_requested(_info_with_selection("edges", "totalCount")) is True
+    assert (
+        _connection_field_requested(
+            _info_with_selection("edges", "totalCount"),
+            connection_total_count_selected,
+        )
+        is True
+    )
     # ``totalCount`` ONLY nested inside ``edges { node { ... } }`` must NOT count:
     # the predicate does not descend into a regular field's selections.
     nested = make_info(
         field_name="connectionField",
         selections="{ edges { node { totalCount } } pageInfo }",
     )
-    assert _total_count_requested(nested) is False
+    assert _connection_field_requested(nested, connection_total_count_selected) is False
 
 
 def test_total_count_requested_recurses_through_fragments() -> None:
-    """``_total_count_requested`` recurses THROUGH fragment wrappers to find ``totalCount``.
+    """The ``totalCount`` observer recurses THROUGH fragment wrappers to find ``totalCount``.
 
     A ``totalCount`` reached only via a ``FragmentSpread`` / ``InlineFragment`` on
     the connection's direct selection set still counts -- the predicate descends
@@ -364,14 +380,14 @@ def test_total_count_requested_recurses_through_fragments() -> None:
         selections="{ edges ...ConnFields }",
         fragments="fragment ConnFields on XConnection { totalCount }",
     )
-    assert _total_count_requested(info) is True
+    assert _connection_field_requested(info, connection_total_count_selected) is True
 
     # An InlineFragment WITHOUT totalCount stays False (recursion returns nothing).
     info_no_count = make_info(
         field_name="connectionField",
         selections="{ ... on XConnection { pageInfo } }",
     )
-    assert _total_count_requested(info_no_count) is False
+    assert _connection_field_requested(info_no_count, connection_total_count_selected) is False
 
 
 # =============================================================================
@@ -968,15 +984,6 @@ def test_pipeline_async_coerces_manager_source_and_finalizes() -> None:
     assert qs.query.order_by == (Category._meta.pk.attname,)
 
 
-def test_clear_connection_type_cache_empties_the_cache() -> None:
-    """``clear_connection_type_cache`` drops the generated-connection-class cache."""
-    node_type = _make_node_type("CacheClearDirectNode", total_count=True)
-    _connection_type_for(node_type, node_type.__django_strawberry_definition__)
-    assert _connection_type_cache
-    clear_connection_type_cache()
-    assert not _connection_type_cache
-
-
 def test_registry_clear_also_clears_connection_type_cache() -> None:
     """``registry.clear()`` resets the connection-type cache too."""
     node_type = _make_node_type("CacheClearRegistryNode", total_count=True)
@@ -992,9 +999,9 @@ def test_registry_clear_also_clears_window_edge_class_cache() -> None:
     _window_edge_class(
         _connection_type_for(node_type, node_type.__django_strawberry_definition__),
     )
-    assert _window_edge_class_cache
+    assert _window_edge_class.cache_info().currsize
     registry.clear()
-    assert not _window_edge_class_cache
+    assert not _window_edge_class.cache_info().currsize
 
 
 @pytest.mark.parametrize("total_count", [None, True], ids=["bare", "total-count"])
@@ -1010,18 +1017,7 @@ def test_generated_connections_decode_under_the_stock_edge_prefix(
     """
     node_type = _make_node_type(f"StockPrefix{total_count}Node", total_count=total_count)
     connection_type = _connection_type_for(node_type, node_type.__django_strawberry_definition__)
-    assert _offset_cursor_prefix(connection_type) == relay.Edge.CURSOR_PREFIX
-
-
-def test_registry_clear_also_clears_offset_cursor_prefix_memo() -> None:
-    """``registry.clear()`` drops the per-class offset cursor prefix memo with the class cache."""
-    node_type = _make_node_type("PrefixMemoNode", total_count=None)
-    _offset_cursor_prefix(
-        _connection_type_for(node_type, node_type.__django_strawberry_definition__),
-    )
-    assert _offset_cursor_prefix.cache_info().currsize
-    registry.clear()
-    assert not _offset_cursor_prefix.cache_info().currsize
+    assert _window_edge_class(connection_type).CURSOR_PREFIX == relay.Edge.CURSOR_PREFIX
 
 
 # The spec-033 root-connection fence. The root-connection planning pins here
@@ -1264,7 +1260,7 @@ def test_a_warm_connection_cache_refuses_alternate_metadata_for_its_target() -> 
 
     real = CacheProvenanceNode.__django_strawberry_definition__
     finalize_django_types()
-    clear_connection_type_cache()
+    _connection_type_cache.clear()
 
     warm = _connection_type_for(CacheProvenanceNode, real)
     assert _connection_type_for(CacheProvenanceNode, real) is warm

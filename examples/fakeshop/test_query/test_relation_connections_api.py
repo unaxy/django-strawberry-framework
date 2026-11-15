@@ -1336,7 +1336,7 @@ def test_outer_total_count_predicate_ignores_nested_total_count() -> None:
 
     Per spec-033 Edge cases (the outer-``totalCount`` direct-children-scoped
     rule), with nested ``totalCount`` a fast-path read: a two-level selection of
-    the nested ``totalCount`` must not make the root connection's ``_total_count_requested``
+    the nested ``totalCount`` must not make the root connection's ``totalCount``
     predicate fire (no spurious outer COUNT, no outer non-queryset guard raise). The root here is a
     ``DjangoConnectionField`` (its own ``totalCount`` opt-in) whose ``totalCount``
     is NOT selected - only the nested one is.

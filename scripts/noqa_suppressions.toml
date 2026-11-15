@@ -73,7 +73,6 @@
 "django_strawberry_framework/relay.py::_decode_and_coerce" = { BLE001 = 1 }
 "django_strawberry_framework/resource_policy.py::ResourceLimitExceeded" = { N818 = 1 }
 "django_strawberry_framework/rest_framework/inputs.py::_default_full_shape_identity" = { BLE001 = 1 }
-"django_strawberry_framework/rest_framework/resolvers.py::_scope_specs_over_serializer" = { S101 = 1 }
 "django_strawberry_framework/routers.py::_build_router_class_uncached" = { PLC0415 = 4, PLW0603 = 1 }
 "django_strawberry_framework/testing/client.py::GraphQLTestMixin.assertResponseHasErrors" = { N802 = 1, PT009 = 1 }
 "django_strawberry_framework/testing/client.py::GraphQLTestMixin.assertResponseNoErrors" = { N802 = 1, PT009 = 2 }

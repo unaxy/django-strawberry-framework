@@ -91,7 +91,7 @@ from django.db.models.sql.datastructures import BaseTable, Join
 from django.db.models.sql.where import ExtraWhere
 from django.http import HttpRequest
 from django.test import override_settings
-from django.test.utils import CaptureQueriesContext
+from django.test.utils import CaptureQueriesContext, isolate_apps
 from django.utils import timezone
 from django.utils.functional import SimpleLazyObject
 from typing_extensions import Self, override
@@ -3140,6 +3140,46 @@ def test_prefetch_relation_target_default_accessors_resolve() -> None:
     assert _prefetch_relation_target_or_none(Venue, "venuesponsor_set") is VenueSponsor
 
 
+@isolate_apps("apps.library")
+def test_prefetch_relation_target_reads_a_colliding_part_as_the_accessor() -> None:
+    """A part that is one relation's accessor and another's query name resolves to the accessor.
+
+    Django's prefetch traversal resolves a lookup by attribute access, so ``"beta"`` fetches
+    ``_BetaRow`` (accessor ``beta``) even though ``_meta.get_field("beta")`` answers with
+    ``_AlphaRow``'s reverse relation (query name ``beta``).
+    """
+
+    class _Hub(models.Model):
+        class Meta:
+            app_label = "library"
+
+    class _AlphaRow(models.Model):
+        hub: "models.ForeignKey[_Hub | Combinable, _Hub]" = models.ForeignKey(
+            _Hub,
+            on_delete=models.CASCADE,
+            related_name="alpha",
+            related_query_name="beta",
+        )
+
+        class Meta:
+            app_label = "library"
+
+    class _BetaRow(models.Model):
+        hub: "models.ForeignKey[_Hub | Combinable, _Hub]" = models.ForeignKey(
+            _Hub,
+            on_delete=models.CASCADE,
+            related_name="beta",
+            related_query_name="gamma",
+        )
+
+        class Meta:
+            app_label = "library"
+
+    assert _Hub._meta.get_field("beta").related_model is _AlphaRow
+    assert _prefetch_relation_target_or_none(_Hub, "beta") is _BetaRow
+    assert _prefetch_relation_target_or_none(_Hub, "alpha") is _AlphaRow
+
+
 @pytest.mark.django_db
 def test_prefetch_relation_target_resolves_every_installed_default_accessor() -> None:
     """EVERY installed default-accessor relation resolves to its own target.
@@ -4553,6 +4593,18 @@ def test_a_prefetch_child_off_its_relation_or_its_alias_fails_closed(
     source = candidate()
     model = source.model
     assert _seal_or_defect(source, model, alias) == (None, ("prefetch", detail))
+
+
+def test_a_candidate_routed_off_the_alias_is_refused_before_its_children() -> None:
+    """A routed-off candidate with a bad ``Prefetch`` child reports the ``alias`` defect.
+
+    The candidate's own routing is checked before its children are walked, so the
+    refusal names the outer queryset rather than one of its children.
+    """
+    source = Category.objects.prefetch_related(
+        Prefetch("items", queryset=Property.objects.all()),
+    ).using("other")
+    assert _seal_or_defect(source, Category, "default") == (None, ("alias", "other"))
 
 
 def test_a_prefetch_child_refusal_names_the_child_in_the_hook_error() -> None:

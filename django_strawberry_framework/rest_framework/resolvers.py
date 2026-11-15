@@ -1126,7 +1126,15 @@ def _scope_specs_over_serializer(
         # ``.all()`` normalizes a Manager to a QuerySet (preserving an explicit ``.using``);
         # the pin fails closed on a cross-alias author queryset BEFORE any validation runs.
         author_queryset = read_attr(relation, "queryset")
-        assert is_manager(author_queryset) or isinstance(author_queryset, QuerySet)  # noqa: S101 - a writable primary-key relation looks its id up in a QuerySet or a Manager
+        if not (is_manager(author_queryset) or isinstance(author_queryset, QuerySet)):
+            # DRF admits ``queryset=None`` beside a ``get_queryset()`` override; the scope
+            # composes onto the field's own ``queryset``, so that spelling has nothing to pin.
+            raise ConfigurationError(
+                f"SerializerMutation: relation field {spec.target_name!r} has no queryset at "
+                f"runtime (got {truth.kind(author_queryset)}); a writable relation is scoped "
+                "through its own queryset attribute. Declare queryset= on the field instead "
+                "of overriding get_queryset().",
+            )
         # The decode resolved the id against the recorded model's visibility; a runtime
         # queryset over another model would AND that model's rows with the recorded model's
         # visible pks, linking a row the visibility query never saw.

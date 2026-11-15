@@ -2622,7 +2622,7 @@ class CreateShelfViaHookNonNullNote(SerializerMutation):
     ``get_serializer_for_schema()`` (the schema-time field map) AND ``get_serializer_kwargs``
     (the per-request construction) to build the SAME serializer with a different
     ``note_allow_null``, so the schema-time ``note`` shape and the runtime ``note`` field AGREE
-    (the agreement guard forbids a schema-only decode-then-drop field). This half
+    (the schema field map must describe the runtime serializer's fields). This half
     is ``allow_null=False``, so ``note`` is a non-null ``String!`` in the generated input; the
     twin's is a nullable, omittable ``String``. Before the descriptor-identity fix both shapes
     compared EQUAL (the descriptor recorded the base annotation, NOT the emitted nullability),
@@ -2841,9 +2841,8 @@ class CreateShelfWithInjectedTopic(SerializerMutation):
     ``get_serializer_injected_data`` hook - the framework merges it into the serializer data
     itself (a ``get_serializer_kwargs`` override cannot rewrite ``data``). The
     create-required guard SUBTRACTS the declared injected field (so the narrowing does not
-    raise), and the resolver enforces the hook's keys EXACTLY match the declaration. The
-    live test posts ``{code, branchId}`` (no ``topic`` input) and reads the injected
-    ``topic`` back off the written ``Shelf``.
+    raise). The live test posts ``{code, branchId}`` (no ``topic`` input) and reads the
+    injected ``topic`` back off the written ``Shelf``.
     """
 
     class Meta:
@@ -2961,9 +2960,8 @@ class UpdateBookWithInjectedStatus(SerializerMutation):
     (required, write-only); this update mutation narrows the partial input to ``title``
     (dropping ``status``), declares ``Meta.injected_fields = ("status",)``, and supplies the
     value from the SANCTIONED ``get_serializer_injected_data`` hook. The injected spec is
-    resolved under the update's ``PartialInput`` provisional so its generated enum identity
-    matches the runtime-agreement guard's re-derivation (a serializer-only ``ChoiceField``'s
-    enum name derives from that provisional). The live test posts ``{title}`` (no ``status``
+    resolved under the update's ``PartialInput`` provisional, from which a serializer-only
+    ``ChoiceField``'s generated enum name derives. The live test posts ``{title}`` (no ``status``
     input) and reads the injected ``status`` back off the written ``subtitle``.
     """
 

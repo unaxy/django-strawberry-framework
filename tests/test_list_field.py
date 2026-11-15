@@ -116,7 +116,6 @@ from django_strawberry_framework.list_field import (
     _ListArguments,
     _normalize_list_arguments,
     _order_normalization_scope,
-    _orderset_class_from_definition,
     _resolve_argument_wire_name,
     _synthesized_list_signature,
     _validate_djangotype_target,
@@ -2093,7 +2092,7 @@ def test_require_orderset_class_rejects_a_target_without_one() -> None:
             model = Category
             fields = ("id", "name")
 
-    assert _orderset_class_from_definition(Orderless.__django_strawberry_definition__) is None
+    assert Orderless.__django_strawberry_definition__.orderset_class is None
     with pytest.raises(
         ConfigurationError,
         match=r"Field target Orderless has no orderset_class configured\.",

@@ -18933,7 +18933,7 @@ def test_serializer_hooks_differing_only_in_allow_null_bind_distinct_nullability
     ``NoteShelfSerializer`` and return the SAME ``code`` + ``branch`` + ``note`` hook fields,
     with ``note`` a ``required=True`` ``CharField`` differing ONLY in ``allow_null``; each also
     constructs the SAME serializer at runtime with the matching ``note_allow_null`` (the
-    agreement guard forbids a schema-only field the runtime does not declare). The EMITTED
+    schema field map must describe the runtime serializer's fields). The EMITTED
     nullability is part of the descriptor identity, so the two generated inputs are DISTINCT
     types: the ``allow_null=False`` half exposes ``note`` as a non-null ``String!``, the
     ``allow_null=True`` half as a nullable, OMITTABLE ``String``. The descriptor records the
@@ -20049,10 +20049,9 @@ def test_serializer_update_injected_field_contract_over_http() -> None:
     ``UpdateBookWithInjectedStatus`` narrows the partial input to ``title`` (dropping the
     ``StatusStampBookSerializer``-required serializer-only ``status`` ``ChoiceField``) and
     declares ``Meta.injected_fields = ("status",)`` with a ``get_serializer_injected_data``
-    override. The injected spec is resolved under the update's ``PartialInput`` provisional, so
-    its generated enum identity matches the runtime-agreement guard's re-derivation and the
-    update SUCCEEDS with the injected value, with no spurious agreement-guard
-    ``ConfigurationError`` naming mismatched enum identities.
+    override. The injected spec is resolved under the update's ``PartialInput`` provisional,
+    from which its generated enum name derives, and the update SUCCEEDS with the injected
+    value.
     """
     shelf = _seed_shelf()
     book = models.Book.objects.create(title="BeforeInject", shelf=shelf)

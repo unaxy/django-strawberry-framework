@@ -1409,16 +1409,16 @@ def _prefetch_relation_target_or_none(
     Resolves ``prefetch_through`` one segment at a time through each model's
     ``_meta`` (Django's own relation metadata -- no consumer dispatch, every
     ``parent_model`` here is already a proven model class) and returns the
-    FINAL relation's ``related_model``. Each part is tried against the field map
-    first (``_meta.get_field`` -- forward relations and explicit
-    ``related_name``/bare-model-name reverse registrations), and on a miss
-    against the model's reverse-ACCESSOR map: a reverse relation declared
-    WITHOUT ``related_name`` is prefetched through the default
-    ``<model>_set`` accessor (Django's own reverse-descriptor spelling) while
-    the field map knows it under the bare child name, so the accessor scan is
-    what proves the target for that spelling too -- ``Permission.user_set``,
-    ``ContentType.permission_set``. A path that does not resolve to a
-    relation at every segment (an unknown name, a plain column, a
+    FINAL relation's ``related_model``. Each part is tried against the model's
+    reverse-ACCESSOR map first, the spelling Django's prefetch traversal itself
+    resolves by attribute access (the default ``<model>_set`` of a relation
+    declared WITHOUT ``related_name`` -- ``Permission.user_set``,
+    ``ContentType.permission_set`` -- or a ``related_name`` beside its own
+    ``related_query_name``), so a part that is one relation's accessor and
+    another's query name resolves to the relation prefetch fetches. On a miss
+    the field map answers (``_meta.get_field`` -- forward relations and reverse
+    query names). A path that does not resolve to a relation at every segment
+    (an unknown name, a plain column, a
     ``GenericForeignKey``-shaped accessor Django resolves through descriptors at
     fetch time rather than through the model's field map, an unresolved
     lazy-FK string whose ``related_model`` stays a raw string) returns ``None``,
@@ -1433,16 +1433,13 @@ def _prefetch_relation_target_or_none(
         return None
     current: type[models.Model] = parent_model
     for part in path.split(LOOKUP_SEP):
-        try:
-            field: object = current._meta.get_field(part)
-        except FieldDoesNotExist:
-            # Not in the field map: a reverse accessor spelled apart from its
-            # query name (the default ``<model>_set`` of a relation declared
-            # without a ``related_name``, or a ``related_name`` beside its own
-            # ``related_query_name``) is what prefetch actually accepts, so
-            # resolve the part over the accessor map before giving up.
-            field = reverse_relation_by_accessor(current, part)
-        if field is None or not getattr(field, "is_relation", False):
+        field: object = reverse_relation_by_accessor(current, part)
+        if field is None:
+            try:
+                field = current._meta.get_field(part)
+            except FieldDoesNotExist:
+                return None
+        if not getattr(field, "is_relation", False):
             return None
         related: object = getattr(field, "related_model", None)
         if not truth.is_subclass(related, models.Model):
@@ -2330,10 +2327,6 @@ def _seal_or_defect(
       ``.filter()`` / ``.only()`` after a combinator and silently drops a
       reverse-FK ``Prefetch``'s parent predicate from one. A branch over another
       model is the ``table`` defect.
-    - ``prefetch`` -- a ``Prefetch`` child, at any depth, over a model that is not
-      its relation's target, or explicitly routed off the effective alias
-      (``_with_prefetch_children_served``). A combined child is served like a
-      combined candidate.
     - ``alias`` -- a queryset explicitly routed off ``required_alias``. For a
       top-level source an UNROUTED queryset (``_db is None``) is never an alias
       defect; the seal pins it with ``.using(required_alias)``. For a prefetch
@@ -2341,6 +2334,10 @@ def _seal_or_defect(
       EQUAL the outer effective alias, including when that alias is ``None`` -- an
       unrouted parent forces an unrouted child, so one resolution never spans two
       connections.
+    - ``prefetch`` -- a ``Prefetch`` child, at any depth, over a model that is not
+      its relation's target, or explicitly routed off the effective alias
+      (``_with_prefetch_children_served``). A combined child is served like a
+      combined candidate.
     """
     if not _is_queryset(candidate):
         return None, ("type", truth.kind(candidate))
@@ -2380,13 +2377,6 @@ def _seal_or_defect(
         if rewritten[1] is not None:
             return None, rewritten[1]
         queryset.query = rewritten[0]
-    with_children = _with_prefetch_children_served(
-        queryset,
-        db if db is not None else required_alias,
-    )
-    if with_children[1] is not None:
-        return None, with_children[1]
-    queryset = with_children[0]
     if policy.require_shared_alias:
         # A prefetch child: its explicit ``_db`` must EQUAL the outer effective alias,
         # INCLUDING when that alias is ``None`` (an unrouted parent forces an unrouted
@@ -2395,6 +2385,13 @@ def _seal_or_defect(
             return None, ("alias", str(db))
     elif required_alias is not None and db is not None and db != required_alias:
         return None, ("alias", str(db))
+    with_children = _with_prefetch_children_served(
+        queryset,
+        db if db is not None else required_alias,
+    )
+    if with_children[1] is not None:
+        return None, with_children[1]
+    queryset = with_children[0]
     if required_alias is not None and db is None:
         queryset = queryset.using(required_alias)
     return queryset, None

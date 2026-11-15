@@ -690,9 +690,10 @@ def runtime_validated_data_fields(
     supplied_fields: set[str],
     apply_defaults: bool,
 ) -> dict[str, DRFField]:
-    """Return every runtime field capable of contributing to ``validated_data``.
+    """Return every field capable of contributing to ``validated_data`` when the serializer runs.
 
-    ``supplied_fields`` are the client-input and injected names the framework can
+    Read at schema time (``rest_framework/sets.py``) to predict which fields a write can
+    populate. ``supplied_fields`` are the client-input and injected names the framework can
     place in serializer data. On non-partial validation, DRF can additionally supply
     defaults from narrowed-out fields (including ``HiddenField``); partial updates
     skip defaults. Read-only fields never contribute.
@@ -754,16 +755,15 @@ def raise_writable_source_ownership_errors(
 ) -> None:
     """Raise ``ConfigurationError`` when writable sources collide or use ``source='*'``.
 
-    The one raise path for schema-time (``rest_framework/sets.py``) and runtime
-    (``rest_framework/resolvers.py``) ownership checks - detection stays in
-    ``writable_star_sources`` / ``writable_source_collisions``; callers only supply
-    the mutation name, the source map, the serializer's backing ``model`` (required:
-    the model each source resolves through; an explicit ``None`` for a model-less
-    serializer compares sources as spelled), and
-    an optional path phrase (e.g. ``"nested serializer path 'items'"`` or
-    ``"runtime serializer path '<root>'"``). Omit ``location`` for the top-level
-    schema surface. A collision names the owners by their declared sources when
-    those differ from the shared attribute (``'cat' (source 'category_id')``).
+    The raise path for the schema-time ownership check (``rest_framework/sets.py``),
+    root and nested - detection stays in ``writable_star_sources`` /
+    ``writable_source_collisions``; callers only supply the mutation name, the source
+    map, the serializer's backing ``model`` (required: the model each source resolves
+    through; an explicit ``None`` for a model-less serializer compares sources as
+    spelled), and an optional path phrase (e.g. ``"nested serializer path 'items'"``).
+    Omit ``location`` for the top-level schema surface. A collision names the owners by
+    their declared sources when those differ from the shared attribute
+    (``'cat' (source 'category_id')``).
     """
     star_fields = writable_star_sources(field_sources)
     if star_fields:
@@ -994,7 +994,9 @@ class SerializerInputShape:
     - ``serializer_class`` / ``operation_kind`` - the declaration identity + the
       ``Input`` / ``PartialInput`` suffix.
     - ``field_specs`` - the ordered tuple of each emitted field's reverse-map
-      ``InputFieldSpec`` (input_attr / graphql_name / target_name / kind / source).
+      ``InputFieldSpec`` (input_attr / graphql_name / target_name / kind / source, plus
+      the emitted ``annotation_repr`` and ``required``, which carry a nested child's
+      emitted shape into the parent's key).
     - ``annotations`` - the ordered tuple of each emitted field's stringified EMITTED
       annotation (post-nullable-widening), so two hook-returned shapes with
       the SAME names but a DIFFERENT emitted annotation diverge: a ``CharField`` vs an

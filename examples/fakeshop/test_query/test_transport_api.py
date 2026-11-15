@@ -2576,6 +2576,7 @@ async def test_the_async_view_rejects_the_same_multipart_map_shape() -> None:
 
     assert response.status_code == 400
     assert response.content == b"Unable to parse the multipart body"
+    _assert_no_graphql_envelope(response)
 
 
 @pytest.mark.parametrize("fields", _NON_ENVELOPE_MULTIPART_FIELDS)
