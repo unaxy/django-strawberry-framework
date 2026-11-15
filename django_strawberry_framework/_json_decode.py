@@ -31,13 +31,10 @@ upstream's own response and literal on every path, and the package writes no
 status, message or close of its own. The interpreter's ``ValueError`` rides as
 ``__cause__``.
 
-The translation is scoped by type and provenance, never by message: CPython's text
-differs between 3.10 and 3.11+, and a configured limit changes the number in it. It
+The translation is scoped by type, never by message: CPython's text differs
+between 3.10 and 3.11+, and a configured limit changes the number in it. It
 applies only to an exception of exactly ``ValueError`` (``JSONDecodeError`` and
-``UnicodeDecodeError`` are subclasses and pass through untouched) whose traceback
-runs through upstream's ``BaseView.decode_json`` frame, the ``json.loads`` call
-that frame makes. A ``ValueError`` raised by a consumer's own ``decode_json``
-override, or by any other code the delegate reaches, keeps its ``500``.
+``UnicodeDecodeError`` are subclasses and pass through untouched).
 
 Package policy, not gated by ``APPLY_UPSTREAM_PATCHES``: the package's resource
 policy names this limit as what bounds an integer a request carries and states that
@@ -48,42 +45,18 @@ holds on every package mount.
 from __future__ import annotations
 
 import json
-from types import FunctionType
 from typing import TYPE_CHECKING
-
-from strawberry.http.base import BaseView
-
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import require_instance
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from types import CodeType
 
 __all__ = ("decode_json",)
-
-#: Upstream's ``decode_json`` body, the frame a translated refusal must have
-#: passed through.
-_UPSTREAM_DECODE_JSON_CODE: CodeType = require_instance(
-    truth.class_dict(BaseView)["decode_json"],
-    FunctionType,
-).__code__
 
 #: The ``JSONDecodeError`` message for the translated refusal. Never on the wire:
 #: upstream's callers answer with their own literal.
 _INTEGER_LIMIT_MESSAGE = (
     "Integer literal exceeds the interpreter's integer string conversion limit"
 )
-
-
-def _raised_inside_upstream_decode(exc: BaseException) -> bool:
-    """Return ``True`` when ``exc``'s traceback runs through ``BaseView.decode_json``."""
-    traceback = exc.__traceback__
-    while traceback is not None:
-        if traceback.tb_frame.f_code is _UPSTREAM_DECODE_JSON_CODE:
-            return True
-        traceback = traceback.tb_next
-    return False
 
 
 def decode_json(decode: Callable[[str | bytes], object], data: str | bytes) -> object:
@@ -96,6 +69,6 @@ def decode_json(decode: Callable[[str | bytes], object], data: str | bytes) -> o
     try:
         return decode(data)
     except ValueError as exc:
-        if not (truth.is_exact(exc, ValueError) and _raised_inside_upstream_decode(exc)):
+        if type(exc) is not ValueError:
             raise
         raise json.JSONDecodeError(_INTEGER_LIMIT_MESSAGE, "", 0) from exc

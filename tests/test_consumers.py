@@ -12,10 +12,7 @@ What a live HTTP request cannot express, and what therefore stays here:
   ``tests/test_routers.py`` drives the same domain through router
   construction);
 - ``_host_validation_request`` projection shape (handshake verdicts live
-  in ``tests/test_routers.py`` via ``WebsocketCommunicator``);
-- ``connection_actor_state``'s typed rejection of a corrupted scope slot used
-  by those checkpoints (happy-path lease lifecycle is
-  ``tests/utils/test_sessions.py``).
+  in ``tests/test_routers.py`` via ``WebsocketCommunicator``).
 
 Both revalidation checkpoints, the revocation-gated adapter and
 ``_revoke_connection`` are driven end to end through ``WebsocketCommunicator``
@@ -29,25 +26,6 @@ import pytest
 
 from django_strawberry_framework import consumers as cmod
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils.sessions import (
-    _ACTOR_STATE_SCOPE_KEY,
-    connection_actor_state,
-)
-
-# ---------------------------------------------------------------------------
-# utils/sessions - corrupted scope state (owning layer)
-# ---------------------------------------------------------------------------
-
-
-def test_connection_actor_state_corrupted_value_raises_configuration_error() -> None:
-    scope: dict[str, object] = {_ACTOR_STATE_SCOPE_KEY: "not-a-state"}
-    with pytest.raises(ConfigurationError, match="corrupted"):
-        connection_actor_state(scope)
-
-
-# ---------------------------------------------------------------------------
-# resolved_revalidation_window - construction-time domain
-# ---------------------------------------------------------------------------
 
 
 class _WindowIntSubclass(int):

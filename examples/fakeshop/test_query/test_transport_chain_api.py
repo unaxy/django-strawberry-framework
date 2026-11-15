@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 from collections.abc import Awaitable, Callable, Coroutine, Generator
-from typing import IO, NoReturn
+from typing import IO
 
 import pytest
 import strawberry
@@ -18,7 +18,7 @@ from django.urls import URLPattern, path
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoSchema
-from django_strawberry_framework._boundary_ordering import _BOUNDARY_MARKER, _BOUNDARY_METHOD
+from django_strawberry_framework._boundary_ordering import _BOUNDARY_MARKER
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
@@ -119,26 +119,13 @@ def _marked_callback_with_unusable_initkwargs(_request: HttpRequest) -> HttpResp
     return HttpResponse("marked, unusable initkwargs")
 
 
-def _marked_callback_with_initkwargs_the_class_rejects(_request: HttpRequest) -> HttpResponse:
-    """A callback with ``as_view``'s exact bookkeeping, naming a kwarg the class refuses."""
-    return HttpResponse("marked, initkwargs the class rejects")
-
-
 class _NotAPackageView:
     """What calling a non-class ``view_class`` would hand the middleware."""
 
 
-def _boundary_the_factory_carries(_request: HttpRequest) -> NoReturn:
-    """The callable the factory below carries under the boundary method's name; never run."""
-    raise AssertionError("the boundary of a non-class view_class must never run")
-
-
 def _view_class_factory(**_initkwargs: object) -> _NotAPackageView:
-    """A ``view_class`` that is callable, carries the boundary's name, and is not a class."""
+    """A ``view_class`` that is callable and is not a class."""
     return _NotAPackageView()
-
-
-setattr(_view_class_factory, _BOUNDARY_METHOD, _boundary_the_factory_carries)
 
 
 def _marked_callback_with_a_callable_view_class(_request: HttpRequest) -> HttpResponse:
@@ -146,41 +133,19 @@ def _marked_callback_with_a_callable_view_class(_request: HttpRequest) -> HttpRe
     return HttpResponse("marked, callable view_class")
 
 
-class _ForeignButBuildableView:
-    """A real class, buildable with no keywords, carrying no body boundary."""
-
-    def __init__(self, **initkwargs: object) -> None:
-        self.initkwargs = initkwargs
-
-
-def _marked_callback_with_a_foreign_view_class(_request: HttpRequest) -> HttpResponse:
-    """A callback whose bookkeeping is impeccable and whose class is no package view."""
-    return HttpResponse("marked, foreign view_class")
-
-
-# The marker ``views.py::_boundary_view`` stamps, forged onto five callbacks the
+# The marker ``views.py::_boundary_view`` stamps, forged onto three callbacks the
 # middleware cannot run a boundary for; Django's ``as_view()`` callback contract puts
 # ``view_class`` / ``view_initkwargs`` in the callback's namespace, mimicked here with
 # values ``as_view`` never produces.
 setattr(_marked_callback_without_a_view_class, _BOUNDARY_MARKER, True)
 setattr(_marked_callback_with_unusable_initkwargs, _BOUNDARY_MARKER, True)
-setattr(_marked_callback_with_initkwargs_the_class_rejects, _BOUNDARY_MARKER, True)
 setattr(_marked_callback_with_a_callable_view_class, _BOUNDARY_MARKER, True)
-setattr(_marked_callback_with_a_foreign_view_class, _BOUNDARY_MARKER, True)
 vars(_marked_callback_with_unusable_initkwargs).update(
     view_class=DjangoGraphQLView,
     view_initkwargs=[("schema", None)],
 )
-vars(_marked_callback_with_initkwargs_the_class_rejects).update(
-    view_class=DjangoGraphQLView,
-    view_initkwargs={"not_a_view_kwarg": 1},
-)
 vars(_marked_callback_with_a_callable_view_class).update(
     view_class=_view_class_factory,
-    view_initkwargs={},
-)
-vars(_marked_callback_with_a_foreign_view_class).update(
-    view_class=_ForeignButBuildableView,
     view_initkwargs={},
 )
 
@@ -188,9 +153,7 @@ vars(_marked_callback_with_a_foreign_view_class).update(
 _MARKED_ROUTES = {
     "no-view-class": _marked_callback_without_a_view_class,
     "bad-initkwargs": _marked_callback_with_unusable_initkwargs,
-    "rejected-initkwargs": _marked_callback_with_initkwargs_the_class_rejects,
     "callable-view-class": _marked_callback_with_a_callable_view_class,
-    "foreign-view-class": _marked_callback_with_a_foreign_view_class,
 }
 
 
@@ -413,15 +376,13 @@ def test_a_marked_callback_the_middleware_cannot_build_is_declined_not_crashed(
 ) -> None:
     """The boundary marker is a claim, not a guarantee that a view instance is behind it.
 
-    Running the boundary needs ``view_class`` and ``view_initkwargs`` as well, and a
-    class that carries the boundary; reading any of that off the marker alone turns
-    a callback carrying one and not the rest into an unhandled exception inside
-    ``process_view``. The five routes are five ways
-    ``middleware/request_body.py::_package_view_instance`` decides no: absent
-    bookkeeping, bookkeeping of the wrong shape to splat, ``as_view``'s exact shape
-    naming a keyword the class rejects, a callable ``view_class`` that is not a
-    class, and a buildable class that is no package view. Each is declined and the
-    request reaches its own callback rather than a 500.
+    Running the boundary needs ``view_class`` and ``view_initkwargs`` as well;
+    reading them off the marker alone turns a callback carrying one and not the
+    rest into an unhandled exception inside ``process_view``. The three routes are
+    three ways ``middleware/request_body.py::_package_view_instance`` decides no:
+    absent bookkeeping, bookkeeping of the wrong shape to splat, and a callable
+    ``view_class`` that is not a class. Each is declined and the request reaches
+    its own callback rather than a 500.
     """
     with _mounted([_BOUNDARY_ENTRY, _STOCK_CSRF_ENTRY]):
         response = Client().get(f"/graphql-chain/marked-{route}/")

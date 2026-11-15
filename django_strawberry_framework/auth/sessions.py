@@ -60,7 +60,6 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils.imports import CHANNELS_FLOOR, require_optional_module
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
 from django_strawberry_framework.utils.sessions import (
-    ScopeSingletonMessages,
     scope_key,
     scope_singleton,
     session_store_class,
@@ -89,17 +88,6 @@ _CHANNELS_INSTALL_HINT = (
 # stored under. Namespaced with the distribution name so it can never collide
 # with an ASGI key set by Channels, Django, or consumer middleware.
 _SCOPE_LOCK_KEY = scope_key("auth_session_lock")
-
-# The per-scope lazy singleton itself is ``utils/sessions.py::scope_singleton``
-# (shared with the WebSocket revalidation state, which shares the same
-# read / create-with-no-await / validate-or-fail-closed body); only the
-# corrupted-slot wording is the auth boundary's own.
-_SCOPE_LOCK_MESSAGES = ScopeSingletonMessages(
-    corrupted=(
-        "The auth session boundary requires an asyncio.Lock per scope, but got a "
-        "{actual}; the per-scope lock is corrupted."
-    ),
-)
 
 
 class Transport(enum.Enum):
@@ -233,7 +221,6 @@ async def scope_session_lock(
         _SCOPE_LOCK_KEY,
         factory=asyncio.Lock,
         expect=asyncio.Lock,
-        messages=_SCOPE_LOCK_MESSAGES,
     )
     async with lock:
         yield lock

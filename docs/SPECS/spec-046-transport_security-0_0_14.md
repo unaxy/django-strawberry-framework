@@ -124,25 +124,19 @@ Each top-level item maps to one commit / PR.
         ([Decision 18](#decision-18--the-body-gate-runs-before-djangos-multipart-parser)).
   - [ ] `django_strawberry_framework/_request_body.py`: the single compatibility helper that
         names `HttpRequest._stream` / `_body` / `_read_started`, handing the view one boolean
-        and pinning the Django 5.2-vs-6.0 contract that measurement depends on
+        and pinning the Django-range contract that measurement depends on
         ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)).
-  - [ ] `_request_body.py::_measured_remaining` models the capability probe as **three**
-        explicit outcomes — measurable; safely unmeasurable with the original position
-        intact so the bounded read may run; or position potentially corrupted, so fail
-        closed with the package's own controlled rejection — with every capability call
-        (`seekable()`, the `tell()` that reads the starting position, the seek to the end,
-        the seek back, and the `tell()` that verifies it; an answer that is not a built-in
-        `int` is never used in arithmetic) guarded rather than allowed to escape as an
-        unrelated `500`
+  - [ ] `_request_body.py::_measured_remaining` answers a measurement or `None`: a stream
+        that declares itself unseekable, a `tell()` raising `io.UnsupportedOperation`, or a
+        probed count of zero or less sends the request to the bounded read
         ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)
-        #"An unmeasurable stream has three outcomes, not two").
-  - [ ] `_request_body.py::_bounded_read_exceeds_limit` is total in the same way and for the
-        same reason: reading, sizing the returned chunks, closing the consumed stream and
-        installing the replacement are all calls into a foreign object, so a failure in any
-        of them is the module's fail-closed `True` plus one operator-side `WARNING` — never
-        an `UnreadablePostError` escaping past upstream's `except HTTPException` as a `500`
+        #"An unmeasurable stream goes to the bounded read").
+  - [ ] `_request_body.py::_bounded_read_exceeds_limit`: reading the request stream,
+        closing it and installing the replacement failing is the module's fail-closed `True`
+        plus one operator-side `WARNING` — never an `UnreadablePostError` escaping past
+        upstream's `except HTTPException` as a `500`
         ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)
-        #"The bounded read is guarded for the same reason the probe is").
+        #"The bounded read is guarded against a broken client").
   - [ ] One settings key, `MAX_REQUEST_BODY_BYTES`, in
         `django_strawberry_framework/conf.py`, with a per-mount view-kwarg override
         (constructor > setting > default) — the `NESTED_CONNECTION_STRATEGY` precedence shape.
@@ -167,8 +161,7 @@ Each top-level item maps to one commit / PR.
   - [ ] `_RequestBodyBoundaryMixin.decode_json` and the package consumer's `decode_json`
         re-raise the interpreter's integer digit-limit `ValueError` out of upstream's
         `BaseView.decode_json` as `json.JSONDecodeError` through
-        `_json_decode.py::decode_json` (exact type, upstream-frame provenance, no message
-        match), so upstream's `parse_json` and `iter_json` answer it, independent of
+        `_json_decode.py::decode_json` (exact type, no message match), so upstream's `parse_json` and `iter_json` answer it, independent of
         `APPLY_UPSTREAM_PATCHES`
         ([Decision 9](#decision-9--the-strict-utf-8-wire-contract-is-enforced-by-the-package-view-its-own-body-source-one-strict-decode)).
   - [ ] `_RequestBodyBoundaryMixin._enforce_body_charset_declaration` refuses a non-multipart
@@ -319,10 +312,11 @@ The Django, Channels and Strawberry behavior this design rests on:
   `AsyncDjangoHTTPRequestAdapter.get_body`) read Django's `HttpRequest.body`, and that property
   (a) rejects a declared-over-limit request from `CONTENT_LENGTH` **without reading the body**,
   on every supported release (gated on `DATA_UPLOAD_MAX_MEMORY_SIZE is not None`), and
-  (b) **only from Django 6.0** additionally seeks a *seekable* stream — which is exactly
-  ASGI's `SpooledTemporaryFile` — to the end and rejects on the **actual buffered size**. The
-  5.2.x floor series has no such check, so against an absent or understated header the
-  package's own **counted** check is the only application-level bound there — the reason for
+  (b) on the 5.2.x series from the floor and the 6.x series from 6.0.4 additionally seeks a
+  *seekable* stream — which is exactly ASGI's `SpooledTemporaryFile` — to the end and rejects
+  on the **actual buffered size**. Django 6.0.0 through 6.0.3 have no such check, so against
+  an absent or understated header the package's own **counted** check is the only
+  application-level bound there — the reason for
   [Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)'s
   "counted, not declared", and the reason the body-cap test matrix never combines a lowered
   `DATA_UPLOAD_MAX_MEMORY_SIZE` with the ASGI harness (see
@@ -481,7 +475,7 @@ its HTTP branch.
   unsafe boundary for migration convenience.
 - **Borrowed from Django instead:** `get_asgi_application()`, the URLconf, `MIDDLEWARE`,
   and `HttpRequest.body`'s existing size checks — the declared-`CONTENT_LENGTH` one on
-  every supported release, the buffered-size one from Django 6.0 — whose
+  every supported release, the buffered-size one on 5.2.x and from 6.0.4 — whose
   `RequestDataTooBig` surfaces as a `400` (see [Current state](#current-state)). Django's own
   documented ASGI arrangement is the shape; the package's contribution is the WebSocket
   composition plus the three package-owned bounds (body cap, UTF-8 wire, actor
@@ -982,9 +976,9 @@ an unbounded `self.read()` into one `bytes` value, so counting it would detect a
 over-limit body only *after* the attacker-sized allocation the cap exists to prevent — and
 on ASGI that read also copies back a `SpooledTemporaryFile` that
 `ASGIHandler.read_body` may already have rolled to disk, synchronously, on the event loop
-for `AsyncDjangoGraphQLView`. Django 6.0's own `body` narrows that window by size-checking
-a seekable stream first; the **Django 5.2.x floor series carries no such check**, which is
-precisely where the package's counted bound has to stand alone. So the cap asks a question
+for `AsyncDjangoGraphQLView`. Django's own `body` narrows that window by size-checking a
+seekable stream first on the 5.2.x series and from 6.0.4; **Django 6.0.0 through 6.0.3 carry
+no such check**, which is precisely where the package's counted bound has to stand alone. So the cap asks a question
 instead of reading a body, in descending order of cheapness. A body an earlier middleware
 already cached is measured from that cache and still refused — the allocation cannot be
 undone, but processing it can be. A measurable stream (the ASGI spool) is size-probed with
@@ -993,7 +987,7 @@ probe's *answer* that is judged, not merely its arithmetic: a count of zero or l
 measurement failure, never an empty body, so the request falls through to the bounded read
 below. Zero is the one answer a size probe must not be believed on, because the cap reads
 it as "within the limit" while nothing has been read, which hands the request straight to
-`HttpRequest.body` with no package bound at all — and on the 5.2.x floor series that
+`HttpRequest.body` with no package bound at all — and on Django 6.0.0 through 6.0.3 that
 property's only ceiling is the `CONTENT_LENGTH` this cap exists precisely not to trust. A
 stream the probe
 cannot answer for (genuinely non-seekable, or refused as above) is read through
@@ -1014,47 +1008,19 @@ in **one** module, `_request_body.py`, which hands the view a single boolean: th
 version-divergent knowledge is the risk, so it is single-sited beside the documented Django
 contract it depends on rather than spread across the two view classes.
 
-**An unmeasurable stream has three outcomes, not two.** The size probe calls into an
-object the package did not create — `seekable()`, the `tell()` that reads the starting
-position, a seek to the end, the seek back to that position, and the `tell()` that verifies
-it — and a stream supplied by consumer middleware or a custom ASGI server may raise from any
-of them; an answer that is not a built-in `int` is never used in arithmetic. Letting such a
-failure fall through as an unrelated `500` is the wrong answer at the one seam this design
-deliberately centralizes, so the probe reports exactly three outcomes:
+**An unmeasurable stream goes to the bounded read.** The size probe answers a count or
+nothing: a stream that declares itself unseekable, a `tell()` that raises
+`io.UnsupportedOperation` (a pipe-backed stream), a position or end that is not an `int`, or
+a probed count of zero or less sends the request to the bounded read. A count of zero or
+less is a measurement failure, not an empty body: verifying a zero costs exactly one `read`,
+so the fail-safe direction is affordable, and a genuinely empty body is still allowed — by
+measurement rather than by assumption. The stream is Django's own (the ASGI spool or WSGI's
+`LimitedStream`) or one a consumer middleware installed, which is trusted application code,
+so the probe's calls into it are not guarded.
 
-1. **Measurable** — a coherent position/end pair, the original position restored, nothing
-   read. The count decides.
-2. **Safely unmeasurable, original position intact** — the stream declared itself
-   unseekable, or `tell()` refused, or the pair came out incoherent and the restore
-   succeeded. No measurement is produced and the bounded read supplies the bound. A probed
-   count of zero or less stays in this class: verifying a zero costs exactly one `read`, so
-   the fail-safe direction is affordable, and a genuinely empty body is still allowed — by
-   measurement rather than by assumption.
-3. **Position potentially corrupted** — the seek to the end succeeded (or raised after
-   moving) and the restore then failed to prove itself: the restoring seek raised, or the
-   `tell()` that verifies it answered something other than the position the probe started
-   from. Either way the stream's read position is no longer
-   known to be where the request started, and the two are one outcome rather than two — an
-   over-reported position takes the second route, because a `tell()` that lies about where
-   the stream is lies about the restore too. The package **fails closed** with its own
-   controlled rejection rather than reading from an unknown offset or guessing a rewind to
-   zero: the bytes cannot be recovered, and a bounded read from an unknown position would
-   measure a body nobody sent. This is the only new refusal, and it is a refusal rather
-   than a `500`.
-
-The split is deliberate about *which* failure fails closed. An outcome-2 failure has cost
-nothing and lost nothing, so deferring to the read is strictly better than refusing a
-possibly-legitimate request. An outcome-3 failure has already mutated state the request
-depends on, and a package that quietly continued would be processing a request it can no
-longer describe. Rewinding to zero instead was rejected explicitly: a stream legitimately
-mid-position would then be misread from its start.
-
-**The bounded read is guarded for the same reason the probe is.** Outcome 2 does not answer
-the question, it *delegates* it — so the delegate has to be as total as the probe, or the
-guarantee only holds on the branch that never runs in production. Everything the bounded read
-touches is foreign too: `request.read` (a stream `OSError`, which Django re-raises as
-`django.http.request.UnreadablePostError`), the chunk objects handed back, the consumed
-stream's `close`, and the replacement stream installed in its place. Any of those failing means
+**The bounded read is guarded against a broken client.** A stream `OSError` from
+`request.read`, which Django re-raises as `django.http.request.UnreadablePostError`, the
+consumed stream's `close`, and the replacement stream installed in its place failing all mean
 the same thing — the package cannot prove this body is within the limit — so all of them
 produce the same **fail-closed** answer and the same controlled rejection, with one
 operator-side `WARNING` carrying the traceback because the wire deliberately cannot say why.
@@ -1065,8 +1031,8 @@ the *response* and the *attribution* wrong rather than a hole, which is why the 
 this module's documented `bool`, not a new exception type. A partially collected prefix is
 dropped with the request rather than installed: `_read_started` stays `True` and `_body` is
 never written, so anything that did reach for the body would get Django's own
-`RawPostDataException`, never a fragment of a body nobody sent. `BaseException` stays uncaught
-in both phases, so cancellation and process control still propagate.
+`RawPostDataException`, never a fragment of a body nobody sent. `BaseException` stays uncaught,
+so cancellation and process control still propagate.
 
 **Why its own key rather than `DATA_UPLOAD_MAX_MEMORY_SIZE`.** Django's knob is
 project-wide and shared with file uploads: a project that raises it to accommodate an
@@ -1242,10 +1208,9 @@ WebSocket frame reaches it through the adapter's `iter_json`. Both callers answe
 exactly that refusal as a `JSONDecodeError` through one shared helper,
 `_json_decode.py::decode_json`, and upstream's own callers answer it: `parse_json` with its
 own `400` and literal, `iter_json` with `NonJsonMessageReceived`. The translation is scoped
-by type and provenance, never by message (CPython's text differs between 3.10 and 3.11+, and a
-configured limit changes its number): only an exception of exactly `ValueError` whose
-traceback runs through upstream's `BaseView.decode_json` frame, so a consumer
-`decode_json`'s own `ValueError`, and the `UnicodeDecodeError` subclass, pass through as raised.
+by type, never by message (CPython's text differs between 3.10 and 3.11+, and a configured
+limit changes its number): only an exception of exactly `ValueError`, so the
+`UnicodeDecodeError` subclass passes through as raised.
 It is answered in the decode seam rather than in `parse_json` for two reasons: the
 package's resource policy names this limit as what bounds an integer a request carries and
 says such a request is refused as malformed input (spec-047 Decision 13), on every transport;
@@ -1587,11 +1552,10 @@ and strips the BOM itself, so an adapter-only assertion would record that body a
   ([Decision 17](#decision-17--multipart-control-fields-stay-django-parsed-behind-a-strict-loss-detection-guard)).
   Status `413` alone is not evidence of ordering, and a plain `Client()` — whose CSRF
   checks are off — cannot observe it.
-- `tests/test_views.py`'s stream-shape rows carry the third probe outcome — a stand-in whose
-  restoring `seek` fails — which is the one shape that must produce the package's controlled
-  rejection rather than a `500`
+- `tests/test_views.py`'s stream-shape rows carry the probe's fall-back to the bounded read —
+  a stand-in whose `tell()` raises and one whose probe answers zero
   ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)
-  #"An unmeasurable stream has three outcomes, not two").
+  #"An unmeasurable stream goes to the bounded read").
 
 **Placement.** The middleware / Host / CSRF / header / cache / routing regressions and
 the entire body-cap matrix live in `examples/fakeshop/test_query/` over the real
@@ -1618,8 +1582,7 @@ either boundary
 and [18](#decision-18--the-body-gate-runs-before-djangos-multipart-parser)).
 The active-operation revocation matrix and the WebSocket Host rows stay in
 `tests/test_routers.py`, communicator-driven, under the same genuinely-unreachable-live
-exemption. The third probe outcome stays in `tests/test_views.py`, because a stream whose
-restoring `seek` raises is exactly the negative witness a real server cannot supply.
+exemption.
 
 *Rationale: [rationale companion, Decision 13][rationale-d13].*
 
@@ -2180,20 +2143,14 @@ another handler's response cycle is a different chain, and the arrangement each 
 the one its own chain supplies.
 
 **Which callbacks the middleware runs a boundary for.** It recognizes a package view by
-attribute, never by importing the view classes, and the recognition **ends at the boundary**:
-it runs a package view's boundary only for a callback whose `view_class` carries that boundary
-**as something callable**, tested by attribute **on the class, before anything is
-constructed**. It never calls anything that is not a class to try, it builds nothing it has not
-established a boundary on, and **a read it cannot complete is a decline rather than an
-exception out of the hook**. Every other callback is declined and keeps the view-local
-arrangement.
-
-Every outcome the **recognition** reaches is therefore a controlled one — a refusal, a stamp,
-or a decline — including for a callback whose attribute reads raise instead of answering.
-Running a boundary the recognition has *accepted* is a separate question and is deliberately
-not guarded: a boundary that raises anything but `HTTPException` surfaces that mount's own
-failure, package or forged, **exactly as it would with this middleware uninstalled**. A guard
-there would sit across the body cap's own errors.
+attribute, never by importing the view classes: the marker `views.py::_boundary_view` stamps,
+a `view_class` that is a class and a `view_initkwargs` mapping. It never calls anything that
+is not a class. Every other callback is declined and keeps the view-local arrangement.
+Forging the marker is outside the threat model: a forged callback whose class cannot be built
+from its kwargs, or is no Django view, raises out of the hook. Running a recognized
+boundary is deliberately not guarded either: a boundary that raises anything but
+`HTTPException` surfaces that mount's own failure **exactly as it would with this middleware
+uninstalled**. A guard there would sit across the body cap's own errors.
 
 **The outer exemption is an ORDERING MECHANISM, NOT a CSRF bypass**, and this spec says so in
 those words because it is the single sentence most likely to be misread. Every request that
@@ -2499,10 +2456,11 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   [Current state](#current-state)). The package's own ceiling is the `413`. Both are correct
   outcomes; the tests assert which fired so the two ceilings are never confused.
 - **Never lower `DATA_UPLOAD_MAX_MEMORY_SIZE` in a test row that drives the ASGI handler.**
-  That single combination is the one cell where the supported Django range diverges: on 6.0
-  the seekable actual-size check rejects the spooled body, on the 5.2.x floor no such check
-  exists and the request succeeds. Django's ceiling is therefore exercised **only** through
-  the declared-`CONTENT_LENGTH` path, which is identical on both releases, and every
+  That single combination is the one cell where the supported Django range diverges: on the
+  5.2.x series and from 6.0.4 the seekable actual-size check rejects the spooled body, on
+  6.0.0 through 6.0.3 no such check exists and the request succeeds. Django's ceiling is
+  therefore exercised **only** through the declared-`CONTENT_LENGTH` path, which is identical
+  on every release, and every
   ASGI-driven row leaves Django's knob at its default — which is what makes the floor-parity
   row (Test plan row 18) bit-identical rather than merely green.
 - **A garbage `Content-Length` is Django's rejection, not the package's.** The package never
@@ -2539,44 +2497,17 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   corrupt the read position — and lets `tell()` decide when it does not. Anything narrower
   drops the ASGI spool onto the read branch at exactly the interpreter the floor gate exists
   for: green on the dev stack, guarantee lost where it matters.
-- **An incoherent size probe is a measurement failure, and the direction it fails in
-  decides which refusal it gets.** Neither shape is hypothetical: a wrapper that answers
-  `tell()` in the coordinates of the whole message over-reports the position, and a queue-
-  or iterator-backed stream that can report a position but not take one returns the offset
-  it was handed, under-reporting the end. The two are refused differently, because the
-  restore is verified **before** the two answers are ever subtracted. An over-reported
-  position cannot survive that verification — the restoring seek is issued in the same lying
-  coordinates and the verifying `tell()` disagrees — so the probe reports a position it
-  could not prove it put back and the request is refused with the package's own `413` on
-  **zero bytes read**, plus the one server-side `WARNING` that records a distinction the
-  wire deliberately cannot carry. An under-reported end restores cleanly, so its answer
-  *is* judged, and it comes out at or below zero — where zero taken at face value would read
-  as "within the limit" with no byte read anywhere, the one answer a size probe must never
-  be believed on. A probe answering zero or less therefore yields no measurement at all and
-  the bounded read supplies the bound. Recovering an over-reporting stream's true bytes is
-  impossible, and rewinding to zero instead would corrupt a stream that was legitimately
-  mid-position.
-  Neither production stream lies (`ASGIRequest`'s spool and `WSGIRequest`'s `LimitedStream`
-  both measure honestly on both supported interpreters); these shapes are consumer
-  middleware and custom ASGI servers, which is exactly where a silent fail-open would be
-  least visible. What no probe can catch is stated rather than implied away: a *plausible*
+- **A size probe that answers zero or less is a measurement failure.** A queue- or
+  iterator-backed stream that can report a position but not take one returns the offset it
+  was handed, under-reporting the end, and zero taken at face value would read as "within the
+  limit" with no byte read anywhere, the one answer a size probe must never be believed on.
+  A probe answering zero or less therefore yields no measurement at all and the bounded read
+  supplies the bound
+  ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)
+  #"An unmeasurable stream goes to the bounded read"). What no probe can catch is stated rather than implied away: a *plausible*
   lie — an end that is wrong but still ahead of the position — is indistinguishable from a
   measurement without reading the bytes it describes, which is the work the probe exists to
   avoid.
-- **A capability call that *raises* is a third outcome, not a variant of the second.** Every
-  call the probe makes into a stream it did not create — `seekable()`, the `tell()` that
-  reads the starting position, the seek to the end, the restoring seek, and the `tell()` that
-  verifies it — is guarded, and the guard branches on *what has already been mutated*. A
-  failure before anything moved leaves the original position intact, so the bounded read
-  supplies the bound; a **restore the probe cannot prove** — the restoring seek raised, or
-  the `tell()` that verifies it answered something other than the position the probe started
-  from — leaves the position unknown, so the request is refused with the package's own
-  controlled rejection rather than read from an unknown offset, guessed back to zero, or
-  allowed to escape as an unrelated `500`
-  ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)
-  #"An unmeasurable stream has three outcomes, not two"). Production streams never take this
-  path; consumer middleware and custom ASGI servers are exactly where it would otherwise be
-  least visible.
 - **Multipart must not be materialized.** Reading `request.body` on a multipart request
   forces the whole payload into memory and defeats Django's streaming upload handlers,
   breaking the [`Upload` scalar][glossary-upload-scalar] /
@@ -2608,9 +2539,8 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
 - **An over-long integer literal is valid JSON the interpreter refuses.** RFC 8259 sets no
   bound on a number's digits; CPython's integer string conversion limit does, and raises a
   plain `ValueError` that neither upstream caller catches. It is answered as unparseable
-  JSON at the decode seam, by exact type and provenance, never by matching CPython's message
-  (it differs between 3.10 and 3.11+, and a configured limit changes it); a consumer
-  `decode_json` raising its own `ValueError` keeps its `500`. A float literal of any length
+  JSON at the decode seam, by exact type, never by matching CPython's message
+  (it differs between 3.10 and 3.11+, and a configured limit changes it). A float literal of any length
   parses, and a literal in the GraphQL document rather than in JSON is graphql-core's
   coercion, not this seam
   ([Decision 9](#decision-9--the-strict-utf-8-wire-contract-is-enforced-by-the-package-view-its-own-body-source-one-strict-decode)).
@@ -2803,28 +2733,14 @@ Maintainer-invoked gates only, per [`AGENTS.md`][agents].
     and no single requested size exceeds it; a body an earlier middleware already cached is
     refused from that cache with the stream unreadable; and an under-limit control reaches
     Strawberry byte-for-byte, `_body` absent and `_read_started` `False`, through the
-    rewound stream the cap installed. The two incoherent `tell()` / `seek` directions get
-    separate rows, because the code refuses them differently. An **over-reported position**
-    is refused outright, with no measurement and no read: `413`, nothing requested of the
-    stream, nothing delivered, `_body` absent, and exactly one `WARNING` naming the probe
-    outcome and the offending stream's class. An **under-reported end** — a full body whose
-    probe answers zero — restores cleanly, so it is refused a *measurement* only and the
-    bounded read supplies the bound: `413` after one bounded read, with bytes demonstrably
-    left unread. Its control is a **genuinely empty** body on an honest stream, allowed after
-    one bounded read of that same `limit + 1` size, so the probe's zero is never taken on
-    trust in either direction. Each guarded capability call gets its own stand-in besides: one
-    whose `seekable()` raises, one whose starting `tell()` raises, one whose seek-to-end raises,
-    and one whose **restoring** seek raises. So does each position answer that is not a built-in
-    `int`: a seek-to-end that returns `None`, an end position whose subtraction raises, one
-    whose comparison raises, and a starting `tell()` answering an `int` subclass, refused before
-    any seek; and so do the two capability shapes decided without a call, a non-callable
-    `seekable` marker and a stream with no `seek` method. All but the restoring-seek stand-in
-    are bounded by the read with the original position intact; that one is refused with the
-    package's own controlled rejection and never a raw `500`, the verdict the over-reported
-    position and a verifying `tell()` whose `int`-subclass answer lies about equality also
-    reach, since a restore that raises and a restore that cannot be verified are one outcome
+    rewound stream the cap installed. A full body whose probe answers zero — an
+    **under-reported end** — is refused a *measurement* only and the bounded read supplies the
+    bound: `413` after one bounded read, with bytes demonstrably left unread. Its control is a
+    **genuinely empty** body on an honest stream, allowed after one bounded read of that same
+    `limit + 1` size, so the probe's zero is never taken on trust. A stream whose `tell()`
+    raises `io.UnsupportedOperation` is bounded by the read too
     ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)
-    #"An unmeasurable stream has three outcomes, not two"). The **bounded read's own** failure
+    #"An unmeasurable stream goes to the bounded read"). The **bounded read's own** failure
     gets two rows on both views, backed by a non-seekable stream whose `read` raises after zero
     bytes and after a partial prefix: the package's own controlled rejection with its exact
     reason (never `UnreadablePostError` escaping as a `500`), a read count showing the loop
@@ -2833,7 +2749,7 @@ Maintainer-invoked gates only, per [`AGENTS.md`][agents].
     body can reach Strawberry, and exactly one `WARNING` naming the stream's class and
     carrying the `UnreadablePostError` traceback
     ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)
-    #"The bounded read is guarded for the same reason the probe is").
+    #"The bounded read is guarded against a broken client").
 16. Which ceiling fired: package cap vs. Django's `DATA_UPLOAD_MAX_MEMORY_SIZE`, both
     directions.
 17. `max_request_body_bytes=` view kwarg beats `MAX_REQUEST_BODY_BYTES`; the setting beats
@@ -3244,11 +3160,8 @@ Every generated doc is regenerated from its source, never hand-edited.
       `DATA_UPLOAD_MAX_MEMORY_SIZE` still applies, and every `_stream` / `_body` /
       `_read_started` reference confined to `_request_body.py` and pinned on both the
       py3.10 / Django 5.2.x floor and the current stack.
-- [ ] The measurement's capability probe reports **three** outcomes and no capability call is
-      unguarded: measurable; safely unmeasurable with the original position intact so the
-      bounded read runs (a probed count of zero or less still counted as a measurement
-      *failure*); or position potentially corrupted, refused with the package's own controlled
-      rejection rather than a raw `500`.
+- [ ] The measurement's size probe answers a count or sends the request to the bounded read,
+      a probed count of zero or less counted as a measurement *failure*.
 - [ ] The declared multipart ceiling runs **before** `request.POST`, `request.FILES`,
       `MultiPartParser` and every upload handler, proven under
       `Client(enforce_csrf_checks=True)` with a parser / upload-handler sentinel that must not
@@ -3257,10 +3170,9 @@ Every generated doc is regenerated from its source, never hand-edited.
       `GraphQLRequestBodyBoundaryMiddleware` in the chain, and with the chain supplying nothing
       so the view-local re-entry is what holds.
 - [ ] `GraphQLRequestBodyBoundaryMiddleware` runs a package view's boundary only for a callback
-      whose `view_class` carries that boundary as something callable, tested on the class before
-      anything is constructed; a callback it declines keeps the view-local arrangement with the
-      cap still enforced; a read it cannot complete declines rather than raising out of
-      `process_view`; and a chain that lists it after a CSRF entry is refused at startup.
+      carrying the package marker over a `view_class` that is a class and a `view_initkwargs`
+      mapping; a callback it declines keeps the view-local arrangement with the cap still
+      enforced; and a chain that lists it after a CSRF entry is refused at startup.
 - [ ] `MAX_REQUEST_BODY_BYTES` exists in `conf.py` with a per-mount view-kwarg override
       and the documented precedence; it is the only settings key this card adds.
 - [ ] An `application/json` request body is UTF-8-only: UTF-16 / UTF-32 (BOM and BOM-less)

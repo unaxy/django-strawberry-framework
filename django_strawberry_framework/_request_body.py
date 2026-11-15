@@ -23,15 +23,17 @@ also re-reads a ``SpooledTemporaryFile`` which
 disk past ``FILE_UPLOAD_MAX_MEMORY_SIZE`` - synchronously, on the event loop, for
 the async view.
 
-Django's own ``HttpRequest.body`` narrows that window on every supported
-release: it compares ``CONTENT_LENGTH``, and seeks a *seekable* stream to its end
-to check the real buffered size, against ``DATA_UPLOAD_MAX_MEMORY_SIZE`` before
-reading; the 5.2.x series also reads at most one byte past that limit from a
-stream it could not size. Every one of those checks is against Django's setting,
-not the package's cap, and ``DATA_UPLOAD_MAX_MEMORY_SIZE = None`` turns all of
-them off, leaving the read unbounded. The package cap therefore has to measure the
-body itself on every supported release, and measuring it means reaching for the
-stream Django keeps private.
+Django's own ``HttpRequest.body`` narrows that window, unevenly across the
+supported range: every release compares ``CONTENT_LENGTH`` against
+``DATA_UPLOAD_MAX_MEMORY_SIZE`` before reading; the 5.2.x series from the
+``Django>=`` floor and the 6.x series from 6.0.4 also seek a *seekable* stream to
+its end to check the real buffered size, but 6.0.0 through 6.0.3 do not; and only
+the 5.2.x series reads at most one byte past that limit from a stream it could not
+size. Every one of those checks is against Django's setting, not the package's
+cap, and ``DATA_UPLOAD_MAX_MEMORY_SIZE = None`` turns all of them off, leaving the
+read unbounded. The package cap therefore has to measure the body itself on every
+supported release, and measuring it means reaching for the stream Django keeps
+private.
 
 The Django contract this module pins
 ------------------------------------
@@ -71,59 +73,41 @@ Seekability, measured rather than assumed
 -----------------------------------------
 
 - ``LimitedStream`` subclasses ``io.IOBase``, so it *declares* ``seekable()`` and
-  returns ``False``, and its ``tell()`` raises ``io.UnsupportedOperation``. WSGI
-  and the async test client therefore take the bounded-read branch.
+  returns ``False``. WSGI and the async test client therefore take the
+  bounded-read branch.
 - ``tempfile.SpooledTemporaryFile`` is seekable in fact on every supported
   Python, but only *declares* it from 3.11, where it became an ``io.IOBase``
   subclass. On the **Python 3.10 floor the attribute is absent entirely**
   (verified: ``hasattr(spool, "seekable")`` is ``False`` at 3.10.19 and ``True``
   at 3.14.2), while ``tell()`` / ``seek()`` work and return positions on both.
-  That is why :func:`_declares_seekable` believes ``seekable()`` when the method
+  That is why :func:`_measured_remaining` believes ``seekable()`` when the method
   exists and otherwise defers to ``tell()``: anything narrower would silently drop
   the ASGI spool onto the read branch at the exact floor the boundary protects.
-- Neither production stream misbehaves, but neither is *constructed here*: the
-  byte source is whatever the ASGI server, ``WSGIRequest``, or a consumer's
-  middleware installed, so every capability call the probe makes is guarded and
-  the probe reports **three** outcomes rather than two - measurable, safely
-  unmeasurable with the position provably intact, or a position it could not
-  prove it restored, which fails closed (see :class:`_Probe`).
 
 What this module deliberately does not do
 -----------------------------------------
 
 It never raises ``HTTPException`` and never looks at settings: the cap's policy -
 which limit applies, and what the ``413`` says - stays in
-``views.py::_RequestBodyBoundaryMixin``. A stream failure is reported as a
-``bool``, in the fail-closed direction, rather than as an exception of its own, so
-this module cannot turn a hostile or unusual stream into an unrelated ``500``. It
-also never touches a multipart request; ``views.py`` returns before calling here,
-because reading a multipart body would defeat Django's streaming upload handlers: a
-multipart body is bounded by its declared length and Django's own parser (spec-046
-Decision 7).
+``views.py::_RequestBodyBoundaryMixin``. It also never touches a multipart
+request; ``views.py`` returns before calling here, because reading a multipart
+body would defeat Django's streaming upload handlers: a multipart body is bounded
+by its declared length and Django's own parser (spec-046 Decision 7).
 
-That totality covers **both** phases, which is the whole reason the two are
-written the same way. The capability probe guards every call it makes into a
-foreign stream (:func:`_measured_remaining`), and so does the bounded read it
-falls back to (:func:`_bounded_read_exceeds_limit`) - reading, sizing the chunks
-that come back, closing the consumed stream, and installing the replacement are
-all calls into objects this module did not construct. A foreign stream that fails
-mid-read is a compatibility fact about a broken or aborted client, exactly like a
-probe method that raises, so an ``OSError`` from the socket (which Django's own
-``HttpRequest.read`` re-raises as ``UnreadablePostError``) must come out as this
-module's fail-closed ``True`` rather than escape the boundary and become a ``500``
-and an error log for a request the package simply could not measure.
-
-What it does emit is one ``WARNING`` record per refusal it cannot describe on the
-wire: the :attr:`_Probe.CORRUPTED` verdict (:data:`_CORRUPTED_PROBE_LOG_MESSAGE`)
-and a failed bounded read (:data:`_UNREADABLE_STREAM_LOG_MESSAGE`). Both are
-refusals whose *reason* is deliberately invisible to the client and therefore
-invisible to an operator too, and neither changes anything on the wire.
+A request stream that fails mid-read is a broken or aborted client, so the
+bounded read (:func:`_bounded_read_exceeds_limit`) reports it as this module's
+fail-closed ``True`` rather than letting the ``OSError`` from the socket (which
+Django's own ``HttpRequest.read`` re-raises as ``UnreadablePostError``) escape the
+boundary and become a ``500`` and an error log for a request the package simply
+could not measure. That refusal is the one this module records, as a ``WARNING``
+(:data:`_UNREADABLE_STREAM_LOG_MESSAGE`): its *reason* is deliberately invisible
+to the client and therefore invisible to an operator too, and the record changes
+nothing on the wire.
 """
 
 from __future__ import annotations
 
 import os
-from enum import Enum
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -144,35 +128,10 @@ __all__ = ("body_exceeds_limit",)
 #: not turn one hostile request into one very large ``read()``.
 _READ_CHUNK_BYTES = 64 * 1024
 
-#: The one server-side record of a :attr:`_Probe.CORRUPTED` verdict, and the only
-#: signal this module emits. The caller's answer to the client is deliberately
-#: indistinguishable from an ordinary over-limit refusal - Decision 9's
-#: non-attributability applies to this branch as much as to the rest of the
-#: boundary - which leaves an operator with a body-limit rejection for a request
-#: that may not be oversized at all and no way to tell the two apart. So the
-#: distinction is recorded where it belongs: server side, at ``WARNING``, the
-#: level the package already uses for a condition a deployment should look at but
-#: which is not this process's error (``types/finalizer.py``,
-#: ``optimizer/nested_planner.py``). ``consumers.py``'s fail-closed revalidation
-#: uses ``logger.exception`` instead because it runs inside an ``except`` block and
-#: has a traceback worth carrying; a failed restore may simply have returned the
-#: wrong position without raising, so there is no exception to attach - unlike the
-#: bounded read's own failure below, which always has one.
-_CORRUPTED_PROBE_LOG_MESSAGE = (
-    "The GraphQL request-body size probe moved this request's stream (%s) and could not "
-    "verify that it restored the original position, so the body is reported as over-limit "
-    "(fail closed) rather than read from an unknown offset. The client sees the endpoint's "
-    "ordinary body-limit rejection, which says nothing about this condition by design - so if "
-    "a request that is NOT oversized was refused, the stream installed by the ASGI server or "
-    "by a middleware is what does not report positions coherently, not the configured limit."
-)
-
-#: The server-side record of a bounded read that could not complete, and the
-#: second of this module's two signals. It shares the probe's ``WARNING`` level for
-#: the probe's reason - a broken client stream is a condition a deployment should
-#: be able to see, not this process's error - but carries ``exc_info`` where the
-#: probe cannot: this arm always has a live exception, and the traceback is the
-#: actionable part, because it is what names whether the request stream died, the
+#: The server-side record of a bounded read that could not complete. It is a
+#: ``WARNING`` - a broken client stream is a condition a deployment should be able
+#: to see, not this process's error - and carries ``exc_info``, because the
+#: traceback is the actionable part: it names whether the request stream died, the
 #: consumed stream refused to close, or the replacement could not be installed.
 #: ``logger.exception`` would say the same thing at ``ERROR``, which would classify
 #: an aborted upload as a package failure.
@@ -185,30 +144,6 @@ _UNREADABLE_STREAM_LOG_MESSAGE = (
     "or a stream installed by the ASGI server or by a middleware that cannot be read, not the "
     "configured limit."
 )
-
-
-class _Probe(Enum):
-    """The two non-numeric outcomes of a size probe, kept apart on purpose.
-
-    A probe answering only with an ``int`` or ``None`` would make ``None`` carry
-    two incompatible meanings: "measure it by reading instead" and "this
-    stream is no longer in a state anything can safely read". Collapsing those
-    into one sentinel lets a failed position-restore fall through to a
-    bounded read that then reads from the wrong offset, so the two states are
-    named.
-
-    - :attr:`UNMEASURABLE` - the probe declined or failed, and the stream is
-      **known** to be exactly where it started, so the bounded read is safe and
-      is the answer.
-    - :attr:`CORRUPTED` - the probe moved the stream and could not prove it put
-      it back. There is no safe read left, so the caller fails closed: the
-      request is refused as over-limit, because the package can no longer prove
-      that it is not, and the bytes a read would return are no longer the
-      request's bytes.
-    """
-
-    UNMEASURABLE = "unmeasurable"
-    CORRUPTED = "corrupted"
 
 
 def body_exceeds_limit(request: HttpRequest, limit: int) -> bool:
@@ -239,23 +174,9 @@ def body_exceeds_limit(request: HttpRequest, limit: int) -> bool:
        body, which is the least information that can distinguish "at the limit"
        from "over it" - and no further. An allowed body is handed back as a
        rewound stream, so ``HttpRequest.body`` still runs normally over the
-       original bytes and Django's own ceiling still applies.
-
-    4. **Not measurable at all**, in either of the two ways that can happen: the
-       probe moved a stream it could not prove it put back
-       (:attr:`_Probe.CORRUPTED`), or the bounded read that rung 3 selected could
-       not complete - a broken or aborted client stream, a ``close`` that raises,
-       a replacement that cannot be installed (see
-       :func:`_bounded_read_exceeds_limit`). Both refuse the request as
-       over-limit: reading from an unknown offset would hand Strawberry bytes
-       that are not the request's, an unfinished read proves nothing about the
-       body's size, and an application that cannot measure a body must not
-       process it. These are the two branches that answer ``True`` without a
-       measurement, both in the fail-closed direction, and they are also the two
-       that log - the client cannot be told either refusal is different from an
-       ordinary over-limit one, so the operator is
-       (:data:`_CORRUPTED_PROBE_LOG_MESSAGE`,
-       :data:`_UNREADABLE_STREAM_LOG_MESSAGE`).
+       original bytes and Django's own ceiling still applies. A read that cannot
+       complete answers ``True`` without a measurement (see
+       :func:`_bounded_read_exceeds_limit`).
 
     Returns ``False`` without measuring anything in two states the package
     cannot bound and must not pretend to: no ``_stream`` at all (a synthetic
@@ -271,248 +192,65 @@ def body_exceeds_limit(request: HttpRequest, limit: int) -> bool:
     if stream is None or getattr(request, "_read_started", False):
         return False
     remaining = _measured_remaining(stream)
-    if remaining is _Probe.CORRUPTED:
-        logger.warning(_CORRUPTED_PROBE_LOG_MESSAGE, truth.name(truth.class_of(stream)))
-        return True
-    if remaining is _Probe.UNMEASURABLE:
+    if remaining is None:
         return _bounded_read_exceeds_limit(request, stream, limit)
     return remaining > limit
 
 
-def _measured_remaining(stream: object) -> int | _Probe:
-    """Return the unread byte count of ``stream``, or which way the probe failed.
+def _measured_remaining(stream: object) -> int | None:
+    """Return the unread byte count of ``stream``, or ``None`` to measure it by reading.
 
-    Three outcomes, never two: a positive ``int``,
-    :attr:`_Probe.UNMEASURABLE` ("ask the bounded read instead", with the stream
-    provably untouched), or :attr:`_Probe.CORRUPTED` ("nothing may read this
-    stream now"). "The body is empty" is not among them, which is enforced rather
-    than merely intended - see below.
+    A stream that declares ``seekable()`` false is believed without being poked.
+    One with no ``seekable`` method at all - the Python 3.10
+    ``SpooledTemporaryFile``, the ASGI body file at the supported floor - is asked
+    for its position instead, and a ``tell()`` raising ``io.UnsupportedOperation``
+    (a pipe-backed stream) sends it to the bounded read. Otherwise the stream is
+    sought to its end and back to where it started, and nothing is read.
 
-    Every I/O call into ``stream`` is guarded, because ``stream`` is the one object in
-    this file the package did not construct: it is whatever the ASGI server,
-    ``WSGIRequest``, or a consumer's middleware installed, and a capability method
-    that raises is a compatibility fact rather than a package bug. The guards
-    catch ``Exception`` rather than an enumerated tuple on purpose - enumerating
-    the types a foreign stream may raise is exactly the fragility this closes, and
-    the failure of a *probe* is never a reason to abort a request with a ``500``.
-    ``BaseException`` is deliberately not caught, so cancellation and
-    ``KeyboardInterrupt`` still propagate.
-
-    The *positions* a foreign stream reports are held to the same rule, and the
-    rule is stricter than a guard because arithmetic and comparison are not calls
-    this function can wrap once: ``end - position`` and ``remaining <= 0`` would
-    both run consumer ``__sub__`` / ``__le__`` code, so a position object whose
-    numeric protocol raises anything at all - not just the ``TypeError`` a
-    non-number produces - would escape as an unrelated ``500`` from whichever
-    expression touched it first. So no foreign numeric protocol is executed: the
-    one production Django stream that reaches this arithmetic reports positions as
-    the built-in ``int`` (``ASGIRequest``'s ``SpooledTemporaryFile``, verified at
-    both supported interpreters), that exact type is what this function accepts,
-    and every other shape - an ``int`` subclass included, since it may override
-    either operator - is ``UNMEASURABLE`` and gets the bounded read instead.
-    ``WSGIRequest``'s ``LimitedStream`` reports no position at all and never gets
-    here: it declares ``seekable()`` ``False`` and its ``tell()`` raises
-    ``io.UnsupportedOperation``, so :func:`_declares_seekable` sends it to the
-    bounded read (verified at both supported Django versions). The type test is
-    ``type(x) is int`` rather than ``isinstance`` for the same reason
-    ``views.py::_resolved_max_request_body_bytes`` uses one: admitting a subclass
-    is admitting overridden operators back inside the boundary.
-
-    What each failure means for the position is what decides its outcome:
-
-    - ``seekable()`` raising, or answering ``False``, and ``tell()`` raising all
-      happen **before** anything moves, so they are ``UNMEASURABLE``. A stream
-      that declares itself unseekable is also believed without being poked: a
-      ``seek`` on it is undefined and a silently-misbehaving one would corrupt the
-      read position for the request that follows. When ``seekable`` is absent
-      entirely - the Python 3.10 ``SpooledTemporaryFile`` shape, i.e. the ASGI
-      body file at the supported floor - capability is decided by ``tell()``
-      instead, which the same ``io.UnsupportedOperation`` reports for a
-      pipe-backed stream.
-    - having no ``seek`` method at all is ``UNMEASURABLE`` too, decided by
-      :func:`_lacks_seek` once the stream has reported a usable built-in ``int``
-      position and before anything moves. Believing a missing ``seekable``
-      declaration - the bullet above - admits streams that genuinely cannot
-      seek, a forward-only body-inspection middleware's position-tracking
-      wrapper among them, and for such a stream the probe must not run its
-      end-seek at all: the ``AttributeError`` of an absent method would fall
-      into the restore-or-``CORRUPTED`` path below and refuse, as over-limit, a
-      request nothing had moved - while logging that the probe moved the
-      stream, which for this shape is provably false. Absence is checkable, so
-      it is checked before anything is called: nothing to move means nothing
-      moved, and the bounded read starts where the request started by
-      construction. A ``seek`` that exists but raises keeps the stricter
-      treatment below, because a raise from a method that ran is not something
-      absence can prove harmless.
-    - the seek to the end raising leaves the position **unknown**, so it is not
-      trusted either way: the restore runs regardless, and the outcome is
-      ``UNMEASURABLE`` only if the restore proves the original position is back.
-    - the restore failing - raising, or landing somewhere other than where the
-      stream started - is ``CORRUPTED``. It is verified with a second ``tell()``
-      rather than inferred from "``seek`` did not raise", because "known to be
-      intact" has to mean measured: a stream whose coordinates are incoherent
-      (a ``tell()`` answering in the coordinates of the whole HTTP message rather
-      than of the body it exposes) accepts the restore and still ends up
-      somewhere else, and the bounded read would then read the wrong bytes -
-      silently, as an empty body.
-    - a position or end that is not exactly a built-in ``int`` (a ``tell()`` or
-      ``seek`` that returns ``None``, which is legal for a stream that simply does
-      not report positions, or any other object) is ``UNMEASURABLE``: no seek,
-      subtraction, comparison, or equality operation is attempted on a foreign
-      position object.
-
-    Why a probed count of zero or less is a measurement FAILURE
-    ----------------------------------------------------------
-
-    ``0`` is the one numeric answer a size probe must never hand back, because
-    :func:`body_exceeds_limit` reads it as "within the limit" and the request
-    then goes straight to ``HttpRequest.body`` with **no package bound at
-    all** - and on the 5.2.x series that property's only ceiling is the
-    ``CONTENT_LENGTH`` this cap exists precisely not to trust. Answering it on
-    the strength of two numbers is therefore fail-open, and a bare
-    ``max(end - position, 0)`` does exactly that for both shapes of an
-    incoherent pair: a ``tell()`` that over-reports (a wrapper answering in the
-    coordinates of the whole message rather than of the body) and a
-    ``seek(0, SEEK_END)`` that under-reports (a queue- or iterator-backed
-    stream that can report a position but not take one, so it returns the
-    offset it was handed). Both leave every byte unread and every byte allowed.
-
-    Verifying a zero costs exactly one ``read`` call, so the fail-safe
-    direction is to verify it: anything at or below zero is ``UNMEASURABLE`` and
-    the bounded read supplies the bound. A genuinely empty body is the cheapest
-    request there is, and it still ends up allowed - by measurement rather than
-    by assumption.
-
-    What this cannot catch, stated rather than papered over: a *plausible* lie -
-    an ``end`` that is wrong but still ahead of ``position`` - is
-    indistinguishable from a measurement without reading the bytes it claims to
-    describe, which is the very work the probe exists to avoid. An incoherent
-    pair is the whole class of lie a probe can detect, and neither production
-    stream tells any (``ASGIRequest``'s spool and ``WSGIRequest``'s
-    ``LimitedStream`` both measure honestly on both supported interpreters); the
-    shapes above are consumer middleware and custom ASGI servers, which is
-    exactly where a silent fail-open would be least visible.
-
-    The position is restored before the pair is judged - and before the failure
-    of the end-seek is judged - so the bounded read that follows an
-    ``UNMEASURABLE`` verdict always starts where the request started.
+    A probed count of zero or less is a measurement FAILURE, never "the body is
+    empty": :func:`body_exceeds_limit` would read it as "within the limit" and the
+    request would go straight to ``HttpRequest.body`` with **no package bound at
+    all**, whose only ceiling on Django 6.0.0 through 6.0.3 is the
+    ``CONTENT_LENGTH`` this cap exists precisely not to trust. A
+    ``seek(0, SEEK_END)`` that under-reports (a stream that can report a position
+    but not take one) produces it, so ``None`` is returned and the bounded read
+    supplies the bound; a genuinely empty body still ends up allowed, by one
+    ``read`` call. A position or end that is not an ``int`` is ``None`` the same
+    way.
     """
-    if not _declares_seekable(stream):
-        return _Probe.UNMEASURABLE
+    if hasattr(stream, "seekable") and not call_method(stream, "seekable"):
+        return None
     try:
         position = call_method(stream, "tell")
-    except Exception:  # noqa: BLE001 - a probe that cannot report a position has not moved one
-        return _Probe.UNMEASURABLE
-    if type(position) is not int:
-        return _Probe.UNMEASURABLE
-    if _lacks_seek(stream):
-        return _Probe.UNMEASURABLE
-    try:
-        end = call_method(stream, "seek", 0, os.SEEK_END)
-    except Exception:  # noqa: BLE001 - the position is now unknown rather than known-intact
-        end = None
-        probed = False
-    else:
-        probed = True
-    if not _position_restored(stream, position):
-        return _Probe.CORRUPTED
-    if not probed:
-        return _Probe.UNMEASURABLE
-    if type(end) is not int:
-        return _Probe.UNMEASURABLE
-    remaining = end - position
-    if remaining <= 0:
-        return _Probe.UNMEASURABLE
-    return remaining
-
-
-def _declares_seekable(stream: object) -> bool:
-    """Whether ``stream`` may be size-probed at all, without moving it.
-
-    ``True`` covers both shapes the probe supports: a stream whose ``seekable()``
-    says yes, and one with no ``seekable`` method at all (the Python 3.10
-    ``SpooledTemporaryFile`` - the ASGI body file at the supported floor - where
-    capability is decided by ``tell()`` a moment later instead). A ``seekable()``
-    that raises is treated exactly like one that answered ``False``: nothing has
-    moved, so the bounded read is both available and correct. A non-callable
-    marker is treated as an explicit ``False`` rather than as an omitted method,
-    so malformed foreign streams cannot be probed accidentally.
-    """
-    seekable: object = getattr(stream, "seekable", None)
-    if seekable is None:
-        return True
-    if not callable(seekable):
-        return False
-    try:
-        return bool(seekable())
-    except Exception:  # noqa: BLE001 - a capability query that fails answers no, not maybe
-        return False
-
-
-def _lacks_seek(stream: object) -> bool:
-    """Whether ``stream`` has no ``seek`` method at all, before anything moves.
-
-    The other half of believing a missing ``seekable`` declaration
-    (:func:`_declares_seekable`): the belief admits streams that report
-    positions but cannot take them, and for those a probe that attempted its
-    end-seek would classify an unmovable stream as :attr:`_Probe.CORRUPTED` -
-    refusing valid requests and logging a movement that could not have
-    happened. Absence is decided here instead, after the position gate has
-    established the one fact this verdict rests on, so the answer is
-    :attr:`_Probe.UNMEASURABLE`: nothing to move means nothing moved, and the
-    bounded read is both safe and the answer. A ``seek`` marker that is present
-    but not callable is likewise not an absence - calling one raises
-    ``TypeError``, which the end-seek's guard handles as any other failed move
-    attempt.
-    """
-    return getattr(stream, "seek", None) is None
-
-
-def _position_restored(stream: object, position: object) -> bool:
-    """Whether ``stream`` is provably back at ``position``.
-
-    Verified with ``tell()`` rather than inferred from a ``seek`` that did not
-    raise, because :func:`_measured_remaining`'s ``CORRUPTED`` verdict has to mean
-    "not known to be intact", and a stream whose coordinates are incoherent
-    accepts the restore while ending up somewhere else entirely.
-    """
-    if type(position) is not int:
-        return False
-    try:
-        _ = call_method(stream, "seek", position)
-        restored = call_method(stream, "tell")
-        return type(restored) is int and restored == position
-    except Exception:  # noqa: BLE001 - an unverifiable restore is a failed restore
-        return False
+    except OSError:
+        return None
+    if not isinstance(position, int):
+        return None
+    end = call_method(stream, "seek", 0, os.SEEK_END)
+    _ = call_method(stream, "seek", position)
+    if not isinstance(end, int) or end <= position:
+        return None
+    return end - position
 
 
 def _bounded_read_exceeds_limit(request: HttpRequest, stream: object, limit: int) -> bool:
     """Measure by reading, and answer fail-closed if the stream will not be read.
 
     The bounded read's error boundary, kept separate from the read itself so that
-    the measurement below can be written as the straight line it is while the
-    verdict stays as total as the capability probe's
-    (:func:`_measured_remaining`). Everything the measurement touches is foreign:
-    the request stream, the chunk objects it hands back, its ``close``, and the
-    replacement this module installs in its place. A failure in any of them means
-    the same thing - the package cannot prove this body is within the limit - so
-    it produces the same fail-closed ``True``, and the caller's ordinary ``413``.
-    The chunk validation belongs inside this boundary too: only an exact built-in
-    ``bytes`` value may reach truth or length testing. Otherwise a truthy foreign
-    object whose ``__len__`` returns zero can keep the loop's byte counter fixed
-    forever, and either protocol can run arbitrary consumer code in the body gate.
+    the measurement below can be written as the straight line it is. A failure
+    reading the request stream, closing it, or installing the replacement means
+    the package cannot prove this body is within the limit, so it produces the
+    fail-closed ``True`` and the caller's ordinary ``413``.
 
-    The concrete shape this closes is an ordinary aborted or broken client: a
-    non-seekable request stream whose ``read`` raises ``OSError``, which Django
-    re-raises as ``django.http.request.UnreadablePostError``. Unguarded, that
-    propagated through ``views.py::_RequestBodyBoundaryMixin`` and past upstream's
-    ``except HTTPException``, so a client that hung up mid-upload turned this
-    security boundary into a ``500`` and an error log. Nothing was executed and no
-    cap was bypassed, but the response was wrong and the failure was attributed to
-    the wrong party.
+    The shape this closes is an ordinary aborted or broken client: a non-seekable
+    request stream whose ``read`` raises ``OSError``, which Django re-raises as
+    ``django.http.request.UnreadablePostError``. Unguarded, that would propagate
+    through ``views.py::_RequestBodyBoundaryMixin`` and past upstream's
+    ``except HTTPException``, turning a client that hung up mid-upload into a
+    ``500`` and an error log.
 
     ``Exception``, never ``BaseException`` - cancellation and process-control
-    exceptions still propagate, exactly as in the probe. A partially consumed
+    exceptions still propagate. A partially consumed
     stream is left as it is: ``_read_started`` stays ``True`` and ``_body`` is
     never written, so if anything downstream did reach for the body it would get
     Django's own ``RawPostDataException`` rather than the prefix this function
@@ -549,8 +287,8 @@ def _measured_by_bounded_read(request: HttpRequest, stream: object, limit: int) 
     for the body: it returns the original bytes byte-for-byte, and, crucially, it
     still applies **Django's own** ``DATA_UPLOAD_MAX_MEMORY_SIZE`` ceiling in
     whatever form the installed Django implements it (a ``CONTENT_LENGTH``
-    comparison at 5.2, plus a seekable-size check at 6.0 - which the substituted
-    ``BytesIO`` now satisfies).
+    comparison everywhere, plus a seekable-size check on the releases that have
+    one - which the substituted ``BytesIO`` now satisfies).
 
     Writing ``request._body`` directly instead was the obvious shape and is
     wrong: it makes ``HttpRequest.body`` short-circuit on its cache, silently
@@ -562,8 +300,6 @@ def _measured_by_bounded_read(request: HttpRequest, stream: object, limit: int) 
     read_so_far = 0
     while read_so_far <= limit:
         chunk = request.read(min(_READ_CHUNK_BYTES, limit + 1 - read_so_far))
-        if type(chunk) is not bytes:
-            raise TypeError("request.read() returned a non-bytes body chunk")
         if not chunk:
             break
         chunks.append(chunk)

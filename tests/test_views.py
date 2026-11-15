@@ -37,9 +37,8 @@ What stays here:
   status and message by design;
 - the integer digit-limit translation in ``decode_json``: the translated
   ``json.JSONDecodeError``'s ``__cause__``, the untouched ``UnicodeDecodeError``
-  subclass, and the provenance scope a wire response cannot show - a consumer
-  ``decode_json``'s own ``ValueError`` stays a ``500``, while one that delegates
-  to upstream through ``super()`` still gets the translation.
+  subclass, and a consumer ``decode_json`` that delegates to upstream through
+  ``super()`` still getting the translation.
 
 The schema is module-local and ORM-free: none of these contracts touches the
 database, so no ``django_db`` marker and no registry mutation.
@@ -93,6 +92,7 @@ from django.test import (
 )
 from django.urls import path
 from django.utils.functional import SimpleLazyObject
+from django.views import View
 from strawberry.django.views import AsyncGraphQLView, GraphQLView
 from strawberry.http.base import BaseView
 from typing_extensions import override
@@ -107,11 +107,7 @@ from django_strawberry_framework._boundary_ordering import (
     _BOUNDARY_PREPARED_VIEW,
     _CSRF_ORDERING_EXEMPTION,
 )
-from django_strawberry_framework._request_body import (
-    _CORRUPTED_PROBE_LOG_MESSAGE,
-    _UNREADABLE_STREAM_LOG_MESSAGE,
-    _position_restored,
-)
+from django_strawberry_framework._request_body import _UNREADABLE_STREAM_LOG_MESSAGE
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.middleware.request_body import (
     GraphQLRequestBodyBoundaryMiddleware,
@@ -735,9 +731,8 @@ def test_the_counted_check_fires_when_no_content_length_is_declared_at_all() -> 
 
     The package-tier colour of the ASGI live rows - an undeclared body is the
     shape Django's declared-length guard cannot see, and the counted check is
-    the only application-level bound on it (the only one at all on the oldest
-    supported Django, the ``5.2.16`` floor, whose ``HttpRequest.body`` has no
-    seekable actual-size check).
+    the only application-level bound on it (the only one at all on Django 6.0.0
+    through 6.0.3, whose ``HttpRequest.body`` has no seekable actual-size check).
     ``>`` not ``>=``: a body exactly AT the limit is allowed, which the third
     direction pins.
     """
@@ -902,12 +897,6 @@ class _UndeclaredSeekableStream(_RecordingStream):
         return self._buffer.seek(offset, whence)
 
 
-class _NonCallableSeekableMarkerStream(_UndeclaredSeekableStream):
-    """A stream with a non-callable ``seekable`` marker, so it must be read-bounded."""
-
-    seekable = False
-
-
 class _UnmeasurableStream(_RecordingStream):
     """Neither declares seekability nor can report its position.
 
@@ -937,217 +926,6 @@ class _MisreportingSizeStream(_UndeclaredSeekableStream):
     @override
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
         return offset
-
-
-class _OverReportingPositionStream(_UndeclaredSeekableStream):
-    """Reports a position past its own end - the other incoherent direction.
-
-    A wrapper that answers ``tell()`` in the coordinates of the whole HTTP
-    message rather than of the body it exposes reports a position beyond that
-    body's end, so ``seek(0, SEEK_END) - tell()`` comes out negative. ``seek``
-    is the honest inherited one, which is the point: the lie is the position,
-    and a position is the one thing a probe has to take on trust.
-    """
-
-    @override
-    def tell(self) -> int:
-        return super().tell() + _PROBE_CAP * 64
-
-
-class _LyingRestoredPosition(int):
-    """An ``int`` subclass whose equality lies about a failed restoration."""
-
-    @override
-    def __eq__(self, other: object) -> bool:
-        return True
-
-    # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-    __hash__ = None  # pyright: ignore[reportAssignmentType]
-
-
-class _LyingRestoredPositionStream(_UndeclaredSeekableStream):
-    """Leaves the stream at EOF while reporting a matching foreign position."""
-
-    def __init__(self, raw: bytes) -> None:
-        super().__init__(raw)
-        self._tell_calls = 0
-
-    @override
-    def tell(self) -> int:
-        self._tell_calls += 1
-        if self._tell_calls == 2:
-            return _LyingRestoredPosition(0)
-        return super().tell()
-
-    @override
-    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        if whence == io.SEEK_END:
-            return super().seek(offset, whence)
-        self._buffer.seek(0, io.SEEK_END)
-        return 0
-
-
-class _ForeignInitialPositionStream(_UndeclaredSeekableStream):
-    """Reports a foreign initial position, so the probe must not seek at all.
-
-    ``seeks`` records every ``seek`` because "without seeking" is the whole claim:
-    the initial position is refused BEFORE the end-seek, not after it. Order is
-    what makes the guard load-bearing - a foreign position that reaches the
-    restore is only ever verified through its own ``__eq__``, so a lying one
-    passes and the bounded read that follows starts wherever the probe left the
-    stream. The inherited ``seek`` is honest, so nothing but the recorder
-    distinguishes "never seeked" from "seeked and got away with it".
-    """
-
-    def __init__(self, raw: bytes) -> None:
-        super().__init__(raw)
-        self.seeks: list[tuple[int, int]] = []
-
-    @override
-    def tell(self) -> int:
-        return _LyingRestoredPosition(super().tell())
-
-    @override
-    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        self.seeks.append((offset, whence))
-        return super().seek(offset, whence)
-
-
-class _CapabilityQueryRaisingStream(_UndeclaredSeekableStream):
-    """``seekable()`` itself raises - the first probe-failure stand-in.
-
-    A wrapper that answers the capability question with an error rather than a
-    boolean, which is a shape a consumer middleware or a custom ASGI server can
-    present, and which an unguarded call would turn into an unrelated ``500``.
-    Nothing has been moved when this raises, so the safe classification is "unmeasurable,
-    position intact" and the bounded read is both available and correct.
-    """
-
-    def seekable(self) -> NoReturn:
-        raise OSError("this stream refuses to answer capability queries")
-
-
-class _UnseekableToEndStream(_UndeclaredSeekableStream):
-    """Reports its position, then refuses the seek to the end.
-
-    The second probe-failure stand-in. The end seek is the first call that can move
-    the stream, so its failure leaves the position UNKNOWN rather than known - the
-    restore has to run anyway, and only a restore that verifies may license the
-    bounded read.
-    """
-
-    @override
-    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        if whence == io.SEEK_END:
-            raise OSError("this stream cannot seek to its end")
-        return self._buffer.seek(offset, whence)
-
-
-class _UnnumberedSeekStream(_UndeclaredSeekableStream):
-    """A ``seek`` that returns ``None`` instead of a position, and never moves.
-
-    The third probe-failure stand-in: the *end* this seek reports is not a position
-    at all, so there is no measurement to make and none is attempted. ``seek``
-    returning ``None`` is legal for a file-like object that simply does not report
-    positions, and because it also does not move, the position is provably intact
-    and the bounded read is the answer.
-    """
-
-    @override
-    # basedpyright: deliberately reports no position, the legal file-like shape the probe must tolerate
-    def seek(self, offset: int, whence: int = io.SEEK_SET) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
-        return None
-
-
-class _ArithmeticRaisingPosition(int):
-    """An ``int`` whose subtraction raises something no ``TypeError`` guard catches.
-
-    A stream is free to report positions as objects of its own, and a wrapper that
-    tracks offsets in some richer type is the ordinary way that happens. The
-    package must therefore never execute a foreign numeric protocol inside the size
-    boundary: ``RuntimeError`` here stands for every exception a ``__sub__`` may
-    raise, and an ``int`` subclass is the shape that gets *past* a numeric check
-    written as ``isinstance``.
-    """
-
-    @override
-    def __sub__(self, other: int) -> int:
-        raise RuntimeError("this position refuses to be subtracted")
-
-
-class _ComparisonRaisingPosition(int):
-    """An ``int`` whose ordering comparison raises - the second escape route.
-
-    Even with the subtraction survived, the probe still compares its result against
-    zero, and a subclass may override ``__le__`` alone. Two hostile operators
-    therefore need two rows, or "the arithmetic is guarded" would be a claim about
-    one expression rather than about the boundary.
-    """
-
-    @override
-    def __le__(self, other: int) -> bool:
-        raise RuntimeError("this position refuses to be compared")
-
-
-class _ArithmeticRaisingPositionStream(_UndeclaredSeekableStream):
-    """Answers the end-seek with a position whose subtraction raises.
-
-    Honest in every other respect: it really seeks, so the restore verifies and the
-    bounded read that follows starts where the request started.
-    """
-
-    @override
-    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        moved = self._buffer.seek(offset, whence)
-        if whence == io.SEEK_END:
-            return _ArithmeticRaisingPosition(moved)
-        return moved
-
-
-class _ComparisonRaisingPositionStream(_ArithmeticRaisingPositionStream):
-    """Answers the end-seek with a position whose comparison raises instead."""
-
-    @override
-    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        moved = self._buffer.seek(offset, whence)
-        if whence == io.SEEK_END:
-            return _ComparisonRaisingPosition(moved)
-        return moved
-
-
-class _UnrestorableStream(_UndeclaredSeekableStream):
-    """Seeks to the end and then cannot get back - the fourth probe-failure stand-in.
-
-    The one shape that must NOT reach the bounded read: the probe has moved the
-    stream to its end and the restore failed, so a read would return the tail of
-    the body (here, nothing at all) rather than the request. Falling through would
-    hand Strawberry a body the client never sent; the package refuses the request
-    instead.
-    """
-
-    @override
-    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
-        if whence == io.SEEK_END:
-            return self._buffer.seek(offset, whence)
-        raise OSError("this stream cannot seek back")
-
-
-class _TellWithoutSeekStream(_RecordingStream):
-    """Reports positions but has no ``seek`` method anywhere in its MRO.
-
-    The forward-only body-inspection middleware shape: ``seekable`` is absent
-    (the ``None`` marker standing in for that absence exactly as
-    ``_UndeclaredSeekableStream`` uses it) and ``tell()`` works, so the probe's
-    capability fallback accepts it - but there is no ``seek`` to call, so
-    nothing the probe does can ever have moved it. That provable intactness is
-    what makes the verdict ``UNMEASURABLE`` rather than ``CORRUPTED``: were the
-    absent method's ``AttributeError`` to fall into the restore-or-refuse path,
-    an under-limit request would be refused ``413`` and the operator told the
-    probe had moved a stream that had no way to move.
-    """
-
-    def tell(self) -> int:
-        return self._buffer.tell()
 
 
 class _ReadRaisingStream(_RecordingNonSeekableStream):
@@ -1186,38 +964,6 @@ class _ReadRaisingAfterPrefixStream(_RecordingNonSeekableStream):
         chunk = self._buffer.read(min(size, _PROBE_CAP // 4))
         self.delivered += len(chunk)
         return chunk
-
-
-class _TruthyZeroLengthChunk:
-    """A foreign read result whose truth and length protocols disagree."""
-
-    def __init__(self) -> None:
-        self.truth_checks = 0
-        self.length_checks = 0
-
-    def __bool__(self) -> bool:
-        self.truth_checks += 1
-        return True
-
-    def __len__(self) -> int:
-        self.length_checks += 1
-        return 0
-
-
-class _NonAdvancingChunkStream(_RecordingNonSeekableStream):
-    """Returns one truthy zero-length object, then stops a non-advancing retry."""
-
-    def __init__(self, raw: bytes) -> None:
-        super().__init__(raw)
-        self.chunk = _TruthyZeroLengthChunk()
-
-    @override
-    # basedpyright: deliberately a truthy zero-length chunk, the read the bounded loop must not retry
-    def read(self, size: int = -1) -> _TruthyZeroLengthChunk:  # pyright: ignore[reportIncompatibleMethodOverride]
-        self.requested.append(size)
-        if len(self.requested) > 1:
-            raise AssertionError("the bounded read retried without advancing")
-        return self.chunk
 
 
 @contextlib.contextmanager
@@ -1311,10 +1057,9 @@ def test_a_seekable_over_limit_body_is_refused_without_ever_being_read(
     A check spelled ``len(request.body) > limit`` is not:
     ``HttpRequest.body`` performs an unbounded ``self.read()`` that copies the
     entire spooled request into one ``bytes`` value *before* the comparison can
-    reject it. Django 6.0 shrinks that window with a seekable-stream size check of
-    its own; the oldest supported Django (the ``Django>=5.2.16`` floor) has
-    none, so with an absent
-    ``Content-Length``, an understated one, or
+    reject it. Django shrinks that window with a seekable-stream size check of its
+    own on the 5.2.x series and from 6.0.4, but 6.0.0 through 6.0.3 have none, so
+    with an absent ``Content-Length``, an understated one, or
     ``DATA_UPLOAD_MAX_MEMORY_SIZE = None`` such a check performs an
     attacker-sized allocation before enforcing its own smaller ceiling.
 
@@ -1492,10 +1237,9 @@ def test_a_stream_that_probes_as_empty_is_read_rather_than_believed(
     read instead", never "the body is empty" - and a probed count of ``0`` is the
     one answer that breaks it, because ``body_exceeds_limit`` reads it as "within
     the limit" while nothing has been read. The refused stream then goes to
-    ``HttpRequest.body`` with **no package bound at all**, whose only ceiling at
-    the oldest supported Django (the ``5.2.16`` floor) is the ``CONTENT_LENGTH``
-    the cap exists precisely not
-    to trust. A clamp such as ``max(end - position, 0)`` produces exactly that answer
+    ``HttpRequest.body`` with **no package bound at all**, whose only ceiling on
+    Django 6.0.0 through 6.0.3 is the ``CONTENT_LENGTH`` the cap exists precisely
+    not to trust. A clamp such as ``max(end - position, 0)`` produces exactly that answer
     for a stream that reports a position but cannot take one.
 
     Verifying a zero costs one ``read`` call, so the probe verifies it, and this row
@@ -1517,408 +1261,30 @@ def test_a_stream_that_probes_as_empty_is_read_rather_than_believed(
     assert hasattr(request, "_body") is False
 
 
-def _assert_one_unmeasurable_body_was_recorded(
-    caplog: pytest.LogCaptureFixture,
-    stream: object,
-    message: str,
-    *,
-    exc_type: type[BaseException] | None,
-) -> None:
-    """The shape BOTH of the body gate's operator signals share, asserted once.
-
-    ``_request_body.py`` refuses two ways it cannot describe on the wire - an
-    incoherent size probe and a bounded read that could not complete - and each is
-    by design indistinguishable from an ordinary over-limit rejection to the client
-    (Decision 9's non-attributability). So an operator debugging a ``413`` for a
-    request that is not oversized has nothing to go on unless the server records
-    the distinction, and the two records are therefore held to one contract: one
-    record, at ``WARNING``, carrying the specific message object and the stream's
-    own class name.
-
-    The message is asserted by IDENTITY rather than by a re-typed string, so a
-    reworded record still pins the contract; ``args`` is what keeps the class name
-    - the only actionable detail, since the culprit is whatever the ASGI server or
-    a middleware installed - from being dropped in a later edit; and the level
-    keeps either signal from drifting to ``logger.exception``'s ``ERROR``, which
-    would file a broken client as a package failure.
-
-    ``exc_type`` is the ONE axis the two differ on, so it is a parameter rather
-    than a second copy of the function: ``None`` asserts no traceback was attached,
-    an exception class asserts the attached one is it.
-    """
-    records = [record for record in caplog.records if record.name == "django_strawberry_framework"]
-
-    assert len(records) == 1, caplog.records
-    assert records[0].levelno == logging.WARNING
-    assert records[0].msg is message
-    assert records[0].args == (type(stream).__name__,)
-    if exc_type is None:
-        assert records[0].exc_info is None
-    else:
-        assert records[0].exc_info is not None
-        assert isinstance(records[0].exc_info[1], exc_type)
-
-
-def _assert_the_corrupted_probe_was_recorded(
-    caplog: pytest.LogCaptureFixture,
-    stream: object,
-) -> None:
-    """Exactly one ``WARNING`` naming the probe outcome and the stream that caused it.
-
-    No traceback, and that is the difference from the bounded read's twin rather
-    than an omission: a restore that returned the wrong position never raised, so
-    there is no exception to attach and ``exc_info is None`` is the assertion that
-    keeps this from being "fixed" into one that carries a stale traceback.
-    """
-    _assert_one_unmeasurable_body_was_recorded(
-        caplog,
-        stream,
-        _CORRUPTED_PROBE_LOG_MESSAGE,
-        exc_type=None,
-    )
-
-
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_stream_reporting_a_position_past_its_end_is_refused_rather_than_read(
-    view_class: _ViewClass,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The other incoherent direction: an unverifiable restore fails CLOSED.
-
-    ``max(end - position, 0)`` would clamp a negative measurement - a ``tell()`` that
-    over-reports - to "no bytes remaining, allowed", so a full body would reach
-    ``HttpRequest.body`` unbounded. The pair is judged rather than clamped, and
-    the verdict is the third probe outcome rather than the second:
-    the position this stream reports is a lie, so the restore lands somewhere the
-    stream did not start, the verifying ``tell()`` says so, and the request is
-    refused with the package's own ``413``.
-
-    Falling through to a bounded read instead - what a two-outcome probe would do -
-    means reading from an offset past the body's end and handing Strawberry
-    an **empty** body the client never sent, then answering ``400`` at the parse.
-    Both outcomes are safe, but only one of them is honest about what happened, and
-    "the package could not measure this body" is a body-limit rejection rather than
-    a malformed-document one. The witnesses are that NOTHING was read and nothing
-    was materialized: a stream whose coordinates are incoherent is not a stream the
-    package will read bytes out of.
-
-    The server-side record is asserted too: the wire cannot
-    carry the distinction, so the log is the only place it exists.
-    """
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = _OverReportingPositionStream(b"x" * (_PROBE_CAP * 16))
-    request = _asgi_request(stream, None)
-
-    with (
-        caplog.at_level(logging.WARNING, logger="django_strawberry_framework"),
-        pytest.raises(HTTPException) as excinfo,
-    ):
-        view._enforce_request_body_limit(request)
-
-    assert excinfo.value.status_code == 413
-    assert excinfo.value.reason == _BODY_LIMIT_REASON
-    assert stream.requested == []
-    assert stream.delivered == 0
-    assert hasattr(request, "_body") is False
-    _assert_the_corrupted_probe_was_recorded(caplog, stream)
-
-
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_foreign_initial_position_uses_the_bounded_read_without_seeking(
-    view_class: _ViewClass,
-) -> None:
-    """A foreign initial position is rejected before the probe can move the stream."""
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = _ForeignInitialPositionStream(b"x" * (_PROBE_CAP * 16))
-    request = _asgi_request(stream, None)
-
-    with pytest.raises(HTTPException, match="request-body limit"):
-        view._enforce_request_body_limit(request)
-
-    assert stream.seeks == []
-    assert stream.delivered == _PROBE_CAP + 1
-    assert stream.unread > 0
-
-
-def test_position_restored_rejects_a_foreign_position_before_calling_the_stream() -> None:
-    """The restoration helper never executes a foreign position protocol."""
-    stream = _LyingRestoredPositionStream(b"body")
-
-    assert _position_restored(stream, _LyingRestoredPosition(0)) is False
-    assert stream._tell_calls == 0
-
-
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_foreign_restored_position_is_not_allowed_to_lie_about_the_stream(
-    view_class: _ViewClass,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A foreign equality result cannot turn a failed restore into a valid size probe."""
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = _LyingRestoredPositionStream(b"x" * 4)
-    request = _asgi_request(stream, None)
-
-    with (
-        caplog.at_level(logging.WARNING, logger="django_strawberry_framework"),
-        pytest.raises(HTTPException, match="request-body limit"),
-    ):
-        view._enforce_request_body_limit(request)
-
-    assert stream.requested == []
-    assert request._stream is stream
-    _assert_the_corrupted_probe_was_recorded(caplog, stream)
-
-
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_non_callable_seekable_marker_uses_the_bounded_read(view_class: _ViewClass) -> None:
-    """A non-callable ``seekable`` marker is not treated as an omitted method."""
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = _NonCallableSeekableMarkerStream(b"x" * (_PROBE_CAP * 16))
-    request = _asgi_request(stream, None)
-
-    with pytest.raises(HTTPException, match="request-body limit"):
-        view._enforce_request_body_limit(request)
-
-    assert stream.delivered == _PROBE_CAP + 1
-    assert stream.unread > 0
-
-
-@pytest.mark.parametrize(
-    "stream_class",
-    [
-        pytest.param(_CapabilityQueryRaisingStream, id="seekable-raises"),
-        pytest.param(_UnseekableToEndStream, id="seek-to-end-raises"),
-        pytest.param(_UnnumberedSeekStream, id="unnumbered-end-position"),
-    ],
-)
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_probe_that_fails_without_moving_the_stream_falls_back_to_the_bounded_read(
-    view_class: _ViewClass,
-    stream_class: type[_RecordingStream],
-) -> None:
-    """A failed probe is a ``413`` from a bounded read, never a ``500``.
-
-    Three failure sites, one classification. ``seekable()`` raising and an
-    unnumbered end position leave the stream untouched; the seek to the end
-    raising leaves it unknown until the restore proves otherwise - and here the
-    restore does. In all three the position is
-    provably where the request started, so the bounded read is licensed and
-    supplies the bound.
-
-    Called unguarded, ``seekable()`` and both ``seek``s would turn each of these
-    streams into an unhandled ``500``. The bound is
-    asserted rather than just the status: exactly
-    ``limit + 1`` bytes are read, bytes are demonstrably left unread, and nothing
-    is materialized.
-    """
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = stream_class(b"x" * (_PROBE_CAP * 16))
-    request = _asgi_request(stream, None)
-
-    with pytest.raises(HTTPException) as excinfo:
-        view._enforce_request_body_limit(request)
-
-    assert excinfo.value.status_code == 413
-    assert excinfo.value.reason == _BODY_LIMIT_REASON
-    assert stream.delivered == _PROBE_CAP + 1
-    assert max(stream.requested) <= _PROBE_CAP + 1
-    assert stream.unread > 0
-    assert hasattr(request, "_body") is False
-
-
-@pytest.mark.parametrize(
-    "stream_class",
-    [
-        pytest.param(_ArithmeticRaisingPositionStream, id="subtraction-raises"),
-        pytest.param(_ComparisonRaisingPositionStream, id="comparison-raises"),
-    ],
-)
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_position_object_whose_numeric_protocol_raises_never_runs_inside_the_gate(
-    view_class: _ViewClass,
-    stream_class: type[_RecordingStream],
-) -> None:
-    """No foreign numeric protocol is executed on a probed position, at all.
-
-    Both the subtraction and the ``remaining <= 0`` comparison execute code
-    belonging to whatever object the stream handed back, so a probe that ran them
-    on a position whose ``__sub__`` or ``__le__`` raises would turn the body
-    boundary into an unrelated ``500`` - the exact failure mode the rest of
-    this module's totality exists to prevent, reached through arithmetic instead of
-    through a method call.
-
-    Guarding the expressions is not the fix, because a guard still runs the foreign
-    code and a plausible-but-wrong answer from it would be believed. Only the exact
-    built-in ``int`` both production streams report is accepted, so these two
-    positions - ``int`` subclasses, which is what gets past an ``isinstance``
-    check - are never operated on: the verdict is "unmeasurable", and the bounded
-    read supplies the bound, with its own ``limit + 1`` ceiling asserted rather
-    than just the status.
-    """
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = stream_class(b"x" * (_PROBE_CAP * 16))
-    request = _asgi_request(stream, None)
-
-    with pytest.raises(HTTPException) as excinfo:
-        view._enforce_request_body_limit(request)
-
-    assert excinfo.value.status_code == 413
-    assert excinfo.value.reason == _BODY_LIMIT_REASON
-    assert stream.delivered == _PROBE_CAP + 1
-    assert max(stream.requested) <= _PROBE_CAP + 1
-    assert stream.unread > 0
-    assert hasattr(request, "_body") is False
-
-
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_probe_that_cannot_restore_the_position_refuses_instead_of_reading(
-    view_class: _ViewClass,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The fail-closed state: a failed restore ends the request.
-
-    The one outcome that must never become a bounded read. The probe has already
-    moved this stream to its end and the restore raises, so every byte a read
-    could still return is the wrong byte - reading anyway would have handed
-    Strawberry an empty body in place of the client's, which is a silent
-    substitution rather than a rejection.
-
-    "Not measurable" and "not readable" therefore have to be different answers,
-    which is why the probe reports three outcomes and not two. The witness is that
-    no read was even attempted: the refusal comes from the probe's verdict, not
-    from a read that happened to come back empty.
-
-    The second stand-in for the same server-side record, so the
-    log is pinned by both ``CORRUPTED`` shapes rather than by whichever one a later
-    refactor happens to keep - and the stream class in ``args`` differs between
-    them, which is the detail an operator needs.
-    """
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = _UnrestorableStream(b"x" * (_PROBE_CAP * 16))
-    request = _asgi_request(stream, None)
-
-    with (
-        caplog.at_level(logging.WARNING, logger="django_strawberry_framework"),
-        pytest.raises(HTTPException) as excinfo,
-    ):
-        view._enforce_request_body_limit(request)
-
-    assert excinfo.value.status_code == 413
-    assert excinfo.value.reason == _BODY_LIMIT_REASON
-    assert stream.requested == []
-    assert stream.delivered == 0
-    assert hasattr(request, "_body") is False
-    assert request._stream is stream
-    _assert_the_corrupted_probe_was_recorded(caplog, stream)
-
-
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_stream_with_no_seek_method_is_measured_rather_than_refused(
-    view_class: _ViewClass,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A stream nothing could have moved is unmeasurable, never corrupted.
-
-    Believing a missing ``seekable`` declaration - the Python 3.10 spool's
-    capability fallback - also admits streams that report positions but have no
-    ``seek`` to call, a forward-only body-inspection middleware's wrapper among
-    them. For such a stream the end-seek cannot run at all: were its
-    ``AttributeError`` to fall into the restore-or-``CORRUPTED`` path, an
-    under-limit request would be refused as over-limit and the ``WARNING``
-    would claim the probe had moved a stream that had no way to move. Absence
-    is decided before any call, so the verdict is "unmeasurable, position
-    provably intact" and the bounded read supplies the bound.
-
-    Both halves are asserted: the under-limit body reaches Django whole through
-    the bounded branch (the refusal would have been a silent loss of service),
-    and no corrupted-probe record exists, because a log whose premise is false
-    is worse than none.
-    """
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = _TellWithoutSeekStream(_UNDER_LIMIT_BODY)
-    request = _asgi_request(stream, None)
-
-    with caplog.at_level(logging.WARNING, logger="django_strawberry_framework"):
-        view._enforce_request_body_limit(request)
-
-    assert stream.delivered == len(_UNDER_LIMIT_BODY)
-    assert max(stream.requested) <= _PROBE_CAP + 1
-    assert request.body == _UNDER_LIMIT_BODY
-    assert not any(
-        _CORRUPTED_PROBE_LOG_MESSAGE.split("(")[0] in record.getMessage()
-        for record in caplog.records
-    )
-
-
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_stream_with_no_seek_method_over_limit_is_still_bounded(view_class: _ViewClass) -> None:
-    """The same shape refuses through the bounded read, not by verdict.
-
-    Measured rather than believed in both directions: the probe-less stream is
-    read to exactly ``limit + 1`` bytes and refused there, with bytes left
-    unread and nothing materialized - the same security property its seekable
-    and non-seekable siblings assert, because classifying it unmeasurable must
-    not quietly become trusting it.
-    """
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = _TellWithoutSeekStream(b"x" * (_PROBE_CAP * 16))
-    request = _asgi_request(stream, None)
-
-    with pytest.raises(HTTPException) as excinfo:
-        view._enforce_request_body_limit(request)
-
-    assert excinfo.value.status_code == 413
-    assert excinfo.value.reason == _BODY_LIMIT_REASON
-    assert stream.delivered == _PROBE_CAP + 1
-    assert stream.unread > 0
-    assert hasattr(request, "_body") is False
-
-
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_genuinely_empty_body_is_allowed_by_one_bounded_read(view_class: _ViewClass) -> None:
-    """The control that keeps "never believe a zero" from becoming "always read".
-
-    An empty POST body is legal - it is refused later, by the JSON parse, not by
-    the cap - so the zero-verification has to end in "allowed" for an honest
-    stream and it has to cost almost nothing. Both are asserted here: exactly one
-    ``read``, sized at the ``limit + 1`` ceiling every bounded read uses, and a
-    body Django still serves as ``b""``.
-
-    The ``requested`` list is also what makes this row fail against a clamping
-    probe, whose zero would be believed with no read at all - so the control
-    asserts the verifying code path, not an outcome a clamping probe also reaches.
-    """
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = _UndeclaredSeekableStream(b"")
-    request = _asgi_request(stream, None)
-
-    view._enforce_request_body_limit(request)
-
-    assert stream.requested == [_PROBE_CAP + 1]
-    assert stream.delivered == 0
-    assert stream.closed is True
-    assert request.body == b""
-
-
 def _assert_the_unreadable_stream_was_recorded(
     caplog: pytest.LogCaptureFixture,
     stream: object,
 ) -> None:
     """Exactly one ``WARNING`` naming the unreadable stream, with its traceback attached.
 
-    The bounded read's twin of :func:`_assert_the_corrupted_probe_was_recorded`,
-    and the attached traceback is the difference between them: a failed read always
-    has a live exception, and WHICH exception it is - Django's own
-    ``UnreadablePostError``, wrapping the stream's ``OSError`` - is the only thing
-    that tells an operator the client's stream died rather than the package's limit
-    being wrong.
+    The refusal is by design indistinguishable from an ordinary over-limit rejection
+    to the client (Decision 9's non-attributability), so the server-side record is
+    the only place the distinction exists. The message is asserted by IDENTITY
+    rather than by a re-typed string; ``args`` keeps the stream's class name - the
+    culprit is whatever the ASGI server or a middleware installed; the level keeps
+    the record from drifting to ``logger.exception``'s ``ERROR``; and the attached
+    exception - Django's own ``UnreadablePostError``, wrapping the stream's
+    ``OSError`` - is what tells an operator the client's stream died rather than
+    the package's limit being wrong.
     """
-    _assert_one_unmeasurable_body_was_recorded(
-        caplog,
-        stream,
-        _UNREADABLE_STREAM_LOG_MESSAGE,
-        exc_type=UnreadablePostError,
-    )
+    records = [record for record in caplog.records if record.name == "django_strawberry_framework"]
+
+    assert len(records) == 1, caplog.records
+    assert records[0].levelno == logging.WARNING
+    assert records[0].msg is _UNREADABLE_STREAM_LOG_MESSAGE
+    assert records[0].args == (type(stream).__name__,)
+    assert records[0].exc_info is not None
+    assert isinstance(records[0].exc_info[1], UnreadablePostError)
 
 
 @pytest.mark.parametrize(
@@ -1936,16 +1302,12 @@ def test_a_request_stream_that_cannot_be_read_is_refused_rather_than_escaping(
 ) -> None:
     """A broken client stream is the controlled ``413``, never an unhandled ``500``.
 
-    The bounded read is the fallback the capability probe *selects*, so it has to
-    be as total as the probe is. It was not: ``request.read`` was called unguarded,
-    and Django turns a stream ``OSError`` into ``UnreadablePostError``, which is
-    not an ``HTTPException`` - so it propagated through the boundary, past
-    upstream's ``except HTTPException``, and out of the view. Under Django's
-    handler an ordinary client that hung up mid-POST therefore produced a ``500``
-    and an error log from the one code path whose entire job is to refuse
-    politely. Nothing was executed and no cap was bypassed, which is why this is
-    the response and the attribution being wrong rather than a hole - and why the
-    fix is the module's documented fail-closed ``bool``, not a new exception type.
+    Django turns a stream ``OSError`` into ``UnreadablePostError``, which is not an
+    ``HTTPException``, so an unguarded ``request.read`` would propagate it through
+    the boundary, past upstream's ``except HTTPException``, and out of the view: an
+    ordinary client that hung up mid-POST would produce a ``500`` and an error log
+    from the one code path whose entire job is to refuse politely. The answer is
+    the module's documented fail-closed ``bool``, not a new exception type.
 
     Both failure moments are covered because they leave different residue: raising
     at zero bytes leaves nothing collected, while raising after a partial prefix
@@ -1981,52 +1343,6 @@ def test_a_request_stream_that_cannot_be_read_is_refused_rather_than_escaping(
     with pytest.raises(RawPostDataException):
         _ = request.body  # the raise IS the assertion
     _assert_the_unreadable_stream_was_recorded(caplog, stream)
-
-
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_a_non_bytes_chunk_cannot_stall_or_run_protocols_inside_the_bounded_read(
-    view_class: _ViewClass,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A foreign read result is rejected before its truth or length protocol runs.
-
-    ``request.read`` delegates directly to the installed stream and does not
-    enforce a return type. A loop that trusted that result would run it twice: ``if
-    not chunk`` executes its truth protocol, and ``len(chunk)`` decides whether the
-    byte counter advances. A stream returning one truthy object whose length is
-    zero would then leave ``read_so_far`` unchanged and retry forever if the
-    stream kept returning it. This stand-in raises on a second read so that
-    failure is finite, while the protocol counters prove the boundary
-    rejected the object before running either piece of foreign code.
-
-    The rejection is the bounded-read branch's existing fail-closed ``413`` and
-    operator warning: no partial body is installed, the stream is not closed, and
-    both the sync and async package views see the same boundary behavior.
-    """
-    view = _capped_view(_PROBE_CAP, view_class=view_class)
-    stream = _NonAdvancingChunkStream(b"unused")
-    request = _asgi_request(stream, None)
-
-    with (
-        caplog.at_level(logging.WARNING, logger="django_strawberry_framework"),
-        pytest.raises(HTTPException) as excinfo,
-    ):
-        view._enforce_request_body_limit(request)
-
-    assert excinfo.value.status_code == 413
-    assert excinfo.value.reason == _BODY_LIMIT_REASON
-    assert stream.requested == [_PROBE_CAP + 1]
-    assert stream.chunk.truth_checks == 0
-    assert stream.chunk.length_checks == 0
-    assert request._stream is stream
-    assert hasattr(request, "_body") is False
-    assert stream.closed is False
-    _assert_one_unmeasurable_body_was_recorded(
-        caplog,
-        stream,
-        _UNREADABLE_STREAM_LOG_MESSAGE,
-        exc_type=TypeError,
-    )
 
 
 @pytest.mark.parametrize("view_class", _VIEW_CLASSES)
@@ -2321,31 +1637,6 @@ def test_decode_json_leaves_a_value_error_subclass_untranslated() -> None:
         DjangoGraphQLView(schema=SCHEMA).decode_json(b'{"x": "\x80"}')
 
 
-class _CooperativeDecode(GraphQLView):
-    """A consumer ``decode_json`` the MRO places between the package mixin and upstream's."""
-
-    @override
-    def decode_json(self, data: str | bytes) -> object:
-        raise ValueError("the consumer's own refusal")
-
-
-class _CooperativeDecodeView(DjangoGraphQLView, _CooperativeDecode):
-    """A package view composed with the cooperative consumer decode above."""
-
-
-def test_a_consumer_decode_json_value_error_is_not_reported_as_unparseable_json() -> None:
-    """Provenance, not type alone: the error must come from upstream's own ``decode_json``.
-
-    A consumer's ``decode_json`` reached through the mixin's ``super()`` raises an exact
-    ``ValueError`` too; it is the consumer's bug, so it keeps its ``500`` instead of
-    being dressed up as the client's malformed JSON.
-    """
-    with pytest.raises(ValueError, match="the consumer's own refusal") as excinfo:
-        _CooperativeDecodeView(schema=SCHEMA).decode_json('{"x": 1}')
-
-    assert type(excinfo.value) is ValueError
-
-
 class _DelegatingDecode(GraphQLView):
     """A consumer ``decode_json`` between the package mixin and upstream's that delegates."""
 
@@ -2359,13 +1650,12 @@ class _DelegatingDecodeView(DjangoGraphQLView, _DelegatingDecode):
 
 
 def test_a_delegating_consumer_decode_json_still_gets_the_digit_limit_translation() -> None:
-    """Provenance is the whole traceback, not the helper's direct callee.
+    """A consumer ``decode_json`` between the mixin and upstream does not hide the refusal.
 
     A consumer ``decode_json`` the MRO places below the package mixin that calls
     ``super()`` puts its own frame between the helper and upstream's
-    ``BaseView.decode_json``; the interpreter's refusal still comes from upstream's
-    ``json.loads``, so it is reported as the client's unparseable JSON, and
-    ``parse_json`` answers upstream's own ``400``.
+    ``BaseView.decode_json``; the interpreter's refusal is still reported as the
+    client's unparseable JSON, and ``parse_json`` answers upstream's own ``400``.
     """
     view = _DelegatingDecodeView(schema=SCHEMA)
     document = '{"x": %s}' % ("9" * 4301)
@@ -2775,17 +2065,6 @@ class _NonCallableSetupView(DjangoGraphQLView):
 _NON_CALLABLE_SETUP_CALLBACK = _NonCallableSetupView.as_view(schema=SCHEMA)
 
 
-class _SetupWithoutRequestView(DjangoGraphQLView):
-    """A package view whose setup forgets Django's required ``super()`` call."""
-
-    @override
-    def setup(self, request: HttpRequest, *args: object, **kwargs: object) -> None:
-        pass
-
-
-_SETUP_WITHOUT_REQUEST_CALLBACK = _SetupWithoutRequestView.as_view(schema=SCHEMA)
-
-
 def _wrapper_copying_only_csrf_exempt(
     view: Callable[..., HttpResponseBase | Coroutine[object, object, HttpResponseBase]],
 ) -> Callable[..., HttpResponseBase] | Callable[..., Coroutine[object, object, HttpResponseBase]]:
@@ -2849,33 +2128,15 @@ class _NotAPackageView:
 _VIEW_CLASS_FACTORY_CALLS: list[dict[str, object]] = []
 
 
-def _boundary_the_factory_carries(_request: HttpRequest) -> NoReturn:
-    """The callable the factory below carries under the boundary method's name.
-
-    Never invoked by anything: the object a called factory returns is what
-    ``process_view`` would look for a boundary on, not the factory itself. It exists
-    only so the factory passes the boundary probe.
-    """
-    raise AssertionError("the boundary of a non-class view_class must never run")
-
-
 def _view_class_factory(**initkwargs: object) -> _NotAPackageView:
     """A ``view_class`` that is callable and is not a class.
 
     It records rather than merely returning, because the contract is that nothing
     but a class is ever *called*: a recognition that called this and then rejected
     what came back would answer the same ``None`` while having run foreign code.
-
-    It carries the boundary method's name as an attribute for the same reason: with
-    the boundary probe standing behind the class test, a callable non-class carrying
-    no boundary is refused by the probe, so the input that still distinguishes the
-    two clauses is a callable non-class that does carry one.
     """
     _VIEW_CLASS_FACTORY_CALLS.append(initkwargs)
     return _NotAPackageView()
-
-
-setattr(_view_class_factory, _BOUNDARY_METHOD, _boundary_the_factory_carries)
 
 
 def _marked_callback_with_a_callable_view_class(_request: HttpRequest) -> HttpResponse:
@@ -2889,53 +2150,18 @@ def _marked_callback_with_a_callable_view_class(_request: HttpRequest) -> HttpRe
     return HttpResponse("marked, callable view_class")
 
 
-#: Every construction the foreign class below receives, so a row can assert it
-#: received none.
-_FOREIGN_VIEW_CONSTRUCTIONS: list[dict[str, object]] = []
-
-
-class _ForeignButBuildableView:
-    """A real class, buildable with no keywords, carrying no body boundary.
-
-    It records rather than merely accepting the construction, because the contract
-    is that a class the middleware cannot vouch for is never *built*: a recognition
-    that constructed this and only then looked for the boundary would answer the
-    same ``None`` while having run a foreign ``__init__``.
-    """
-
-    def __init__(self, **initkwargs: object) -> None:
-        _FOREIGN_VIEW_CONSTRUCTIONS.append(initkwargs)
-
-
-def _marked_callback_with_a_foreign_view_class(_request: HttpRequest) -> HttpResponse:
-    """A callback whose bookkeeping is impeccable and whose class is not ours.
-
-    The shape no test of the bookkeeping and no construction attempt can tell from
-    a real mount: ``view_class`` is a class, ``view_initkwargs`` is a ``dict``, and
-    the class accepts those keywords, so recognition succeeds on every one of those
-    counts and hands ``process_view`` an object with no boundary on it. Only the
-    boundary probe separates it from a package view.
-    """
-    return HttpResponse("marked, foreign view_class")
-
-
 #: Every boundary run the minimal view class below received, so a row can assert
 #: the middleware ran the boundary it probed the class for.
 _MINIMAL_BOUNDARY_RUNS: list[HttpRequest] = []
 
 
-class _MinimalBoundaryViewClass:
-    """A class that is a package view in exactly the one respect the protocol names.
+class _MinimalBoundaryViewClass(View):
+    """A Django view that is a package view in exactly the one respect the protocol names.
 
-    Buildable from the keywords its bookkeeping names and carrying a callable under
-    ``_BOUNDARY_METHOD`` - installed below with ``setattr`` from the constant, never
-    spelled out - so the only thing recognition can accept it for is the protocol's
-    name. That is what lets it answer whether the name the probe accepted is the name
-    ``process_view`` runs.
+    It carries a callable under ``_BOUNDARY_METHOD`` - installed below with
+    ``setattr`` from the constant, never spelled out - so it answers whether the
+    name the protocol holds is the name ``process_view`` runs.
     """
-
-    def __init__(self, **initkwargs: object) -> None:
-        self.initkwargs = initkwargs
 
 
 def _record_the_boundary_run(_self: object, request: HttpRequest) -> None:
@@ -2956,16 +2182,11 @@ def _marked_callback_with_a_minimal_boundary_view_class(_request: HttpRequest) -
 
 
 setattr(_marked_callback_with_a_callable_view_class, _BOUNDARY_MARKER, True)
-setattr(_marked_callback_with_a_foreign_view_class, _BOUNDARY_MARKER, True)
 setattr(_marked_callback_with_a_minimal_boundary_view_class, _BOUNDARY_MARKER, True)
 # Django's ``as_view()`` callback contract puts ``view_class`` / ``view_initkwargs`` in the
 # callback function's namespace, mimicked here with values ``as_view`` never produces.
 vars(_marked_callback_with_a_callable_view_class).update(
     view_class=_view_class_factory,
-    view_initkwargs={},
-)
-vars(_marked_callback_with_a_foreign_view_class).update(
-    view_class=_ForeignButBuildableView,
     view_initkwargs={},
 )
 vars(_marked_callback_with_a_minimal_boundary_view_class).update(
@@ -3100,7 +2321,7 @@ def test_middleware_ignores_an_unreadable_optional_mount_handoff() -> None:
     ordinary one.
     """
 
-    class BoundaryView:
+    class BoundaryView(View):
         def _enforce_request_boundary(self, _request: HttpRequest) -> None:
             return None
 
@@ -3154,25 +2375,6 @@ def test_the_middleware_preserves_djangos_non_callable_setup_failure() -> None:
         prepared_request = request()
         with pytest.raises(TypeError, match="not callable"):
             middleware.process_view(prepared_request, _NON_CALLABLE_SETUP_CALLBACK, (), {})
-
-    assert getattr(prepared_request, _BOUNDARY_ENFORCED, False) is False
-
-
-def test_the_middleware_preserves_djangos_setup_super_call_invariant() -> None:
-    """A prepared view must establish ``self.request`` before dispatch, just like Django."""
-
-    def request() -> WSGIRequest:
-        return RequestFactory().get("/graphql/")
-
-    message = "Did you override setup"
-    with pytest.raises(AttributeError, match=message):
-        _SETUP_WITHOUT_REQUEST_CALLBACK(request())
-
-    with _chain(_ORDERED_CHAIN):
-        middleware = GraphQLRequestBodyBoundaryMiddleware(lambda _request: HttpResponse())
-        prepared_request = request()
-        with pytest.raises(AttributeError, match=message):
-            middleware.process_view(prepared_request, _SETUP_WITHOUT_REQUEST_CALLBACK, (), {})
 
     assert getattr(prepared_request, _BOUNDARY_ENFORCED, False) is False
 
@@ -3348,22 +2550,6 @@ def test_a_callable_view_class_that_is_not_a_class_is_never_called() -> None:
 
     assert _package_view_instance(_marked_callback_with_a_callable_view_class) is None
     assert len(_VIEW_CLASS_FACTORY_CALLS) == calls_before
-
-
-def test_a_view_class_without_the_boundary_is_never_constructed() -> None:
-    """Recognition reaches the boundary, and reaches it before anything is built.
-
-    The class here is real, is buildable with exactly the keywords the bookkeeping
-    names, and carries no body boundary - so every earlier clause says yes and only
-    the probe says no. Probing the built instance instead would answer the same
-    ``None`` while having run a foreign ``__init__``, and ``process_view`` runs the
-    boundary method by name, so the class is where the answer has to be established.
-    The unrecorded construction is as much of the contract as the ``None`` is.
-    """
-    constructions_before = len(_FOREIGN_VIEW_CONSTRUCTIONS)
-
-    assert _package_view_instance(_marked_callback_with_a_foreign_view_class) is None
-    assert len(_FOREIGN_VIEW_CONSTRUCTIONS) == constructions_before
 
 
 def test_the_probed_boundary_method_is_the_one_the_package_views_define() -> None:

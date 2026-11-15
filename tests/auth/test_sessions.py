@@ -536,16 +536,3 @@ def test_no_process_global_lock_registry_in_the_sessions_module() -> None:
         if not name.startswith("__") and isinstance(value, forbidden)
     ]
     assert offenders == [], f"unexpected process-global lock storage: {offenders}"
-
-
-# ---------------------------------------------------------------------------
-# Per-scope lock storage: a corrupted slot is a typed rejection
-# ---------------------------------------------------------------------------
-
-
-async def test_scope_lock_corrupted_non_lock_value_is_a_typed_rejection() -> None:
-    scope = {"type": "websocket", _SCOPE_LOCK_KEY: 42}
-    adapter = _adapter(scope)
-    with pytest.raises(ConfigurationError, match=r"requires an asyncio\.Lock"):
-        async with scope_session_lock(adapter):
-            pass

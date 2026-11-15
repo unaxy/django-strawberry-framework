@@ -8,7 +8,7 @@ and prepared view per request, the identity of the mounted callback, and one
 static fact concerning the view class itself. The per-request agreement runs in
 both directions, so the marks, names, and their meanings live here rather than
 in either of them: neither of the two imports the other, and this module imports
-nothing but the standard library.
+neither of them.
 
 The protocol
 ------------

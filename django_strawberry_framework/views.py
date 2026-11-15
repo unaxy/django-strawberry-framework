@@ -614,14 +614,13 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
     ``len(request.body)``. That property performs an unbounded read of the whole
     request into one ``bytes`` value, so counting it would detect an over-limit
     body only *after* the attacker-sized allocation the cap exists to prevent -
-    and the 5.2.x series, the oldest supported, has no seekable-stream size check of
-    its own to shrink that window. ``_request_body.py::body_exceeds_limit`` measures
+    and Django 6.0.0 through 6.0.3 have no seekable-stream size check of their own
+    to shrink that window. ``_request_body.py::body_exceeds_limit`` measures
     instead: a seekable ASGI spool is size-probed with ``seek`` / ``tell`` and
     refused with nothing read, a non-seekable stream is read in bounded chunks up
     to ``limit + 1`` bytes and no further, and a body an earlier middleware
-    already cached is measured from that cache and still refused. A body the
-    package cannot measure at all - an incoherent size probe, or a request stream
-    whose read fails part way, which is what an aborted client looks like - is
+    already cached is measured from that cache and still refused. A request stream
+    whose read fails part way, which is what an aborted client looks like, is
     refused by the same ``413`` rather than escaping as a ``500``: that module
     answers a ``bool`` in the fail-closed direction and records the distinction
     server side, because the wire deliberately cannot carry it. An allowed body
@@ -963,9 +962,7 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
         conversion limit raises a plain ``ValueError`` there instead;
         ``_json_decode.py::decode_json`` re-raises exactly that refusal as the
         ``JSONDecodeError`` upstream's ``parse_json`` turns into its own ``400`` and
-        literal, on both views. See that
-        module for the type and provenance scope that keeps a consumer override's own
-        ``ValueError`` a ``500``.
+        literal, on both views.
         """
         return decode_json(super().decode_json, data)
 

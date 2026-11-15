@@ -97,7 +97,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 from typing import TYPE_CHECKING, TypeVar, cast
 
 from django.utils.module_loading import import_string
@@ -106,6 +105,7 @@ from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import truth
+from ._narrowing import require_instance
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -118,7 +118,6 @@ _ScopedT = TypeVar("_ScopedT")
 
 __all__ = (
     "ConnectionActorState",
-    "ScopeSingletonMessages",
     "actor_lease",
     "actor_transition",
     "connection_actor_state",
@@ -143,31 +142,12 @@ def scope_key(name: str) -> str:
     return f"__django_strawberry_framework_{name}__"
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class ScopeSingletonMessages:
-    """The consumer-facing failure :func:`scope_singleton` can report: a corrupted slot.
-
-    Declared as DATA per call site rather than interleaved with the control
-    flow, because the wording is genuinely per-surface (the auth boundary
-    names the lock; the revalidation boundary names the actor state) while the
-    algorithm must not be. Making it a required field set also means a new
-    failure mode added to the algorithm cannot be added at one call site and
-    forgotten at the other: it is a field, so every site must answer it.
-
-    ``corrupted`` is a format template receiving ``actual`` (the safely-rendered
-    type name of whatever was found in the slot).
-    """
-
-    corrupted: str
-
-
 def scope_singleton(
     scope: MutableChannelsScope,
     key: str,
     *,
     factory: Callable[[], _ScopedT],
     expect: type[_ScopedT],
-    messages: ScopeSingletonMessages,
 ) -> _ScopedT:
     """Return the scope's singleton under ``key``, creating it on first use.
 
@@ -176,28 +156,18 @@ def scope_singleton(
     connection that never reaches the feature must not pay for one, so every
     per-scope object is created on first use.
 
-    Two properties are load-bearing and are why this is one body rather than
-    two:
-
-    * **No ``await`` between the read and the store.** The get-or-create is
-      therefore atomic on the event loop, and two operations multiplexed on one
-      connection cannot each create their own object - which for a lock would
-      mean no serialization at all.
-    * **A corrupted slot is a typed error, never a silent replacement.** The
-      scope is a mapping other software also writes to: finding the wrong
-      object there means something else owns the key, and quietly overwriting
-      it would trade a loud configuration error for two systems sharing one
-      slot. The found object is classified by its real class, so its
-      ``__class__`` attribute cannot claim the slot.
+    There is no ``await`` between the read and the store, so the get-or-create
+    is atomic on the event loop, and two operations multiplexed on one
+    connection cannot each create their own object - which for a lock would
+    mean no serialization at all. The key is namespaced (:func:`scope_key`), so
+    the slot holds what this function stored.
     """
     value = scope.get(key)
     if value is None:
         created = factory()
         scope[key] = created
         return created
-    if not truth.is_instance(value, expect):
-        raise ConfigurationError(messages.corrupted.format(actual=truth.kind(value)))
-    return value
+    return require_instance(value, expect)
 
 
 def session_store_class() -> type[SessionBase]:
@@ -208,11 +178,7 @@ def session_store_class() -> type[SessionBase]:
     callers named in the module docstring. The resolution goes through Django's
     own ``import_string``, so a consumer-authored engine subclass resolves
     identically to a shipped one. ``settings`` is read at CALL time, never
-    captured, so ``override_settings(SESSION_ENGINE=...)`` is honored. The
-    engine is accepted by its real class (a ``str`` or subclass; its
-    ``__class__`` is never read) and copied to an exact ``str`` before anything
-    else reads it, so the emptiness check, the import path and the rejection
-    message all see the string the deployment wrote.
+    captured, so ``override_settings(SESSION_ENGINE=...)`` is honored.
     """
     try:
         engine = django_setting("SESSION_ENGINE")
@@ -231,11 +197,6 @@ def session_store_class() -> type[SessionBase]:
         raise ConfigurationError(
             f"SESSION_ENGINE must be a string; got {truth.describe(engine)}.",
         )
-    # A ``str`` subclass is copied to an exact ``str`` through the base slot, so
-    # the truthiness test below and both interpolations after it (the import
-    # path here and the ``{engine!r}`` tail at the raise site) read the base
-    # string content.
-    engine = truth.text(engine)
     if not engine:
         raise ConfigurationError(
             "SESSION_ENGINE must be a non-empty string; got empty value.",
@@ -263,13 +224,6 @@ def session_store_class() -> type[SessionBase]:
 #: ``auth/sessions.py::_SCOPE_LOCK_KEY`` and
 #: ``consumers.py::_REVALIDATED_AT_SCOPE_KEY``.
 _ACTOR_STATE_SCOPE_KEY = scope_key("connection_actor_state")
-
-_ACTOR_STATE_MESSAGES = ScopeSingletonMessages(
-    corrupted=(
-        "The WebSocket revalidation state is corrupted; expected a "
-        "ConnectionActorState, got {actual}."
-    ),
-)
 
 
 class ConnectionActorState:
@@ -319,7 +273,6 @@ def connection_actor_state(scope: MutableChannelsScope) -> ConnectionActorState:
         _ACTOR_STATE_SCOPE_KEY,
         factory=ConnectionActorState,
         expect=ConnectionActorState,
-        messages=_ACTOR_STATE_MESSAGES,
     )
 
 

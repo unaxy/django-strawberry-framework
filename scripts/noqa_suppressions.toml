@@ -8,9 +8,6 @@
 "django_strawberry_framework/__init__.py::__getattr__" = { ANN401 = 1, PLC0415 = 1 }
 "django_strawberry_framework/_completion.py::_gather_with_cancel" = { PERF203 = 1 }
 "django_strawberry_framework/_completion.py::drain_settling" = { PERF203 = 1 }
-"django_strawberry_framework/_request_body.py::_declares_seekable" = { BLE001 = 1 }
-"django_strawberry_framework/_request_body.py::_measured_remaining" = { BLE001 = 2 }
-"django_strawberry_framework/_request_body.py::_position_restored" = { BLE001 = 1 }
 "django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready" = { PLC0415 = 1 }
 "django_strawberry_framework/auth/mutations.py::_channels_http_login_establish" = { B904 = 1, BLE001 = 1, PLC0415 = 1 }
 "django_strawberry_framework/auth/mutations.py::_channels_logout" = { PLC0415 = 1 }

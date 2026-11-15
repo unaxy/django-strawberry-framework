@@ -63,10 +63,9 @@ What it deliberately does not do
 It holds no policy of its own: the limit, the refusal statuses, and the wire
 reasons all stay in ``views.py``, and this module reaches them by instantiating
 the resolved view exactly as ``View.as_view`` does. It recognizes a package view
-by the marker attribute stamped on the callback, by the ``view_class`` /
-``view_initkwargs`` bookkeeping behind it, and by the boundary method that
-``view_class`` itself has to carry (:func:`_package_view_instance`), never by
-importing the view classes - the marker and the boundary method's *name* both
+by the marker attribute stamped on the callback and the ``view_class`` /
+``view_initkwargs`` bookkeeping behind it (:func:`_package_view_instance`), never
+by importing the view classes - the marker and the boundary method's *name* both
 reach this module through ``_boundary_ordering.py`` - so no non-package view is
 touched and this module imports neither ``views.py`` nor anything that imports
 it. And it translates the boundary's
@@ -77,13 +76,14 @@ CSRF check refused it.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from asgiref.sync import markcoroutinefunction
 from cross_web import HTTPException
 from django.http import HttpResponse
 from django.middleware.csrf import CsrfViewMiddleware
 from django.utils.module_loading import import_string
+from django.views import View
 
 from django_strawberry_framework._boundary_ordering import (
     _BOUNDARY_ENFORCED,
@@ -96,7 +96,13 @@ from django_strawberry_framework._boundary_ordering import (
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_awaitable, is_str, list_of, require
+from django_strawberry_framework.utils._narrowing import (
+    is_awaitable,
+    is_str,
+    list_of,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.utils.typing import is_marked_coroutine_function, object_result
 
 if TYPE_CHECKING:
@@ -119,12 +125,6 @@ _MISORDERED_MIDDLEWARE_MESSAGE = (
     "request-body boundary listed after it can no longer run before the parse it exists to "
     "prevent."
 )
-
-#: Sentinel separating a foreign marked class with no Django setup lifecycle from
-#: a class that explicitly shadows ``setup`` with a non-callable value. The former
-#: retains the boundary-only recognition contract; the latter must fail exactly as
-#: ``View.as_view`` would when it tries to call the existing attribute.
-_NO_SETUP = object()
 
 
 class GraphQLRequestBodyBoundaryMiddleware:
@@ -215,9 +215,8 @@ class GraphQLRequestBodyBoundaryMiddleware:
         """Run a package view's body boundary here, before any later ``process_view``.
 
         The boundary itself is the view's, reached through an instance built and
-        set up the way ``View.as_view`` builds and sets one up - and built only
-        from a class :func:`_package_view_instance` has established carries that
-        boundary - so the limit that applies is the mount's own
+        set up the way ``View.as_view`` builds and sets one up, so the limit that
+        applies is the mount's own
         ``max_request_body_bytes`` and this module states no policy. Running
         ``setup`` before the boundary is load-bearing: a consumer subclass may
         derive request-local boundary state there, and stamping a request after
@@ -227,13 +226,9 @@ class GraphQLRequestBodyBoundaryMiddleware:
         for the identical ``HTTPException``, so a client cannot tell from the
         response which side of the CSRF check refused it.
 
-        It is invoked under the name the recognition probed for - reached through
-        ``_boundary_ordering.py::_BOUNDARY_METHOD``, not spelled again here - so the
-        boundary this hook runs cannot come to differ from the boundary it accepted
-        the class for. A literal attribute access would state that name a second
-        time, and the drift it permits is exactly the failure the probe exists to
-        remove: an ``AttributeError`` out of this hook, on the one class of input the
-        recognition had just vouched for.
+        It is invoked under the name ``_boundary_ordering.py::_BOUNDARY_METHOD``
+        holds, not spelled again here, so the boundary this hook runs cannot come to
+        differ from the one ``views.py`` defines under that name.
 
         A callback :func:`_package_view_instance` declines is left entirely alone:
         no boundary run here, and therefore no stamp, which is what leaves that
@@ -244,15 +239,7 @@ class GraphQLRequestBodyBoundaryMiddleware:
         view = _package_view_instance(view_func)
         if view is None:
             return None
-        # basedpyright: sentinel or unchecked setup; no identity test narrows object to callable
-        setup: Any = getattr(view, "setup", _NO_SETUP)  # pyright: ignore[reportExplicitAny]
-        if setup is not _NO_SETUP:
-            setup(request, *view_args, **view_kwargs)
-            if not hasattr(view, "request"):
-                raise AttributeError(
-                    f"{truth.name(type(view))} instance has no 'request' attribute. "
-                    "Did you override setup() and forget to call super()?",
-                )
+        view.setup(request, *view_args, **view_kwargs)
         try:
             getattr(view, _BOUNDARY_METHOD)(request)
         except HTTPException as exc:
@@ -273,7 +260,7 @@ def _is_initkwargs(value: object) -> TypeIs[dict[str, object]]:
     return truth.is_instance(value, dict) and all(is_str(key) for key in value)
 
 
-def _package_view_instance(view_func: object) -> object:
+def _package_view_instance(view_func: object) -> View | None:
     """Return the package view instance whose boundary this callback's mount would run.
 
     ``None`` means "not a callback this middleware can run a boundary for", and
@@ -282,61 +269,15 @@ def _package_view_instance(view_func: object) -> object:
     unstamped, so the view supplies the ordering itself and the CSRF exemption
     stays true (``_boundary_ordering.py::_CsrfOrderingExemption``).
 
-    The recognition is one decision and it ends at the boundary, because the
-    boundary is the answer: the marker
-    ``views.py::_boundary_view`` stamps, a ``view_class`` that
-    is a class, a ``view_initkwargs`` mapping - Django's own ``as_view``
-    bookkeeping, and what makes the built instance carry the mount's own
-    ``max_request_body_bytes`` - a ``view_class`` that itself carries the boundary
-    method named by ``_boundary_ordering.py::_BOUNDARY_METHOD``, and then a
-    construction that the class actually accepts those kwargs for. A wrapper can
-    copy the marker with bookkeeping of any shape behind it, bookkeeping can be
-    shaped exactly like ``as_view``'s while naming kwargs the class rejects, and a
-    ``view_class`` can be a real, buildable class that is no package view at all,
-    so a recognition that stopped short of the boundary - at the shape of the
-    bookkeeping, or at the instance the bookkeeping builds - would still turn a
-    foreign callback into an unhandled ``500`` from a hook whose every other
-    outcome is a controlled response.
-
-    The boundary is probed on the class rather than on the built instance because
-    the boundary is exactly what :meth:`GraphQLRequestBodyBoundaryMiddleware
-    .process_view` then runs, and because probing the instance would answer the
-    same question one step too late, having already run a foreign class's
-    ``__init__``. It is probed for a *callable* rather than for presence: an
-    attribute of that name which cannot be called is not a boundary this
-    middleware can run either, and recognizing it would hand ``process_view`` the
-    same uncontrolled failure the probe exists to remove. The name is reached
-    through ``_boundary_ordering.py``, which is what lets the probe cost no import
-    of ``views.py``. Every read the recognition performs is a truthful static
-    read (``utils/truth.py::static_attr``, ``is_type``, ``is_instance``): it
-    walks the real namespaces and never runs a ``__getattr__``, a metaclass
-    property or a descriptor, so the callback answers only with what it stores.
-    Forging the marker is outside the threat model either way, and the probe is here so that every
-    outcome the recognition reaches is a controlled response - a refusal, a stamp,
-    or a decline - not to defend against a forger. Running a boundary the
-    recognition accepted is a different question: a boundary that raises anything
-    but an ``HTTPException`` leaves ``process_view`` uncaught, deliberately and
-    identically for a package mount and for a forged class carrying a callable of
-    the probed name, because a guard there would sit across the body cap's own
-    errors.
-
-    The ``TypeError`` arm is therefore the answer being absent rather than a
-    failure being swallowed: it is raised by the splat and by the class's own
-    signature, the two ways a callback can carry the bookkeeping without a
-    buildable instance behind it, and both mean "not a callback whose boundary I
-    can run". With the probe ahead of it, what reaches it is a class carrying a
-    callable of the probed name that cannot be built from the kwargs it names: a
-    package class named with kwargs it rejects, a package subclass whose own
-    ``__init__`` raises, and equally a forged class whose accepted ``__init__``
-    raises ``TypeError``. It hides no misconfiguration of a *package* mount,
-    because Django's own ``as_view`` closure constructs the same class with the
-    same kwargs for the same request, so a mount that genuinely cannot be built
-    still fails there - as it would with this middleware uninstalled. The
-    real-class test and the ``str``-keyed ``dict`` test stay ahead of the probe
-    and the construction, so it is only ever a class that gets called, with
-    keyword arguments it can be splatted with. There is deliberately no ``or {}``
-    default: an absent attribute means "not ours", never "ours, with nothing
-    configured".
+    A package callback carries the marker ``views.py::_boundary_view`` stamps, a
+    ``view_class`` that is a class and a ``view_initkwargs`` mapping - Django's own
+    ``as_view`` bookkeeping, and what makes the built instance carry the mount's
+    own ``max_request_body_bytes``. The reads are truthful static reads
+    (``utils/truth.py::static_attr``, ``is_type``, ``is_instance``): they walk the
+    real namespaces and never run a ``__getattr__``, a metaclass property or a
+    descriptor. There is deliberately no ``or {}`` default: an absent attribute
+    means "not ours", never "ours, with nothing configured". Forging the marker is
+    outside the threat model.
     """
     if truth.static_attr(view_func, _BOUNDARY_MARKER, default=False) is not True:
         return None
@@ -344,12 +285,7 @@ def _package_view_instance(view_func: object) -> object:
     initkwargs = truth.static_attr(view_func, "view_initkwargs", None)
     if not truth.is_type(view_class) or not _is_initkwargs(initkwargs):
         return None
-    if not callable(truth.static_attr(view_class, _BOUNDARY_METHOD, None)):
-        return None
-    try:
-        return object_result(view_class, **initkwargs)
-    except TypeError:
-        return None
+    return require_instance(object_result(view_class, **initkwargs), View)
 
 
 def _require_boundary_before_csrf() -> None:

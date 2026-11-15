@@ -167,9 +167,9 @@ Spec: [Decision 7][s65-d7].
 - **Counting `len(request.body)`.** Its appeal is real — the property is the only *public*
   way to obtain a body, so counting it touches no private attribute. Rejected anyway,
   because it obtains the correct length only after Django has materialized the whole
-  request, which makes it a detector rather than a bound; and on the Django 5.2.x series,
-  against an absent or understated `Content-Length`, there is no earlier Django check to
-  have shrunk that allocation. Measuring the stream Django keeps private, from one module
+  request, which makes it a detector rather than a bound; and on Django 6.0.0 through
+  6.0.3, against an absent or understated `Content-Length`, there is no earlier Django
+  check to have shrunk that allocation. Measuring the stream Django keeps private, from one module
   pinned to both supported versions, is the smaller compatibility surface of the two — the
   alternative buys its purity with an unbounded allocation on the one path this card exists
   to bound.
@@ -195,12 +195,6 @@ Spec: [Decision 7][s65-d7].
 - **Rejecting inside `parse_json`.** Rejected: a size policy is a boundary check, not a
   parse; it would fire on GET query-param parses, and it would be unreachable for a
   multipart request.
-- **Letting an unguarded capability call fall through as a `500`.** The probe's
-  `seekable()`, `tell()` and `seek()` calls are made into a stream the package did not
-  construct (an ASGI server's, or a consumer middleware's). Rejected: an unrelated `500` is
-  the wrong answer at the one seam this design deliberately centralized, so every capability
-  call is guarded and a restore the probe cannot verify fails closed with the package's own
-  refusal.
 
 ### Decision 8 — The deployment-layer cap is a co-requirement, not an alternative
 
@@ -689,35 +683,15 @@ observe that ordering; status `413` alone is never evidence of it.
   "the boundary ran" are one fact about one request. A declined callback keeps the exemption:
   the CSRF **class** degrades, while ordering and cap stay intact.
 
-**Where recognition probes, and how widely it guards.** Recognition ends at the boundary: a
-callback carrying the package's private marker over a buildable class that is no package view
-must not reach `process_view`'s boundary call and raise there.
-
-- **Probing the built instance.** Rejected: it closes the same hole, but only after running a
-  foreign class's `__init__`. The probe reads the **class**, before construction, and requires
-  a **callable** boundary attribute — one that cannot be called is not a boundary the
-  middleware can run either.
-- **Declaring the forged marker out of contract, or refusing it with a `ConfigurationError`.**
-  Rejected: the first is more text than the fix and an exception to the no-unrelated-`500`
-  doctrine [Decision 7][s65-d7] establishes; the second contradicts the contract in which every
-  unforeseen state answers "no" and falls back to the view-local arrangement.
-- **One broad `except Exception` around recognition and construction together.** Rejected: it
-  would convert a package mount's own non-`TypeError` construction failure into a silent
-  decline. The recognition **reads** are guarded broadly, because a read that raises is no
-  answer at all; the construction keeps a narrow `except TypeError`, because a class that
-  cannot be built from the kwargs it names is a determined answer.
-
-**The probe's limit.** An attribute read on a class consults that class's own attribute
-machinery — a metaclass `__getattr__` or a class-level descriptor under the probed name — so
-recognition can still run consumer code, which is why every recognition read is guarded.
+**What recognition reads.** The package marker, a `view_class` that is a class and a
+`view_initkwargs` mapping: Django's own `as_view` bookkeeping, read statically.
 **Forging the package's private marker is outside the threat model** (the [spec-045][spec-045]
 stance that no in-interpreter walk is a trust boundary against a party already executing code
-in the process); the probe and the read guard exist so that every outcome the recognition
-reaches is controlled, not to defend against a forger. Running a boundary the recognition has
-*accepted* is deliberately unguarded: a boundary that raises anything but `HTTPException` leaves
-`process_view` uncaught, identically for a package mount and a forged class, because a guard
-there would sit across the body cap's own errors and across a package mount's genuinely broken
-boundary.
+in the process), so a forged callback over a class that cannot be built from its kwargs, or is
+no Django view, raises out of `process_view`. Running a recognized boundary is deliberately
+unguarded: a boundary that raises anything but `HTTPException` leaves `process_view` uncaught,
+because a guard there would sit across the body cap's own errors and across a package mount's
+genuinely broken boundary.
 
 ### Decision 19 — A Django-backed WebSocket Host boundary, beside Channels' Origin check
 

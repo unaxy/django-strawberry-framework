@@ -66,7 +66,6 @@
 "django_strawberry_framework/list_field.py::ListArgumentError" = { reportUnsafeMultipleInheritance = 1 }
 "django_strawberry_framework/management/commands/inspect_django_type.py::_converter_type_name" = { reportUnknownMemberType = 1 }
 "django_strawberry_framework/middleware/debug_toolbar.py::_panel_title" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
-"django_strawberry_framework/middleware/request_body.py::GraphQLRequestBodyBoundaryMiddleware.process_view" = { reportExplicitAny = 1 }
 "django_strawberry_framework/mutations/permissions.py::DjangoModelPermission.has_permission" = { reportAny = 2, reportExplicitAny = 2 }
 "django_strawberry_framework/mutations/resolvers.py::payload_cls_for" = { cast = 1 }
 "django_strawberry_framework/mutations/sets.py::DjangoMutation.check_permission" = { reportAny = 3, reportExplicitAny = 2 }
@@ -458,10 +457,7 @@
 "tests/test_sets_mixins.py::test_a_longer_related_order_reaching_a_target_path_is_refused._ShelfOrder" = { reportArgumentType = 1 }
 "tests/test_sets_mixins.py::test_a_non_string_field_name_claims_no_relation._Owner" = { reportArgumentType = 2 }
 "tests/test_sets_mixins.py::test_resolve_lazy_class_owner_scope_matrix" = { reportArgumentType = 1 }
-"tests/test_views.py::_LyingRestoredPosition.__hash__" = { reportAssignmentType = 1 }
-"tests/test_views.py::_NonAdvancingChunkStream.read" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_views.py::_NonCallableSetupView.setup" = { reportAssignmentType = 1 }
-"tests/test_views.py::_UnnumberedSeekStream.seek" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_views.py::_asgi_request" = { reportAttributeAccessIssue = 1 }
 "tests/test_views.py::_multipart_request" = { reportAttributeAccessIssue = 1 }
 "tests/test_views.py::test_the_async_view_evaluates_the_lazy_actor_off_the_loop_without_auser" = { reportAttributeAccessIssue = 1 }

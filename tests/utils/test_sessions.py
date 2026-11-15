@@ -22,7 +22,6 @@ from django.contrib.sessions.backends.signed_cookies import (
 )
 from django.test import override_settings
 from django.utils.functional import SimpleLazyObject
-from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils._narrowing import read_attr
@@ -149,60 +148,6 @@ def test_session_store_class_plain_subclass_engine_resolves() -> None:
     assert session_store_class() is DBSessionStore
 
 
-class _FormatHostileEngine(str):
-    """A deployment-supplied engine whose ``__format__`` raises while being interpolated."""
-
-    @override
-    def __format__(self, spec: str) -> str:
-        raise RuntimeError("hostile __format__")
-
-
-class _ReprHostileEngine(str):
-    """A deployment-supplied engine whose ``__repr__`` raises while being rendered."""
-
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError("hostile __repr__")
-
-
-@override_settings(SESSION_ENGINE=_FormatHostileEngine("tests.utils._no_such_engine"))
-def test_session_store_class_format_hostile_engine_raises_configuration_error() -> None:
-    """A hostile ``__format__`` on the engine cannot defeat the typed rejection.
-
-    ``SESSION_ENGINE`` is deployment-supplied, so the import-path f-string
-    ``f"{engine}.SessionStore"`` must never dispatch a consumer dunder: a
-    raising ``__format__`` would replace the promised ``ConfigurationError``
-    with an arbitrary exception on exactly the misconfiguration path where the
-    typed error matters. The engine is copied to an exact ``str`` through the
-    base slot (``truth.text``), so the rejection stays typed.
-    """
-    with pytest.raises(ConfigurationError, match="Could not resolve SESSION_ENGINE"):
-        session_store_class()
-
-
-@override_settings(SESSION_ENGINE=_ReprHostileEngine("tests.utils._no_such_engine"))
-def test_session_store_class_repr_hostile_engine_raises_configuration_error() -> None:
-    """A hostile ``__repr__`` on the engine cannot defeat the typed rejection.
-
-    The import-failure message renders the engine through ``{engine!r}`` at the
-    raise site, so a deployment-supplied engine subclass with a raising
-    ``__repr__`` must arrive there as an exact base ``str``.
-    """
-    with pytest.raises(ConfigurationError, match="Could not resolve SESSION_ENGINE"):
-        session_store_class()
-
-
-@override_settings(SESSION_ENGINE=_ReprHostileEngine("tests.utils._no_such_engine"))
-def test_session_store_class_repr_hostile_engine_names_the_engine_path() -> None:
-    """The copied engine still renders its path in the rejection message.
-
-    The copy is a safety measure, not a redaction: the actionable part of the
-    message (which module could not be imported) survives.
-    """
-    with pytest.raises(ConfigurationError, match=r"tests\.utils\._no_such_engine"):
-        session_store_class()
-
-
 @pytest.mark.parametrize(
     ("engine", "rendered"),
     [
@@ -236,33 +181,6 @@ def test_session_store_class_rejects_an_engine_that_is_not_really_a_string(
     with override_settings(SESSION_ENGINE=engine), pytest.raises(ConfigurationError) as excinfo:
         session_store_class()
     assert str(excinfo.value).startswith(f"SESSION_ENGINE must be a string; got {rendered}")
-
-
-class _TruthinessHostileEngine(str):
-    """An engine whose ``__bool__`` and ``__len__`` raise when its truthiness is tested."""
-
-    def __bool__(self) -> NoReturn:
-        raise RuntimeError("hostile __bool__")
-
-    @override
-    def __len__(self) -> NoReturn:
-        raise RuntimeError("hostile __len__")
-
-
-def test_session_store_class_resolves_a_truthiness_hostile_engine() -> None:
-    """The emptiness test reads the flattened engine, never the subclass's ``__bool__`` / ``__len__``."""
-    engine = _TruthinessHostileEngine("django.contrib.sessions.backends.signed_cookies")
-    with override_settings(SESSION_ENGINE=engine):
-        assert session_store_class() is SignedCookieSessionStore
-
-
-def test_session_store_class_rejects_an_empty_truthiness_hostile_engine() -> None:
-    """An empty hostile engine meets the typed emptiness rejection, not its own exception."""
-    with (
-        override_settings(SESSION_ENGINE=_TruthinessHostileEngine("")),
-        pytest.raises(ConfigurationError, match="SESSION_ENGINE must be a non-empty string"),
-    ):
-        session_store_class()
 
 
 @override_settings(SESSION_ENGINE=_PlainSubclassEngine("tests.utils._no_such_session_engine"))
