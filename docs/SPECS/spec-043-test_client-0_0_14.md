@@ -89,7 +89,7 @@ Skim these [`docs/GLOSSARY.md`][glossary] entries first:
   rule Decision 11 applies: the request-driving coverage lives in the live
   tier; `tests/testing/test_client.py` covers only what a live request cannot
   pin (endpoint-resolution precedence against recording transports, the
-  assertion helpers' failure directions, the owned builder's guards, the
+  assertion helpers' failure directions, the owned builder's map rule, the
   surface guards).
 - [Schema reload discipline][glossary-schema-reload-discipline] — the live
   request-driving tests inherit [`test_query/conftest.py`][test-query-conftest]'s
@@ -151,7 +151,7 @@ Each top-level item maps to one commit / PR.
         with `__test__ = False`, the endpoint-resolving constructor, the
         `client` property, the Django-shaped `request(body, headers=None,
         files=None, *, url=None)`, the owned `_build_body` + path-keyed
-        file-map builder + placeholder walker, and the shared
+        file-map builder, and the shared
         `_finish_response` tail; `TestClient(_GraphQLTestClientBase[Client])`
         and `AsyncTestClient(_GraphQLTestClientBase[AsyncClient])`, each with
         `__init__(path=None, client=None)`, its own `query()` (adds
@@ -177,7 +177,7 @@ Each top-level item maps to one commit / PR.
   - [ ] `tests/testing/test_client.py` — the **DB-free** package-tier tests
         for only what a live request cannot pin: endpoint-resolution
         precedence, both mixin assertion-helper FAILURE directions against
-        canned responses, the owned builder's map rule and guards, the
+        canned responses, the owned builder's map rule, the
         transport-selection contracts, and the collection guard + export
         surface (Decision 11).
   - [ ] Every new symbol carries its docstring (the [`docs/TREE.md`][tree]
@@ -615,16 +615,6 @@ Consumer-visible behavior:
   **any** type behaves alike — Django's test client coerces the path with
   `str()`, so a `None` posts to `/None` — surfacing as whatever the URLconf
   serves at that path, ordinarily a 404 (the previous bullet).
-- **`files=` without usable `variables`** — the owned `_build_body` enters the
-  multipart envelope on **truthiness** (`files={}` posts plain JSON) and then
-  raises `AssertionError` when the envelope it just built carries **no
-  `variables` member** for the `map` to point into
-  (`if "variables" not in body`). Because the `variables` emission is itself
-  truthiness, `variables={}` and `variables=None` are refused alike, as is any
-  falsy mapping whatever it contains. The per-path placeholder contract is
-  enforced separately by
-  `django_strawberry_framework/testing/client.py::_GraphQLTestClientBase._assert_file_placeholders`
-  (Decision 9).
 - **Async misuse** — calling `AsyncTestClient.query(...)` without awaiting is
   the standard un-awaited-coroutine failure; the suite's `-W error` posture
   turns the `RuntimeWarning` into a loud failure. No package-specific guard.
@@ -909,8 +899,7 @@ Only the transport is colored. `request()` is written once on the base and
 returns whatever the wrapped client's `post()` returns — an awaitable over
 `AsyncClient` — typed per color by its two overloads, so the async `query()`
 awaits it (upstream's `cast("Awaitable", ...)` becomes a plain `await`). The
-endpoint resolution, `_build_body`, the file-map builder and placeholder
-walker, the per-call `url=` routing, and `_finish_response` are the base's;
+endpoint resolution, `_build_body`, the file-map builder, the per-call `url=` routing, and `_finish_response` are the base's;
 each client owns its `__init__` default transport (`Client()` /
 `AsyncClient()`), its `query()`, and its `login()`. The async `login()` wraps
 `force_login` / `logout` in `sync_to_async` (session writes are ORM work).
@@ -941,43 +930,9 @@ to.** A key `"data.attachment"` means "the file at
 nested input-object field (`"data.image"`), and a list index (`"tags.0"`). The
 caller carries a matching `None` placeholder at each path inside `variables`.
 
-**The multipart envelope is entered on truthiness, and the placeholder
-contract is enforced by a recursive walker.**
+**The multipart envelope is entered on truthiness.**
 `django_strawberry_framework/testing/client.py::_GraphQLTestClientBase._build_body`
-returns the plain JSON body when `files` is falsy — so `files={}` posts JSON —
-and then raises when the built body carries no `variables` member for the
-`map` to point into. The guard's subject is the envelope, not the argument:
-the emission above it is the one owner of when that member exists. Under
-truthiness emission that is every falsy `variables` — including a falsy
-mapping carrying real placeholders, which the per-path walker alone would
-accept while the `map` pointed into a member the envelope never wrote. Next,
-`_build_body` refuses a `files` key named `operations` or `map` — the
-envelope's own field names, which the trailing `**files` spread would
-silently clobber — and then hands the call to
-`django_strawberry_framework/testing/client.py::_GraphQLTestClientBase._assert_file_placeholders`,
-which walks every dotted path and rejects at the source:
-
-- an **empty dotted segment** (the `""` key's `variables.` path, or
-  `variables.data.` for a `""` field) — such a map entry could never name a
-  GraphQL variable;
-- an **array index that is not its canonical non-negative decimal rendering**
-  or is out of range, checked by a guarded `int()` conversion plus
-  `index >= 0`, `str(index) == segment`, and `index < len(array)` — digit-like
-  Unicode and very long decimal strings do not share `int()`'s acceptance
-  domain, so an index the emitted `object-path` segment could not name is
-  refused;
-- a **missing key** at a mapping level;
-- a **value that cannot be descended into** (neither array nor mapping);
-- a **non-`None` value at the resolved path**.
-
-The walk models the POST-serialization shape the map points into:
-`json.dumps` renders dicts as JSON objects and **both lists and tuples** as
-JSON arrays, so both array flavors carry indexed placeholders alike. Every
-guard is an explicit `raise AssertionError` (not the base's bare
-`assert variables is not None`), so all of them hold under `python -O` and
-share one type for `pytest.raises(AssertionError)`. Every diagnostic renders
-consumer-supplied paths and values through `utils/truth.py::render` rather
-than `{x!r}` (D5).
+returns the plain JSON body when `files` is falsy, so `files={}` posts JSON.
 
 The builder is **owned, not inherited** (Decision 5 ground 2): with the path
 explicit in the public contract it needs none of the base's folder-key
@@ -1072,11 +1027,9 @@ real request:
   mixin rungs end-to-end against a probe URLconf besides.
 - **Both mixin assertion helpers' FAILURE directions** against canned
   `Response` objects (their PASSING directions ride the live unittest tests).
-- **The owned builder's map rule and its guards** — the uniform path-keyed
-  rule (the top-level and list-index shapes no fakeshop mutation takes), the
-  empty-`variables` guard, the placeholder walker's rejections, the
-  reserved-envelope-key guard, `files={}` as a JSON post, and the
-  `operation_name=""`-is-sent contract.
+- **The owned builder's map rule** — the uniform path-keyed rule (the
+  top-level and list-index shapes no fakeshop mutation takes), `files={}` as
+  a JSON post, and the `operation_name=""`-is-sent contract.
 - **The transport-selection contracts and the surface guards** — an explicit
   falsy transport is kept, the async default is a `django.test.AsyncClient`,
   `__test__ = False`, and the export surface.
@@ -1119,7 +1072,7 @@ The file-level delta map (no slice bumps the version, Decision 12):
 | File | Change | Slice |
 | --- | --- | --- |
 | [`django_strawberry_framework/conf.py`][conf] | `TESTING_ENDPOINT_KEY` constant + `testing_endpoint_setting()` accessor (default `"/graphql/"`, `__test__ = False`) (Decision 7) | 1 |
-| `django_strawberry_framework/testing/client.py` | `Response` (typed + raw response); `_GraphQLTestClientBase` (endpoint resolution, `client` property, `request(..., *, url=None)`, owned `_build_body` + path-keyed map + placeholder walker, `_finish_response`); sibling `TestClient` / `AsyncTestClient` (own `__init__`, `query()`, `login()`); `GraphQLTestMixin` + `GraphQLTestCase` + `GraphQLTransactionTestCase` (Decisions 3–10) | 1 |
+| `django_strawberry_framework/testing/client.py` | `Response` (typed + raw response); `_GraphQLTestClientBase` (endpoint resolution, `client` property, `request(..., *, url=None)`, owned `_build_body` + path-keyed map, `_finish_response`); sibling `TestClient` / `AsyncTestClient` (own `__init__`, `query()`, `login()`); `GraphQLTestMixin` + `GraphQLTestCase` + `GraphQLTransactionTestCase` (Decisions 3–10) | 1 |
 | [`django_strawberry_framework/testing/__init__.py`][testing-init] | Re-export the six public names in `__all__` (Decision 4) | 1 |
 | `tests/testing/test_client.py` | The DB-free package-tier scenarios per the [Test plan](#test-plan) | 1 |
 | `examples/fakeshop/test_query/` (targeted rows) | The request-driving live rows: [`test_client_api.py`][test-client-api] plus the `TestClient` rows in [`test_products_api.py`][test-products-api] and [`test_uploads_api.py`][test-uploads-api] | 1 |
@@ -1149,10 +1102,6 @@ Reuse is named per item, and deliberate *non*-reuse carries its reason.
   live tier's autouse fixture) and the [`seed_data`][glossary-seed-data] /
   `create_users` helpers — never private reloads or hand-built catalog rows
   (Decision 11).
-- [ ] **D5** — every guard diagnostic in the owned builder and the placeholder
-  walker renders consumer-supplied paths and values through
-  `utils/truth.py::render`, never `{x!r}` — the package's one renderer for a
-  value named in an error message (Decision 9).
 - [ ] **D-N1** (non-reuse) — the client does **not** route through
   [`request_from_info`][glossary-request-from-info]: that helper decodes
   resolver-context shapes server-side; this module *originates* HTTP requests
@@ -1192,9 +1141,7 @@ Reuse is named per item, and deliberate *non*-reuse carries its reason.
   leak session state; for cookie/session assertions the raw client rides
   along (`test_client.client.cookies`, and `res.response.cookies` per
   response).
-- **`files=` requires placeholder variables.** `_build_body` raises when a
-  truthy `files` arrives and the envelope carries no `variables` member, and
-  `_GraphQLTestClientBase._assert_file_placeholders` enforces a `None`
+- **`files=` takes placeholder variables.** The caller carries a `None`
   placeholder at each file's path (Decision 9). The `query()` docstring carries
   the single-file and nested-input-object examples.
 - **Multi-file, nested-input-object, and list uploads** are handled by the
@@ -1267,8 +1214,7 @@ run under the live tier's autouse schema reload and seed with `seed_data` /
    operation_name="Create")` → success payload, both files persisted —
    `examples/fakeshop/test_query/test_uploads_api.py::test_multipart_create_uploads_real_files_over_http`,
    the shape the base's map builder cannot produce, with `operationName` riding
-   inside `operations`. The top-level and list-index shapes and the walker's
-   success path are package-tier,
+   inside `operations`. The top-level and list-index shapes are package-tier,
    `::test_build_body_map_rule_is_uniform_across_path_shapes`; `files={}` as a
    plain JSON post is `::test_empty_files_dict_is_a_plain_json_post`.
 
@@ -1353,42 +1299,11 @@ the transport error:**
     `from django_strawberry_framework import TestClient` statement)
     (Decision 4).
 
-**The hardened builder and the transport selection (package-tier, DB-free):**
+**The transport selection (package-tier, DB-free):**
 
-15. **Every rejection branch of the placeholder walker, plus the call-level
-    guards and the selection contracts, carries its own named owner** in
-    `tests/testing/test_client.py` (Decisions 5 and 9). The walker:
+15. **The selection contracts carry their own named owners** in
+    `tests/testing/test_client.py` (Decision 5):
 
-    - tuples walk like lists —
-      `::test_files_placeholder_tuple_arrays_walk_and_map_like_lists`;
-    - the empty dotted segment —
-      `::test_files_placeholder_empty_segment_raises_instead_of_emitting`,
-      parametrized over the `""`-key and trailing-dot shapes;
-    - the non-canonical array index —
-      `::test_files_placeholder_noncanonical_list_index_raises`, parametrized
-      over the digit-like spellings `int()` and `str.isdigit()` disagree on,
-      with `::test_files_placeholder_out_of_range_list_index_raises` for the
-      range leg;
-    - the non-descendable value —
-      `::test_files_placeholder_cannot_descend_into_a_scalar_raises`,
-      including a case past the first segment;
-    - the non-`None` value — `::test_files_placeholder_present_but_not_none_raises`;
-    - the missing key — `::test_files_placeholder_missing_top_level_path_raises`
-      / `::test_files_placeholder_missing_nested_key_raises`.
-
-    The call-level guards, the diagnostics, and the selection contracts:
-
-    - the empty-`variables` guard —
-      `::test_files_without_variables_raises_the_placeholder_guard`,
-      parametrized over `variables=None`, `variables={}`, and a **falsy `dict`
-      subclass carrying real placeholders** (the input the walker alone would
-      accept), plus `::test_async_files_without_variables_raises_the_same_guard`
-      for the async color; each matches the guard's own phrase rather than a
-      word every walker message carries;
-    - the reserved-envelope-key guard —
-      `::test_files_key_shadowing_a_reserved_envelope_field_raises`,
-      parametrized over `operations`, `map`, and both (which also pins the
-      sorted rendering of the offending names);
     - the transport is selected by presence, not truthiness —
       `::test_clients_preserve_an_explicit_falsy_transport` (both colors),
       `::test_async_client_defaults_to_djangos_async_transport` (the async
@@ -1405,8 +1320,7 @@ Coverage: the package gate is `fail_under = 100` and `testing/client.py` is
 package code. The live rows reach the JSON and multipart `request()`
 branches, both `query()` overrides, `login()` in both colors, the mixin
 delegate, and the assertion helpers' passing directions; the DB-free package
-rows reach the builder's map rule and guards, the walker's rejection branches,
-the selection contracts, both helpers' failure directions, the endpoint
+rows reach the builder's map rule, the selection contracts, both helpers' failure directions, the endpoint
 ladder, and the export / guard surface.
 
 ## Doc updates
@@ -1487,8 +1401,7 @@ fallback weighing is in the [rationale][rationale-risks].
       clients — a live `Upload`-scalar mutation drives through the helper on
       the **sync** client ([`test_uploads_api.py`][test-uploads-api]) and the
       **async** client ([`test_client_api.py`][test-client-api]); the
-      `variables`-placeholder contract is documented and enforced, and a
-      `files=` key may not shadow the reserved `operations` / `map` fields.
+      `variables`-placeholder contract is documented.
 - [ ] `from django_strawberry_framework.testing import TestClient,
       AsyncTestClient, Response, GraphQLTestMixin, GraphQLTestCase,
       GraphQLTransactionTestCase` all resolve; nothing is added to the package

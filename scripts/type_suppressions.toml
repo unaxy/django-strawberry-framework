@@ -520,7 +520,6 @@
 "tests/test_write_mixins.py::test_make_declaration_registry_identity_dedup_hostile_eq_safe_containment.HostileEqMeta" = { reportAssignmentType = 1 }
 "tests/test_write_mixins.py::test_whole_record_swap_and_deletion_on_a_real_mutation_class_are_sealed" = { reportAttributeAccessIssue = 1 }
 "tests/testing/test_client.py::test_export_surface_is_the_testing_root_not_the_package_root" = { reportAny = 1 }
-"tests/testing/test_client.py::test_files_non_string_key_raises_the_uniform_guard" = { reportArgumentType = 1 }
 "tests/testing/test_wrap.py::test_safe_wrap_connection_method_keeps_type_error_boundary_for_hostile_repr" = { reportArgumentType = 1 }
 "tests/testing/test_wrap.py::test_safe_wrap_connection_method_raises_on_non_callable_wrapper" = { reportArgumentType = 1 }
 "tests/types/test_base.py::_lazy_lookup_prefetch" = { reportAssignmentType = 1 }

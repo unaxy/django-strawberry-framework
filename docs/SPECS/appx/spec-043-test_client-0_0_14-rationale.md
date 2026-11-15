@@ -203,7 +203,7 @@ Spec: [Decision 8][d8].
   the async `query()` / `login()` are coroutine-colored, so an `AsyncTestClient` accepted where a
   `TestClient` is expected returns an un-awaited coroutine from `query()`.
 - **Two flat clients each subclassing `BaseGraphQLTestClient`.** Re-declares the constructor,
-  `request()`, the body builder, the placeholder walker, and the response tail twice — exactly the
+  `request()`, the body builder, and the response tail twice — exactly the
   un-colored code the shared base holds once.
 - **One class with sync/async auto-detection** (the package's `is_async_callable` machinery from
   `DjangoListField`). That machinery exists for *consumer-supplied* resolvers whose color the
@@ -229,25 +229,6 @@ Spec: [Decision 9][d9].
 - **Gate `operationName` on truthiness (`if operation_name:`).** An explicit `""` would be
   silently reinterpreted as "no operation name"; gating on `is not None` sends it for the server to
   reject with a real GraphQL error.
-- **Let the trailing `**files` spread take any key.** A `files` key named `operations` or `map`
-  (with a matching placeholder) would overwrite the envelope and post a corrupt body the server has
-  to diagnose; refusing it at the source matches the sibling guards.
-- **Delete the empty-`variables` guard as subsumed by the walker.** The walker does not catch a
-  *falsy container carrying real placeholders* — a `dict` subclass whose `__bool__` returns
-  `False` holding `{"file": None}`: the walker accepts it while the emission writes no `variables`
-  member, so the builder would emit `operations` without `variables` beside a `map` pointing into
-  `variables.file`, an envelope Strawberry rejects with "File(s) missing in form data", a message
-  that blames files which are present. The guard decides that verdict, and its message for
-  `variables=None` is clearer than the walker's would be.
-- **Spell the guard as a truthiness test on the `variables` argument.** It would duplicate the
-  emission's own truthiness test, so a change to the emission rule would have to move two sites;
-  reading `"variables" not in body` derives the guard from the envelope it protects.
-- **`segment.isdigit() and int(segment) < len(current)` for array indexes.** The two domains
-  disagree: `isdigit()` accepts superscripts `int()` rejects, and digit-like Unicode and very long
-  decimal strings do not share `int()`'s acceptance domain, so a non-canonical index could be
-  accepted where the emitted `object-path` segment could not name it.
-- **`{x!r}` in guard diagnostics.** Every package error message names a value through
-  `utils/truth.py::render`; a second spelling here would drift from it.
 
 ### Decision 10 — Mixin-first: `GraphQLTestMixin` composes over `TestClient`
 
@@ -326,10 +307,6 @@ re-implements the flow rather than calling `super().query()`.
 convenience, the mixin's deprecated `_client` property shim, graphene's `TESTING_ENDPOINT`
 default of `"/graphql"`) are the evidence the borrow decisions rest on; the decisions and the
 non-borrow list stay in the spec.
-
-**`utils/truth.py::render` is not a borrow.** Neither upstream contributes it; it is the package's
-own renderer for a value named in an error message, which is why it sits in the spec's
-`## Helper-reuse obligations (DRY)` as D5 rather than in the borrowing list.
 
 ### Risks and open questions — the preferred-answer / fallback weighing
 

@@ -42,13 +42,10 @@ from strawberry.test.client import Response as _EngineResponse
 from typing_extensions import override
 
 from django_strawberry_framework._multipart import (
-    _MULTIPART_CONTROL_FIELDS,
     _MULTIPART_MAP_FIELD,
     _MULTIPART_OPERATIONS_FIELD,
 )
 from django_strawberry_framework.conf import testing_endpoint_setting
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_dict, is_list_or_tuple
 from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
@@ -284,48 +281,14 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
         if operation_name is not None:
             body["operationName"] = operation_name
 
-        # Truthiness first, then a plain-``dict`` copy: the annotation admits any
-        # ``Mapping`` (``MappingProxyType``, ``UserDict``), which ``json.dumps``
-        # cannot encode and the placeholder walk cannot descend. The copy is the
-        # one object both the envelope and the walk read.
-        sent: dict[str, object] = {}
+        # A plain-``dict`` copy: ``json.dumps`` cannot encode an arbitrary ``Mapping``.
         if variables:
-            sent = dict(variables)
-            body["variables"] = sent
+            body["variables"] = dict(variables)
 
         # Truthiness, matching the ``files`` switches in ``query()`` and
         # ``request()``: ``files={}`` is a JSON post, never a mixed envelope.
         if not files:
             return body
-
-        # Coherence, not truthiness: the multipart ``map`` points into
-        # ``variables.<path>``, so the envelope must carry a ``variables``
-        # member for it to point at. Read the member off the body just built
-        # rather than re-testing ``variables`` - the emission above is the one
-        # owner of when that member exists. Explicit raise (not a bare
-        # ``assert``) so the guard survives ``python -O``.
-        if "variables" not in body:
-            raise AssertionError(
-                "query(..., files=...) requires variables= carrying a None placeholder "
-                "at each file's variable path (e.g. variables={'data': {'image': None}} "
-                "for files={'data.image': f}).",
-            )
-
-        # Reserved-field guard: each ``files`` key becomes a multipart field
-        # name alongside the envelope's own ``operations`` / ``map`` fields, and
-        # ``**files`` spreads last - a key named ``operations`` or ``map`` would
-        # silently clobber the envelope and post a corrupt body the server has to
-        # diagnose. Reject it at the source. Explicit raise (not a bare assert)
-        # so the guard holds under ``python -O``, matching the sibling guards.
-        reserved = set(_MULTIPART_CONTROL_FIELDS) & set(files)
-        if reserved:
-            raise AssertionError(
-                f"files= keys may not use the reserved multipart envelope field "
-                f"name(s) {truth.render(sorted(reserved))}; the 'operations' / 'map' fields "
-                f"are built by this client - rename the variable path.",
-            )
-
-        self._assert_file_placeholders(sent, files)
 
         file_map = {key: [f"variables.{key}"] for key in files}
         return {
@@ -333,90 +296,6 @@ class _GraphQLTestClientBase(BaseGraphQLTestClient, Generic[_ClientT]):
             _MULTIPART_MAP_FIELD: json.dumps(file_map),
             **files,
         }
-
-    @staticmethod
-    def _assert_file_placeholders(
-        variables: Mapping[str, object],
-        files: dict[str, object],
-    ) -> None:
-        """Verify each ``files=`` path resolves to a ``None`` placeholder in ``variables``.
-
-        The path-keyed ``files=`` contract (spec-043 Decision 9) makes the
-        client - not the server - the owner of the multipart ``map``: each key
-        is a dotted variable path (dict keys and array indexes) and ``variables``
-        must carry a ``None`` placeholder at exactly that path. The walk models
-        the POST-serialization shape the map points into: ``json.dumps`` renders
-        dict (and dict subclass) values as JSON objects and list / tuple values
-        as JSON arrays, so both array flavors carry indexed placeholders alike.
-        A key that is not a string is rejected here with the same uniform
-        ``AssertionError`` rather than failing inside the walk.
-        Walking the path here fails a typo or a malformed call at the source,
-        naming the bad path, rather than emitting a spec-invalid envelope the
-        server has to diagnose later - which is also why an empty dotted segment
-        (an object path like ``variables.`` that can never name a GraphQL
-        variable) is rejected here instead of being emitted. Explicit
-        ``AssertionError`` (not a bare ``assert``) so the guard holds under
-        ``python -O``, matching the empty-``variables`` guard above.
-        """
-        for key in files:
-            if not truth.is_instance(key, str):
-                raise AssertionError(
-                    f"files= key {truth.render(key)} is not a string: keys must be "
-                    "dot-separated variable paths.",
-                )
-            current: object = variables
-            for segment in key.split("."):
-                # An empty segment can never name a GraphQL variable (variable
-                # names are non-empty), so a map entry built from one - the ``""``
-                # key's ``variables.`` path, or ``variables.data.`` for a ``""``
-                # field - would be a spec-invalid envelope only the server could
-                # diagnose (an opaque 400 naming no path). Fail at the source.
-                if not segment:
-                    raise AssertionError(
-                        f"files= path {truth.render(key)} has an empty dotted segment: "
-                        f"multipart object paths are dot-separated non-empty names, so the "
-                        f"emitted map entry could never name a GraphQL variable.",
-                    )
-                if is_list_or_tuple(current):
-                    array = current
-                    # Multipart operation paths use ``object-path`` numeric segments:
-                    # a list index is its canonical non-negative decimal rendering.
-                    # Guard the conversion itself because digit-like Unicode and very
-                    # long decimal strings do not share ``int()``'s acceptance domain.
-                    try:
-                        index = int(segment)
-                    except ValueError:
-                        index = None
-                    size = len(array)
-                    if index is None or index < 0 or str(index) != segment or index >= size:
-                        raise AssertionError(
-                            f"files= path {truth.render(key)} has no matching placeholder in "
-                            f"variables: {truth.render(segment)} is not a valid index into a "
-                            f"{size}-item array.",
-                        )
-                    current = array[index]
-                elif is_dict(current):
-                    if segment not in current:
-                        raise AssertionError(
-                            f"files= path {truth.render(key)} has no matching placeholder in "
-                            f"variables: no key {truth.render(segment)} at that level.",
-                        )
-                    current = current[segment]
-                else:
-                    # AssertionError (not the TRY004-suggested TypeError) on
-                    # purpose: every placeholder failure here is one malformed
-                    # test call, raised as the same type as the sibling guards so
-                    # ``pytest.raises(AssertionError)`` catches every bad shape.
-                    raise AssertionError(
-                        f"files= path {truth.render(key)} has no matching placeholder in "
-                        f"variables: cannot descend into {truth.render(segment)} (the value "
-                        f"there is not a dict or list).",
-                    )
-            if current is not None:
-                raise AssertionError(
-                    f"files= path {truth.render(key)} must point at a None placeholder in "
-                    f"variables, but the value there is {truth.render(current)}.",
-                )
 
 
 class TestClient(_GraphQLTestClientBase[Client]):
