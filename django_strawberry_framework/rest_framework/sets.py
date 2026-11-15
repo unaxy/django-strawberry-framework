@@ -46,14 +46,14 @@ resolver bodies land, the same pairing the form flavor uses in
 ``forms/sets.py``). The default ``get_serializer_kwargs`` construction hook ships
 here as the constructor-only customization seam; the resolver consumes
 ``get_serializer_kwargs`` (spec-039 Decision 8's construction hook) and OWNS the
-framework merge / ``partial`` injection / the actor-drift ``context["request"]``
-``ConfigurationError`` rules on top of its return, so those framework-owned
-invariants never live in the consumer-overridable hook. The serializer flavor
+framework merge / ``partial`` injection / ``context["request"]`` assignment on top
+of its return, so those framework-owned invariants never live in the
+consumer-overridable hook. The serializer flavor
 deliberately has **no** coarse ``get_serializer`` constructor hook (unlike the form
 flavor's ``get_form``): its framework-owned invariants - ``partial`` and the
 authorized-actor ``context["request"]`` - cannot be entrusted to a
 consumer-overridable constructor, so construction is framework-owned
-through ``_merged_serializer_kwargs``.
+through ``_serializer_kwargs``.
 """
 
 from __future__ import annotations
@@ -887,19 +887,16 @@ class SerializerMutation(DjangoMutation):
 
         **``data``, ``instance``, ``partial``, ``context["request"]``, and
         ``context["write_alias"]`` are FRAMEWORK-OWNED.** The resolver's
-        ``_merged_serializer_kwargs`` builds the serializer data itself (decoded client data +
-        the ``get_serializer_injected_data`` injection), passes this hook the FROZEN view
-        (immutable containers; uploads as ``UploadMetadata``), and raises a
-        ``ConfigurationError`` on any conflicting reserved return: a ``data`` that is not the
-        EXACT frozen object the hook received (identity via an omission sentinel - an explicit
-        ``data=None`` or a rebuilt-equal copy is rejected too), ANY ``instance`` key (the live
-        located row never reaches hooks - ``hook_context`` carries its ``instance_pk``
-        snapshot instead, and the framework injects the authorized row itself), any
-        ``partial``, a different ``context["request"]`` object, or a conflicting
-        ``context["write_alias"]``. Omission or the identical pass-through (this default's
-        shape) is tolerated. The framework also sets ``context["write_alias"]`` to the
-        pipeline's pinned write alias so custom serializer code routes any extra queries into
-        the SAME transaction.
+        ``_serializer_kwargs`` builds the serializer data itself (decoded client data + the
+        ``get_serializer_injected_data`` injection), passes this hook a shallow copy, and
+        raises a ``ConfigurationError`` on a returned ``data`` that is not the exact copy the
+        hook received (an explicit ``data=None`` included), or on ANY ``instance`` or
+        ``partial`` key (the live located row never reaches hooks - ``hook_context`` carries
+        its ``instance_pk`` instead, and the framework injects the authorized row itself).
+        Omission or the identical pass-through (this default's shape) is accepted. The
+        framework then sets ``context["request"]`` to the framework request and
+        ``context["write_alias"]`` to the pipeline's pinned write alias so custom serializer
+        code routes any extra queries into the SAME transaction.
 
         ``hook_context`` is the frozen ``SerializerHookContext`` (``operation`` /
         ``write_alias`` / ``instance_pk``).
@@ -929,8 +926,8 @@ class SerializerMutation(DjangoMutation):
         ``ConfigurationError`` - injection is an auditable, per-field contract, never a
         blanket rewrite). An injected field must be narrowed OUT of the GraphQL input
         (enforced at class creation), so the merge can never overwrite a client value.
-        ``data`` is the FROZEN view of the decoded client data (consult it freely; mutation
-        is structurally impossible, and uploads appear as ``UploadMetadata``);
+        ``data`` is a shallow copy of the decoded client data (uploads appear as the
+        uploaded files themselves, so a hook that reads one must not exhaust its stream);
         ``hook_context`` is the frozen ``SerializerHookContext`` - ``instance_pk`` is the
         authorized target's pk snapshot on update (``None`` on create). The default injects
         nothing - a mutation declaring ``Meta.injected_fields`` MUST override this.
@@ -953,15 +950,9 @@ class SerializerMutation(DjangoMutation):
         context). The default returns ``{}``; a consumer overrides it to inject save-time
         arguments. The resolver calls it inside the value-preserving ``save()``
         closure (so the transaction / error-mapping / optimizer re-fetch behavior is
-        preserved) and REJECTS a save kwarg that shadows ANY top-level
-        ``serializer.validated_data`` key - a renamed input, an injected field, a default, or
-        a ``HiddenField`` alike (DRF merges save kwargs over ``validated_data``, so a
-        collision would silently replace the validated value) - AND a save kwarg naming ANY
-        model field (model-field injection goes through ``Meta.injected_fields``, the
-        auditable, validated, visibility-checked contract; save kwargs carry only non-model
-        custom arguments). ``data`` is the FROZEN view of the decoded ``provided_data``
-        (immutable; uploads as ``UploadMetadata``); ``hook_context`` is the frozen
-        ``SerializerHookContext``.
+        preserved); DRF merges the save kwargs over ``serializer.validated_data``.
+        ``data`` is a shallow copy of the decoded ``provided_data``; ``hook_context`` is the
+        frozen ``SerializerHookContext``.
         """
         del info, data, hook_context  # the default injects nothing; overrides may consult.
         return {}

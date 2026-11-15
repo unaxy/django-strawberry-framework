@@ -153,7 +153,7 @@ used throughout the spec:
 - [`field_error`][glossary-fielderror-envelope] — the shared write-error envelope.
   Untouched by this card, but named because the request
   [`request_from_info()`][glossary-request-from-info] resolves is the same object
-  [`rest_framework/resolvers.py::_merged_serializer_kwargs`][rf-resolvers] hands DRF as
+  [`rest_framework/resolvers.py::_serializer_kwargs`][rf-resolvers] hands DRF as
   `context["request"]`, and a serializer override that reads it under Channels produces
   entries in that envelope.
 - [`TestClient`][glossary-testclient] / [`GraphQLTestCase`][glossary-graphqltestcase]
@@ -1101,7 +1101,7 @@ their `check_<field>_permission(self, request)` input gates (the
 `FieldSet`);
 [`DjangoModelPermission`][glossary-djangomodelpermission]`.has_permission`
 ([`mutations/permissions.py`][mutations-permissions]) reads it; and
-[`rest_framework/resolvers.py::_merged_serializer_kwargs`][rf-resolvers] sets it as DRF's
+[`rest_framework/resolvers.py::_serializer_kwargs`][rf-resolvers] sets it as DRF's
 `context["request"]`. The auth `current_user` query and the default
 model-permission path need only `.user`, but those user-written hooks and
 serializer overrides may read `request.headers`, `request.COOKIES`,

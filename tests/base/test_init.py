@@ -197,7 +197,6 @@ def test_dynamic_drf_soft_exports_via_getattr() -> None:
         SerializerFieldConversion,
         SerializerHookContext,
         SerializerMutation,
-        UploadMetadata,
         describe_serializer_input,
         register_serializer_field_converter,
     )
@@ -208,7 +207,6 @@ def test_dynamic_drf_soft_exports_via_getattr() -> None:
     assert callable(describe_serializer_input)
     assert NestedSerializerConfig is not None
     assert SerializerHookContext is not None
-    assert UploadMetadata is not None
 
 
 def test_dynamic_getattr_non_memoization() -> None:

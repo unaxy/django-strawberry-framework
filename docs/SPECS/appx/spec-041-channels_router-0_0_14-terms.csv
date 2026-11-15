@@ -11,7 +11,7 @@ Live-first coverage mandate,live-first-coverage-mandate,"Decision 8: routers.py 
 Auth mutations,auth-mutations,"the session-auth surface whose session-mutating half over Channels is spec-040 auth/sessions.py; this spec ships the transport and the read path (groups: login, logout, register, channels_auth, channels.auth.login/logout, session cycling)"
 SerializerMutation,serializermutation,"the soft-dependency precedent (require_drf / lazy root export) Decision 5 generalizes (groups: rest_framework/__init__.py, test_soft_dependency.py, _HINT_SUBSTRING)"
 ConfigurationError,configurationerror,what request_from_info raises for an unrecognized context shape; the family-labeled error contract Decision 11 preserves
-FieldError,fielderror-envelope,"named because the request request_from_info resolves is the context[""request""] _merged_serializer_kwargs hands DRF (groups: field_error)"
+FieldError,fielderror-envelope,"named because the request request_from_info resolves is the context[""request""] _serializer_kwargs hands DRF (groups: field_error)"
 finalize_django_types,finalize_django_types,"test-plan note: execution tests use plain strawberry.Schema to stay out of the registry lifecycle (groups: registry lifecycle, TypeRegistry)"
 FilterSet,filterset,"Decision 11 blast radius: its shared _request_from_info hands the resolved request to consumer-written check_<field>_permission(self, request) input gates, which must keep their full request contract under Channels"
 OrderSet,orderset,"Decision 11 blast radius: same (self, request) input-gate shape as FilterSet, through the shared _request_from_info"

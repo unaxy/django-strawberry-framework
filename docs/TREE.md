@@ -275,7 +275,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 │   └── sets.py                   # ``OrderSet`` + ``OrderSetMetaclass`` - declaration, validation, and the apply pipeline.
 ├── rest_framework/    # DRF serializer mutations: generated inputs, conversion, binding, and execution behind an import guard.
 │   ├── accessors.py              # Typed reads of the DRF attributes djangorestframework-stubs declares with bare generics.
-│   ├── hook_context.py           # The frozen serializer-hook context + upload metadata.
+│   ├── hook_context.py           # The frozen serializer-hook context.
 │   ├── inputs.py                 # DRF-serializer-derived ``@strawberry.input`` generation substrate.
 │   ├── resolvers.py              # The sync + async serializer-mutation resolver pipeline.
 │   ├── serializer_converter.py   # DRF serializer-field -> Strawberry input conversion + the per-input-field reverse map.
@@ -421,7 +421,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── permissions/    # planned by TODO-BETA-066-0.1.4 - Cascade-permission package migration plus opt-in node-sentinel redaction (``Meta.redaction_mode``).
 ├── rest_framework/    # DRF serializer mutations: generated inputs, conversion, binding, and execution behind an import guard.
 │   ├── accessors.py              # Typed reads of the DRF attributes djangorestframework-stubs declares with bare generics.
-│   ├── hook_context.py           # The frozen serializer-hook context + upload metadata.
+│   ├── hook_context.py           # The frozen serializer-hook context.
 │   ├── inputs.py                 # DRF-serializer-derived ``@strawberry.input`` generation substrate.
 │   ├── resolvers.py              # The sync + async serializer-mutation resolver pipeline.
 │   ├── serializer_converter.py   # DRF serializer-field -> Strawberry input conversion + the per-input-field reverse map.

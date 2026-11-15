@@ -591,7 +591,7 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     [`utils/permissions.py`][utils-permissions]) set unconditionally after the merge, so
     the serializer's own validators / `HiddenField(default=CurrentUserDefault())` resolve
     against the same actor the permission seam authorized; hooks receive a frozen
-    `SerializerHookContext` plus an immutable data view, never the live located instance
+    `SerializerHookContext` plus a shallow copy of the data, never the live located instance
     ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)
     step 4);
     **validate** via `serializer.is_valid()` — a failure maps the nested
@@ -776,7 +776,7 @@ replaces.
   descriptor, the input namespace), [`sets.py`][rf-sets] (`SerializerMutation`, its
   `Meta` validation and hooks), [`resolvers.py`][rf-resolvers] (the serializer
   pipeline), and [`hook_context.py`][rf-hook-context] (the frozen
-  `SerializerHookContext` / `UploadMetadata` the consumer hooks receive). The package
+  `SerializerHookContext` the consumer hooks receive). The package
   root resolves `SerializerMutation` lazily through `__getattr__` (`_DRF_SOFT_EXPORTS`),
   never through `__all__`.
 - **It composes the `036` foundation through the seams** `DjangoModelFormMutation`
@@ -1143,8 +1143,8 @@ Rationale companion — this Decision's justification and its two rejected alter
   (`SerializerMutation` + `Meta` validation + the seam overrides), `resolvers.py`
   (the serializer pipeline), `__init__.py` (the `require_drf()` guard,
   [Decision 12](#decision-12--soft-djangorestframework-dependency-and-the-100-coverage-strategy)),
-  and [`hook_context.py`][rf-hook-context] (the frozen `SerializerHookContext` /
-  `UploadMetadata` surface every consumer hook receives). It reuses [`mutations/`][mutations-fields]'s
+  and [`hook_context.py`][rf-hook-context] (the frozen `SerializerHookContext`
+  every consumer hook receives). It reuses [`mutations/`][mutations-fields]'s
   [`DjangoMutationField`][glossary-djangomutationfield] and
   [`FieldError`][glossary-fielderror-envelope] rather than re-declaring them.
 - **Tests:** [`tests/rest_framework/`][test-rest-framework] mirroring the source
@@ -1179,7 +1179,7 @@ spans [`types/finalizer.py`][types-finalizer] + [`registry.py`][registry].
 
 ### Decision 5 — Public surface: `SerializerMutation` exported from the root, the `038`-generalized factory reused
 
-The flavor's public surface is **seven names, every one a lazy export via the root
+The flavor's public surface is **six names, every one a lazy export via the root
 `__getattr__`** under the shared `require_drf()` guard, and — while DRF is a soft
 dependency — every one **deliberately NOT added to `__all__`** (so `from … import *`
 stays DRF-free for consumers who never write a serializer mutation; the named
@@ -1192,12 +1192,11 @@ stays DRF-free for consumers who never write a serializer mutation; the named
   converter registry and its conversion result.
 - `describe_serializer_input` — the schema-shape debug helper.
 - `NestedSerializerConfig` — the opt-in nested-input declaration.
-- `SerializerHookContext` and `UploadMetadata` — the frozen hook surface every consumer
-  hook receives ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)
+- `SerializerHookContext` — the frozen hook context every consumer hook receives ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)
   step 4).
 
-`SerializerMutation` is the only one of the seven a consumer must name to declare a
-mutation; the other six are the surfaces those improvements and the hook contract expose.
+`SerializerMutation` is the only one of the six a consumer must name to declare a
+mutation; the other five are the surfaces those improvements and the hook contract expose.
 
 No serializer-specific field factory or error type: the flavor is exposed through
 [`DjangoMutationField`][glossary-djangomutationfield] and returns the one shared
@@ -1944,42 +1943,24 @@ The pipeline steps:
      (`get_serializer_kwargs`, `get_serializer_injected_data`,
      `get_serializer_save_kwargs`) takes a frozen
      `SerializerHookContext(operation, write_alias, instance_pk)`
-     ([`rest_framework/hook_context.py`][rf-hook-context]) plus an **immutable data
-     view**: read-only mapping proxies, lists and tuples as tuples, sets as frozensets,
-     `bytearray` as `bytes`, and each upload replaced by a frozen `UploadMetadata`
-     descriptor, so the stateful authoritative upload objects reach only the serializer's
-     own validation. The freeze (`_frozen_hook_view`) is **recursive and iteratively
-     built**, so nested in-place mutation is structurally impossible and
-     client-controlled JSON nesting depth cannot crash the pipeline with a
-     `RecursionError`; a **cyclic** container is a loud `ConfigurationError` rather than an
-     unbounded loop; a merely shared (diamond) reference freezes once and stays shared;
-     immutable scalar leaves pass by reference; and an opaque, possibly-mutable leaf with
-     no immutable rendering **fails closed** rather than being aliased into a value a hook
-     could mutate to reach the authoritative data.
-   - **Every hook result crosses a typed mapping boundary** (`_hook_mapping`): a
-     non-`Mapping` return, a mapping that cannot be materialized, and a mapping carrying
-     a non-`str` key (an `int`, `bytes`, a lazy translation proxy) are each a
-     `ConfigurationError` naming the hook — never a silent repair. A `str` subclass key (a
-     `TextChoices` or `StrEnum` member) is a string to Python's `**` and to DRF, so it is
-     read as its exact text: the checks below compare plain `str` and refuse a member
-     spelling a reserved, undeclared or model-field name exactly as they refuse the plain
-     name.
+     ([`rest_framework/hook_context.py`][rf-hook-context]) plus a **shallow copy** of the
+     decoded data (`dict(...)`; an upload is the uploaded file itself). Each hook's
+     mapping return is read with `dict(...)`; a `str` subclass key (a `TextChoices` or
+     `StrEnum` member) is a string to Python's `**` and to DRF, so a member spelling a
+     reserved or undeclared name is refused exactly as the plain name is.
    - **`data`, `instance`, `partial`, `context["request"]`, and `context["write_alias"]`
-     are framework-owned.** The reserved returns are checked by **omission sentinel +
-     object identity**, never deep equality: a returned `data` must be omitted or the
-     **exact** frozen object the hook received (an explicit `data=None` and a
-     rebuilt-equal copy are both refused — a deep `!=` recurses on deep valid payloads,
-     and a `pop(..., None)` default conflates explicit `None` with omission), and **any**
-     returned `instance` key is rejected outright, since the framework injects the
+     are framework-owned.** A returned `data` must be omitted or the **exact** copy the
+     hook received (identity, so an explicit `data=None` and a rebuilt-equal copy are
+     both refused), and **any** returned `instance` key is rejected outright, since the framework injects the
      authorized row itself and hooks see only its pk via `hook_context.instance_pk`.
      `partial` is the update contract, not a knob: the resolver sets `partial=True` for
      `update` and never for `create`, and a hook returning a `partial` key **at all** —
      whatever its value, on either operation — is a `ConfigurationError`. After merging the hook's other kwargs the framework
      sets `context["request"] = request_from_info(info, family_label="SerializerMutation")`
-     and `context["write_alias"]` **unconditionally** — the same request object the
-     inherited `check_permission` / `permission_classes` seam already authorized against
-     so the serializer's request-aware validators cannot drift from the actor the
-     permission check saw. Consumer-specific context belongs under **other** keys.
+     and `context["write_alias"]` **unconditionally**, overwriting any value the hook
+     returned under those keys — the same request object the inherited
+     `check_permission` / `permission_classes` seam already authorized against.
+     Consumer-specific context belongs under **other** keys.
    - **Post-construct, pre-`is_valid()`, the runtime serializer is proved to agree with
      the schema** (`_assert_schema_runtime_agreement` → `_assert_field_agreement` /
      `_assert_relation_agreement` / `_assert_nested_agreement`), and
@@ -2095,8 +2076,8 @@ The pipeline steps:
      the operation's write alias, so a `UniqueTogetherValidator` (or any author validator)
      cannot read through a different connection than the write is pinned to.
 
-   The flattener itself is **iterative, cycle-rejecting, and budget-capped** for the same
-   reason the hook freeze is: the error structure mirrors client-controlled input nesting,
+   The flattener itself is **iterative, cycle-rejecting, and budget-capped**: the error
+   structure mirrors client-controlled input nesting,
    so a pathological fan-out ends in one `"__all__"`-keyed `truncated` marker
    (`_ERROR_FLATTEN_NODE_BUDGET`) instead of unbounded work, and a cyclic structure fails
    loud rather than looping.
@@ -2126,8 +2107,7 @@ The pipeline steps:
    assignment internally (DRF's `ModelSerializer.save()` writes the instance + its
    relations). Three guards bracket the write, in order:
    - **A thread-scoped write witness** (`_write_witness`) records the backing model's
-     actual writes through `post_save`, **with a pk snapshot taken at the signal**,
-     because the model object is mutable and identity alone is forgeable; a `pre_save`
+     actual writes through `post_save`, with the pk at the signal; a `pre_save`
      arm blocks cross-alias writes, and a second records each backing-model save that
      started and has not completed, with that save's `update_fields`: the row a refused
      save leaves for the `IntegrityError` diagnosis, and the columns it wrote. Django
@@ -2140,26 +2120,20 @@ The pipeline steps:
      child over a stored parent row is that child's INSERT (Django's `post_save` reports
      `created=True`).
    - **`get_serializer_save_kwargs` runs inside the same value-preserving, error-mapped
-     closure as `save()` itself**.
+     closure as `save()` itself**; DRF merges its kwargs over `validated_data`.
    - **A flavor-independent pk backstop** rejects an update result whose pk drifted from
      the `authorized_pk` snapshot, and a delete whose instance pk drifts during
      authorization fails the same way. What a custom `create()` / `update()` writes to the
      relations it was handed is trusted application code: DRF's own `.set()` semantics
      apply (an explicit `[]` clears; duplicates collapse).
 
-   **The save result is validated before the re-fetch** (`_checked_saved_result`):
-   correct model; identity with `serializer.instance` (DRF's `save()` bookkeeping — a
-   detached saved-looking fabrication fails closed); a non-null pk and not `_state.adding`;
-   exactly the pinned alias; on **create**, a witnessed `created=True` write of the
-   returned row on the pinned alias **whose snapshotted pk still equals the returned pk**
-   (identity alone is forgeable through normal DRF bookkeeping — a custom `create()`
-   returning an existing row is still assigned to `self.instance`, and a really-inserted
-   object can be re-pointed at a hidden row's pk afterwards, so only the observed INSERT
-   plus the pk snapshot proves the row was not laundered through the visibility-free
-   re-fetch; signal-less bulk persistence fails closed); and on **update**, the same pk as
-   the post-locate `authorized_pk` snapshot (a live `instance.pk` comparison would be
-   forgeable, since `instance` and the returned object can be the same mutable object).
-   A custom `create()` whose plain `save()` of a client-assigned key UPDATEs a row a
+   **The save result is validated before the re-fetch** (`_checked_saved_result`): a
+   persisted row of the backing model (a non-null pk, not `_state.adding`); and on
+   **create**, a row the witness saw written with `created=True` (a custom `create()`
+   returning an existing row, such as a `get_or_create` keyed by a client value, is still
+   assigned to `self.instance` by DRF, so only the observed INSERT keeps a row the caller
+   cannot see out of the visibility-free re-fetch; signal-less bulk persistence fails
+   closed). A custom `create()` whose plain `save()` of a client-assigned key UPDATEs a row a
    concurrent transaction committed under it witnesses no `created=True` write and fails
    closed the same way; DRF's own `ModelSerializer.create` INSERTs (`QuerySet.create`),
    so the stock create meets that race as the `IntegrityError` envelope. Before these
@@ -2702,7 +2676,7 @@ held by the identity ratchet where a symbol is shared:
   participate in required-field guard decisions. The serializer flavor has **only** the
   finer `get_serializer_kwargs` hook — **no** coarse `get_serializer` constructor hook
   (unlike the form flavor's `get_form`): its framework-owned invariants (`partial` and
-  the authorized-actor `context["request"]`) are owned by `_merged_serializer_kwargs`
+  the authorized-actor `context["request"]`) are owned by `_serializer_kwargs`
   and cannot be entrusted to a consumer-overridable constructor, so the default body
   sets **neither** `partial` **nor** `context`. Required-field injection is explicit
   through `Meta.injected_fields` + `get_serializer_injected_data`.
@@ -2770,7 +2744,7 @@ the Slice-1 DRY bullet enumerates, and that one is executable
 | [`sets.py`][rf-sets] | `exceptions`, `mutations/inputs.py`, `mutations/operations.py`, `mutations/sets.py`, `utils/inputs.py`, `write_mixins.py`, `.inputs`, `.serializer_converter` | `DjangoMutation`, `_ValidatedMutationMeta`, `_validate_permission_classes`, `reject_unknown_meta_keys`, `MODEL_BACKED_WRITE_META_KEYS`, `NON_DELETE_OPERATION_INPUT_KIND` + `require_non_delete_operation`, `build_and_stash_input`, `construction_kwargs`, `normalize_meta_field_selection`, `own_backing_class`, `require_backing_class` / `require_subclass`, `resolve_backed_model_or_raise` (the no-model raise + `require_model_class`) / `resolve_meta_model`, `resolver_seams`, `validate_select_for_update`, `normalize_field_name_sequence` |
 | [`resolvers.py`][rf-resolvers] | `exceptions`, `mutations/inputs.py`, `mutations/resolvers.py`, `utils/errors.py`, `utils/inputs.py`, `utils/permissions.py`, `utils/querysets.py`, `utils/relations.py`, `utils/write_transaction.py`, `utils/write_values.py`, `.hook_context`, `.inputs`, `.serializer_converter` | the shared sync-pipeline skeleton `run_write_pipeline_sync` + `make_resolver_entries`, the shared decode primitives in `utils/write_values.py` — `decode_visible_relation`, `decode_visible_relation_ids`, `decode_provided_fields`, `decode_field_handlers`, `decoded_into` — the shared leaf-error constructors in `utils/errors.py`, the `NON_FIELD_ERROR_KEY` sentinel and `FieldError`, the write-transaction substrate (`require_write_pipeline`, `pipeline_write_phase`, `pin_write_queryset`, `base_locked_queryset`, `pks_match`, `make_cross_alias_save_guard`), `related_visibility_queryset`, `request_from_info` |
 | [`__init__.py`][rf-init] | `utils/imports.py` | the shared `require_optional_module` core behind `require_drf()` (Decision 12) |
-| [`hook_context.py`][rf-hook-context] | nothing | — (two frozen dataclasses, no framework dependency) |
+| [`hook_context.py`][rf-hook-context] | nothing | — (one frozen dataclass, no framework dependency) |
 
 **Cross-module (not `rest_framework/`):** the subsystem-clear registration seam touches
 [`types/finalizer.py`][types-finalizer]
@@ -2879,10 +2853,7 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   proof is an explicit `validate()` branch, not a `HiddenField`**
   ([Decision 13](#decision-13--live-coverage-products-grows-a-modelserializer-mutation));
   `HiddenField` is exercised only for the input-drop rule (and optionally a create-only
-  behavior). Dropped from the *input* does not mean invisible to the *guards*: a
-  `HiddenField`'s resolved key is a top-level `serializer.validated_data` key, so
-  `_assert_save_kwargs_no_shadow` rejects a save kwarg that would shadow it,
-  exactly as it does for a renamed `source=` input or a serializer default.
+  behavior).
 - **Serializer `validate()` / `non_field_errors`.** A cross-field `validate()` error or
   a `UniqueTogetherValidator` error surfaces in `serializer.errors` under DRF's
   `non_field_errors` key (`api_settings.NON_FIELD_ERRORS_KEY`), mapped to the
@@ -3380,9 +3351,7 @@ same transport, different app.
     raises [`ConfigurationError`][glossary-configurationerror] (the framework owns
     partial-update semantics); an override `context` dict is
     **merged** (its non-`request` keys win, the framework-owned `request` is always set from
-    `request_from_info(...)`); an override supplying a **different** `context["request"]`
-    object raises [`ConfigurationError`][glossary-configurationerror] (the actor cannot drift
-    from the permission seam) while the **same** object is tolerated; plus the
+    `request_from_info(...)`, over any `request` the override supplied); plus the
     bare-`HttpRequest` `info.context` fallback of `request_from_info`; **the recorded
     GlobalID strategy is consumed, not the live setting (config assessment)** — monkeypatch
     `types/relay.py::_resolve_globalid_strategy` to fail **after** finalization and assert a
@@ -3575,7 +3544,7 @@ The completion contract.
    non-reserved kwargs over the construction, then sets
    `context["request"] = request_from_info(info, …)`, `context["write_alias"]`, and
    `partial=True` on `update` unconditionally; every hook sees a frozen
-   `SerializerHookContext` plus an immutable data view, never the live instance.
+   `SerializerHookContext` plus a shallow copy of the data, never the live instance.
    `serializer.errors` maps onto the
    [`FieldError` envelope][glossary-fielderror-envelope] via the **dedicated recursive
    flattener** (`serializer_errors_to_field_errors`; dotted path `items.0.name`;
@@ -3654,8 +3623,8 @@ The completion contract.
    [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth)).
 8. Every name in [`__init__.py`][init]'s `_DRF_SOFT_EXPORTS` — `SerializerMutation`,
    `register_serializer_field_converter`, `SerializerFieldConversion`,
-   `describe_serializer_input`, `NestedSerializerConfig`, `SerializerHookContext`,
-   `UploadMetadata` — is a **named lazy export** resolved via the root `__getattr__`
+   `describe_serializer_input`, `NestedSerializerConfig`, `SerializerHookContext` — is
+   a **named lazy export** resolved via the root `__getattr__`
    under the DRF soft-import guard, and **none is in `__all__`** while DRF is soft (so
    `from … import *` stays DRF-free).
 
@@ -3899,26 +3868,16 @@ its opt-out in `tests/mutations/test_resolvers.py`).
 `SerializerMutation.get_serializer_save_kwargs(self, info, *, data, hook_context) -> dict` is
 the DRF-native customization point for request-derived data DRF expects at
 `serializer.save(**kwargs)`, distinct from `get_serializer_kwargs` (construction / context).
-Like every consumer hook it receives the frozen `SerializerHookContext` plus an immutable data
-view, never the live instance. The resolver calls it INSIDE the value-preserving `save()`
+Like every consumer hook it receives the frozen `SerializerHookContext` plus a shallow copy of
+the data, never the live instance. The resolver calls it INSIDE the value-preserving `save()`
 closure — `saved = serializer.save(**save_kwargs)` — so the transaction boundary,
 `ValidationError` / `IntegrityError` mapping, and optimizer re-fetch all apply (unlike
 graphene-django's `perform_mutate`, which bypasses framework-owned behavior). Default `{}`.
 
-**Two guards, and together they confine the hook to non-model custom arguments.**
-`_assert_save_kwargs_no_shadow` rejects a save kwarg whose name matches a top-level
-`serializer.validated_data` key (renamed `source=` inputs, `Meta.injected_fields` injections,
-serializer defaults, and `HiddenField`s alike — the comparison is against the actual validated
-keys, not the input-spec names, because a collision would silently override the validated
-value). `_assert_save_kwargs_not_model_fields` then rejects a save kwarg naming **any** model
-field at all, whether or not it was validated: model-field injection goes exclusively through
-the audited `Meta.injected_fields` channel, so an `owner=request.user` style save
-kwarg is a `ConfigurationError` and its `Meta.injected_fields` equivalent is the supported
-spelling. The hook's intended use is a **custom argument the serializer's own
-`create()` / `update()` consumes**: the live fixture stamps a non-model `stamp` kwarg that
-`create()` pops and writes into `topic`. Live-tested (`createShelfWithSaveKwargs`, and the
-model-field rejection over `/graphql/`); package-tested (shadow raises, model-field raises,
-non-shadow allowed).
+DRF merges the save kwargs over `serializer.validated_data` (its documented
+`serializer.save(owner=request.user)` idiom). The live fixture stamps a non-model `stamp`
+kwarg that the serializer's own `create()` pops and writes into `topic`. Live-tested
+(`createShelfWithSaveKwargs`).
 
 ### Visibility-scoped + query-efficient relation validation
 

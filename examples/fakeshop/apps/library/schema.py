@@ -2836,55 +2836,6 @@ class CreateShelfWithSaveKwargs(SerializerMutation):
         return {"stamp": "stamped-at-save"}
 
 
-class CreateShelfWithModelFieldSaveKwargs(SerializerMutation):
-    """A DELIBERATELY-misconfigured create whose save kwarg names a MODEL field.
-
-    ``topic`` is a ``Shelf`` column: a save kwarg would write it with no validation and no
-    visibility check - the unaudited injection channel ``Meta.injected_fields`` exists to
-    replace. The live test proves the configuration is a top-level ``ConfigurationError``
-    over ``/graphql/`` and no row is written.
-    """
-
-    class Meta:
-        serializer_class = serializers.ShelfSerializer
-        operation = "create"
-        permission_classes = []
-
-    @override
-    def get_serializer_save_kwargs(
-        self,
-        info: Info,
-        *,
-        data: Mapping[str, object],
-        hook_context: SerializerHookContext,
-    ) -> dict[str, object]:
-        return {"topic": "smuggled-model-field"}
-
-
-class CreateShelfWithRenamedSaveKwargsCollision(SerializerMutation):
-    """Prove save kwargs cannot replace a renamed serializer input.
-
-    ``RenamedShelfSerializer.shelf_code`` writes through ``source="code"``. Returning a
-    server-side ``code`` kwarg would make DRF merge it over the client's validated value, so the
-    framework must reject the configuration before ``serializer.save()`` writes either value.
-    """
-
-    class Meta:
-        serializer_class = serializers.RenamedShelfSerializer
-        operation = "create"
-        permission_classes = []
-
-    @override
-    def get_serializer_save_kwargs(
-        self,
-        info: Info,
-        *,
-        data: Mapping[str, object],
-        hook_context: SerializerHookContext,
-    ) -> dict[str, object]:
-        return {"code": "server-shadow"}
-
-
 class CreateShelfViaAltBranchesSerializer(SerializerMutation):
     """Create a ``Shelf`` with a raw-pk M2M ``alt_branches`` input.
 
@@ -3026,30 +2977,6 @@ class CreateShelfWithSaveKwargsByMember(CreateShelfWithSaveKwargs):
         hook_context: SerializerHookContext,
     ) -> dict[str, object]:
         return {ShelfHookKey.STAMP: "stamped-at-save"}
-
-
-class CreateShelfWithModelFieldSaveKwargsByMember(CreateShelfWithModelFieldSaveKwargs):
-    """``CreateShelfWithModelFieldSaveKwargs`` with its model-field save kwarg keyed by a member.
-
-    ``get_serializer_save_kwargs`` returns ``ShelfHookKey.TOPIC`` where the plain twin returns
-    ``"topic"``; the live test proves the member is refused with the twin's message, naming
-    the plain text ``'topic'``.
-    """
-
-    class Meta(CreateShelfWithModelFieldSaveKwargs.Meta):
-        serializer_class = serializers.ShelfSerializer
-        operation = "create"
-        permission_classes = []
-
-    @override
-    def get_serializer_save_kwargs(
-        self,
-        info: Info,
-        *,
-        data: Mapping[str, object],
-        hook_context: SerializerHookContext,
-    ) -> dict[str, object]:
-        return {ShelfHookKey.TOPIC: "smuggled-model-field"}
 
 
 class CreateShelfWithPartialKwargByMember(SerializerMutation):
@@ -3631,9 +3558,8 @@ class Mutation:
     leaving DRF to enforce the omitted required field in-band.
     ``createShelfViaSchemaHookSerializerByMember``, ``createShelfWithInjectedTopicByMember`` and
     ``createShelfWithSaveKwargsByMember`` key their hook's return by a ``TextChoices`` member
-    and write what their plain-keyed twins write; ``createShelfWithModelFieldSaveKwargsByMember``
-    and ``createShelfWithPartialKwargByMember`` spell a model field and the framework-owned
-    ``partial`` by a member and are refused as the plain names are.
+    and write what their plain-keyed twins write; ``createShelfWithPartialKwargByMember`` spells
+    the framework-owned ``partial`` by a member and is refused as the plain name is.
     ``createPatronProfileViaSerializer`` / ``updatePatronProfileViaSerializer`` write the
     ``to_field`` key ``PatronProfile.favorite_genre`` (the column stores the genre name), as
     does ``createPatronProfileViaRenamedSerializer`` (the same key bound under the renamed
@@ -3754,12 +3680,6 @@ class Mutation:
     create_shelf_with_save_kwargs = DjangoMutationField(
         CreateShelfWithSaveKwargs,
     )
-    create_shelf_with_model_field_save_kwargs = DjangoMutationField(
-        CreateShelfWithModelFieldSaveKwargs,
-    )
-    create_shelf_with_renamed_save_kwargs_collision = DjangoMutationField(
-        CreateShelfWithRenamedSaveKwargsCollision,
-    )
     create_shelf_via_schema_hook_serializer_by_member = DjangoMutationField(
         CreateShelfViaSchemaHookSerializerByMember,
     )
@@ -3768,9 +3688,6 @@ class Mutation:
     )
     create_shelf_with_save_kwargs_by_member = DjangoMutationField(
         CreateShelfWithSaveKwargsByMember,
-    )
-    create_shelf_with_model_field_save_kwargs_by_member = DjangoMutationField(
-        CreateShelfWithModelFieldSaveKwargsByMember,
     )
     create_shelf_with_partial_kwarg_by_member = DjangoMutationField(
         CreateShelfWithPartialKwargByMember,

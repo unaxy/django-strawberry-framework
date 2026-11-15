@@ -1,4 +1,4 @@
-"""The frozen serializer-hook context + upload metadata.
+"""The frozen serializer-hook context.
 
 The consumer hooks (``get_serializer_kwargs`` / ``get_serializer_injected_data`` /
 ``get_serializer_save_kwargs``) never receive the LIVE located model instance:
@@ -11,12 +11,6 @@ documented use cases (branching create-vs-update, routing an extra query into th
 transaction, keying server data to the target row) actually need, with nothing
 mutable. A hook that needs more of the row reads it itself through the pinned
 alias (a visible, auditable query) rather than through a privileged live object.
-
-``UploadMetadata`` is the frozen stand-in for an uploaded file in the DATA VIEW
-the hooks receive: the authoritative upload objects (whose streams are
-stateful - a hook that ``read()``s one would exhaust it before validation) stay
-exclusively on the framework-built serializer ``data`` and reach only the
-serializer's own validation.
 """
 
 from __future__ import annotations
@@ -38,18 +32,3 @@ class SerializerHookContext:
     operation: str
     write_alias: str
     instance_pk: object
-
-
-@dataclass(frozen=True, slots=True)
-class UploadMetadata:
-    """The frozen upload descriptor standing in for a file value in hook data views.
-
-    Carries what a hook can safely branch on (``name`` / ``size`` /
-    ``content_type``); the stateful upload object itself never reaches a hook -
-    it stays on the authoritative serializer ``data`` for validation to consume
-    exactly once.
-    """
-
-    name: str | None
-    size: int | None
-    content_type: str | None

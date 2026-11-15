@@ -164,11 +164,11 @@ def test_getattr_return_annotation_admits_function_valued_exports() -> None:
     assert not isinstance(django_strawberry_framework.describe_serializer_input, type)
 
 
-def test_drf_soft_export_membership_is_exactly_the_seven_lazy_names() -> None:
-    """The lazy root serializer surface holds exactly the seven documented names.
+def test_drf_soft_export_membership_is_exactly_the_six_lazy_names() -> None:
+    """The lazy root serializer surface holds exactly the six documented names.
 
     The per-name guard / non-memoization tests parametrize FROM the table, so an
-    eighth lazy entry with a valid target would extend their coverage and break
+    seventh lazy entry with a valid target would extend their coverage and break
     nothing - silent surface widening. This spells the membership from the
     consumer contract (the same rationale as the eager ``__all__`` pin): adding
     or dropping a lazy export fails here.
@@ -178,7 +178,6 @@ def test_drf_soft_export_membership_is_exactly_the_seven_lazy_names() -> None:
         "SerializerFieldConversion",
         "SerializerHookContext",
         "SerializerMutation",
-        "UploadMetadata",
         "describe_serializer_input",
         "register_serializer_field_converter",
     }

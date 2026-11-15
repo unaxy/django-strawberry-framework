@@ -59,8 +59,7 @@ query shape, off the SQL the request emitted:
   and ``LendingDesk``, a ``create()`` / ``update()`` saving a proxy, a proxy of a proxy,
   a multi-table child or grandchild or a proxy of a child (test-local proxies included)
   answers that row; the concrete base under the proxy is refused as no ``OpenVenue``; a
-  create saving a child over a stored plain ``Venue`` is that child's INSERT, an update
-  doing so over the located row is never observed being UPDATED (no ``conflict``), and an
+  create saving a child over a stored plain ``Venue`` is that child's INSERT, and an
   INSERT through the concrete base or a sibling proxy under the ``OpenVenue`` update is
   no re-INSERT.
 - A key into a parent-link chain: ``createKioskFault`` and its ``ViaForm`` /
@@ -2347,9 +2346,9 @@ def _family_write(instance: models.Venue | None) -> models.Venue:
 
     ``save`` saves a new row of the class (create) or the located row loaded as it
     (update), named ``Saved``. ``promote`` saves a new row of the multi-table class over a
-    stored plain ``Venue`` row (the located one on an update), turning that row into a
-    child. ``replace`` deletes the located row, stores it again through the class and then
-    saves the located instance, renamed ``Saved``.
+    stored plain ``Venue`` row, turning that row into a child. ``replace`` deletes the
+    located row, stores it again through the class and then saves the located instance,
+    renamed ``Saved``.
     """
     scenario = _FAMILY["scenario"]
     cls = _FAMILY_CLASSES[_FAMILY["saved"]]
@@ -2362,8 +2361,12 @@ def _family_write(instance: models.Venue | None) -> models.Venue:
         row.save()
         return row
     if scenario == "promote":
-        key = int(_FAMILY["promoted"]) if instance is None else instance.pk
-        child = cls(pk=key, name="Promoted", opened_on=_FAMILY_DAY, **_child_values(cls))
+        child = cls(
+            pk=int(_FAMILY["promoted"]),
+            name="Promoted",
+            opened_on=_FAMILY_DAY,
+            **_child_values(cls),
+        )
         child.save()
         return child
     assert instance is not None
@@ -2641,9 +2644,9 @@ def test_a_proxy_serializer_returning_its_concrete_base_row_is_refused(
         "errors": [
             {
                 "message": (
-                    f"SerializerMutation {mutation}: FamilyOpenVenueSerializer.save() returned "
-                    "<Venue: Saved>, not a OpenVenue instance; the serializer's "
-                    "create()/update() must return the written model row."
+                    f"SerializerMutation {mutation}: save() returned <Venue: Saved>; the "
+                    "serializer's create()/update() must persist and return the written "
+                    "OpenVenue row."
                 ),
                 "locations": [{"line": 1, "column": column}],
                 "path": [f"{op}OpenVenueFamily"],
@@ -2702,49 +2705,6 @@ def test_a_create_promoting_a_stored_venue_to_a_child_is_its_insert(
     assert _family_writes(sql) == writes
     kiosks = [promoted] if saved == "self_serve" else []
     assert _stored_venues() == ([(promoted, "Promoted")], [promoted], kiosks)
-
-
-@pytest.mark.usefixtures("private_registry")
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    "saved",
-    [pytest.param("desk", id="child"), pytest.param("self_serve", id="grandchild")],
-)
-def test_an_update_promoting_its_located_venue_to_a_child_is_refused(
-    saved: str,
-    family_scenario: dict[str, str],
-) -> None:
-    """An update saving a child row over the located plain ``Venue`` is no update of it.
-
-    The child's ``post_save`` reports ``created=True`` under the authorized key, but for
-    the child's own table, not the located row's: the located ``Venue`` row was UPDATEd,
-    never re-INSERTed, so it is not the ``conflict`` of a vanished row. No ``created=False``
-    save of the returned row was observed, so the result is refused as never UPDATED and
-    the write rolled back.
-    """
-    located = _plain_venue("Located")
-    before = _stored_venues()
-    family_scenario.update(scenario="promote", saved=saved)
-
-    payload, _sql, column = _post_family("venue", located)
-
-    assert payload == {
-        "data": None,
-        "errors": [
-            {
-                "message": (
-                    "SerializerMutation UpdateVenueFamily: FamilyVenueSerializer.save() "
-                    "returned a Venue that was never observed being UPDATED on alias "
-                    "'default' during the save; the serializer must persist and return the "
-                    "same row addressed by this mutation. Returning an existing instance "
-                    "without saving it is not an update and cannot be reported as success."
-                ),
-                "locations": [{"line": 1, "column": column}],
-                "path": ["updateVenueFamily"],
-            },
-        ],
-    }
-    assert _stored_venues() == before
 
 
 @pytest.mark.usefixtures("private_registry")

@@ -83,10 +83,8 @@ _DRF_SOFT_EXPORTS: dict[str, tuple[str, str]] = {
     "describe_serializer_input": (".rest_framework.inputs", "describe_serializer_input"),
     "NestedSerializerConfig": (".rest_framework.inputs", "NestedSerializerConfig"),
     # The frozen hook surface: the context every serializer consumer hook
-    # receives instead of the live located instance, and the frozen upload
-    # descriptor standing in for file values in hook data views.
+    # receives instead of the live located instance.
     "SerializerHookContext": (".rest_framework.hook_context", "SerializerHookContext"),
-    "UploadMetadata": (".rest_framework.hook_context", "UploadMetadata"),
 }
 
 # The same names, imported for the type checker only, so a consumer's
@@ -98,7 +96,6 @@ _DRF_SOFT_EXPORTS: dict[str, tuple[str, str]] = {
 # them re-exported. Each line mirrors one ``_DRF_SOFT_EXPORTS`` entry.
 if TYPE_CHECKING:
     from .rest_framework.hook_context import SerializerHookContext as SerializerHookContext
-    from .rest_framework.hook_context import UploadMetadata as UploadMetadata
     from .rest_framework.inputs import NestedSerializerConfig as NestedSerializerConfig
     from .rest_framework.inputs import describe_serializer_input as describe_serializer_input
     from .rest_framework.serializer_converter import (

@@ -261,21 +261,16 @@ ordering is single-sited for all of them.
 
 Hooks never own `data` or `instance`. A hook holding the live located row could mutate
 the row that had just been authorized, and DRF's `update()` saves the whole instance, so
-hooks receive the frozen `SerializerHookContext` / `UploadMetadata` view instead. Three
-choices inside that contract each reject a plausible weaker alternative:
+hooks receive the frozen `SerializerHookContext` and a copy of the data instead. A
+returned `data` must be omitted or the exact copy the hook received, checked by identity
+(a deep `!=` recurses on deep valid payloads); any returned `instance` key is refused.
 
-- **Reserved returns are checked by omission sentinel + object identity, never deep
-  equality.** A deep `!=` recurses on deep valid payloads, and a `pop(..., None)` default
-  conflates an explicit `None` with omission. A returned `data` must be omitted or the
-  exact frozen object; any returned `instance` key is refused.
 - **The alias guard performs no read/write classification.** A lexical test is bypassable
   (leading SQL comments, `EXPLAIN ANALYZE`, write-capable functions called through
   `SELECT`), so `utils/write_transaction.py::pipeline_alias_guard` rejects every statement
   on a non-pinned connection before it executes, and the authorization phase's exception
   is contained by a **database-enforced** read-only transaction rather than by inspecting
   SQL. Post-hoc detection cannot roll back a write that already escaped.
-- **The freeze fails closed on an opaque leaf.** Aliasing a possibly-mutable value a hook
-  could reach back through reopens the bypass the frozen view closes.
 
 The save runs in its own savepoint and maps `DRFValidationError`, Django
 `ValidationError` and `IntegrityError` to the envelope outside that atomic block: the
@@ -497,13 +492,6 @@ contract alone:
   so an opt-*out* is the shape that fails safe when a consumer says nothing. A per-flavor
   default was rejected because it would make one `Meta` key mean different things on
   three bases.
-- **Save kwargs never name a model field.** DRF merges `serializer.save(**kwargs)` into
-  the write with no validation and no visibility check, so a save kwarg naming a model
-  column or relation would be an unaudited model-field injection.
-  `_assert_save_kwargs_not_model_fields` refuses it, leaving the audited
-  `Meta.injected_fields` + `get_serializer_injected_data` channel as the one way to inject
-  a model field; save kwargs carry only non-model arguments a custom `create()` /
-  `update()` consumes.
 - **Injected fields ride the input fields' walk.** Every top-level per-field discipline
   (schema/runtime agreement, write-source ownership, queryset scoping) walks the one
   `_write_surface_specs` list of input

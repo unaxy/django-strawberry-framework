@@ -95,7 +95,7 @@ import zoneinfo
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, NoReturn, Protocol, cast, runtime_checkable
 
 import django
@@ -110,8 +110,6 @@ from apps.scalars.models import NullableScalarSpecimen, ScalarSpecimen
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.files import File
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, connections, models, transaction
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models import Model, QuerySet
@@ -120,7 +118,6 @@ from django.db.utils import OperationalError
 from django.http import HttpRequest
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.utils.functional import SimpleLazyObject
 from rest_framework import serializers
 from rest_framework.exceptions import ErrorDetail
 from rest_framework.settings import api_settings
@@ -158,7 +155,6 @@ from django_strawberry_framework.rest_framework.accessors import (
 )
 from django_strawberry_framework.rest_framework.hook_context import (
     SerializerHookContext,
-    UploadMetadata,
 )
 from django_strawberry_framework.rest_framework.inputs import (
     build_serializer_input_class,
@@ -208,8 +204,6 @@ from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import (
-    ClaimsClassBase,
-    ClassReadRaises,
     ModelSerializerBase,
     is_object_dict,
     json_at,
@@ -283,71 +277,10 @@ def _as_serializer_mutation(stand_in: object) -> type[SerializerMutation]:
     return stand_in  # pyright: ignore[reportReturnType]
 
 
-class _ClassReadRaises(ClassReadRaises):
-    """A value whose ``__class__`` read raises ``escape``: ``isinstance`` falls back to that read."""
-
-    def __init__(self, escape: type[BaseException] = RuntimeError) -> None:
-        super().__init__(escape, "hostile __class__ boom")
-
-
 class _CityRequest(HttpRequest):
     """A request carrying the visibility probe the ``get_queryset`` hook reads."""
 
     visibility_city: str
-
-
-class _ReprRaises:
-    """A value whose ``__repr__`` raises (a key or a return the rejection must still render)."""
-
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError("hostile __repr__ boom")
-
-
-class _ReprRaisesStr(str):
-    """A ``str`` subclass whose ``__repr__`` raises; equal to and hashed like its text."""
-
-    __slots__ = ()
-
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError("hostile __repr__ boom")
-
-
-class _CompareRaisesStr(str):
-    """A ``str`` subclass whose ``__eq__`` / ``__ne__`` raise; its text is still a real ``str``."""
-
-    __slots__ = ()
-
-    @override
-    def __eq__(self, other: object) -> NoReturn:
-        raise RuntimeError("hostile __eq__ boom")
-
-    @override
-    def __ne__(self, other: object) -> NoReturn:
-        raise RuntimeError("hostile __ne__ boom")
-
-    @override
-    def __hash__(self) -> int:
-        return str.__hash__(self)
-
-
-class _ClaimsStr(ClaimsClassBase):
-    """A mutable object whose ``__class__`` claims ``str``."""
-
-    claimed = str
-
-
-class _ClaimsDict(ClaimsClassBase):
-    """An object whose ``__class__`` claims ``dict`` but which has no ``items()``."""
-
-    claimed = dict
-
-
-class _ListClaimsDict(ClaimsClassBase, list[object]):
-    """A real ``list`` whose ``__class__`` claims ``dict``."""
-
-    claimed = dict
 
 
 @runtime_checkable
@@ -1678,14 +1611,14 @@ def _basic_item_serializer() -> type[ModelSerializerBase[product_models.Item]]:
 
 
 @pytest.mark.django_db
-def test_merged_kwargs_injects_partial_true_on_update_never_create() -> None:
+def test_serializer_kwargs_injects_partial_true_on_update_never_create() -> None:
     """The framework injects `partial=True` for update (instance present), never for create."""
     mutation_cls = _bind_item_serializer_mutation(_basic_item_serializer())
     request = HttpRequest()
     request.user = User(username="u")
     info = make_info(context=SimpleNamespace(request=request))
 
-    create_kwargs = serializer_resolvers._merged_serializer_kwargs(
+    create_kwargs = serializer_resolvers._serializer_kwargs(
         mutation_cls,
         info,
         final_data={"name": "X"},
@@ -1696,7 +1629,7 @@ def test_merged_kwargs_injects_partial_true_on_update_never_create() -> None:
     assert "partial" not in create_kwargs
 
     instance = product_models.Category(pk=1)
-    update_kwargs = serializer_resolvers._merged_serializer_kwargs(
+    update_kwargs = serializer_resolvers._serializer_kwargs(
         mutation_cls,
         info,
         final_data={"name": "X"},
@@ -1708,14 +1641,14 @@ def test_merged_kwargs_injects_partial_true_on_update_never_create() -> None:
 
 
 @pytest.mark.django_db
-def test_merged_kwargs_sets_framework_request_unconditionally() -> None:
+def test_serializer_kwargs_sets_framework_request_unconditionally() -> None:
     """`context["request"]` is set to the framework request, defaulting `data` to `provided_data`."""
     mutation_cls = _bind_item_serializer_mutation(_basic_item_serializer())
     request = HttpRequest()
     request.user = User(username="u")
     info = make_info(context=SimpleNamespace(request=request))
 
-    kwargs = serializer_resolvers._merged_serializer_kwargs(
+    kwargs = serializer_resolvers._serializer_kwargs(
         mutation_cls,
         info,
         final_data={"name": "X"},
@@ -1728,7 +1661,7 @@ def test_merged_kwargs_sets_framework_request_unconditionally() -> None:
 
 
 @pytest.mark.django_db
-def test_merged_kwargs_merges_override_context_keys_keeping_framework_request() -> None:
+def test_serializer_kwargs_merges_override_context_keys_keeping_framework_request() -> None:
     """An override's non-`request` context keys are kept; the framework `request` always wins."""
 
     class OverridingMutation(SerializerMutation):
@@ -1777,7 +1710,7 @@ def test_merged_kwargs_merges_override_context_keys_keeping_framework_request() 
     request = HttpRequest()
     request.user = User(username="u")
     info = make_info(context=SimpleNamespace(request=request))
-    kwargs = serializer_resolvers._merged_serializer_kwargs(
+    kwargs = serializer_resolvers._serializer_kwargs(
         OverridingMutation,
         info,
         final_data={"name": "X"},
@@ -1790,7 +1723,7 @@ def test_merged_kwargs_merges_override_context_keys_keeping_framework_request() 
 
 
 @pytest.mark.django_db
-def test_merged_kwargs_override_returning_partial_is_configuration_error() -> None:
+def test_serializer_kwargs_override_returning_partial_is_configuration_error() -> None:
     """A `get_serializer_kwargs` override returning `partial` itself is a `ConfigurationError`."""
 
     class PartialReturningMutation(SerializerMutation):
@@ -1840,7 +1773,7 @@ def test_merged_kwargs_override_returning_partial_is_configuration_error() -> No
     request.user = User(username="u")
     info = make_info(context=SimpleNamespace(request=request))
     with pytest.raises(ConfigurationError, match="partial"):
-        serializer_resolvers._merged_serializer_kwargs(
+        serializer_resolvers._serializer_kwargs(
             PartialReturningMutation,
             info,
             final_data={"name": "X"},
@@ -1851,142 +1784,14 @@ def test_merged_kwargs_override_returning_partial_is_configuration_error() -> No
 
 
 @pytest.mark.django_db
-def test_merged_kwargs_override_different_request_object_is_configuration_error() -> None:
-    """An override supplying a DIFFERENT `context["request"]` object is a `ConfigurationError`."""
-
-    class WrongRequestMutation(SerializerMutation):
-        class Meta:
-            serializer_class = _basic_item_serializer()
-            operation = "create"
-
-        @override
-        def get_serializer_kwargs(
-            self,
-            info: strawberry.Info,
-            *,
-            data: Mapping[str, object],
-            hook_context: SerializerHookContext,
-        ) -> dict[str, object]:
-            kwargs = super().get_serializer_kwargs(info, data=data, hook_context=hook_context)
-            kwargs["context"] = {"request": HttpRequest()}  # a DIFFERENT request object
-            return kwargs
-
-    class CategoryT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Category
-            fields = ("id", "name")
-            primary = True
-
-    class ItemT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Item
-            fields = ("id", "name", "category")
-            primary = True
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
-    class Mutation:
-        write_item = DjangoMutationField(WrongRequestMutation)
-
-    finalize_django_types()
-    DjangoSchema(query=Query, mutation=Mutation)
-    del CategoryT, ItemT
-
-    request = HttpRequest()
-    request.user = User(username="u")
-    info = make_info(context=SimpleNamespace(request=request))
-    with pytest.raises(ConfigurationError, match="request"):
-        serializer_resolvers._merged_serializer_kwargs(
-            WrongRequestMutation,
-            info,
-            final_data={"name": "X"},
-            instance=None,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-@pytest.mark.django_db
-def test_merged_kwargs_override_echoing_the_same_request_object_is_tolerated() -> None:
-    """An override returning the framework's OWN `context["request"]` is permitted.
-
-    The guard rejects a DIFFERENT request object, not the presence of the key: a
-    hook assembling a DRF-style context around the request it was handed keeps the
-    framework's actor, so there is nothing to reject.
-    """
-
-    class EchoingRequestMutation(SerializerMutation):
-        class Meta:
-            serializer_class = _basic_item_serializer()
-            operation = "create"
-
-        @override
-        def get_serializer_kwargs(
-            self,
-            info: strawberry.Info[object, object],
-            *,
-            data: Mapping[str, object],
-            hook_context: SerializerHookContext,
-        ) -> dict[str, object]:
-            kwargs = super().get_serializer_kwargs(info, data=data, hook_context=hook_context)
-            # The SAME object the framework resolved, echoed back.
-            kwargs["context"] = {"request": read_attr(info.context, "request")}
-            return kwargs
-
-    class CategoryT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Category
-            fields = ("id", "name")
-            primary = True
-
-    class ItemT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Item
-            fields = ("id", "name", "category")
-            primary = True
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
-    class Mutation:
-        write_item = DjangoMutationField(EchoingRequestMutation)
-
-    finalize_django_types()
-    DjangoSchema(query=Query, mutation=Mutation)
-    del CategoryT, ItemT
-
-    request = HttpRequest()
-    request.user = User(username="u")
-    info = make_info(context=SimpleNamespace(request=request))
-    kwargs = serializer_resolvers._merged_serializer_kwargs(
-        EchoingRequestMutation,
-        info,
-        final_data={"name": "X"},
-        instance=None,
-        alias="default",
-        hook_context=_hook_ctx(),
-    )
-    assert _serializer_context(kwargs)["request"] is request
-
-
-@pytest.mark.django_db
-def test_merged_kwargs_bare_httprequest_info_context_fallback() -> None:
+def test_serializer_kwargs_bare_httprequest_info_context_fallback() -> None:
     """`request_from_info` resolves a bare `HttpRequest` `info.context` (the no-`.request` fallback)."""
     mutation_cls = _bind_item_serializer_mutation(_basic_item_serializer())
     bare_request = HttpRequest()
     bare_request.user = User(username="u")
     # `info.context` IS the HttpRequest (no `.request` attribute layer).
     info = make_info(context=bare_request)
-    kwargs = serializer_resolvers._merged_serializer_kwargs(
+    kwargs = serializer_resolvers._serializer_kwargs(
         mutation_cls,
         info,
         final_data={"name": "X"},
@@ -2752,102 +2557,6 @@ def test_serializer_refetch_introduces_no_projection() -> None:
 
 
 # ===========================================================================
-# _hook_mapping - the shared mapping-hook materialization boundary
-# ===========================================================================
-
-
-def test_hook_mapping_iteration_error_propagates() -> None:
-    """A hook mapping's own iteration is consumer code: what it raises propagates."""
-
-    class BrokenMapping(Mapping[str, object]):
-        @override
-        def __getitem__(self, key: str) -> NoReturn:
-            raise KeyError(key)
-
-        @override
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("iteration failed")
-
-        @override
-        def __len__(self) -> int:
-            return 1
-
-    with pytest.raises(RuntimeError, match="iteration failed"):
-        serializer_resolvers._hook_mapping(
-            _as_serializer_mutation(type("Mutation", (), {})),
-            "get_data",
-            BrokenMapping(),
-        )
-
-
-_HOOK_MAPPING_TAIL = (
-    "; hook mappings become serializer kwargs / data keys, so every key must be a string."
-)
-
-
-@pytest.mark.parametrize(
-    ("value", "message"),
-    [
-        (
-            {None: 1, 1: 2, "ok": 3},
-            (
-                "SerializerMutation M.get_data returned a mapping with non-string key(s) "
-                f"['1', 'None']{_HOOK_MAPPING_TAIL}"
-            ),
-        ),
-    ],
-    ids=["honest-non-str-keys"],
-)
-def test_hook_mapping_rejection_renders_each_offending_key_once(
-    value: object,
-    message: str,
-) -> None:
-    """The hook-boundary rejection is typed and byte-stable: ``['1', 'None']``, sorted text."""
-    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
-        serializer_resolvers._hook_mapping(
-            _as_serializer_mutation(type("M", (), {})),
-            "get_data",
-            value,
-        )
-
-
-@pytest.mark.parametrize(
-    ("value", "escape", "text"),
-    [
-        (_ClassReadRaises(), RuntimeError, "hostile __class__ boom"),
-        (_ClassReadRaises(KeyboardInterrupt), KeyboardInterrupt, "hostile __class__ boom"),
-        ({_ReprRaises(): 1, "ok": 2}, RuntimeError, "hostile __repr__ boom"),
-    ],
-    ids=["class-read-raises", "class-read-KeyboardInterrupt", "key-repr-raises"],
-)
-def test_hook_mapping_return_code_that_raises_propagates(
-    value: object,
-    escape: type[BaseException],
-    text: str,
-) -> None:
-    """The return's own ``__class__`` / key ``__repr__`` is consumer code: what it raises propagates.
-
-    The mapping test is a plain ``isinstance`` and each offending key renders through
-    ``truth.render``, which runs a non-scalar key's own ``__repr__``.
-    """
-    with pytest.raises(escape, match=text):
-        serializer_resolvers._hook_mapping(
-            _as_serializer_mutation(type("M", (), {})),
-            "get_data",
-            value,
-        )
-
-
-def test_hook_mapping_accepts_a_faithful_lazy_mapping() -> None:
-    """A ``SimpleLazyObject`` over a str-keyed dict still materializes (the test is ``isinstance``)."""
-    assert serializer_resolvers._hook_mapping(
-        _as_serializer_mutation(type("M", (), {})),
-        "get_data",
-        SimpleLazyObject(lambda: {"k": 1}),
-    ) == {"k": 1}
-
-
-# ===========================================================================
 # Explicit injection contract runtime verification
 # ===========================================================================
 
@@ -3016,11 +2725,7 @@ def _hookable_injected_mut(
             data: Mapping[str, object],
             **_kwargs: object,
         ) -> object:
-            # The received view is FROZEN: mutation is structurally impossible.
-            with pytest.raises(TypeError):
-                # basedpyright: the hook view is a read-only Mapping; the test proves item
-                # assignment raises TypeError
-                data["smuggled"] = True  # pyright: ignore[reportIndexIssue]
+            del data
             return hook_return
 
     return FakeInjectMut
@@ -3033,7 +2738,7 @@ def test_injected_data_hook_missing_declared_key_raises() -> None:
         serializer_resolvers._injected_serializer_data(
             _as_serializer_mutation(fake),
             info=unread_info(),
-            frozen_provided=serializer_resolvers._frozen_hook_view({"code": "X"}),
+            data={"code": "X"},
             hook_context=_hook_ctx(),
         )
 
@@ -3045,71 +2750,9 @@ def test_injected_data_hook_undeclared_extra_key_raises() -> None:
         serializer_resolvers._injected_serializer_data(
             _as_serializer_mutation(fake),
             info=unread_info(),
-            frozen_provided=serializer_resolvers._frozen_hook_view({"code": "X"}),
+            data={"code": "X"},
             hook_context=_hook_ctx(),
         )
-
-
-def test_injected_data_hook_non_mapping_return_is_configuration_error() -> None:
-    """A malformed injection hook return fails at the typed hook boundary."""
-    fake = _hookable_injected_mut((), None)
-    with pytest.raises(ConfigurationError, match="must return a mapping"):
-        serializer_resolvers._injected_serializer_data(
-            _as_serializer_mutation(fake),
-            info=unread_info(),
-            frozen_provided=serializer_resolvers._frozen_hook_view({"code": "X"}),
-            hook_context=_hook_ctx(),
-        )
-
-
-def test_injected_data_hook_exact_match_returns_and_cannot_mutate_client_data() -> None:
-    """An exact-match injection returns the values; the hook's data view is immutable."""
-    fake = _hookable_injected_mut(("topic",), {"topic": "stamped"})
-    provided: dict[str, object] = {"code": "X"}
-    injected = serializer_resolvers._injected_serializer_data(
-        _as_serializer_mutation(fake),
-        info=unread_info(),
-        frozen_provided=serializer_resolvers._frozen_hook_view(provided),
-        hook_context=_hook_ctx(),
-    )
-    assert injected == {"topic": "stamped"}
-    # The hook only ever saw the frozen view: the authoritative data is untouched.
-    assert provided == {"code": "X"}
-
-
-def test_injected_data_hook_cannot_mutate_nested_client_containers() -> None:
-    """The hook's data view is RECURSIVELY frozen: nested mutation attempts raise TypeError."""
-
-    class NestedMutatingMut:
-        _mutation_meta = SimpleNamespace(injected_fields=("topic",))
-
-        def get_serializer_injected_data(
-            self,
-            _info: object,
-            *,
-            data: Mapping[str, object],
-            **_kwargs: object,
-        ) -> object:
-            # A nested list is a tuple and a nested dict a MappingProxyType: the
-            # in-place mutations a mutable clone would merely ISOLATE are
-            # structurally impossible.
-            # A frozen nested list is a tuple: no in-place ``append`` exists to call.
-            assert not hasattr(data["genre_ids"], "append")
-            with pytest.raises(TypeError):
-                # basedpyright: a nested value of the frozen view is a read-only proxy typed
-                # object; the test proves item assignment raises TypeError
-                data["detail"]["code"] = "evil"  # pyright: ignore[reportIndexIssue]
-            return {"topic": "stamped"}
-
-    provided: dict[str, object] = {"genre_ids": [1, 2], "detail": {"code": "ok"}}
-    injected = serializer_resolvers._injected_serializer_data(
-        _as_serializer_mutation(NestedMutatingMut),
-        info=unread_info(),
-        frozen_provided=serializer_resolvers._frozen_hook_view(provided),
-        hook_context=_hook_ctx(),
-    )
-    assert injected == {"topic": "stamped"}
-    assert provided == {"genre_ids": [1, 2], "detail": {"code": "ok"}}
 
 
 # ===========================================================================
@@ -3517,195 +3160,6 @@ def test_relation_queryset_scope_is_isolated_between_concurrent_serializer_insta
     )
 
 
-# ===========================================================================
-# get_serializer_save_kwargs shadow guard
-# ===========================================================================
-
-
-def _validated_serializer(
-    serializer_cls: type[DRFSerializer],
-    data: dict[str, object],
-) -> DRFSerializer:
-    """Construct + validate a serializer so ``validated_data`` is populated."""
-    serializer = serializer_cls(data=data)
-    assert serializer.is_valid(), serializer_errors(serializer)
-    return serializer
-
-
-def test_save_kwargs_shadowing_validated_key_raises() -> None:
-    """A save kwarg colliding with a ``validated_data`` key fails loud (would clobber it)."""
-
-    class CodeSer(serializers.Serializer[object]):
-        code = serializers.CharField()
-
-    fake = type("M", (), {})
-    serializer = _validated_serializer(CodeSer, {"code": "X"})
-    with pytest.raises(ConfigurationError, match="validated_data"):
-        serializer_resolvers._assert_save_kwargs_no_shadow(
-            _as_serializer_mutation(fake),
-            serializer,
-            {"code": "clobber"},
-        )
-
-
-def test_save_kwargs_shadow_message_renders_the_save_kwarg_not_the_validated_key() -> None:
-    """A ``validate()`` key whose ``__repr__`` raises cannot replace the typed shadow error.
-
-    The shadowed names come from the save-kwargs side (plain ``str`` keys), so the message
-    renders ``'code'`` even though the colliding ``validated_data`` key is a hostile object.
-    """
-
-    class CodeSer(serializers.Serializer[object]):
-        code = serializers.CharField()
-
-        @override
-        def validate(self, attrs: dict[str, object]) -> dict[str, object]:
-            return {_ReprRaisesStr("code"): attrs["code"]}
-
-    serializer = _validated_serializer(CodeSer, {"code": "X"})
-    message = (
-        "SerializerMutation M.get_serializer_save_kwargs returned kwarg(s) ['code'] that shadow "
-        "key(s) in the serializer's validated_data; DRF merges save kwargs over validated_data, "
-        "so the value would silently replace the validated one (client input, injection, "
-        "default, or hidden field). Save kwargs are for server-side data outside the validated "
-        "payload (rename them, or drop the colliding field)."
-    )
-    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
-        serializer_resolvers._assert_save_kwargs_no_shadow(
-            _as_serializer_mutation(type("M", (), {})),
-            serializer,
-            {"code": "clobber"},
-        )
-
-
-def test_save_kwargs_not_shadowing_validated_key_is_allowed() -> None:
-    """A save kwarg NOT in ``validated_data`` (server-side data) is allowed."""
-
-    class CodeSer(serializers.Serializer[object]):
-        code = serializers.CharField()
-
-    fake = type("M", (), {})
-    serializer = _validated_serializer(CodeSer, {"code": "X"})
-    # No raise: `owner` is server-side data, not a validated key.
-    serializer_resolvers._assert_save_kwargs_no_shadow(
-        _as_serializer_mutation(fake),
-        serializer,
-        {"owner": object()},
-    )
-
-
-def test_save_kwargs_shadowing_renamed_defaulted_and_hidden_keys_raises() -> None:
-    """The check covers renamed (``source=``), defaulted, and ``HiddenField`` keys.
-
-    ``validated_data`` is keyed by resolved ``source`` and includes keys the CLIENT never sent
-    (a serializer default, a ``HiddenField``); comparing against the ACTUAL validated keys
-    catches every collision a reconstruction from the input specs would miss.
-    """
-
-    class RenamedSer(serializers.Serializer[object]):
-        display_name = serializers.CharField(source="name")
-        topic = serializers.CharField(required=False, default="defaulted")
-        owner = serializers.HiddenField(default="hidden-owner")
-
-    fake = type("M", (), {})
-    serializer = _validated_serializer(RenamedSer, {"display_name": "X"})
-    with pytest.raises(ConfigurationError, match="'name'"):
-        serializer_resolvers._assert_save_kwargs_no_shadow(
-            _as_serializer_mutation(fake),
-            serializer,
-            {"name": "clobber"},
-        )
-    with pytest.raises(ConfigurationError, match="'topic'"):
-        serializer_resolvers._assert_save_kwargs_no_shadow(
-            _as_serializer_mutation(fake),
-            serializer,
-            {"topic": "clobber"},
-        )
-    with pytest.raises(ConfigurationError, match="'owner'"):
-        serializer_resolvers._assert_save_kwargs_no_shadow(
-            _as_serializer_mutation(fake),
-            serializer,
-            {"owner": "clobber"},
-        )
-
-    # The declared alias is not the key DRF places in validated_data.
-    serializer_resolvers._assert_save_kwargs_no_shadow(
-        _as_serializer_mutation(fake),
-        serializer,
-        {"display_name": "ok"},
-    )
-
-
-@pytest.mark.django_db
-def test_save_kwargs_hook_cannot_mutate_validated_data_by_identity() -> None:
-    """The save hook's ``data`` is a FROZEN view, so an in-place JSON mutation is impossible.
-
-    It can therefore never reach ``serializer.validated_data`` (whose nested containers can
-    share identity with the decoded client data).
-    """
-    seed_data(0)
-    captured = {}
-
-    class BlobItemSerializer(ModelSerializerBase[product_models.Item]):
-        meta_blob = serializers.JSONField()
-
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category", "meta_blob")
-
-        @override
-        def create(self, validated_data: dict[str, object]) -> product_models.Item:
-            captured["blob"] = validated_data.pop("meta_blob")
-            return super().create(validated_data)
-
-    def mutating_save_kwargs(
-        self: SerializerMutation,
-        info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        del (
-            self,
-            info,
-        )  # the typed hook fixes these names; the body reads only the frozen ``data`` view
-        # Before the freeze, these in-place mutations rewrote validated_data by identity;
-        # the frozen view makes them raise instead of silently succeeding.
-        with pytest.raises(TypeError):
-            # basedpyright: a nested value of the frozen view is a read-only proxy typed object;
-            # the test proves item assignment raises TypeError
-            data["meta_blob"]["mode"] = "evil"  # pyright: ignore[reportIndexIssue]
-        meta_blob = data["meta_blob"]
-        assert is_mapping(meta_blob)
-        # The blob's frozen nested list is a tuple: no in-place ``append`` exists to call.
-        assert not hasattr(meta_blob["tags"], "append")
-        return {}
-
-    mutation_cls = _bind_item_serializer_mutation(BlobItemSerializer)
-    mutation_cls.get_serializer_save_kwargs = mutating_save_kwargs
-    (category,) = categories_from_seed(("BlobCat", False))
-    request = HttpRequest()
-    request.user = User(username="u")
-    info = make_info(context=SimpleNamespace(request=request))
-
-    provided: dict[str, object] = {
-        "name": "BlobItem",
-        "category": saved_pk(category),
-        "meta_blob": {"mode": "ok", "tags": ["a"]},
-    }
-    with write_pipeline("default", lock=False):
-        saved = serializer_resolvers._serializer_write_step(
-            mutation_cls,
-            info,
-            None,
-            provided,
-            specs=mutation_cls._input_field_specs,
-        )
-    assert isinstance(saved, product_models.Item)
-    assert captured["blob"] == {"mode": "ok", "tags": ["a"]}  # the validated value survived
-    assert provided["meta_blob"] == {"mode": "ok", "tags": ["a"]}  # and the decoded data too
-
-
 @pytest.mark.django_db
 def test_save_kwargs_hook_validation_error_maps_to_field_error_envelope() -> None:
     """A DRF ``ValidationError`` raised BY the save-kwargs hook rides the documented mapping.
@@ -3744,37 +3198,6 @@ def test_save_kwargs_hook_validation_error_maps_to_field_error_envelope() -> Non
     assert [(fe.field, fe.messages) for fe in result.errors] == [
         ("name", ["from the save-kwargs hook"]),
     ]
-
-
-@pytest.mark.django_db
-def test_save_kwargs_hook_non_mapping_return_is_configuration_error() -> None:
-    """A malformed save hook return fails before serializer.save()."""
-    seed_data(0)
-
-    class PlainItemSerializer(ModelSerializerBase[product_models.Item]):
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
-
-    def malformed_save_kwargs(_self: SerializerMutation, _info: object, **_kwargs: object) -> None:
-        return None
-
-    mutation_cls = _bind_item_serializer_mutation(PlainItemSerializer)
-    # basedpyright: the malformed hook installed on the class is the hostile input under test;
-    # SerializerMutation declares a dict[str, object] return
-    mutation_cls.get_serializer_save_kwargs = malformed_save_kwargs  # pyright: ignore[reportAttributeAccessIssue]
-    (category,) = categories_from_seed(("MalformedSaveKwargsCat", False))
-    with (
-        write_pipeline("default", lock=False),
-        pytest.raises(ConfigurationError, match="must return a mapping"),
-    ):
-        serializer_resolvers._serializer_write_step(
-            mutation_cls,
-            _info_with_request(),
-            None,
-            {"name": "MalformedSaveKwargsItem", "category": saved_pk(category)},
-            specs=mutation_cls._input_field_specs,
-        )
 
 
 # ===========================================================================
@@ -3833,7 +3256,7 @@ def _info_with_request() -> strawberry.Info[object, object]:
 
 
 @pytest.mark.django_db
-def test_merged_kwargs_hook_rewriting_data_is_configuration_error() -> None:
+def test_serializer_kwargs_hook_rewriting_data_is_configuration_error() -> None:
     """A ``get_serializer_kwargs`` returning a DIFFERENT ``data`` fails loud (data is framework-owned)."""
 
     def hook(
@@ -3847,7 +3270,7 @@ def test_merged_kwargs_hook_rewriting_data_is_configuration_error() -> None:
 
     mutation_cls = _reserved_kwarg_mutation(hook)
     with pytest.raises(ConfigurationError, match="not the exact object the hook received"):
-        serializer_resolvers._merged_serializer_kwargs(
+        serializer_resolvers._serializer_kwargs(
             mutation_cls,
             _info_with_request(),
             final_data={"name": "X"},
@@ -3858,7 +3281,7 @@ def test_merged_kwargs_hook_rewriting_data_is_configuration_error() -> None:
 
 
 @pytest.mark.django_db
-def test_merged_kwargs_hook_equal_data_is_tolerated() -> None:
+def test_serializer_kwargs_hook_equal_data_is_tolerated() -> None:
     """A hook returning the (unmodified) data copy is tolerated (the default's pass-through)."""
 
     def hook(
@@ -3871,7 +3294,7 @@ def test_merged_kwargs_hook_equal_data_is_tolerated() -> None:
         return {"data": data}
 
     mutation_cls = _reserved_kwarg_mutation(hook)
-    kwargs = serializer_resolvers._merged_serializer_kwargs(
+    kwargs = serializer_resolvers._serializer_kwargs(
         mutation_cls,
         _info_with_request(),
         final_data={"name": "X"},
@@ -3883,7 +3306,7 @@ def test_merged_kwargs_hook_equal_data_is_tolerated() -> None:
 
 
 @pytest.mark.django_db
-def test_merged_kwargs_hook_substituting_instance_is_configuration_error() -> None:
+def test_serializer_kwargs_hook_substituting_instance_is_configuration_error() -> None:
     """A hook returning a DIFFERENT ``instance`` than the located row fails loud (the bypass)."""
     substituted = SimpleNamespace(pk=999)
 
@@ -3898,7 +3321,7 @@ def test_merged_kwargs_hook_substituting_instance_is_configuration_error() -> No
 
     mutation_cls = _reserved_kwarg_mutation(hook)
     with pytest.raises(ConfigurationError, match="`instance` kwarg"):
-        serializer_resolvers._merged_serializer_kwargs(
+        serializer_resolvers._serializer_kwargs(
             mutation_cls,
             _info_with_request(),
             final_data={"name": "X"},
@@ -3909,201 +3332,10 @@ def test_merged_kwargs_hook_substituting_instance_is_configuration_error() -> No
 
 
 @pytest.mark.django_db
-def test_merged_kwargs_hook_conflicting_write_alias_is_configuration_error() -> None:
-    """A hook setting a conflicting ``context['write_alias']`` fails loud (alias is framework-owned)."""
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return {"data": data, "context": {"write_alias": "other"}}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    with pytest.raises(ConfigurationError, match="write_alias"):
-        serializer_resolvers._merged_serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=None,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-_WRITE_ALIAS_TAIL = (
-    ", but the mutation's transaction is pinned to 'default'; the write alias is "
-    "framework-owned (one transaction, one alias). Drop context['write_alias'] from the override."
-)
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("context", "message"),
-    [
-        (
-            {"write_alias": _CompareRaisesStr("other")},
-            (
-                "SerializerMutation ReservedMutation.get_serializer_kwargs set "
-                f"context['write_alias'] to 'other'{_WRITE_ALIAS_TAIL}"
-            ),
-        ),
-        (
-            {"write_alias": 5},
-            (
-                "SerializerMutation ReservedMutation.get_serializer_kwargs set "
-                f"context['write_alias'] to 5{_WRITE_ALIAS_TAIL}"
-            ),
-        ),
-    ],
-    ids=["alias-compare-raises", "alias-int"],
-)
-def test_merged_kwargs_write_alias_rejection_never_runs_the_override_compare(
-    context: object,
-    message: str,
-) -> None:
-    """The ``write_alias`` rejection is typed whatever the override's comparison does.
-
-    The alias agrees only when its real type is ``str`` and the base ``str`` slot finds the
-    pinned alias's text, so no override ``__eq__`` / ``__ne__`` runs; the rejection renders the
-    alias through ``truth.render`` (a ``str`` subclass keeping ``str.__repr__`` renders as its
-    text).
-    """
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return {"data": data, "context": context}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
-        serializer_resolvers._merged_serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=None,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("context", "escape", "text"),
-    [
-        (_ClassReadRaises(), RuntimeError, "hostile __class__ boom"),
-        (_ClassReadRaises(KeyboardInterrupt), KeyboardInterrupt, "hostile __class__ boom"),
-        ({"write_alias": _ReprRaisesStr("other")}, RuntimeError, "hostile __repr__ boom"),
-    ],
-    ids=["context-class-read-raises", "context-class-read-KeyboardInterrupt", "alias-repr-raises"],
-)
-def test_merged_kwargs_override_code_that_raises_propagates(
-    context: object,
-    escape: type[BaseException],
-    text: str,
-) -> None:
-    """The override's own ``__class__`` / alias ``__repr__`` is consumer code: it propagates.
-
-    The context test is a plain ``isinstance`` and the alias rejection renders through
-    ``truth.render``, which runs a ``str`` subclass's own ``__repr__``.
-    """
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return {"data": data, "context": context}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    with pytest.raises(escape, match=text):
-        serializer_resolvers._merged_serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=None,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-@pytest.mark.django_db
-def test_merged_kwargs_lazy_write_alias_is_conflicting() -> None:
-    """A lazy proxy of the pinned alias is not the alias: a database alias is a real ``str``."""
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return {"data": data, "context": {"write_alias": SimpleLazyObject(lambda: "default")}}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    pattern = (
-        re.escape(
-            "SerializerMutation ReservedMutation.get_serializer_kwargs set context['write_alias'] "
-            "to <SimpleLazyObject: ",
-        )
-        + ".*"
-        + re.escape(_WRITE_ALIAS_TAIL)
-    )
-    with pytest.raises(ConfigurationError, match=f"^{pattern}$"):
-        serializer_resolvers._merged_serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=None,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    "override",
-    [_CompareRaisesStr("default"), _ReprRaisesStr("default"), "default"],
-    ids=["str-subclass-compare-raises", "str-subclass-repr-raises", "plain-str"],
-)
-def test_merged_kwargs_write_alias_equal_by_text_is_accepted(override: str) -> None:
-    """An override whose real ``str`` text is the pinned alias agrees, whatever its dunders do."""
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return {"data": data, "context": {"write_alias": override}}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    kwargs = serializer_resolvers._merged_serializer_kwargs(
-        mutation_cls,
-        _info_with_request(),
-        final_data={"name": "X"},
-        instance=None,
-        alias="default",
-        hook_context=_hook_ctx(),
-    )
-    assert type(_serializer_context(kwargs)["write_alias"]) is str
-    assert _serializer_context(kwargs)["write_alias"] == "default"
-
-
-@pytest.mark.django_db
-def test_merged_kwargs_sets_write_alias_in_context() -> None:
+def test_serializer_kwargs_sets_write_alias_in_context() -> None:
     """The framework sets ``context['write_alias']`` to the pipeline's pinned alias."""
     mutation_cls = _bind_item_serializer_mutation(_basic_item_serializer())
-    kwargs = serializer_resolvers._merged_serializer_kwargs(
+    kwargs = serializer_resolvers._serializer_kwargs(
         mutation_cls,
         _info_with_request(),
         final_data={"name": "X"},
@@ -4114,41 +3346,7 @@ def test_merged_kwargs_sets_write_alias_in_context() -> None:
     assert _serializer_context(kwargs)["write_alias"] == "default"
 
 
-@pytest.mark.django_db
-def test_merged_kwargs_hook_cannot_mutate_nested_client_containers() -> None:
-    """The constructor hook's data view is RECURSIVELY frozen: nested mutations raise."""
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        # A mutable copy merely ISOLATED these; the frozen view makes them impossible.
-        # A frozen nested list is a tuple: no in-place ``append`` exists to call.
-        assert not hasattr(data["genre_ids"], "append")
-        with pytest.raises(TypeError):
-            # basedpyright: a nested value of the frozen view is a read-only proxy typed object;
-            # the test proves item assignment raises TypeError
-            data["detail"]["code"] = "evil"  # pyright: ignore[reportIndexIssue]
-        return {}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    final_data: dict[str, object] = {"name": "X", "genre_ids": [1, 2], "detail": {"code": "ok"}}
-    kwargs = serializer_resolvers._merged_serializer_kwargs(
-        mutation_cls,
-        _info_with_request(),
-        final_data=final_data,
-        instance=None,
-        alias="default",
-        hook_context=_hook_ctx(),
-    )
-    assert kwargs["data"] == {"name": "X", "genre_ids": [1, 2], "detail": {"code": "ok"}}
-    assert kwargs["data"] is final_data  # the authoritative structure, untouched
-
-
-def test_merged_kwargs_hook_equal_but_not_identical_data_is_configuration_error() -> None:
+def test_serializer_kwargs_hook_equal_but_not_identical_data_is_configuration_error() -> None:
     """An EQUAL data copy is rejected: the contract is identity with the received clone.
 
     Equality would require a deep comparison of two independently cloned structures
@@ -4167,7 +3365,7 @@ def test_merged_kwargs_hook_equal_but_not_identical_data_is_configuration_error(
 
     mutation_cls = _reserved_kwarg_mutation(hook)
     with pytest.raises(ConfigurationError, match="not the exact object the hook received"):
-        serializer_resolvers._merged_serializer_kwargs(
+        serializer_resolvers._serializer_kwargs(
             mutation_cls,
             _info_with_request(),
             final_data={"name": "X"},
@@ -4177,171 +3375,7 @@ def test_merged_kwargs_hook_equal_but_not_identical_data_is_configuration_error(
         )
 
 
-def test_merged_kwargs_hook_non_mapping_return_is_configuration_error() -> None:
-    """A malformed constructor hook return fails before reserved-key handling."""
-
-    def hook(_self: SerializerMutation, _info: object, **_kwargs: object) -> None:
-        return None
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    with pytest.raises(ConfigurationError, match="must return a mapping"):
-        serializer_resolvers._merged_serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=None,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-def test_hook_mapping_rejects_non_string_keys() -> None:
-    """A mapping with non-string keys fails loud at the hook boundary.
-
-    The keys become ``serializer_class(**kwargs)`` / ``serializer.save(**save_kwargs)``
-    keywords, so a non-string key could not pass the boundary and instead escaped later as
-    a raw ``TypeError: keywords must be strings`` - the same unclassified escape the
-    non-mapping guard exists to prevent. The gate also keeps every downstream key-hashing
-    consumer (the exact-match injection comparison, the save-kwarg shadow checks) on plain
-    string keys.
-    """
-    mutation = type("M", (), {})
-    for hook_name in (
-        "get_serializer_kwargs()",
-        "get_serializer_injected_data()",
-        "get_serializer_save_kwargs()",
-    ):
-        with pytest.raises(ConfigurationError, match="non-string key"):
-            serializer_resolvers._hook_mapping(
-                _as_serializer_mutation(mutation),
-                hook_name,
-                {1: "x"},
-            )
-        with pytest.raises(ConfigurationError, match="non-string key"):
-            serializer_resolvers._hook_mapping(
-                _as_serializer_mutation(mutation),
-                hook_name,
-                {b"k": "x", "ok": 1},
-            )
-    # A legitimate str-keyed mapping passes untouched.
-    assert serializer_resolvers._hook_mapping(
-        _as_serializer_mutation(mutation),
-        "get_serializer_kwargs()",
-        {"k": 1},
-    ) == {
-        "k": 1,
-    }
-
-
-def test_merged_kwargs_hook_non_string_keys_are_configuration_error() -> None:
-    """A ``get_serializer_kwargs`` returning a non-str-keyed mapping fails loud, typed."""
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[object, object]:
-        return {1: "x", "data": data}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    with pytest.raises(ConfigurationError, match="non-string key"):
-        serializer_resolvers._merged_serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=None,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-@pytest.mark.django_db
-def test_serializer_kwargs_hook_non_string_keys_fail_before_serializer_construction() -> None:
-    """End to end: a hostile constructor-hook return is the typed error, never a raw TypeError.
-
-    The boundary rejects the non-string key before any serializer work, so it never reaches
-    ``serializer_class(**kwargs)`` to escape the whole write step as
-    ``TypeError: keywords must be strings``.
-    """
-    seed_data(0)
-    (category,) = categories_from_seed(("KeyGateCat", False))
-
-    class KeyGateSerializer(ModelSerializerBase[product_models.Item]):
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
-
-    def hostile_kwargs(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[object, object]:
-        return {1: "x", "data": data}
-
-    mutation_cls = _bind_item_serializer_mutation(KeyGateSerializer)
-    # basedpyright: the malformed hook installed on the class is the hostile input under test;
-    # SerializerMutation declares a dict[str, object] return
-    mutation_cls.get_serializer_kwargs = hostile_kwargs  # pyright: ignore[reportAttributeAccessIssue]
-
-    with (
-        write_pipeline("default", lock=False),
-        pytest.raises(ConfigurationError, match="non-string key"),
-    ):
-        serializer_resolvers._serializer_write_step(
-            mutation_cls,
-            _info_with_request(),
-            None,
-            {"name": "KeyGate", "category": saved_pk(category)},
-            specs=mutation_cls._input_field_specs,
-        )
-
-
-@pytest.mark.django_db
-def test_save_kwargs_hook_non_string_keys_fail_before_save() -> None:
-    """End to end: a non-str-keyed save-kwargs return is the typed error before ``save()``.
-
-    The shadow / model-field key checks both pass an unknown integer key, so the
-    key-type check is what keeps it from reaching ``serializer.save(**save_kwargs)`` as
-    a raw ``TypeError``.
-    """
-    seed_data(0)
-    (category,) = categories_from_seed(("KeyGateSaveCat", False))
-
-    class KeyGateSaveSerializer(ModelSerializerBase[product_models.Item]):
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
-
-    def hostile_save_kwargs(
-        _self: SerializerMutation,
-        _info: object,
-        **_kwargs: object,
-    ) -> dict[object, object]:
-        return {1: "x"}
-
-    mutation_cls = _bind_item_serializer_mutation(KeyGateSaveSerializer)
-    # basedpyright: the malformed hook installed on the class is the hostile input under test;
-    # SerializerMutation declares a dict[str, object] return
-    mutation_cls.get_serializer_save_kwargs = hostile_save_kwargs  # pyright: ignore[reportAttributeAccessIssue]
-
-    with (
-        write_pipeline("default", lock=False),
-        pytest.raises(ConfigurationError, match="non-string key"),
-    ):
-        serializer_resolvers._serializer_write_step(
-            mutation_cls,
-            _info_with_request(),
-            None,
-            {"name": "KeyGateSave", "category": saved_pk(category)},
-            specs=mutation_cls._input_field_specs,
-        )
-
-
-def test_merged_kwargs_hook_explicit_none_data_is_configuration_error() -> None:
+def test_serializer_kwargs_hook_explicit_none_data_is_configuration_error() -> None:
     """An explicit ``data=None`` return is NOT omission: the sentinel keeps it rejected."""
 
     def hook(_self: SerializerMutation, _info: object, **_kwargs: object) -> dict[str, object]:
@@ -4349,7 +3383,7 @@ def test_merged_kwargs_hook_explicit_none_data_is_configuration_error() -> None:
 
     mutation_cls = _reserved_kwarg_mutation(hook)
     with pytest.raises(ConfigurationError, match="not the exact object the hook received"):
-        serializer_resolvers._merged_serializer_kwargs(
+        serializer_resolvers._serializer_kwargs(
             mutation_cls,
             _info_with_request(),
             final_data={"name": "X"},
@@ -4360,7 +3394,7 @@ def test_merged_kwargs_hook_explicit_none_data_is_configuration_error() -> None:
 
 
 @pytest.mark.django_db
-def test_merged_kwargs_hook_explicit_none_instance_on_update_is_configuration_error() -> None:
+def test_serializer_kwargs_hook_explicit_none_instance_on_update_is_configuration_error() -> None:
     """On update, an explicit ``instance=None`` return is rejected (sentinel, not ``pop`` default)."""
     seed_data(1)
 
@@ -4373,7 +3407,7 @@ def test_merged_kwargs_hook_explicit_none_instance_on_update_is_configuration_er
     product_models.Item.objects.exclude(pk__in=[saved_pk(item)]).delete()
     product_models.Entry.objects.filter(item_id__in=[saved_pk(item)]).delete()
     with pytest.raises(ConfigurationError, match="`instance` kwarg"):
-        serializer_resolvers._merged_serializer_kwargs(
+        serializer_resolvers._serializer_kwargs(
             mutation_cls,
             _info_with_request(),
             final_data={"name": "X"},
@@ -4383,338 +3417,39 @@ def test_merged_kwargs_hook_explicit_none_instance_on_update_is_configuration_er
         )
 
 
-def test_merged_kwargs_deep_data_passthrough_never_recurses() -> None:
-    """A pass-through hook over a deeper-than-recursion-limit payload must not crash.
-
-    A deep ``!=`` comparison of two independently cloned structures would raise the
-    ``RecursionError`` the iterative clone avoids; the identity check is O(1).
-    """
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return {"data": data}
-
-    depth = sys.getrecursionlimit() + 200
-    deep: list[object] = []
-    cursor = deep
-    for _ in range(depth):
-        child: list[object] = []
-        cursor.append(child)
-        cursor = child
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    final_data: dict[str, object] = {"name": "X", "blob": deep}
-    kwargs = serializer_resolvers._merged_serializer_kwargs(
-        mutation_cls,
-        _info_with_request(),
-        final_data=final_data,
-        instance=None,
-        alias="default",
-        hook_context=_hook_ctx(),
-    )
-    assert kwargs["data"] is final_data
-
-
-def test_frozen_hook_view_survives_json_depth_beyond_the_recursion_limit() -> None:
-    """The freeze is ITERATIVE, so a deeply-nested client JSON value never raises ``RecursionError``.
-
-    A client-parseable deeply-nested JSON value must never crash the pipeline (an
-    availability hole a recursive walk had).
-    """
-    depth = sys.getrecursionlimit() + 200
-    deep: list[object] = []
-    cursor = deep
-    for _ in range(depth):
-        child: list[object] = []
-        cursor.append(child)
-        cursor = child
-    cursor.append({"leaf": "ok"})
-
-    view = serializer_resolvers._frozen_hook_view({"blob": deep})
-
-    original: object = deep
-    frozen: object = view["blob"]
-    for _ in range(depth):
-        assert is_tuple(frozen)  # an IMMUTABLE container at EVERY depth
-        assert is_list(original)
-        original, frozen = original[0], frozen[0]
-    assert frozen == ({"leaf": "ok"},)
-    assert is_tuple(frozen)
-    leaf = frozen[0]
-    assert is_mapping(leaf)
-    assert dict(leaf) == {"leaf": "ok"}
-
-    # An immutable scalar top-level value passes through by reference (safe: unmutable).
-    assert serializer_resolvers._frozen_hook_view("scalar") == "scalar"
-    # An OPAQUE, possibly-mutable top-level leaf fails closed rather than aliasing it.
-    with pytest.raises(ConfigurationError, match="cannot be frozen into an immutable"):
-        serializer_resolvers._frozen_hook_view(object())
-
-
-def test_frozen_hook_view_rejects_cycles_preserves_sharing_and_freezes_uploads() -> None:
-    """A CYCLIC container fails loud; a shared reference freezes once; a file becomes metadata.
-
-    A shared (diamond) reference freezes once and stays shared; a file value becomes
-    ``UploadMetadata`` (the authoritative upload never reaches a hook).
-
-    Parsed GraphQL JSON can never cycle, but hook-generated data can; without the guard the
-    iterative freeze would loop forever (an availability hole). A merely SHARED dict is
-    legitimate and must not be misdiagnosed as a cycle.
-    """
-    cyclic: dict[str, object] = {"k": "v"}
-    cyclic["self"] = cyclic
-    with pytest.raises(ConfigurationError, match="CYCLIC container"):
-        serializer_resolvers._frozen_hook_view({"blob": cyclic})
-
-    indirect: list[object] = []
-    indirect.append({"loop": indirect})
-    with pytest.raises(ConfigurationError, match="CYCLIC container"):
-        serializer_resolvers._frozen_hook_view({"blob": indirect})
-
-    shared = {"code": "ok"}
-    view = serializer_resolvers._frozen_hook_view({"a": shared, "b": shared})
-    frozen_shared = view["a"]
-    assert isinstance(frozen_shared, MappingProxyType)
-    assert dict(frozen_shared) == {"code": "ok"}
-    assert view["a"] is view["b"]  # sharing preserved in the frozen view
-    with pytest.raises(TypeError):
-        # and every level is read-only
-        # basedpyright: a nested value of the frozen view is a read-only proxy typed object; the
-        # test proves item assignment raises TypeError
-        view["a"]["code"] = "evil"  # pyright: ignore[reportIndexIssue]
-
-    upload = SimpleUploadedFile("cover.png", b"12345", content_type="image/png")
-    file_view = serializer_resolvers._frozen_hook_view({"cover": upload})
-    metadata = file_view["cover"]
-    assert isinstance(metadata, UploadMetadata)
-    assert metadata.name == "cover.png"
-    assert metadata.size == 5
-    assert metadata.content_type == "image/png"
-
-
-def test_frozen_hook_view_freezes_the_full_value_algebra_and_fails_closed_on_opaque_leaves() -> (
-    None
-):
-    """The freeze covers tuples/sets/bytearray and rejects opaque mutable leaves.
-
-    A tuple / set is a mutable-reachable container (a tuple can carry a mutable member; a
-    ``set`` itself is mutable), and a ``bytearray`` is a mutable scalar - passed to hooks BY
-    REFERENCE, any of them would let a hook mutate the authoritative ``provided_data``. They
-    are rendered immutable; a leaf with no immutable rendering fails
-    closed instead of being aliased under a false promise of immutability.
-    """
-    # A tuple carrying a mutable dict member: the tuple becomes a tuple, the dict a proxy.
-    view = serializer_resolvers._frozen_hook_view({"pair": ("x", {"n": 1})})
-    frozen_pair = view["pair"]
-    assert isinstance(frozen_pair, tuple)
-    assert isinstance(frozen_pair[1], MappingProxyType)
-    with pytest.raises(TypeError):
-        # basedpyright: the frozen member is a read-only MappingProxyType; the test proves item
-        # assignment raises TypeError
-        frozen_pair[1]["n"] = 2  # pyright: ignore[reportIndexIssue]
-
-    # A set becomes an immutable frozenset (the source set stays mutable and unshared).
-    frozen_set = serializer_resolvers._frozen_hook_view({"tags": {"a", "b"}})["tags"]
-    assert isinstance(frozen_set, frozenset)
-    assert frozen_set == {"a", "b"}
-
-    # A bytearray is rendered as immutable bytes (never aliased).
-    frozen_bytes = serializer_resolvers._frozen_hook_view({"blob": bytearray(b"12")})["blob"]
-    assert frozen_bytes == b"12"
-    assert isinstance(frozen_bytes, bytes)
-
-    # Genuinely-immutable scalars pass through by reference (safe, no false rejection).
-    scalars: dict[str, object] = {
-        "dt": datetime.datetime(2026, 7, 15, 12, 0, 0, tzinfo=datetime.timezone.utc),
-        "dec": decimal.Decimal("1.5"),
-        "id": uuid.uuid4(),
-        "n": 7,
-        "flag": True,
-        "nil": None,
-    }
-    scalar_view = serializer_resolvers._frozen_hook_view(scalars)
-    for key, original in scalars.items():
-        assert scalar_view[key] is original
-
-    # An opaque, possibly-mutable leaf nested in the tree fails closed.
-    with pytest.raises(ConfigurationError, match="cannot be frozen into an immutable"):
-        serializer_resolvers._frozen_hook_view({"weird": object()})
-
-
-_OPAQUE_LEAF_TAIL = (
-    " that cannot be frozen into an immutable hook view. The frozen view exposes only immutable "
-    "scalars, uploads (as UploadMetadata), and dict/list/tuple/set containers; an opaque, "
-    "possibly-mutable leaf is rejected rather than passed by reference (a hook could mutate it "
-    "and thereby mutate the authoritative serializer data). Supply a plain JSON-compatible value."
-)
-
-
-@pytest.mark.parametrize(
-    ("value", "type_name"),
-    [
-        ({"x": _ClassReadRaises()}, "_ClassReadRaises"),
-        ({"x": [_ClaimsStr()]}, "_ClaimsStr"),
-        ({"x": _ClaimsDict()}, "_ClaimsDict"),
-        (_ClaimsDict(), "_ClaimsDict"),
-        ({"x": SimpleLazyObject(lambda: "s")}, "SimpleLazyObject"),
-    ],
-    ids=[
-        "class-read-raises",
-        "claims-str",
-        "claims-dict",
-        "root-claims-dict",
-        "lazy-str",
-    ],
-)
-def test_frozen_hook_view_asks_the_real_type(value: object, type_name: str) -> None:
-    """A leaf is frozen by what it IS, never by what its ``__class__`` says.
-
-    A value claiming ``str`` / ``dict`` (or a lazy proxy of one, which can be rebound in place)
-    is not that immutable object, so it fails closed as an opaque leaf; a ``__class__`` read
-    that raises is never made.
-    """
-    message = (
-        f"SerializerMutation hook data contains a value of type {type_name!r}{_OPAQUE_LEAF_TAIL}"
-    )
-    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
-        serializer_resolvers._frozen_hook_view(value)
-
-
-def test_frozen_hook_view_descends_a_real_list_whatever_its_class_claims() -> None:
-    """A real ``list`` whose ``__class__`` claims ``dict`` is frozen as the list it is."""
-    view = serializer_resolvers._frozen_hook_view({"x": _ListClaimsDict(["a", {"n": 1}])})
-    frozen = view["x"]
-    assert is_tuple(frozen)
-    assert type(frozen) is tuple
-    assert frozen[0] == "a"
-    assert type(frozen[1]) is MappingProxyType
-
-
-def _saved_result_fixture() -> tuple[type[object], serializers.Serializer[object]]:
-    """A fake mutation + serializer name for the saved-result validation tests."""
-
-    class FakeSer(serializers.Serializer[object]):
-        pass
-
-    fake = type(
+def _saved_result_fixture() -> type[object]:
+    """A fake mutation for the saved-result validation tests."""
+    return type(
         "SavedMut",
         (),
         {"_mutation_meta": SimpleNamespace(model=product_models.Item)},
     )
-    return fake, FakeSer()
 
 
 @pytest.mark.django_db
 def test_saved_result_wrong_model_is_configuration_error() -> None:
     """A ``save()`` returning a non-model / wrong-model value fails loud before the re-fetch."""
-    fake, serializer = _saved_result_fixture()
-    with pytest.raises(ConfigurationError, match="not a Item instance"):
+    fake = _saved_result_fixture()
+    with pytest.raises(ConfigurationError, match="must persist and return the written Item row"):
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
-            serializer,
             object(),
-            None,
-            "default",
-            [],
+            creating=True,
+            written=[],
         )
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("saved", "rendered"),
-    [(_ClassReadRaises(), "<ClassReadRaises>")],
-    ids=["class-read-raises"],
-)
-def test_saved_result_drifted_return_rejection_never_reads_its_class(
-    saved: object,
-    rendered: str,
-) -> None:
-    """A drifted ``save()`` return is the typed rejection even when its ``__class__`` raises.
-
-    The model test asks the real class (``truth.is_instance``), so the ``__class__`` property
-    is never read.
-    """
-    fake, serializer = _saved_result_fixture()
-    message = (
-        f"SerializerMutation SavedMut: FakeSer.save() returned {rendered}, not a Item instance; "
-        "the serializer's create()/update() must return the written model row."
-    )
-    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            serializer,
-            saved,
-            None,
-            "default",
-            [],
-        )
-
-
-@pytest.mark.django_db
-def test_saved_result_drifted_return_repr_that_raises_propagates() -> None:
-    """The drifted return's own ``__repr__`` is consumer code: rendering it propagates."""
-    fake, serializer = _saved_result_fixture()
-    with pytest.raises(RuntimeError, match="hostile __repr__ boom"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            serializer,
-            _ReprRaises(),
-            None,
-            "default",
-            [],
-        )
-
-
-@pytest.mark.django_db
-def test_saved_result_lazy_proxy_is_rejected_without_being_evaluated() -> None:
-    """A lazy proxy of a row is not the row: the check asks the real type and never evaluates it."""
-    fake, serializer = _saved_result_fixture()
-    evaluated: list[bool] = []
-
-    def load() -> product_models.Item:
-        evaluated.append(True)
-        return product_models.Item(name="x")
-
-    lazy = SimpleLazyObject(load)
-    pattern = (
-        re.escape("SerializerMutation SavedMut: FakeSer.save() returned <SimpleLazyObject: ")
-        + ".*"
-        + re.escape(
-            ", not a Item instance; the serializer's create()/update() must return the written "
-            "model row.",
-        )
-    )
-    with pytest.raises(ConfigurationError, match=f"^{pattern}$"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            serializer,
-            lazy,
-            None,
-            "default",
-            [],
-        )
-    assert evaluated == []
 
 
 @pytest.mark.django_db
 def test_saved_result_unsaved_instance_is_configuration_error() -> None:
     """A ``save()`` returning an UNSAVED instance (pk None) fails loud."""
-    fake, serializer = _saved_result_fixture()
+    fake = _saved_result_fixture()
     unsaved = product_models.Item(name="x")
-    serializer.instance = unsaved  # DRF bookkeeping followed; the object is defective anyway
-    with pytest.raises(ConfigurationError, match="returned an unsaved"):
+    with pytest.raises(ConfigurationError, match="must persist and return the written Item row"):
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
-            serializer,
             unsaved,
-            None,
-            "default",
-            [],
+            creating=True,
+            written=[],
         )
 
 
@@ -4722,88 +3457,49 @@ def test_saved_result_unsaved_instance_is_configuration_error() -> None:
 def test_saved_result_spoofed_pk_on_never_persisted_instance_is_configuration_error() -> None:
     """A never-persisted instance carrying a SPOOFED pk fails loud (would launder an existing row)."""
     seed_data(1)
-    fake, serializer = _saved_result_fixture()
+    fake = _saved_result_fixture()
     (category,) = categories_from_seed(("SpoofCat", False))
     (real,) = items_from_seed(category, ("Real", False))
     product_models.Item.objects.exclude(pk__in=[saved_pk(real)]).delete()
     product_models.Entry.objects.filter(item_id__in=[saved_pk(real)]).delete()
     spoofed = product_models.Item(pk=saved_pk(real), name="Spoof")  # adding=True, _state.db=None
-    serializer.instance = spoofed  # DRF bookkeeping followed; the object is defective anyway
-    with pytest.raises(ConfigurationError, match="returned an unsaved"):
+    with pytest.raises(ConfigurationError, match="must persist and return the written Item row"):
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
-            serializer,
             spoofed,
-            None,
-            "default",
-            [],
-        )
-
-
-@pytest.mark.django_db
-def test_saved_result_detached_saved_looking_instance_is_configuration_error() -> None:
-    """A fabricated result whose per-attribute state LOOKS saved fails the identity check.
-
-    Hand-setting ``_state.adding = False`` + ``_state.db = alias`` on a never-persisted
-    instance defeats every per-attribute guard - but DRF's ``save()`` contract assigns the
-    written row to ``serializer.instance``, so a detached return object that bypassed that
-    bookkeeping fails closed on identity before it can launder the real row via the re-fetch.
-    """
-    seed_data(1)
-    fake, serializer = _saved_result_fixture()
-    (category,) = categories_from_seed(("DetachedCat", False))
-    (real,) = items_from_seed(category, ("RealRow", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(real)]).delete()
-    product_models.Entry.objects.filter(item_id__in=[saved_pk(real)]).delete()
-    forged = product_models.Item(pk=saved_pk(real), name="Forged")
-    forged._state.adding = False
-    forged._state.db = "default"
-    # serializer.instance was never assigned (the save bookkeeping was bypassed).
-    with pytest.raises(ConfigurationError, match=r"not serializer\.instance"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            serializer,
-            forged,
-            None,
-            "default",
-            [],
+            creating=True,
+            written=[],
         )
 
 
 @pytest.mark.django_db
 def test_saved_result_create_without_witnessed_insert_is_configuration_error() -> None:
-    """A create result that was never OBSERVED being inserted fails loud (unforgeable).
+    """A create result that was never OBSERVED being inserted fails loud.
 
-    ``serializer.instance`` identity is forgeable through NORMAL DRF bookkeeping: a custom
-    ``create()`` returning an existing row is still assigned to ``self.instance``. Only the
-    ``post_save`` witness record proves the returned row was actually INSERTED on the pinned
-    alias inside this save - an empty witness means an existing row was being laundered.
+    A custom ``create()`` returning an existing row is still assigned to ``self.instance`` by
+    DRF's ``save()``; only the ``post_save`` witness record proves the returned row was
+    INSERTED inside this save.
     """
     seed_data(1)
-    fake, serializer = _saved_result_fixture()
+    fake = _saved_result_fixture()
     (category,) = categories_from_seed(("LaunderCat", False))
     (existing,) = items_from_seed(category, ("PreExisting", False))
     product_models.Item.objects.exclude(pk__in=[saved_pk(existing)]).delete()
     product_models.Entry.objects.filter(item_id__in=[saved_pk(existing)]).delete()
-    serializer.instance = existing  # normal DRF save() bookkeeping - and still rejected
     with pytest.raises(ConfigurationError, match="never observed being INSERTED"):
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
-            serializer,
             existing,
-            None,
-            "default",
-            [],  # no witnessed insert of this row
+            creating=True,
+            written=[],  # no witnessed insert of this row
         )
     # A witnessed UPDATE of the row (created=False) is not an insert either.
     with pytest.raises(ConfigurationError, match="never observed being INSERTED"):
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
-            serializer,
             existing,
-            None,
-            "default",
-            [
+            creating=True,
+            written=[
                 (
                     existing,
                     saved_pk(existing),
@@ -4816,14 +3512,13 @@ def test_saved_result_create_without_witnessed_insert_is_configuration_error() -
 
 @pytest.mark.django_db
 def test_saved_result_create_with_witnessed_insert_passes() -> None:
-    """A create result matched by a witnessed ``created=True`` write on the pinned alias passes."""
+    """A create result matched by a witnessed ``created=True`` write passes."""
     seed_data(1)
-    fake, serializer = _saved_result_fixture()
+    fake = _saved_result_fixture()
     (category,) = categories_from_seed(("WitnessCat", False))
     (item,) = items_from_seed(category, ("WitnessItem", False))
     product_models.Item.objects.exclude(pk__in=[saved_pk(item)]).delete()
     product_models.Entry.objects.filter(item_id__in=[saved_pk(item)]).delete()
-    serializer.instance = item
     written: list[_WrittenRow] = [
         (
             item,
@@ -4835,131 +3530,12 @@ def test_saved_result_create_with_witnessed_insert_passes() -> None:
     assert (
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
-            serializer,
             item,
-            None,
-            "default",
-            written,
+            creating=True,
+            written=written,
         )
         is item
     )
-
-
-@pytest.mark.django_db
-def test_saved_result_update_pk_mutation_is_configuration_error() -> None:
-    """A custom update re-pointing the SAME object's pk at a hidden row fails the snapshot check.
-
-    ``instance`` and ``saved`` can be the same mutable object, so a live ``instance.pk``
-    comparison would compare the mutated pk to itself; the check runs against the
-    authorized-pk SNAPSHOT captured before any consumer hook ran.
-    """
-    seed_data(2)
-    fake, serializer = _saved_result_fixture()
-    (category,) = categories_from_seed(("SnapCat", False))
-    authorized, hidden = items_from_seed(category, ("AuthorizedRow", False), ("HiddenRow", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(authorized), saved_pk(hidden)]).delete()
-    product_models.Entry.objects.filter(
-        item_id__in=[saved_pk(authorized), saved_pk(hidden)],
-    ).delete()
-    authorized_pk = saved_pk(authorized)  # the immutable snapshot the pipeline captures pre-hooks
-    authorized.pk = saved_pk(hidden)  # the in-place forgery: instance IS the returned object
-    serializer.instance = authorized
-    with pytest.raises(ConfigurationError, match="must write the row that was authorized"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            serializer,
-            authorized,
-            authorized_pk,
-            "default",
-            [],
-        )
-
-
-@pytest.mark.django_db
-def test_write_step_update_repointing_instance_pk_is_configuration_error() -> None:
-    """End-to-end: an ``update()`` mutating ``instance.pk`` to a hidden row's pk fails loud."""
-    seed_data(2)
-    hidden_holder = {}
-
-    class RepointingSerializer(ModelSerializerBase[product_models.Item]):
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
-
-        @override
-        def update(
-            self,
-            instance: product_models.Item,
-            validated_data: dict[str, object],
-        ) -> product_models.Item:
-            instance.pk = hidden_holder["pk"]  # re-point at the hidden row, save nothing
-            return instance
-
-    (category,) = categories_from_seed(("RepointCat", False))
-    target, hidden = items_from_seed(category, ("Target", False), ("Hidden", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(target), saved_pk(hidden)]).delete()
-    product_models.Entry.objects.filter(item_id__in=[saved_pk(target), saved_pk(hidden)]).delete()
-    hidden_holder["pk"] = saved_pk(hidden)
-    mutation_cls = _bind_item_serializer_mutation(RepointingSerializer, operation="update")
-    request = HttpRequest()
-    request.user = User(username="u")
-    info = make_info(context=SimpleNamespace(request=request))
-
-    with (
-        write_pipeline("default", lock=False),
-        pytest.raises(ConfigurationError, match="must write the row that was authorized"),
-    ):
-        serializer_resolvers._serializer_write_step(
-            mutation_cls,
-            info,
-            target,
-            {"name": "Renamed"},
-            specs=mutation_cls._input_field_specs,
-        )
-
-
-@pytest.mark.django_db
-def test_write_step_create_pk_mutated_after_insert_is_configuration_error() -> None:
-    """A witnessed INSERT whose object is then re-pointed at a hidden row fails the pk snapshot.
-
-    Object identity alone (``row is saved``) survives the mutation - both references see
-    the mutated object - so the witness compares the pk SNAPSHOTTED at ``post_save``.
-    """
-    seed_data(1)
-    hidden_holder = {}
-
-    class PkSwapSerializer(ModelSerializerBase[product_models.Item]):
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
-
-        @override
-        def create(self, validated_data: dict[str, object]) -> product_models.Item:
-            item = super().create(validated_data)  # a REAL witnessed insert
-            item.pk = hidden_holder["pk"]  # then re-point the same object at a hidden row
-            return item
-
-    (category,) = categories_from_seed(("SwapCat", False))
-    (hidden,) = items_from_seed(category, ("HiddenSwap", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(hidden)]).delete()
-    product_models.Entry.objects.filter(item_id__in=[saved_pk(hidden)]).delete()
-    hidden_holder["pk"] = saved_pk(hidden)
-    mutation_cls = _bind_item_serializer_mutation(PkSwapSerializer)
-    request = HttpRequest()
-    request.user = User(username="u")
-    info = make_info(context=SimpleNamespace(request=request))
-
-    with (
-        write_pipeline("default", lock=False),
-        pytest.raises(ConfigurationError, match="never observed being INSERTED"),
-    ):
-        serializer_resolvers._serializer_write_step(
-            mutation_cls,
-            info,
-            None,
-            {"name": "Fresh", "category": saved_pk(category)},
-            specs=mutation_cls._input_field_specs,
-        )
 
 
 @pytest.mark.django_db
@@ -5263,81 +3839,14 @@ def test_pipeline_alias_guard_blocks_cross_alias_pre_save_and_ignores_other_thre
 
 
 @pytest.mark.django_db
-def test_saved_result_none_alias_on_persisted_looking_instance_is_configuration_error() -> None:
-    """A result whose ``_state.db`` is ``None`` fails the EXACT-alias check (never ORM-loaded)."""
-    seed_data(1)
-    fake, serializer = _saved_result_fixture()
-    (category,) = categories_from_seed(("NoneAliasCat", False))
-    (item,) = items_from_seed(category, ("NoneAliasItem", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(item)]).delete()
-    product_models.Entry.objects.filter(item_id__in=[saved_pk(item)]).delete()
-    item._state.db = None  # simulate a custom save() handing back a detached object
-    serializer.instance = item
-    with pytest.raises(ConfigurationError, match="alias None"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            serializer,
-            item,
-            None,
-            "default",
-            [],
-        )
-
-
-@pytest.mark.django_db
-def test_saved_result_wrong_alias_is_configuration_error() -> None:
-    """A ``save()`` result living on a different database alias fails loud (escaped the transaction)."""
-    seed_data(1)
-    fake, serializer = _saved_result_fixture()
-    (category,) = categories_from_seed(("AliasCat", False))
-    (item,) = items_from_seed(category, ("AliasItem", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(item)]).delete()
-    product_models.Entry.objects.filter(item_id__in=[saved_pk(item)]).delete()
-    serializer.instance = item
-    with pytest.raises(ConfigurationError, match="alias 'default'"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            serializer,
-            item,
-            None,
-            "shard_b",
-            [],
-        )
-
-
-@pytest.mark.django_db
-def test_saved_result_update_pk_drift_is_configuration_error() -> None:
-    """On update, a ``save()`` returning a DIFFERENT row than the authorized one fails loud."""
-    seed_data(2)
-    fake, serializer = _saved_result_fixture()
-    (category,) = categories_from_seed(("DriftCat", False))
-    authorized, other = items_from_seed(category, ("Authorized", False), ("Other", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(authorized), saved_pk(other)]).delete()
-    product_models.Entry.objects.filter(
-        item_id__in=[saved_pk(authorized), saved_pk(other)],
-    ).delete()
-    serializer.instance = other
-    with pytest.raises(ConfigurationError, match="must write the row that was authorized"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            serializer,
-            other,
-            saved_pk(authorized),
-            "default",
-            [],
-        )
-
-
-@pytest.mark.django_db
 def test_saved_result_happy_path_returns_saved() -> None:
-    """A correct-model, saved, same-alias, same-pk result passes through unchanged."""
+    """A persisted row of the backing model passes through unchanged on update."""
     seed_data(1)
-    fake, serializer = _saved_result_fixture()
+    fake = _saved_result_fixture()
     (category,) = categories_from_seed(("OkCat", False))
     (item,) = items_from_seed(category, ("OkItem", False))
     product_models.Item.objects.exclude(pk__in=[saved_pk(item)]).delete()
     product_models.Entry.objects.filter(item_id__in=[saved_pk(item)]).delete()
-    serializer.instance = item
     written: list[_WrittenRow] = [
         (
             item,
@@ -5349,35 +3858,12 @@ def test_saved_result_happy_path_returns_saved() -> None:
     assert (
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
-            serializer,
             item,
-            saved_pk(item),
-            "default",
-            written,
+            creating=False,
+            written=written,
         )
         is item
     )
-
-
-@pytest.mark.django_db
-def test_saved_result_update_without_witness_is_configuration_error() -> None:
-    """Returning the existing instance without saving is not a successful update."""
-    seed_data(1)
-    fake, serializer = _saved_result_fixture()
-    (category,) = categories_from_seed(("NoopCat", False))
-    (item,) = items_from_seed(category, ("NoopItem", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(item)]).delete()
-    product_models.Entry.objects.filter(item_id__in=[saved_pk(item)]).delete()
-    serializer.instance = item
-    with pytest.raises(ConfigurationError, match="never observed being UPDATED"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            serializer,
-            item,
-            saved_pk(item),
-            "default",
-            [],
-        )
 
 
 def test_validator_querysets_are_recursively_pinned_to_write_alias() -> None:
@@ -6223,14 +4709,6 @@ def test_flattener_truncates_past_the_node_budget() -> None:
     assert len(flattened) <= serializer_resolvers._ERROR_FLATTEN_NODE_BUDGET + 1
 
 
-def test_upload_metadata_tolerates_a_sizeless_file() -> None:
-    """A file object whose ``size`` read raises reports ``size=None`` (never an exception)."""
-    metadata = serializer_resolvers._upload_metadata(File(None, name="ghost.bin"))
-    assert isinstance(metadata, UploadMetadata)
-    assert metadata.name == "ghost.bin"
-    assert metadata.size is None
-
-
 def test_decode_nested_multi_non_iterable_returns_field_error() -> None:
     """Passing a non-iterable to _decode_nested for NESTED_MULTI returns a field-keyed error."""
     spec = InputFieldSpec(
@@ -6252,104 +4730,7 @@ def test_decode_nested_multi_non_iterable_returns_field_error() -> None:
     assert error.codes == ["invalid"]
 
 
-def test_upload_metadata_reports_no_size_for_an_unsizable_upload() -> None:
-    """A file Django cannot size (no ``size`` / name / seekable stream) reports ``size=None``."""
-
-    class OpaqueStream:
-        pass
-
-    # basedpyright: the stream is the hostile shape under test (no ``size``, ``name``, ``seek``
-    # or ``tell``); File types its argument as an IO stream
-    metadata = serializer_resolvers._upload_metadata(File[bytes](OpaqueStream()))  # pyright: ignore[reportArgumentType]
-    assert isinstance(metadata, UploadMetadata)
-    assert metadata.name is None
-    assert metadata.size is None
-    assert metadata.content_type is None
-
-
-@pytest.mark.parametrize(
-    "bad_context",
-    [
-        123,
-        "not-a-mapping",
-        [("key", "val")],
-        True,
-    ],
-)
-def test_merged_serializer_kwargs_rejects_non_mapping_context(bad_context: object) -> None:
-    """`get_serializer_kwargs` returning a non-mapping `context` raises `ConfigurationError`."""
-    mutation_cls = _bind_item_serializer_mutation(_basic_item_serializer())
-    req = HttpRequest()
-    req.user = User(username="u")
-    info = make_info(context=SimpleNamespace(request=req))
-    hook_ctx = _hook_ctx(operation="create", alias="default", instance_pk=None)
-
-    class BadContextMutation(mutation_cls):
-        @override
-        def get_serializer_kwargs(
-            self,
-            info: strawberry.Info,
-            *,
-            data: Mapping[str, object],
-            hook_context: SerializerHookContext,
-        ) -> dict[str, object]:
-            return {"context": bad_context}
-
-    with pytest.raises(ConfigurationError, match="returned a `context` that is not a mapping"):
-        serializer_resolvers._merged_serializer_kwargs(
-            BadContextMutation,
-            info,
-            final_data={},
-            instance=None,
-            alias="default",
-            hook_context=hook_ctx,
-        )
-
-
-def test_merged_serializer_kwargs_context_mapping_error_propagates() -> None:
-    """A `context` mapping returned by `get_serializer_kwargs` that raises while copied propagates."""
-    mutation_cls = _bind_item_serializer_mutation(_basic_item_serializer())
-    req = HttpRequest()
-    req.user = User(username="u")
-    info = make_info(context=SimpleNamespace(request=req))
-    hook_ctx = _hook_ctx(operation="create", alias="default", instance_pk=None)
-
-    class ExplodingMapping(Mapping[str, object]):
-        @override
-        def __getitem__(self, key: str) -> NoReturn:
-            raise RuntimeError("boom on read")
-
-        @override
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("boom on iter")
-
-        @override
-        def __len__(self) -> int:
-            return 1
-
-    class ExplodingContextMutation(mutation_cls):
-        @override
-        def get_serializer_kwargs(
-            self,
-            info: strawberry.Info,
-            *,
-            data: Mapping[str, object],
-            hook_context: SerializerHookContext,
-        ) -> dict[str, object]:
-            return {"context": ExplodingMapping()}
-
-    with pytest.raises(RuntimeError, match="boom on iter"):
-        serializer_resolvers._merged_serializer_kwargs(
-            ExplodingContextMutation,
-            info,
-            final_data={},
-            instance=None,
-            alias="default",
-            hook_context=hook_ctx,
-        )
-
-
-def test_merged_serializer_kwargs_preserves_custom_context_keys() -> None:
+def test_serializer_kwargs_preserves_custom_context_keys() -> None:
     """`get_serializer_kwargs` custom `context` keys are preserved alongside request and write_alias."""
     mutation_cls = _bind_item_serializer_mutation(_basic_item_serializer())
 
@@ -6371,7 +4752,7 @@ def test_merged_serializer_kwargs_preserves_custom_context_keys() -> None:
     info = make_info(context=SimpleNamespace(request=req))
     hook_ctx = _hook_ctx(operation="create", alias="default", instance_pk=None)
 
-    kwargs = serializer_resolvers._merged_serializer_kwargs(
+    kwargs = serializer_resolvers._serializer_kwargs(
         CustomContextMutation,
         info,
         final_data={"name": "test"},
@@ -6518,8 +4899,8 @@ def test_decode_nested_multi_tolerates_none_item_in_list() -> None:
         registry.clear()
 
 
-def test_hook_context_and_upload_metadata_invariants() -> None:
-    """``SerializerHookContext`` and ``UploadMetadata`` are frozen, slotted, and immutable."""
+def test_hook_context_invariants() -> None:
+    """``SerializerHookContext`` is frozen, slotted, and immutable."""
     ctx = SerializerHookContext(
         operation="update",
         write_alias="default",
@@ -6542,29 +4923,6 @@ def test_hook_context_and_upload_metadata_invariants() -> None:
     )
     assert ctx == ctx_same
     assert hash(ctx) == hash(ctx_same)
-
-    meta = UploadMetadata(
-        name="photo.jpg",
-        size=2048,
-        content_type="image/jpeg",
-    )
-    assert meta.name == "photo.jpg"
-    assert meta.size == 2048
-    assert meta.content_type == "image/jpeg"
-    assert not hasattr(meta, "__dict__")
-
-    with pytest.raises(FrozenInstanceError):
-        # basedpyright: the write to the frozen dataclass field is the mutation under test; the
-        # checker rejects assignment to a frozen field
-        meta.name = "other.jpg"  # pyright: ignore[reportAttributeAccessIssue]
-
-    meta_same = UploadMetadata(
-        name="photo.jpg",
-        size=2048,
-        content_type="image/jpeg",
-    )
-    assert meta == meta_same
-    assert hash(meta) == hash(meta_same)
 
 
 def test_decode_nested_multi_decodes_items_and_handles_item_error() -> None:
@@ -6647,20 +5005,6 @@ def test_serializer_decode_step_returns_field_errors_on_decode_failure() -> None
 # classes through `utils/truth.py`, which reads the interpreter's own class name,
 # never a metaclass `__name__`; an ordinary class renders byte-identically.
 # Direct-called throughout: no wire query can declare a class.
-
-
-def test_hook_mapping_honest_label_is_byte_identical() -> None:
-    """The honest hook-mapping message renders its exact text."""
-    honest = type("HonestM", (), {})
-    with pytest.raises(ConfigurationError) as exc_info:
-        serializer_resolvers._hook_mapping(
-            _as_serializer_mutation(honest),
-            "get_serializer_kwargs()",
-            None,
-        )
-    assert str(exc_info.value) == (
-        "SerializerMutation HonestM.get_serializer_kwargs() must return a mapping; got NoneType."
-    )
 
 
 def test_agreement_missing_field_honest_labels_are_byte_identical() -> None:
