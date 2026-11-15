@@ -24,7 +24,6 @@ from django.db.models.functions import Lower
 from django.test.utils import isolate_apps
 from typing_extensions import override
 
-from django_strawberry_framework.connection import _ends_in_unique_column
 from django_strawberry_framework.exceptions import OptimizerError
 from django_strawberry_framework.keyset import (
     CursorState,
@@ -1338,10 +1337,6 @@ class TestDeterministicOrder:
         # Already ends in a unique column -> unchanged.
         assert deterministic_order(("name",), Category) == ("name",)
         assert deterministic_order(("id",), Item) == ("id",)
-
-    def test_deterministic_order_matches_connection_reexport(self) -> None:
-        """``connection.py`` re-exports the same ``ends_in_unique_column`` (one source)."""
-        assert _ends_in_unique_column is ends_in_unique_column
 
     def test_ends_in_unique_column_defensive_for_non_model(self) -> None:
         """Non-model objects without ``_meta`` safely return False."""

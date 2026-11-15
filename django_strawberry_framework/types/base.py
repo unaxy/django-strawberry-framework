@@ -643,7 +643,8 @@ def _is_auto_annotation(annotation: object) -> bool:
     if isinstance(annotation, StrawberryAuto):
         return True
     # The package's ``auto`` annotates ``object``, which Strawberry's check does not
-    # accept; its marker is matched by identity, so no metadata ``__eq__`` runs.
+    # accept; its marker is found with ``in``, which compares each metadata entry by
+    # identity and then by ``==``.
     if (
         typing.get_origin(annotation) is Annotated
         and _AUTO_MARKER in typing.get_args(annotation)[1:]
@@ -1363,8 +1364,11 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     ``Meta.interfaces`` tuple.
 
     A Django lazy proxy (``SimpleLazyObject``) forwards ``__class__`` but is not the class it
-    stands for, so every key refuses it with the same ``ConfigurationError`` as any other
-    malformed value (``utils/lazy.py`` states the rule).
+    stands for: a key whose gate reads the real type (``Meta.model``, ``Meta.fields``,
+    ``Meta.name``, ``Meta.description``, an interface entry) refuses it with the same
+    ``ConfigurationError`` as any other malformed value, and a key whose gate only iterates
+    or compares (``Meta.interfaces`` as a whole, ``Meta.globalid_strategy``) reads through
+    it (``utils/lazy.py`` states the rule).
 
     Validation order:
 
@@ -1677,10 +1681,10 @@ def _hinted_prefetch_seed_defect(model: type[models.Model], prefetch: object) ->
     prefetch_state = instance_state(prefetch)
     queryset = prefetch_state.get("queryset")
     to_attr = prefetch_state.get("to_attr")
-    if queryset is None or (isinstance(to_attr, str) and introspection.text(to_attr) != ""):
+    if queryset is None or (is_str(to_attr) and introspection.text(to_attr) != ""):
         return None
     through = prefetch_state.get("prefetch_through")
-    lookup = introspection.text(through) if isinstance(through, str) else None
+    lookup = introspection.text(through) if is_str(through) else None
     if lookup is None:
         return None
     target = _prefetch_relation_target_or_none(model, lookup)

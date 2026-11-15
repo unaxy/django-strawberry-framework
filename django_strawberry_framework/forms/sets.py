@@ -139,13 +139,13 @@ _ALLOWED_PLAIN_FORM_META_KEYS: frozenset[str] = COMMON_WRITE_META_KEYS | frozens
 _ABSENT = object()
 
 # The model-less declaration registry for the plain ``DjangoFormMutation`` flavor
-# (spec-038 Decision 13). A SECOND, disjoint ledger from the ``036``
-# ``_mutation_registry`` - the dedup / post-finalize reject / clear mechanics are
+# (spec-038 Decision 13). A SECOND, disjoint ledger from the model-flavor registry in
+# ``mutations/sets.py`` - the dedup / post-finalize reject / clear mechanics are
 # single-sourced via ``make_declaration_registry``, the storage is separate.
 # ``register_form_mutation`` / ``clear_form_mutation_registry`` /
 # ``iter_form_mutations`` are the public names ``registry.py`` (the co-clear),
 # ``DjangoFormMutationMetaclass``, ``bind_form_mutations``, and the tests
-# reference; ``_form_mutation_registry`` is the backing list the tests introspect.
+# reference.
 _form_mutation_declaration_registry: DeclarationRegistry[type[DjangoFormMutation]] = (
     make_declaration_registry("DjangoFormMutation")
 )
@@ -156,7 +156,6 @@ clear_form_mutation_registry: Callable[[], None] = _form_mutation_declaration_re
 iter_form_mutations: Callable[[], tuple[type[DjangoFormMutation], ...]] = (
     _form_mutation_declaration_registry.iter_
 )
-_form_mutation_registry = _form_mutation_declaration_registry.store
 register_subsystem_clear(clear_form_mutation_registry, owner="forms.declarations")
 
 

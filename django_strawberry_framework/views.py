@@ -1149,13 +1149,15 @@ def _evaluate_request_user(request: HttpRequest) -> None:
 class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValue]):
     """The package's synchronous Django GraphQL view.
 
-        A subclass of ``strawberry.django.views.GraphQLView`` that overrides two
-        things on the request's way in. The raw request body: the cumulative cap,
-        enforced at the top of ``run`` (spec-046 Decision 7), and the strict UTF-8
-        decode of the bytes that survive it (Decision 9). And the JSON decode of
-        every document the request carries (``decode_json``: the body, the GET
-        ``variables`` / ``extensions`` parameters and the multipart ``operations`` /
-        ``map`` fields), which answers an integer literal past the interpreter's
+        A subclass of ``strawberry.django.views.GraphQLView`` that overrides the
+        request's way in. The raw request body: the cumulative cap, enforced at the
+        top of ``run`` (spec-046 Decision 7), and the strict UTF-8 decode of the
+        bytes that survive it (``parse_json``, Decision 9). The documents the
+        request carries: the GET ``variables`` / ``extensions`` parameters
+        (``parse_query_params``), the multipart ``operations`` / ``map`` fields
+        (``parse_multipart``, which refuses lossily-decoded control fields and a
+        malformed ``map``), and the JSON decode of each of those and of the body
+        (``decode_json``), which answers an integer literal past the interpreter's
         digit limit with upstream's own ``400`` instead of a ``500`` (Decision 9).
         Everything else is inherited: every upstream ``as_view()`` keyword still
         applies and behaves identically - ``schema``, ``graphql_ide``,

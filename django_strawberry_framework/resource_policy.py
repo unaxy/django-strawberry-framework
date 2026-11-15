@@ -494,12 +494,11 @@ class ResourcePolicy:
 DEFAULT_RESOURCE_POLICY = ResourcePolicy()
 
 #: The package's own fail-closed budget, and the one every seam in the package
-#: falls back to: the miss path of :func:`policy_from_info`, the resource
-#: extension's unconfigured schema, and the record answered for a schema that
-#: settled none. Built once, at import, from the values the template was declared
-#: with, so it carries the package's bounds rather than whatever the exported
-#: object holds now; being reachable from no exported name is what makes
-#: enforcing a tampered default impossible rather than merely discouraged.
+#: falls back to: the miss path of :func:`policy_from_info` and the resource
+#: extension's unconfigured schema. Built once, at import, from the values the
+#: template was declared with, so it carries the package's bounds rather than
+#: whatever the exported object holds now; being reachable from no exported name is
+#: what makes enforcing a tampered default impossible rather than merely discouraged.
 _PACKAGE_RESOURCE_POLICY = canonical_policy(
     DEFAULT_RESOURCE_POLICY,
     policy_cls=ResourcePolicy,
@@ -914,11 +913,6 @@ def policy_from_info(info: object) -> ResourcePolicy:
     policy is
     therefore always bounded, including under a plain ``strawberry.Schema`` that
     never installed the extension, and never needs a ``None`` branch of its own.
-
-    An ended operation's budget answers nothing, which is what makes the
-    ``info`` argument the authority again for a caller running outside every
-    operation: a background task that outlived the request it was started from
-    reads the context it was handed rather than the ceiling that request had.
     """
     budget = _armed_budget()
     if budget is not None:

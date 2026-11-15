@@ -33,12 +33,13 @@ The clone keeps the queryset's own class, drops any fetched rows, and bakes a
 related manager's pending filter, so a surface never windows stale or shared
 rows and never composes onto the hook's own object. The checks refuse a value
 that is not a ``QuerySet``, a queryset over another table, a sliced query a
-surface would recompose onto, a projection where model rows are required, and a
-queryset routed off the resolution's alias. A ``union()`` / ``intersection()`` /
-``difference()`` is served as the set of primary keys it selects, rewritten as a
-``pk__in`` membership test the recomposing surfaces can narrow; a combinator
-with a branch over another model, or whose rows that rewrite would change, fails
-closed.
+surface would recompose onto, a projection where model rows are required, a
+queryset routed off the resolution's alias, and a ``Prefetch`` child, at any
+depth, over a model its relation does not target or routed off that alias. A
+``union()`` / ``intersection()`` / ``difference()`` is served as the set of
+primary keys it selects, rewritten as a ``pk__in`` membership test the
+recomposing surfaces can narrow; a combinator with a branch over another model,
+or whose rows that rewrite would change, fails closed.
 
 Caller-specific tails stay with their caller: the connection field keeps its
 GraphQL non-queryset error (it calls ``normalize_query_source`` then guards),
@@ -46,12 +47,12 @@ the Relay node defaults keep their id filter, the optimizer keeps plan
 building, and the filter related derive keeps its per-branch recursion. This
 module owns only the source normalization + the colored visibility calls.
 
-Cycle-safe by construction: it depends on ``django``, ``asgiref``,
-``strawberry``'s context probe, ``..exceptions``, and the write-transaction
-ContextVar helpers, so
-``types/relay.py`` (imported at module top by ``types/base.py``) can import
-from here without closing a load cycle, and it never imports back into
-filters / orders / mutations / permissions.
+Cycle-safe by construction: it depends on ``django``, ``asgiref``, ``..conf``,
+``..exceptions``, ``..registry`` and its own ``utils`` siblings (the
+write-transaction ContextVar helpers among them), so ``types/relay.py``
+(imported at module top by ``types/base.py``) can import from here without
+closing a load cycle, and it never imports back into filters / orders /
+mutations / permissions.
 """
 
 from __future__ import annotations
@@ -2167,27 +2168,67 @@ def _foreign_combined_model(query: sql.Query, concrete: type[models.Model] | Non
     return None
 
 
-def _with_combined_prefetch_children_rewritten(
+def _with_prefetch_children_served(
     queryset: _QuerySetT,
+    alias: str | None,
 ) -> tuple[_QuerySetT, None] | tuple[None, tuple[str, str]]:
-    """Serve each combined ``Prefetch`` child of ``queryset``, at any depth, as its primary-key set.
+    """Check and serve each ``Prefetch`` child of ``queryset``, at any depth.
 
-    Django's prefetch filters a child by its relation (``.filter()`` / ``.extra()``),
-    which it refuses after a combinator, and it hoists a child's own lookups into the
-    outer prefetch, whose relation predicate a combinator's compiler ignores; so a
-    ``Prefetch(..., queryset=a.union(b))`` child is rewritten the way a combined hook
-    result is, however deep it sits. A child over another model's table is the ``table``
-    defect and a shape the rewrite would change is ``combined``. ``queryset`` is returned
-    as it is when no child below it changed.
+    Django's prefetch hands a child's rows to the lookup's relation without checking
+    the child's model (Django ticket #37267), so a child whose concrete model is not
+    the relation target's concrete model (or a subclass of it) would populate the
+    relation with rows the related type's visibility hook never saw; and a child
+    explicitly routed off ``alias`` (the outer effective alias, ``None`` for an
+    unrouted parent) would split one resolution across two connections. Both are the
+    ``prefetch`` defect. A path ``_prefetch_relation_target_or_none`` cannot resolve
+    is left to Django, and an unrouted child inherits the outer alias at fetch.
+
+    Django's prefetch also filters a child by its relation (``.filter()`` /
+    ``.extra()``), which it refuses after a combinator, and it hoists a child's own
+    lookups into the outer prefetch, whose relation predicate a combinator's compiler
+    ignores; so a ``Prefetch(..., queryset=a.union(b))`` child is rewritten the way a
+    combined hook result is, however deep it sits. A child over another model's table
+    is the ``table`` defect and a shape the rewrite would change is ``combined``.
+    ``queryset`` is returned as it is when no child below it changed.
     """
     rewritten: list[PrefetchLookup] = []
     changed = False
+    parent = queryset.model
     for lookup in queryset_prefetch_lookups(queryset):
         child = None if is_str(lookup) else lookup.queryset
         if is_str(lookup) or child is None:
             rewritten.append(lookup)
             continue
-        served = _served_prefetch_child(child)
+        path = lookup.prefetch_through
+        target = _prefetch_relation_target_or_none(parent, path)
+        target_concrete = _concrete_or_none(target)
+        child_concrete = _concrete_or_none(child.model)
+        if (
+            target_concrete is not None
+            and child_concrete is not None
+            and not issubclass(child_concrete, target_concrete)
+        ):
+            return None, (
+                "prefetch",
+                (
+                    f"{truth.name(parent)} prefetch {path!r} queryset is over "
+                    f"{truth.name(child.model)} rows, but the {path!r} relation targets "
+                    f"{truth.name(target)} rows; a prefetch child over an unrelated table "
+                    "would populate the relation with rows the related type's visibility "
+                    "hook never saw"
+                ),
+            )
+        child_db = queryset_db(child)
+        if child_db is not None and child_db != alias:
+            return None, (
+                "prefetch",
+                (
+                    f"{truth.name(parent)} prefetch {path!r} queryset is routed to alias "
+                    f"{child_db!r}, but this resolution reads alias {alias!r}; one "
+                    "resolution never spans two database connections"
+                ),
+            )
+        served = _served_prefetch_child(child, alias)
         if served[1] is not None:
             return None, served[1]
         if served[0] is child:
@@ -2204,12 +2245,13 @@ def _with_combined_prefetch_children_rewritten(
 
 def _served_prefetch_child(
     child: _QuerySetT,
+    alias: str | None,
 ) -> tuple[_QuerySetT, None] | tuple[None, tuple[str, str]]:
-    """Return ``child`` with its own combined children and combinator served as primary-key sets.
+    """Return ``child`` with its own children checked and combinators served as primary-key sets.
 
     ``child`` itself is returned when nothing in it changed.
     """
-    nested = _with_combined_prefetch_children_rewritten(child)
+    nested = _with_prefetch_children_served(child, alias)
     if nested[1] is not None:
         return None, nested[1]
     served = nested[0]
@@ -2248,9 +2290,10 @@ def _seal_or_defect(
     checks catch the shapes a surface cannot compose onto.
 
     The codes ``type`` / ``table`` / ``routing`` / ``evaluated`` / ``sliced`` /
-    ``projection`` / ``combined`` / ``alias`` are the one vocabulary every
-    message-building site shares (a new code owes an arm at every site that can
-    reach it). The checks run in this order:
+    ``projection`` / ``combined`` / ``prefetch`` / ``alias`` are the one vocabulary
+    every message-building site shares (a new code owes an arm at every site that can
+    reach it; ``prefetch`` carries its whole clause and ``_defect_message`` renders it
+    for every site). The checks run in this order:
 
     - ``type`` -- not a ``QuerySet`` at all.
     - ``table`` -- the queryset's model, or a combinator branch's, is not the
@@ -2287,6 +2330,10 @@ def _seal_or_defect(
       ``.filter()`` / ``.only()`` after a combinator and silently drops a
       reverse-FK ``Prefetch``'s parent predicate from one. A branch over another
       model is the ``table`` defect.
+    - ``prefetch`` -- a ``Prefetch`` child, at any depth, over a model that is not
+      its relation's target, or explicitly routed off the effective alias
+      (``_with_prefetch_children_served``). A combined child is served like a
+      combined candidate.
     - ``alias`` -- a queryset explicitly routed off ``required_alias``. For a
       top-level source an UNROUTED queryset (``_db is None``) is never an alias
       defect; the seal pins it with ``.using(required_alias)``. For a prefetch
@@ -2333,7 +2380,10 @@ def _seal_or_defect(
         if rewritten[1] is not None:
             return None, rewritten[1]
         queryset.query = rewritten[0]
-    with_children = _with_combined_prefetch_children_rewritten(queryset)
+    with_children = _with_prefetch_children_served(
+        queryset,
+        db if db is not None else required_alias,
+    )
     if with_children[1] is not None:
         return None, with_children[1]
     queryset = with_children[0]
@@ -2412,11 +2462,14 @@ def _defect_message(messages: dict[str, str], defect: tuple[str, str], subject: 
 
     Each site owns its own prose (a cascade edge names the edge, a read surface
     names ``get_queryset``); what is shared is the dispatch and the
-    exhaustiveness, plus the one clause text no surface respells -- the
-    combined-queryset contract (``_COMBINED_WHAT``) -- composed under the
-    site's own subject.
+    exhaustiveness, plus the clause text no surface respells: the
+    combined-queryset contract (``_COMBINED_WHAT``), composed under the site's own
+    subject, and the ``prefetch`` defect, whose detail names the child and the
+    relation it was refused for and is rendered here for every site.
     """
     code, detail = defect
+    if code == "prefetch":
+        return f"{subject} was refused: its {detail}."
     message = messages.get(code)
     if message is None:
         return (
@@ -2621,6 +2674,12 @@ def _prepared_visibility_source(
                         f"source; the visibility contract composes over {model_name} model "
                         f"rows, not a .values() / .values_list() (or custom-iterable) "
                         f"projection."
+                    ),
+                    "alias": (
+                        f"apply_type_visibility for {name} got a source queryset routed to "
+                        f"alias {detail!r}, but a prefetch child shares its parent's database "
+                        f"connection and this one's parent is unrouted. Remove the "
+                        f".using(...) call."
                     ),
                 },
                 defect,

@@ -78,7 +78,6 @@ from django_strawberry_framework.mutations.inputs import (
 )
 from django_strawberry_framework.mutations.sets import (
     DjangoMutationMetaclass,
-    _mutation_registry,
     _resolve_primary_type,
     _shape_build_cache,
     _validate_input_class,
@@ -763,7 +762,7 @@ def test_registration_is_idempotent() -> None:
             operation = "create"
 
     register_mutation(CreateItem)
-    assert _mutation_registry.count(CreateItem) == 1
+    assert iter_mutations().count(CreateItem) == 1
 
 
 def test_late_declaration_after_finalize_raises() -> None:

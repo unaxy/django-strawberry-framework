@@ -25763,6 +25763,45 @@ def test_library_consumer_prefetched_relation_keeps_target_visibility_over_http(
     }
 
 
+@pytest.mark.django_db
+def test_library_prefetch_child_over_unrelated_table_is_refused_over_http() -> None:
+    """A proxy relation target does not widen the child rule to any model.
+
+    ``allLibraryBranchNotesOverUnrelatedChild`` prefetches the same
+    proxy-targeted ``branch`` relation with a child over ``library_genre``.
+    Reducing both sides of the comparison to their concrete model admits the
+    proxy's own table and nothing else, so this child is refused and the
+    request fails closed rather than populating ``branch`` with genre rows no
+    visibility hook ever saw.
+    """
+    _seed_branch_notes()
+
+    query = "query { allLibraryBranchNotesOverUnrelatedChild { body branch { name } } }"
+    response = _post_graphql(query)
+
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert payload["data"] is None, payload
+    assert [json_at(error, "path") for error in json_list(payload, "errors")] == [
+        ["allLibraryBranchNotesOverUnrelatedChild"],
+    ]
+    # The shipped error policy masks the seal's own detail.
+    assert json_at(payload, "errors", 0, "message") == "An unexpected error occurred."
+
+    # Under error policy debug pass-through, the seal's refusal travels over the wire.
+    with override_settings(**_ERROR_POLICY_PASS_THROUGH):
+        debug_response = _post_graphql(query)
+    debug_payload = response_json(debug_response)
+    assert debug_payload["data"] is None, debug_payload
+    debug_message = json_str(debug_payload, "errors", 0, "message")
+    assert "prefetch 'branch' queryset is over Genre rows" in debug_message
+    assert "relation targets ProxyBranch rows" in debug_message
+    assert (
+        "a prefetch child over an unrelated table would populate the relation with "
+        "rows the related type's visibility hook never saw"
+    ) in debug_message
+
+
 # ---------------------------------------------------------------------------
 # Blank-admitting choice column (``Shelf.condition``) and nullable list elements
 # ---------------------------------------------------------------------------

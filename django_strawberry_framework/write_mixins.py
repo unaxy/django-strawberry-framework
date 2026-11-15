@@ -486,8 +486,7 @@ class DeclarationRegistry(Generic[_DeclarationT]):
 
     A flat named bundle (not a tuple of bare callables) so a caller assigns the
     three public functions to module-level names AND keeps a handle on the backing
-    ``store`` list for the tests that introspect it directly (e.g. the
-    ``_mutation_registry.count(...)`` idempotency assertion). ``register`` /
+    ``store`` list for the tests that introspect it directly. ``register`` /
     ``clear`` / ``iter_`` carry the dedup / clear / snapshot mechanics; ``store``
     is the disjoint list they close over. Generic over the declaration class each
     ledger records (a frozen dataclass, not a ``NamedTuple``: a generic

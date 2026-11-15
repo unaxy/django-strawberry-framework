@@ -162,7 +162,14 @@ def apply_interfaces(type_cls: type[DjangoType], definition: DjangoTypeDefinitio
             (spec-015 Decision 1 #"never as a raw layout error").
 
     """
-    additions = tuple(iface for iface in definition.interfaces if not issubclass(type_cls, iface))
+    # An MRO identity test, never ``issubclass`` or ``in``: neither an interface's own
+    # ``__subclasscheck__`` (a ``typing.Protocol``'s, an ABC's ``__subclasshook__``) nor a
+    # metaclass ``__eq__`` decides whether it is applied.
+    additions = tuple(
+        iface
+        for iface in definition.interfaces
+        if not any(base is iface for base in type_cls.__mro__)
+    )
     if not additions:
         return
     try:
@@ -1015,7 +1022,9 @@ def decode_global_id(
     Steps (the candidate resolution and strategy check follow spec-031 Decision 8):
 
     - **Input gate.** A value outside ``(relay.GlobalID, str)`` (``None``, an
-      ``int``, a lazy object) is rejected up front, before any parse.
+      ``int``, a lazy proxy of a ``str``) is rejected up front, before any parse;
+      a lazy proxy standing for a ``relay.GlobalID`` passes ``isinstance`` and is
+      read through the proxy.
     - **Parse.** A ``relay.GlobalID`` is read directly; a ``str`` is parsed via
       ``relay.GlobalID.from_id`` (catching the ``ValueError`` superset that covers
       ``GlobalIDValueError``). An empty ``type_name`` or empty ``node_id`` is

@@ -160,8 +160,7 @@ register_subsystem_clear(clear_mutation_shape_build_cache, owner="mutations.shap
 # SECOND, disjoint list - the dedup / reject / clear logic is single-sourced while
 # the two ledgers stay separate. ``register_mutation`` / ``clear_mutation_registry``
 # / ``iter_mutations`` stay the importable public names ``registry.py`` (the
-# co-clear), the metaclass, ``mutations/fields.py``, and the tests reference;
-# ``_mutation_registry`` stays the backing list the idempotency tests introspect.
+# co-clear), the metaclass, ``mutations/fields.py``, and the tests reference.
 _mutation_declaration_registry: DeclarationRegistry[type[DjangoMutation]] = (
     make_declaration_registry("DjangoMutation")
 )
@@ -170,7 +169,6 @@ clear_mutation_registry: Callable[[], None] = _mutation_declaration_registry.cle
 iter_mutations: Callable[[], tuple[type[DjangoMutation], ...]] = (
     _mutation_declaration_registry.iter_
 )
-_mutation_registry = _mutation_declaration_registry.store
 register_subsystem_clear(clear_mutation_registry, owner="mutations.declarations")
 
 

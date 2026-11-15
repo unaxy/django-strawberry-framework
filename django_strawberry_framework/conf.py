@@ -70,9 +70,9 @@ APPLY_UPSTREAM_PATCHES_KEY = "APPLY_UPSTREAM_PATCHES"
 # Canonical ``APPLY_UPSTREAM_PATCHES`` mapping keys - one name per patch
 # module, matching the package's one-module-per-dependency organizing rule.
 # ``strawberry`` owns the Relay connection-page rebind. Disabling it at startup
-# restores upstream's empty renamed pages on package offset connections (the
-# keyset page decides itself). The package views' request-body refusals are not
-# gated by this setting.
+# restores upstream's empty renamed pages on package offset connections under the
+# synchronous executor (the keyset page decides itself). The package views'
+# request-body refusals are not gated by this setting.
 UPSTREAM_PATCH_DEPENDENCIES = frozenset(
     {"strawberry"},
 )

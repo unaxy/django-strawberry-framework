@@ -233,7 +233,6 @@ _auth_declaration_registry: DeclarationRegistry[_AuthDeclaration] = make_declara
 register_auth_mutation: Callable[[_AuthDeclaration], None] = _auth_declaration_registry.register
 clear_auth_mutation_registry: Callable[[], None] = _auth_declaration_registry.clear
 iter_auth_mutations: Callable[[], tuple[_AuthDeclaration, ...]] = _auth_declaration_registry.iter_
-_auth_declarations = _auth_declaration_registry.store
 register_subsystem_clear(clear_auth_mutation_registry, owner="auth.declarations")
 
 

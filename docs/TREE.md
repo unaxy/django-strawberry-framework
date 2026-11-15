@@ -700,7 +700,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_relations.py         # Relation utility tests for kinds, many-side detection, instance accessors, and package re-exports.
     ├── test_sessions.py          # Behavioral tests for the session-engine resolver and connection actor lease.
     ├── test_strings.py           # String utility tests for Pascal case conversion and Django lookup-path flattening.
-    ├── test_truth.py             # Tests for ``django_strawberry_framework/utils/truth.py``: identity reads a consumer cannot fake.
+    ├── test_truth.py             # Tests for ``django_strawberry_framework/utils/truth.py``: its identity reads a consumer cannot fake.
     ├── test_typing.py            # Typing utility tests for async-callable detection and Strawberry and GraphQL unwrapping.
     ├── test_widgets.py           # Tests for the form-data keys a widget reads (``utils/widgets.py``).
     └── test_write_values.py      # Direct pins of write-value decode internals a GraphQL request cannot name.
@@ -1105,7 +1105,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_relations.py         # Relation utility tests for kinds, many-side detection, instance accessors, and package re-exports.
     ├── test_sessions.py          # Behavioral tests for the session-engine resolver and connection actor lease.
     ├── test_strings.py           # String utility tests for Pascal case conversion and Django lookup-path flattening.
-    ├── test_truth.py             # Tests for ``django_strawberry_framework/utils/truth.py``: identity reads a consumer cannot fake.
+    ├── test_truth.py             # Tests for ``django_strawberry_framework/utils/truth.py``: its identity reads a consumer cannot fake.
     ├── test_typing.py            # Typing utility tests for async-callable detection and Strawberry and GraphQL unwrapping.
     ├── test_widgets.py           # Tests for the form-data keys a widget reads (``utils/widgets.py``).
     └── test_write_values.py      # Direct pins of write-value decode internals a GraphQL request cannot name.

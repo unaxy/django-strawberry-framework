@@ -269,11 +269,12 @@ class DjangoErrorPolicyExtension(_OperationBoundExtension[OperationState]):
     ``DjangoSchema`` installs one of these on every operation and is the only
     thing that can: the policy object is resolved once at schema construction
     and read from ``schema.error_policy``, and an entry that resolves to one of
-    these on a request already running is refused rather than admitted. A
+    these on a request already running raises ``ConfigurationError``. A
     ``DjangoSchema(extensions=[...])`` entry that IS this class, or an exact
     instance of it, is read as a declaration of the schema's own masker and
     does not travel into the chain; a subclass is refused at construction, and a
-    factory resolving to either refuses the operation.
+    factory resolving to either raises ``ConfigurationError`` when the operation
+    resolves it.
 
     **Which result is masked is per-operation state, not an attribute.** The
     teardown reads the completed result off the operation's engine context, and

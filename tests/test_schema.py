@@ -195,7 +195,7 @@ def test_schema_init_with_none_execution_context_class_falls_back() -> None:
 
 
 def test_consumer_extension_entries_shapes() -> None:
-    """What travels as configuration, and what is read once and folded into the record."""
+    """What travels as configuration, and what is read once and folded into the schema's policy."""
     assert _consumer_extension_entries(None) == ([], None)
     assert _consumer_extension_entries([]) == ([], None)
     assert _consumer_extension_entries([_MarkerExtension]) == ([_MarkerExtension], None)
@@ -545,7 +545,7 @@ def test_a_policy_declared_by_an_entry_becomes_the_schemas_own() -> None:
     Keeping the entry would leave the object a resolver reaches through
     ``info.schema.extensions`` deciding what the next request is bounded by;
     dropping what it declared would answer the deployment with a ceiling it did
-    not choose. The record takes the declaration and the entry does not travel.
+    not choose. The schema's policy takes the declaration and the entry does not travel.
     """
     schema = DjangoSchema(
         query=_BoundedRowQuery,
@@ -555,52 +555,6 @@ def test_a_policy_declared_by_an_entry_becomes_the_schemas_own() -> None:
     assert schema.extensions == ()
     assert schema.resource_policy.max_list_rows == 1
     assert schema.execute_sync("{ rows }").data == {"rows": ["a"]}
-
-
-class _SlottedFactory:
-    """A valid extension factory whose layout admits no weak reference.
-
-    ``__slots__`` without ``__weakref__`` is an ordinary, supported way to write
-    a callable, and Strawberry runs one exactly as it runs any other factory.
-    Refusing it would be refusing a memory layout rather than a configuration.
-    """
-
-    __slots__ = ()
-
-    def __call__(self) -> _MarkerExtension:
-        return _MarkerExtension()
-
-
-class _WeakReferenceableFactory:
-    """The control: the same factory, with the layout a weak reference can be taken of."""
-
-    def __call__(self) -> _MarkerExtension:
-        return _MarkerExtension()
-
-
-@pytest.mark.parametrize(
-    "factory",
-    [_SlottedFactory, _WeakReferenceableFactory],
-    ids=["slotted-callable", "weak-referenceable-control"],
-)
-def test_a_slotted_callable_factory_is_accepted_and_runs(
-    factory: type[_SlottedFactory | _WeakReferenceableFactory],
-) -> None:
-    """A callable factory works whatever its object layout is.
-
-    Strawberry accepts either one, so a schema that refused the slotted form
-    would be refusing a configuration for a reason that has nothing to do with
-    what runs the operation. Both build the extension per operation and both
-    run it.
-    """
-    schema = DjangoSchema(
-        query=_RowQuery,
-        resource_policy=ResourcePolicy(max_list_rows=1),
-        extensions=[factory()],
-    )
-
-    assert schema.execute_sync("{ rows }").data == {"rows": ["a"]}
-    assert _MARKS == ["accepted"]
 
 
 @pytest.mark.parametrize(
@@ -615,9 +569,7 @@ def test_an_extension_entry_strawberry_could_not_resolve_is_refused(entry: objec
     by CALLING it otherwise, so a class, an instance and a factory are the three
     shapes that work. A builtin value is none of them and fails at the first
     operation, deep inside the engine, on a schema the deployment already
-    started; the refusal names it where it was supplied instead. What is NOT a
-    reason is a memory layout - see
-    ``test_a_slotted_callable_factory_is_accepted_and_runs``.
+    started; the refusal names it where it was supplied instead.
     """
     with pytest.raises(ConfigurationError, match="is none of those"):
         DjangoSchema(query=DummyQuery, extensions=_unchecked_entries(entry))
@@ -696,15 +648,6 @@ def test_widening_a_schema_policy_copy_leaves_the_schemas_own_bound() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _SlottedConsumerFactory:
-    """A valid consumer-extension factory in the layout that takes no weak reference."""
-
-    __slots__ = ()
-
-    def __call__(self) -> _MarkerExtension:
-        return _MarkerExtension()
-
-
 class _HybridFactory:
     """A factory returning one object that answers to both authorities."""
 
@@ -773,7 +716,6 @@ def test_a_factory_producing_an_enforcement_authority_raises_when_the_operation_
 @pytest.mark.parametrize(
     "entry",
     [
-        _SlottedConsumerFactory(),
         _MarkerExtension,
         _fresh_marker_factory,
         _singleton_marker_factory,
@@ -781,7 +723,6 @@ def test_a_factory_producing_an_enforcement_authority_raises_when_the_operation_
         _optimizer_singleton_factory,
     ],
     ids=[
-        "slotted-factory",
         "class",
         "fresh-factory",
         "singleton-factory",
@@ -790,11 +731,11 @@ def test_a_factory_producing_an_enforcement_authority_raises_when_the_operation_
     ],
 )
 def test_every_supported_entry_spelling_still_resolves_into_one_chain(entry: object) -> None:
-    """The controls that keep the refusals honest: every consumer spelling still runs.
+    """Every supported consumer spelling still runs.
 
-    A memory layout that takes no weak reference, a class, a module-level
-    function, a factory handing back one shared object and the optimizer's own
-    documented singleton-in-a-factory are configurations rather than defects.
+    A class, a module-level function, a factory handing back one shared object
+    and the optimizer's own documented singleton-in-a-factory are configurations
+    rather than defects.
     Each resolves between exactly one masking authority and exactly one resource
     authority, both of which are the schema's.
     """

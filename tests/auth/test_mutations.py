@@ -89,7 +89,6 @@ from django_strawberry_framework.auth import (
 )
 from django_strawberry_framework.auth import mutations as auth_mutations
 from django_strawberry_framework.auth.mutations import (
-    _auth_declarations,
     _declared_auth_surface,
     _make_permission_holder,
     _register_decode_step,
@@ -112,7 +111,7 @@ from django_strawberry_framework.mutations.resolvers import (
     StepFailure,
     _model_decode_step,
 )
-from django_strawberry_framework.mutations.sets import _mutation_registry
+from django_strawberry_framework.mutations.sets import iter_mutations
 from django_strawberry_framework.registry import (
     iter_subsystem_clears,
     registry,
@@ -360,7 +359,7 @@ def test_same_args_factory_calls_dedupe_to_one_cached_holder() -> None:
     holder = _declared_auth_surface("login")
     login_mutation()
     assert _declared_auth_surface("login") is holder
-    assert len(_auth_declarations) == 1
+    assert len(iter_auth_mutations()) == 1
 
 
 def test_presentation_kwargs_never_enter_the_conflict_key() -> None:
@@ -369,7 +368,7 @@ def test_presentation_kwargs_never_enter_the_conflict_key() -> None:
     holder = _declared_auth_surface("login")
     login_mutation(description="B", deprecation_reason="old")
     assert _declared_auth_surface("login") is holder
-    assert len(_auth_declarations) == 1
+    assert len(iter_auth_mutations()) == 1
 
 
 def test_conflicting_permission_classes_second_call_raises() -> None:
@@ -511,10 +510,10 @@ def test_declarations_survive_the_pre_bind_reset() -> None:
     """The pre-bind emit-ledger reset never touches the auth DECLARATION ledger."""
     login_mutation()
     logout_mutation()
-    assert len(_auth_declarations) == 2
+    assert len(iter_auth_mutations()) == 2
     for clear in iter_subsystem_clears(before_bind=True):
         clear()
-    assert len(_auth_declarations) == 2
+    assert len(iter_auth_mutations()) == 2
 
 
 def test_registry_clear_drains_ledger_and_resets_conflict_state() -> None:
@@ -690,8 +689,8 @@ def test_register_factory_recache_and_reregister_on_every_call() -> None:
     assert rider.__name__ == "Register"
     register_mutation()
     assert _declared_auth_surface("register") is rider
-    assert _mutation_registry.count(rider) == 1
-    assert _auth_declarations.count(rider) == 1
+    assert iter_mutations().count(rider) == 1
+    assert iter_auth_mutations().count(rider) == 1
     with pytest.raises(
         ConfigurationError,
         match=r"auth register_mutation\(\) is already declared",

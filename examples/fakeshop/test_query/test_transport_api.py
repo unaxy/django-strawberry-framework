@@ -1653,10 +1653,10 @@ def test_on_asgi_an_absent_or_lying_content_length_cannot_buy_a_larger_body(
     handler hands the application every byte it received regardless of the
     header, so with no declaration - or a declaration of ``10`` against a
     four-times-oversized payload - the only application-level bound left is the
-    real byte count. On the oldest supported Django (the ``5.2.16`` floor) it is
-    the ONLY bound at all, since the 5.2 series'
-    ``HttpRequest.body`` has no seekable actual-size check of its
-    own - which is exactly why the package performs its own size probe on the
+    real byte count. Django's own ``HttpRequest.body`` measures a seekable stream's
+    actual size, but that check is inert on Python 3.10, whose ASGI spool has no
+    ``seekable``, and absent on Django 6.0.0-6.0.3, so there the package's bound is
+    the only one - which is why the package performs its own size probe on the
     spooled body file rather than counting ``len(request.body)``. That the probe
     costs no read is a package-tier proof (``tests/test_views.py``); what this row
     owns is that the real handler, with the real middleware chain, produces the
@@ -1664,9 +1664,9 @@ def test_on_asgi_an_absent_or_lying_content_length_cannot_buy_a_larger_body(
 
     Deliberately DB-free and un-marked: the subject is the transport, so the row
     carries no database.
-    ``DATA_UPLOAD_MAX_MEMORY_SIZE`` is left alone here on purpose - it is the one
-    cell where the two supported Django versions diverge, so no ASGI row lowers
-    it.
+    ``DATA_UPLOAD_MAX_MEMORY_SIZE`` is left alone here on purpose: lowered under
+    ASGI, the outcome agrees across the supported Django versions but the mechanism
+    that produces it differs on Python 3.10, so no ASGI row lowers it.
     """
     with override_settings(ROOT_URLCONF=__name__):
         status, headers, body = _asgi_post(
@@ -1887,8 +1887,9 @@ def test_the_two_body_ceilings_are_distinguishable_by_the_response_they_produce(
     413`` wraps only ``ASGIRequest`` construction, which never touches the body;
     ``RequestDataTooBig`` is raised lazily from ``HttpRequest.body`` inside the
     view, where ``response_for_exception`` maps ``SuspiciousOperation`` to
-    ``400``. Deliberately WSGI-only: lowering Django's knob under the
-    ASGI harness is the single cell where the two Django versions diverge.
+    ``400``. Deliberately WSGI-only: lowered under the ASGI harness, Django's knob
+    gives the same outcome on every supported version, but by a different mechanism
+    on Python 3.10.
     """
     seed_data(1)
     body = _sized_body(_TINY_CAP * 4)
@@ -2461,6 +2462,43 @@ def test_a_multipart_map_must_be_an_object_not_a_batched_body(
     _assert_no_graphql_envelope(response)
 
 
+#: The reply to a multipart control field that parses to a JSON scalar or ``null``.
+_MULTIPART_ENVELOPE_REASON = (
+    b"The GraphQL request body must be a JSON object "
+    b"(or an array of operations for a batch request)."
+)
+
+#: Control-field pairs whose ``operations`` or ``map`` parses to no envelope at all.
+_NON_ENVELOPE_MULTIPART_FIELDS = (
+    pytest.param(
+        [("operations", b"42"), ("map", b"{}")],
+        id="scalar-operations",
+    ),
+    pytest.param(
+        [("operations", b'{"query": "{ __typename }"}'), ("map", b"null")],
+        id="null-map",
+    ),
+)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("fields", _NON_ENVELOPE_MULTIPART_FIELDS)
+def test_a_multipart_control_field_that_is_no_envelope_is_refused(
+    fields: list[tuple[str, bytes]],
+) -> None:
+    """A scalar ``operations`` or a ``null`` ``map`` is refused as no envelope, not a 500.
+
+    The envelope check covers the multipart control fields as it covers a body,
+    so neither reaches the upload utility, and the reply is the envelope reason.
+    """
+    seed_data(1)
+
+    response = _post_multipart(Client(raise_request_exception=False), "/graphql/", fields)
+
+    assert response.status_code == 400
+    assert response.content == _MULTIPART_ENVELOPE_REASON
+
+
 def test_a_multipart_consumer_json_hook_failure_is_not_downgraded_to_a_400() -> None:
     """A consumer ``parse_json`` raising its own exception reaches the server as raised.
 
@@ -2538,6 +2576,18 @@ async def test_the_async_view_rejects_the_same_multipart_map_shape() -> None:
 
     assert response.status_code == 400
     assert response.content == b"Unable to parse the multipart body"
+
+
+@pytest.mark.parametrize("fields", _NON_ENVELOPE_MULTIPART_FIELDS)
+async def test_the_async_view_refuses_the_same_multipart_control_field_that_is_no_envelope(
+    fields: list[tuple[str, bytes]],
+) -> None:
+    """The async multipart parser refuses the same non-envelope control fields."""
+    with override_settings(ROOT_URLCONF=__name__):
+        response = await _post_multipart(AsyncClient(), "/async-multipart/", fields)
+
+    assert response.status_code == 400
+    assert response.content == _MULTIPART_ENVELOPE_REASON
     _assert_no_graphql_envelope(response)
 
 

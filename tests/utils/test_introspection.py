@@ -13,7 +13,6 @@ import codecs
 import enum
 import functools
 import sys
-import types
 from typing import TYPE_CHECKING, TypeAlias
 
 import pytest
@@ -21,9 +20,7 @@ from django.db import models
 from typing_extensions import override
 
 from django_strawberry_framework.utils.introspection import (
-    is_classmethod,
     kind,
-    module,
     mro_attr,
     mro_entry,
     name,
@@ -150,25 +147,6 @@ class _Named:
 class _Outer:
     class Inner:
         pass
-
-
-@pytest.mark.parametrize(
-    ("obj", "expected"),
-    [
-        (_CM_WRAPPER, True),
-        (_CMSub(_cm_func), True),
-        (_SM_WRAPPER, False),
-        (_plain_func, False),
-        (_Base.cm, False),
-        (_Base(), False),
-    ],
-)
-def test_is_classmethod_accepts_the_wrapper_and_its_subclasses(
-    *,
-    obj: object,
-    expected: bool,
-) -> None:
-    assert is_classmethod(obj) is expected
 
 
 def test_stored_function_unwraps_exact_wrappers_and_bound_methods() -> None:
@@ -342,7 +320,7 @@ def test_text_spells_classes_as_their_metaclass_does() -> None:
     NoModule = type("NoModule", (), {"__module__": None})
     assert text(int) == "<class 'int'>"
     assert text(_Sub) == f"<class '{MODULE}._Sub'>"
-    assert text(_WithMetaRepr) == f"<class '{MODULE}._WithMetaRepr'>"
+    assert text(_WithMetaRepr) == "custom-repr"
     assert text(_Color) == "<enum '_Color'>"
     assert text(_Outer.Inner) == f"<class '{MODULE}._Outer.Inner'>"
     assert text(NoModule) == "<class 'NoModule'>"
@@ -398,52 +376,3 @@ def test_name_of_a_callable_instance_is_its_stored_name_unless_empty() -> None:
     assert name(instance) == "stored"
     vars(instance)["__name__"] = ""
     assert name(instance) == "_Callable"
-
-
-@pytest.mark.parametrize(
-    ("obj", "expected"),
-    [
-        (str.join, "builtins"),
-        (len, "builtins"),
-        ([1].append, "builtins"),
-        (int.__new__, "builtins"),
-        (int.real, "builtins"),
-        (object.__init__, "builtins"),
-        ((1).__add__, "builtins"),
-        (codecs.strict_errors, "<unknown module>"),
-        (_Base.meth, MODULE),
-        (_Base().meth, MODULE),
-        (_Base.cm, MODULE),
-        (_plain_func, MODULE),
-        (_CM_WRAPPER, "builtins"),
-        (_Base.prop, "builtins"),
-        (_Base(), MODULE),
-        (_Callable(), MODULE),
-        (_WithMetaRepr, MODULE),
-        (functools.partial(_plain_func), "functools"),
-        (functools.lru_cache(maxsize=None)(_plain_func), MODULE),
-        (1, "builtins"),
-        (sys, "builtins"),
-    ],
-)
-def test_module_answers_for_c_callables_and_callable_instances(obj: object, expected: str) -> None:
-    assert module(obj) == expected
-
-
-def test_module_is_unknown_when_a_function_or_class_has_no_module_name() -> None:
-    NoModule = type("NoModule", (), {"__module__": None})
-    unnamed = types.FunctionType(_plain_func.__code__, {})
-    assert module(unnamed) == "<unknown module>"
-    assert module(NoModule) == "<unknown module>"
-
-
-def test_module_of_a_callable_instance_is_its_stored_module() -> None:
-    instance = _Callable()
-    instance.__module__ = "stored.mod"
-    assert module(instance) == "stored.mod"
-
-
-def test_module_of_a_non_callable_instance_is_its_class_module() -> None:
-    instance = _Base()
-    instance.__module__ = "shadow"
-    assert module(instance) == MODULE

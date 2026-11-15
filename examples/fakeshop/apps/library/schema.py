@@ -85,8 +85,10 @@ def _reading_lists_without_default_order(
 
 # Consumer ``Prefetch`` children over a proxy-targeted relation
 # (``models.BranchNote.branch``, declared to ``models.ProxyBranch``): one over the
-# proxy itself and one over the concrete ``Branch``, each reachable from a real
-# ``/graphql/`` query.
+# proxy itself and one over the concrete ``Branch``, which the visibility seal
+# admits because a proxy reads its concrete model's table, and one over an
+# unrelated table, which it refuses. Each is reachable from a real ``/graphql/``
+# query.
 
 
 def _branch_notes_over_proxy_child_resolver(
@@ -106,6 +108,19 @@ def _branch_notes_over_concrete_child_resolver(
     """Prefetch the proxy-targeted relation with a child over the CONCRETE model."""
     return models.BranchNote.objects.prefetch_related(
         Prefetch("branch", queryset=models.Branch.objects.all()),
+    ).order_by("id")
+
+
+def _branch_notes_over_unrelated_child_resolver(
+    _root: object,
+    _info: Info,
+) -> QuerySet[models.BranchNote]:
+    """Prefetch the proxy-targeted relation with a child over an UNRELATED table.
+
+    Refused by the seal: a proxy target does not widen the rule to any model.
+    """
+    return models.BranchNote.objects.prefetch_related(
+        Prefetch("branch", queryset=models.Genre.objects.all()),
     ).order_by("id")
 
 
@@ -1525,6 +1540,10 @@ class Query:
     all_library_branch_notes_over_concrete_child: list[BranchNoteType] = DjangoListField(
         BranchNoteType,
         resolver=_branch_notes_over_concrete_child_resolver,
+    )
+    all_library_branch_notes_over_unrelated_child: list[BranchNoteType] = DjangoListField(
+        BranchNoteType,
+        resolver=_branch_notes_over_unrelated_child_resolver,
     )
 
     def _named_library_records(

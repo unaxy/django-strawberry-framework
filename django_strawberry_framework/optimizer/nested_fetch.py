@@ -505,8 +505,7 @@ def active_strategy() -> NestedConnectionStrategy:
 
     Published on the execution frame by ``DjangoOptimizerExtension.on_execute``
     for the walker, which cannot import the extension module (the dependency
-    points the other way). Outside a managed execution - and in a task that
-    copied a frame binding and outlived the execution - there is no strategy to
+    points the other way). Outside a managed execution there is no strategy to
     read and the default answers, which is what an unmanaged caller gets.
     """
     strategy = active_nested_strategy()

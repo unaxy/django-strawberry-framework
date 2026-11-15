@@ -1687,11 +1687,10 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
 
     **On a ``DjangoSchema`` this is not a consumer entry at all.** An entry that
     IS this class, or an exact instance of it, is read once as a declaration of
-    the schema's bound and does not travel into the chain - which is also why no
-    resolver finds one in ``info.schema.extensions`` to write through. A subclass
-    is refused at construction and a factory resolving to one refuses the
-    operation: both would decide enforcement from consumer code on a request
-    already running.
+    the schema's bound and does not travel into the chain. A subclass is refused
+    at construction and a factory resolving to one raises ``ConfigurationError``
+    when the operation resolves it: both would decide enforcement from consumer
+    code on a request already running.
 
     A plain ``strawberry.Schema`` builds none of that, so a consumer on one adds
     the extension explicitly and may hand it its own policy::
@@ -1709,7 +1708,8 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
     state (``extensions/operation_state.py``). A factory that returns a new
     extension per call - or the bare class, when no override is needed - is
     operation-local on any schema, because the instance itself is. Copied onto a
-    ``DjangoSchema`` the same factory refuses every operation, by the rule above.
+    ``DjangoSchema`` the same factory raises ``ConfigurationError`` when an
+    operation resolves it, by the rule above.
 
     Without an explicit policy the extension reads the one the schema resolved at
     construction, falling back to the package defaults for a schema that carries

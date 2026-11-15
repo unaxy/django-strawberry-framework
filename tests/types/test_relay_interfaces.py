@@ -8,10 +8,11 @@
 none of those are a JSON selection.
 """
 
+import abc
 import enum
 import functools
 from types import MethodType
-from typing import TYPE_CHECKING, Literal, NoReturn
+from typing import TYPE_CHECKING, Literal, NoReturn, Protocol
 
 import pytest
 import pytest_django
@@ -1394,6 +1395,58 @@ def test_non_relay_interface_works() -> None:
     assert "resolve_node" not in CategoryNode.__dict__
     assert "resolve_id" not in CategoryNode.__dict__
     assert not implements_relay_node(CategoryNode)
+
+
+def _sdl_with(node_type: type[DjangoType]) -> str:
+    """Finalize, then build a schema serving ``node_type`` and return its SDL."""
+    finalize_django_types()
+
+    @strawberry.type
+    class Query:
+        hello: str = "hi"
+
+    return strawberry.Schema(query=Query, types=[node_type]).as_str()
+
+
+def test_a_protocol_interface_is_applied_without_consulting_its_subclass_check() -> None:
+    """A ``typing.Protocol`` interface is injected; its ``__subclasscheck__`` is never asked.
+
+    ``issubclass`` against a non-runtime protocol raises ``TypeError``, so the
+    injection decides by the class's own MRO.
+    """
+
+    @strawberry.interface
+    class Named(Protocol):
+        name: str
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (Named,)
+
+    assert "type CategoryNode implements Named" in _sdl_with(CategoryNode)
+
+
+def test_an_abc_interface_claiming_every_subclass_is_still_applied() -> None:
+    """An ABC whose ``__subclasshook__`` answers ``True`` is injected all the same."""
+
+    @strawberry.interface
+    class Claiming(abc.ABC):
+        name: str
+
+        @classmethod
+        @override
+        def __subclasshook__(cls, subclass: type) -> bool:
+            return True
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (Claiming,)
+
+    assert "type CategoryNode implements Claiming" in _sdl_with(CategoryNode)
 
 
 @pytest.mark.parametrize("hostile", ["type", "interface"])

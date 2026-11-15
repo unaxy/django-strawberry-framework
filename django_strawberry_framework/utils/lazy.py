@@ -7,14 +7,16 @@ hands over a real runtime lazy object: ``request.user`` is a
 ``SimpleLazyObject``, and what stands behind it reaches the Relay node paths.
 The other is a gate that reads a protocol ``LazyObject`` forwards (``__iter__``,
 ``__len__``, ``__contains__``), which would otherwise read a proxied ``str``
-character by character or a proxied ``set`` in hash order. Every other
-real-class gate (configuration: ``Meta`` keys, optimizer hints, policies,
-transport and request classification, router applications) refuses a proxy
-with its existing typed error, as ``Meta.name``, ``OptimizerHint.strategy``,
-``strictness=`` and ``SESSION_ENGINE`` do. Only Django's own ``LazyObject`` is
-unwrapped, recognised by its real class; any other object that forwards
-``__class__`` (a ``Mock(spec=...)``, a hand-written stand-in) wraps no real
-object and is checked as what it is.
+character by character or a proxied ``set`` in hash order. Elsewhere a proxy
+is taken as the value it is: a gate that reads the real class refuses it with
+its existing typed error, as ``Meta.model``, ``Meta.name``,
+``OptimizerHint.strategy``, ``strictness=`` and ``SESSION_ENGINE`` do, while a
+gate that only iterates, compares or asks ``isinstance`` reads through what the
+proxy forwards, as ``Meta.interfaces`` and ``Meta.globalid_strategy`` do. Only
+Django's own ``LazyObject`` is unwrapped, recognised by its real class; any
+other object that forwards ``__class__`` (a ``Mock(spec=...)``, a hand-written
+stand-in) wraps no real object and is never unwrapped, so an ``isinstance``
+gate takes it for the class it claims, as Python does.
 
 This module is Django-aware and sits below every subsystem that unwraps, so
 ``utils/truth.py`` stays Django-free.

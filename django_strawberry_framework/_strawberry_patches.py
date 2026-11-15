@@ -22,7 +22,8 @@ binding. The ``DjangoConnection`` offset page reaches the check through
 It is gated by the ``APPLY_UPSTREAM_PATCHES`` setting (default on):
 ``DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": False}`` or
 ``{"APPLY_UPSTREAM_PATCHES": {"strawberry": False}}`` leaves upstream's check in
-place, and the offset page under such a converter serves the empty page again.
+place, and on the synchronous executor the offset page under such a converter
+serves the empty page again.
 A ``ListConnection.resolve_connection`` that no longer reads the global by name
 fails :func:`apply` loudly, since the rebind would then change nothing.
 

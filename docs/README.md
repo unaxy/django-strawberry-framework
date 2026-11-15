@@ -708,7 +708,7 @@ One auditable list for taking a schema from "runs" to "internet-facing". Start w
 Three trust levels, and every row below reads against them.
 
 - **Untrusted: the wire.** Every GraphQL document, variable, header, upload and transport frame. Every bound in this section exists for that input.
-- **Validated, then trusted: configuration.** Schema and policy arguments are canonicalized into exact built-in primitives at construction, read back as copies, and refused when they cannot be read back. After that the package answers from its own record rather than re-deriving it per request.
+- **Validated, then trusted: configuration.** Schema and policy arguments are canonicalized into exact built-in primitives at construction and read back as copies. After that the package answers from its own record rather than re-deriving it per request.
 - **Trusted: application Python.** A resolver, a `get_queryset` hook, an `OrderSet.apply_*` override, a project `QuerySet` class, an extension factory. The package validates what it can establish mechanically about their **results** — shape, model, routing, evaluation state — and states the contract each must keep; it does not promise to contain code running inside its own process. [Visibility and permissions](#visibility-and-permissions) is the worked example: a hook's return is checked for the shape a surface composes onto and cloned, and a wrong shape fails closed.
 
 That last boundary is Django's own. A report is a defect here when the code it needs could feasibly exist in a project using supported public API and the input that triggers it arrives over the wire or through ordinary configuration, and not when it depends on calling private internals unsafely ([Django's security policy][django-security-policy]).

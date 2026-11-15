@@ -59,8 +59,8 @@ def test_nothing_is_bound_outside_every_operation() -> None:
     """The readers answer for no operation where no runner owns one.
 
     Not a default of "sync": a caller outside an operation is not inside an
-    operation of either color, and a reader that guessed one would give a
-    resolver in a background task an answer about an operation that has ended.
+    operation of either color, and a reader that guessed one would answer a caller
+    outside any operation as though it were inside one.
     """
     assert current_operation_mode() is None
 

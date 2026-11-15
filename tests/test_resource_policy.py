@@ -3612,7 +3612,7 @@ def test_an_extension_configured_with_no_policy_reads_the_schemas() -> None:
 
 
 def test_a_class_entry_is_constructed_fresh_and_bounded_for_every_operation() -> None:
-    """A schema builds its own resource extension per operation, from its own record.
+    """A schema builds its own resource extension per operation, from its own policy.
 
     The entry is the supported spelling that declares the automatic extension,
     and every operation still gets an instance of its own: one shared object
@@ -3652,8 +3652,8 @@ def test_a_directly_supplied_extension_does_not_travel_as_an_entry(supplied: obj
     assert _consumer_extension_entries([supplied]) == ([], None)
 
 
-def test_an_entry_declaring_a_policy_is_read_into_the_record() -> None:
-    """An instance built with a policy declares it; the record is where it lands."""
+def test_an_entry_declaring_a_policy_is_read_into_the_schema_policy() -> None:
+    """An instance built with a policy declares it; the schema's policy is where it lands."""
     entries, declared = _consumer_extension_entries(
         [DjangoResourcePolicyExtension(policy=ResourcePolicy(max_list_rows=2))],
     )
@@ -4009,7 +4009,7 @@ def test_the_armed_budget_is_not_the_policy_the_caller_armed_it_with() -> None:
     context: dict[str, object] = {}
     token = begin_resource_budget(context, policy)
     try:
-        # The scope carries the snapshot the lease arms, never the caller's object.
+        # The scope carries the snapshot the budget arms, never the caller's object.
         assert token.policy is armed_resource_policy()
         assert token.policy is not policy
         policy.__dict__["max_list_rows"] = 999

@@ -101,7 +101,6 @@ from .optimizer.plans import (
     _extend_only_projection,
     effective_connection_order,
     effective_cursor_state,
-    ends_in_unique_column,
     local_cursor_attnames,
     normalize_order_direction,
     resolver_key,
@@ -193,11 +192,6 @@ if TYPE_CHECKING:
 
         def __call__(self, selection: ConvertedSelection) -> bool: ...
 
-
-# ``ends_in_unique_column`` is owned by ``optimizer/plans.py`` (spec-033 Decision 4:
-# one source for plan-time and resolve-time order); this alias keeps the private
-# name ``tests/test_connection.py`` and ``tests/optimizer/test_plans.py`` import.
-_ends_in_unique_column = ends_in_unique_column
 
 NodeType = TypeVar("NodeType")
 # A generated ``<TypeName>Connection`` (or the base): every helper below builds and

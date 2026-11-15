@@ -1,4 +1,4 @@
-"""Tests for ``django_strawberry_framework/utils/truth.py``: identity reads a consumer cannot fake.
+"""Tests for ``django_strawberry_framework/utils/truth.py``: its identity reads a consumer cannot fake.
 
 The hostile bestiary lives here once, against the module, instead of once per
 caller. Each attack shape lives on its own class, and each is paired with a

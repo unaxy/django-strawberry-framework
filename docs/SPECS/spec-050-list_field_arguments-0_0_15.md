@@ -1645,8 +1645,8 @@ window (`django_strawberry_framework/_completion.py`).
 Strawberry patch module only, and
 `django_strawberry_framework/conf.py #"UPSTREAM_PATCH_DEPENDENCIES = frozenset("` names no
 graphql-core key. A graphql-core defect that needs a workaround gets its own patch module and
-dependency key beside it, separate from Strawberry's HTTP-view patch module, and a
-sentinel test that calls the captured upstream method on the bug shape, so an
+dependency key beside it, separate from Strawberry's connection-page patch module, and a
+sentinel test on the bug shape, so an
 upstream fix fails the sentinel and the workaround is removed without disturbing another
 dependency's patches. See the [rationale][rationale-d12] for the rejected shared-gate design
 and for why upstream completion, not the optimizer, owns a queryset a resolver returns.

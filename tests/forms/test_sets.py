@@ -76,7 +76,6 @@ from django_strawberry_framework.forms.sets import (
     _default_get_form,
     _default_mutation_get_form_fields,
     _form_kwargs_overridden,
-    _form_mutation_registry,
     _form_shape_build_cache,
     clear_form_shape_build_cache,
     iter_form_mutations,
@@ -913,7 +912,7 @@ def test_plain_form_registration_is_idempotent() -> None:
             form_class = form_cls
 
     register_form_mutation(Submit)
-    assert _form_mutation_registry.count(Submit) == 1
+    assert iter_form_mutations().count(Submit) == 1
 
 
 def test_plain_form_late_declaration_after_finalize_raises() -> None:

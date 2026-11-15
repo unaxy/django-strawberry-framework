@@ -348,8 +348,8 @@ repeated cancellation still waits for it. Nullable failures keep surviving sibli
 running under upstream semantics. This ownership is per execution context and mutation
 window; ordinary queries, unmarked mutations and application-created background tasks
 retain upstream behavior. The mandatory boundary is independent of
-`APPLY_UPSTREAM_PATCHES`, which still gates only the optional QuerySet/AsyncIterable
-adapter. Its upstream-method audit runs lazily when an async generated-mutation window
+`APPLY_UPSTREAM_PATCHES`, which gates only the Relay connection-page rebind, never
+this boundary. Its upstream-method audit runs lazily when an async generated-mutation window
 opens and ignores docstrings, comments and formatting. Wrapped methods, unavailable
 source and unaudited executable changes refuse that window with an explicit runtime
 error; package imports, queries and synchronous execution do not require the audit.

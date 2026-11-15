@@ -210,6 +210,24 @@ def test_connection_selected_pages_and_unselected_rows_follow_wire_names(
 
 @pytest.mark.usefixtures("private_registry")
 @pytest.mark.django_db(transaction=True)
+def test_a_last_only_page_selecting_only_the_count_runs_no_row_query(
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A ``last``-only page that selects only the count runs the count and no row query."""
+    for name in ("C", "A", "B"):
+        models.Genre.objects.create(name=name)
+    schema = _schema(keyset=False, renamed=False)
+    sql = record_compiled_sql('FROM "library_genre"')
+    payload = _post(schema, "{ genres(last: 2) { totalCount } }", "async")
+    assert payload == {"data": {"genres": {"totalCount": 3}}}, payload
+    count_sql = [statement for statement in sql if "COUNT(" in statement.upper()]
+    row_sql = [statement for statement in sql if "COUNT(" not in statement.upper()]
+    assert len(count_sql) == 1, sql
+    assert row_sql == [], sql
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("keyset", [False, True], ids=["offset", "keyset"])
 @pytest.mark.parametrize("color", ["sync", "async"])
 def test_renamed_connection_selection_survives_aliases_and_anonymous_fragments(

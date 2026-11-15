@@ -218,7 +218,7 @@ def test_a_schema_refuses_a_policy_option_carrying_a_str_subclass() -> None:
         DjangoSchema(query=_Query, error_policy={"message": _HostileMessage("Nope.")})
 
 
-def test_a_str_subclass_cannot_survive_into_the_private_record() -> None:
+def test_a_str_subclass_cannot_survive_into_the_schema_policy() -> None:
     """The bypass shape: a policy built without ever running the validation.
 
     ``object.__new__`` plus a ``__dict__`` write produces an ``isinstance``-valid

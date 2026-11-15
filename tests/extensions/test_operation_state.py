@@ -12,9 +12,7 @@ drive the seams directly:
 - a failure anywhere in front of the operation - inside the engine's assignment
   loop, inside runner construction, between the runner and ``operation()`` -
   leaves nothing bound and nothing retained;
-- a task that copied a binding and outlived the runner reads no state at all;
-- the binding carrier is settled once per extension and a second constructor
-  call is refused.
+- a task that copied a binding and outlived the runner reads no state at all.
 
 The disclosure these prevent is asserted where a client can see it -
 ``examples/fakeshop/test_query/test_resource_policy_api.py``,
@@ -135,15 +133,6 @@ class _SilentProbe(_OperationBoundExtension[OperationState]):
         yield
 
 
-class _Unbuilt(_OperationBoundExtension[OperationState]):
-    """An operation-bound extension built by ``_unbuilt``, with no binding carrier."""
-
-
-def _unbuilt() -> _Unbuilt:
-    """An ``_Unbuilt`` whose constructor never ran, as a subclass that skipped ``super`` leaves it."""
-    return _Unbuilt.__new__(_Unbuilt)
-
-
 def test_a_hook_context_read_outside_an_operation_is_refused() -> None:
     """``execution_context`` answers ``None`` outside an operation; a hook's read refuses instead.
 
@@ -195,38 +184,6 @@ def test_the_runner_builds_every_state_from_the_context_it_is_handed() -> None:
     with runner.operation():
         assert probe.execution_context is context
     assert probe.execution_context is None
-
-
-@pytest.mark.parametrize(
-    "assigned",
-    [None, "forged"],
-    ids=["none", "a-forged-context-naming-the-real-schema"],
-)
-def test_a_resolver_assigning_a_context_records_and_retains_nothing(assigned: str | None) -> None:
-    """A resolver holds the extension, so the setter is reachable from a request.
-
-    Assigning a context of its own - including one naming the real schema, which
-    is what a handoff protocol would have had to accept as the engine's - must
-    leave the running operation reading its own state, retain nothing for the
-    next request, and be uncollectible by nothing.
-    """
-    shared = _Probe()
-    schema = DjangoSchema(query=_Query, extensions=[lambda: shared])
-
-    # A real engine context a resolver could build, naming the real schema.
-    forged = None if assigned is None else make_execution_context(schema=schema)
-    forged_ref = None if forged is None else weakref.ref(forged)
-
-    shared.execution_context = forged
-    assert shared.execution_context is None
-    assert shared._operation_state() is None
-
-    del forged
-    gc.collect()
-    assert forged_ref is None or forged_ref() is None
-
-    assert schema.execute_sync("{ hello }").data == {"hello": "hi"}
-    assert shared.execution_context is None
 
 
 def test_result_collection_reads_the_operations_own_state() -> None:
@@ -310,36 +267,6 @@ def test_a_failure_between_the_runner_and_the_operation_retains_nothing() -> Non
 
     schema_without_the_hostile_entry = DjangoSchema(query=_Query, extensions=[lambda: shared])
     assert schema_without_the_hostile_entry.execute_sync("{ hello }").errors is None
-
-
-def test_a_binding_that_fails_partway_unwinds_the_ones_already_made() -> None:
-    """All-or-nothing, so a half-bound operation never runs.
-
-    The second extension never ran the base constructor, so it has no carrier
-    and binding it raises after the first one bound. Leaving that binding in
-    place would leak one operation's state into whatever the task did next.
-    """
-    good = _Probe()
-    schema = DjangoSchema(query=_Query, extensions=[lambda: good, _unbuilt])
-
-    with pytest.raises(AttributeError, match="_operation_carrier"):
-        schema.execute_sync("{ hello }")
-
-    assert good.execution_context is None
-    assert good._operation_state() is None
-
-
-@pytest.mark.asyncio
-async def test_a_binding_that_fails_partway_unwinds_on_the_async_path_too() -> None:
-    """The async twin: one primitive, two protocol adapters, one decision."""
-    good = _Probe()
-    schema = DjangoSchema(query=_Query, extensions=[lambda: good, _unbuilt])
-
-    with pytest.raises(AttributeError, match="_operation_carrier"):
-        await schema.execute("{ hello }")
-
-    assert good.execution_context is None
-    assert good._operation_state() is None
 
 
 def test_a_hook_that_raises_while_setting_up_still_resets_every_binding() -> None:
@@ -626,13 +553,6 @@ def test_a_state_constructor_that_raises_retains_neither_the_context_nor_a_parti
     del sentinel
     gc.collect()
     assert reference() is None
-
-
-async def _await_spawned_task(seen: dict[str, object]) -> None:
-    """Wait for the child task a resolver stored under ``seen["task"]``."""
-    task = seen["task"]
-    assert isinstance(task, asyncio.Future)
-    await task
 
 
 @pytest.mark.asyncio
@@ -1020,136 +940,18 @@ async def test_a_child_started_after_a_frame_was_yielded_copies_no_live_budget()
 
 
 # ---------------------------------------------------------------------------
-# A package-managed extension takes its state from the runner and nothing else.
+# An extension a raw schema used first.
 # ---------------------------------------------------------------------------
 
 
-class _Forged:
-    """An object graph a resolver would like the process to keep."""
-
-
-class _RawSchemaShaped:
-    """A value shaped like a context belonging to some other schema."""
-
-    def __init__(self) -> None:
-        self.schema = object()
-
-
-class _RefusingToSaySchema:
-    """A value whose ``.schema`` raises, which the setter must not depend on."""
-
-    @property
-    def schema(self) -> NoReturn:
-        """Refuse to say which schema this context belongs to."""
-        raise RuntimeError("no schema here")
-
-
-@pytest.mark.parametrize(
-    "forge",
-    [
-        _Forged,
-        _RawSchemaShaped,
-        _RefusingToSaySchema,
-        lambda: None,
-    ],
-    ids=[
-        "arbitrary-object",
-        "raw-schema-shaped",
-        "raising-schema",
-        "none",
-    ],
-)
-def test_a_resolver_assigning_to_a_managed_extension_leaves_nothing_behind(
-    forge: Callable[[], object],
-) -> None:
-    """The engine's assignment is the package's signal, not the consumer's channel.
-
-    A shared extension is reachable from every resolver the schema serves, and
-    the setter is an ordinary attribute write. Every shape here is one no engine
-    produces: an arbitrary graph, a context belonging to some other schema, a
-    value that refuses to say, and the clearing assignment. An extension the
-    runner has managed takes none of them, so a direct read outside the
-    operation answers ``None`` and the object the resolver made is released with
-    the request.
-    """
-    shared = _SilentProbe()
-    forged: dict[str, object] = {}
-
-    @strawberry.type
-    class TamperingQuery:
-        @strawberry.field
-        def tamper(self) -> str:
-            """Assign one forged value to the shared extension."""
-            value = forge()
-            forged["value"] = value
-            # basedpyright: the forged non-context values a resolver could assign are the inputs
-            # under test; the extension types the slot as ExecutionContext | None
-            shared.execution_context = value  # pyright: ignore[reportAttributeAccessIssue]
-            return "tampered"
-
-    schema = DjangoSchema(query=TamperingQuery, extensions=[lambda: shared])
-    result = schema.execute_sync("{ tamper }")
-
-    assert result.errors is None, result.errors
-    assert shared.execution_context is None
-    assert shared._operation_state() is None
-    value = forged.pop("value")
-    reference = None if value is None else weakref.ref(value)
-    del value, result
-    gc.collect()
-    assert reference is None or reference() is None
-
-
-@pytest.mark.asyncio
-async def test_a_surviving_task_cannot_give_a_managed_extension_state_either() -> None:
-    """The assignment a background task makes is the same assignment, later.
-
-    Nothing about the tamper needs the request to still be running: a task that
-    outlived it holds the shared extension just as a resolver does, and the read
-    it would poison is every direct read the process makes afterwards.
-    """
-    shared = _SilentProbe()
-    seen: dict[str, object] = {}
-    release = asyncio.Event()
-
-    @strawberry.type
-    class SpawningQuery:
-        @strawberry.field
-        async def spawn(self) -> str:
-            """Start a task that assigns to the shared extension after the request."""
-
-            async def child() -> None:
-                await release.wait()
-                forged = _Forged()
-                seen["reference"] = weakref.ref(forged)
-                # basedpyright: an arbitrary object graph a surviving task assigns is the input under
-                # test; the extension types the slot as ExecutionContext | None
-                shared.execution_context = forged  # pyright: ignore[reportAttributeAccessIssue]
-
-            seen["task"] = asyncio.ensure_future(child())
-            return "spawned"
-
-    schema = DjangoSchema(query=SpawningQuery, extensions=[lambda: shared])
-    assert (await schema.execute("{ spawn }")).errors is None
-
-    release.set()
-    await _await_spawned_task(seen)
-
-    assert shared.execution_context is None
-    gc.collect()
-    reference = seen["reference"]
-    assert isinstance(reference, weakref.ref)
-    assert reference() is None
-
-
-def test_an_extension_a_raw_schema_used_first_is_managed_once_a_django_schema_runs_it() -> None:
-    """The mark is one-way, because the question it answers is.
+def test_a_django_schema_operation_drops_what_a_raw_schema_left_on_an_extension() -> None:
+    """A raw schema's state does not outlive a ``DjangoSchema`` operation on the instance.
 
     A raw ``strawberry.Schema`` has no runner, so the setter is the only signal
     it can give and the state lands on the instance. Once a ``DjangoSchema``
-    operation has run the same instance, the runner is the authority and the
-    earlier arrangement is dropped: a read outside an operation answers for no
-    operation rather than for whatever the raw schema last assigned.
+    operation has run the same instance, the earlier arrangement is dropped: a
+    read outside an operation answers for no operation rather than for whatever
+    the raw schema last assigned.
     """
     shared = _SilentProbe()
     raw = strawberry.Schema(query=_Query, extensions=[lambda: shared])
@@ -1160,9 +962,6 @@ def test_an_extension_a_raw_schema_used_first_is_managed_once_a_django_schema_ru
 
     managed = DjangoSchema(query=_Query, extensions=[lambda: shared])
     assert managed.execute_sync("{ hello }").errors is None
-    assert shared.execution_context is None
-
-    assert raw.execute_sync("{ hello }").errors is None
     assert shared.execution_context is None
 
 

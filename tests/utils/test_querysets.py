@@ -35,12 +35,14 @@ from apps.library.models import (
     Annotation,
     Book,
     Branch,
+    BranchNote,
     CirculationDesk,
     DeskShift,
     LendingDesk,
     OpenVenue,
     Patron,
     PatronProfile,
+    ProxyBranch,
     SelfServeDesk,
     Shelf,
     TaggedItem,
@@ -48,7 +50,7 @@ from apps.library.models import (
     VenueBadge,
     VenueSponsor,
 )
-from apps.products.models import Category, Entry, Item
+from apps.products.models import Category, Entry, Item, Property
 from apps.products.services import seed_data
 from apps.scalars.models import NullableScalarSpecimen, ScalarSpecimen
 from asgiref.sync import sync_to_async
@@ -4398,7 +4400,7 @@ def test_a_combined_prefetch_child_the_rewrite_cannot_serve_fails_closed(
     assert _seal_or_defect(candidate, Category, None) == (None, defect)
 
 
-def _two_level_prefetch(entries: models.QuerySet[Entry]) -> models.QuerySet[Category]:
+def _two_level_prefetch(entries: models.QuerySet[models.Model]) -> models.QuerySet[Category]:
     """A ``Category`` source prefetching ``items`` and, under them, ``entries`` over ``entries``."""
     items = Item.objects.prefetch_related(Prefetch("entries", queryset=entries))
     return Category.objects.prefetch_related(Prefetch("items", queryset=items))
@@ -4446,3 +4448,231 @@ def test_a_combined_prefetch_child_two_levels_down_over_another_model_fails_clos
         None,
         ("table", "Item"),
     )
+
+
+_UNRELATED_ROWS = (
+    "a prefetch child over an unrelated table would populate the relation with rows the "
+    "related type's visibility hook never saw"
+)
+
+
+@pytest.mark.parametrize(
+    ("candidate", "alias", "detail"),
+    [
+        pytest.param(
+            lambda: Category.objects.prefetch_related(
+                Prefetch("items", queryset=Property.objects.all()),
+            ),
+            None,
+            "Category prefetch 'items' queryset is over Property rows, but the 'items' "
+            f"relation targets Item rows; {_UNRELATED_ROWS}",
+            id="unrelated-model",
+        ),
+        pytest.param(
+            lambda: _two_level_prefetch(Property.objects.all()),
+            None,
+            "Item prefetch 'entries' queryset is over Property rows, but the 'entries' "
+            f"relation targets Entry rows; {_UNRELATED_ROWS}",
+            id="unrelated-model-one-level-down",
+        ),
+        pytest.param(
+            lambda: Category.objects.prefetch_related(
+                Prefetch("items__entries", queryset=Property.objects.all()),
+            ),
+            None,
+            "Category prefetch 'items__entries' queryset is over Property rows, but the "
+            f"'items__entries' relation targets Entry rows; {_UNRELATED_ROWS}",
+            id="unrelated-model-nested-path",
+        ),
+        pytest.param(
+            lambda: Item.objects.prefetch_related(
+                Prefetch("category", queryset=Property.objects.all()),
+            ),
+            None,
+            "Item prefetch 'category' queryset is over Property rows, but the 'category' "
+            f"relation targets Category rows; {_UNRELATED_ROWS}",
+            id="forward-fk",
+        ),
+        pytest.param(
+            lambda: ContentType.objects.prefetch_related(
+                Prefetch("permission_set", queryset=LogEntry.objects.all()),
+            ),
+            None,
+            "ContentType prefetch 'permission_set' queryset is over LogEntry rows, but the "
+            f"'permission_set' relation targets Permission rows; {_UNRELATED_ROWS}",
+            id="default-accessor",
+        ),
+        pytest.param(
+            lambda: BranchNote.objects.prefetch_related(
+                Prefetch("branch", queryset=Property.objects.all()),
+            ),
+            None,
+            "BranchNote prefetch 'branch' queryset is over Property rows, but the 'branch' "
+            f"relation targets ProxyBranch rows; {_UNRELATED_ROWS}",
+            id="proxy-target",
+        ),
+        pytest.param(
+            lambda: Category.objects.prefetch_related(
+                Prefetch("items", queryset=Item.objects.using("other")),
+            ),
+            None,
+            "Category prefetch 'items' queryset is routed to alias 'other', but this "
+            "resolution reads alias None; one resolution never spans two database connections",
+            id="routed-child-under-unrouted-parent",
+        ),
+        pytest.param(
+            lambda: Category.objects.prefetch_related(
+                Prefetch("items", queryset=Item.objects.using("other")),
+            ),
+            "default",
+            "Category prefetch 'items' queryset is routed to alias 'other', but this "
+            "resolution reads alias 'default'; one resolution never spans two database "
+            "connections",
+            id="cross-routed-child",
+        ),
+        pytest.param(
+            lambda: _two_level_prefetch(Entry.objects.using("other")),
+            None,
+            "Item prefetch 'entries' queryset is routed to alias 'other', but this "
+            "resolution reads alias None; one resolution never spans two database connections",
+            id="routed-child-one-level-down",
+        ),
+    ],
+)
+def test_a_prefetch_child_off_its_relation_or_its_alias_fails_closed(
+    candidate: Callable[[], models.QuerySet[models.Model]],
+    alias: str | None,
+    detail: str,
+) -> None:
+    """A child at any depth over a model its relation does not target, or routed off, is refused.
+
+    Django hands a child's rows to the relation without checking their model (Django
+    ticket #37267), so they would reach the relation unseen by its type's hook; a
+    routed child would split one resolution across two connections.
+    """
+    source = candidate()
+    model = source.model
+    assert _seal_or_defect(source, model, alias) == (None, ("prefetch", detail))
+
+
+def test_a_prefetch_child_refusal_names_the_child_in_the_hook_error() -> None:
+    """A hook returning such a child fails closed with the child named in the error."""
+    hook_result = Category.objects.prefetch_related(
+        Prefetch("items", queryset=Property.objects.all()),
+    )
+    with pytest.raises(ConfigurationError) as raised:
+        apply_type_visibility_sync(
+            _sync_hook_type(hook_result),
+            Category.objects.all(),
+            info=None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
+    assert str(raised.value).startswith(
+        "_StubType.get_queryset was refused: its Category prefetch 'items' queryset is over "
+        "Property rows",
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "alias"),
+    [
+        pytest.param(
+            lambda: Category.objects.prefetch_related(
+                Prefetch("items", queryset=Item.objects.all()),
+            ),
+            None,
+            id="relation-target",
+        ),
+        pytest.param(
+            lambda: Shelf.objects.prefetch_related(
+                Prefetch("branch", queryset=ProxyBranch.objects.all()),
+            ),
+            None,
+            id="target-subclass",
+        ),
+        pytest.param(
+            lambda: BranchNote.objects.prefetch_related(
+                Prefetch("branch", queryset=Branch.objects.all()),
+            ),
+            None,
+            id="concrete-model-of-a-proxy-target",
+        ),
+        pytest.param(
+            lambda: ContentType.objects.prefetch_related(
+                Prefetch("permission_set", queryset=Permission.objects.all()),
+            ),
+            None,
+            id="default-accessor",
+        ),
+        pytest.param(
+            lambda: _two_level_prefetch(Entry.objects.all()),
+            None,
+            id="nested-child",
+        ),
+        pytest.param(
+            lambda: Category.objects.prefetch_related(
+                Prefetch("items__entries", queryset=Entry.objects.all()),
+            ),
+            None,
+            id="nested-path",
+        ),
+        pytest.param(
+            lambda: Category.objects.prefetch_related(
+                Prefetch("items", queryset=Item.objects.all()[:5], to_attr="top_items"),
+            ),
+            None,
+            id="sliced-child-with-to-attr",
+        ),
+        pytest.param(
+            lambda: Category.objects.prefetch_related(
+                Prefetch("items", queryset=Item.objects.using("other")),
+            ).using("other"),
+            None,
+            id="child-routed-with-its-parent",
+        ),
+        pytest.param(
+            lambda: Category.objects.prefetch_related(
+                Prefetch("items", queryset=Item.objects.using("default")),
+            ),
+            "default",
+            id="child-routed-to-the-required-alias",
+        ),
+        pytest.param(
+            lambda: Category.objects.prefetch_related(
+                "items",
+                Prefetch("items"),
+                Prefetch("items", queryset=None, to_attr="every_item"),
+            ),
+            None,
+            id="no-child-queryset",
+        ),
+    ],
+)
+def test_a_prefetch_child_on_its_relation_and_alias_seals(
+    candidate: Callable[[], models.QuerySet[models.Model]],
+    alias: str | None,
+) -> None:
+    """A child over its relation's target (or a subclass of it), on the parent's alias, seals."""
+    source = candidate()
+    sealed, defect = _seal_or_defect(source, source.model, alias)
+    assert defect is None
+    assert sealed is not None
+    assert queryset_prefetch_lookups(sealed) == queryset_prefetch_lookups(source)
+
+
+@pytest.mark.django_db
+def test_an_unrouted_prefetch_child_follows_its_parent_alias_at_fetch() -> None:
+    """The seal leaves an unrouted child unrouted; Django routes it with the parent's rows."""
+    seed_data(2)
+    candidate = Category.objects.prefetch_related(Prefetch("items", queryset=Item.objects.all()))
+    sealed, defect = _seal_or_defect(candidate, Category, "default")
+    assert defect is None
+    assert sealed is not None
+    assert queryset_db(sealed) == "default"
+    child = queryset_prefetch_lookups(sealed)[0]
+    assert not is_str(child)
+    assert child.queryset is not None
+    assert queryset_db(child.queryset) is None
+    rows = _rows_of(Category, sealed)
+    assert rows
+    assert all(type(item) is Item for row in rows for item in row.items.all())

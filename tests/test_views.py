@@ -1261,6 +1261,27 @@ def test_a_stream_that_probes_as_empty_is_read_rather_than_believed(
     assert hasattr(request, "_body") is False
 
 
+@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
+def test_a_genuinely_empty_spooled_body_is_verified_by_reading_and_allowed(
+    view_class: _ViewClass,
+) -> None:
+    """The control that keeps "never believe a zero" from refusing an honest empty body.
+
+    An empty POST body is legal - it is refused later, by the JSON parse, not by
+    the cap. On the real ASGI spool the size probe measures zero, which the
+    package treats as no measurement and verifies with the bounded read; that read
+    finds end-of-stream at once, so the body is allowed and Django still serves it
+    as ``b""``.
+    """
+    view = _capped_view(_PROBE_CAP, view_class=view_class)
+    with _spooled(b"", spool_class=tempfile.SpooledTemporaryFile) as stream:
+        request = _asgi_request(stream, None)
+
+        view._enforce_request_body_limit(request)
+
+        assert request.body == b""
+
+
 def _assert_the_unreadable_stream_was_recorded(
     caplog: pytest.LogCaptureFixture,
     stream: object,

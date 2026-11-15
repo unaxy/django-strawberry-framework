@@ -172,11 +172,15 @@ shapes a hook can return by mistake, and the clone is what the surface composes
 onto. A combined (`union()` / `intersection()` / `difference()`) query is the one
 shape the seal rewrites (Decision 5), and a `Prefetch` child the candidate carries
 that is itself combined is rewritten the same way, since Django's prefetch filters
-the child by its relation and refuses that after a combinator.
+the child by its relation and refuses that after a combinator. Every such child, at
+any depth, is also refused (the `prefetch` code) when its model is not its
+relation's target or a subclass of it, since Django hands a child's rows to the
+relation without checking them, or when it is routed off the candidate's
+effective alias; an unrouted child follows its parent at fetch.
 
 **Enforcing symbols.**
 [`utils/querysets.py::_seal_or_defect`][querysets];
-[`::_with_combined_prefetch_children_rewritten`][querysets].
+[`::_with_prefetch_children_served`][querysets].
 
 **Tests that pin it.** [`tests/utils/test_querysets.py`][queryset-tests]
 `test_seal_policy_presets_answer_slice_and_combinator_independently`,
@@ -383,6 +387,7 @@ post-sidecar result seal.
 | `sliced` | sliced query on a recomposing read surface | "Django forbids refiltering or reordering a sliced query" |
 | `projection` | non-`ModelIterable` row iterable on a model-row surface | "composes over `<Model>` model rows, not a `.values()` / `.values_list()` (or custom-iterable) projection" |
 | `combined` | a combinator whose primary-key set cannot represent its rows (duplicates, branch annotations / `extra(select=...)` / `.values()` / `select_for_update`, outer `.values()` / ordering by a lookup, transform or other expression / slice) | "serves a combined queryset as the set of `<Model>` primary keys it selects ... cannot be reduced to that set without changing its rows" |
+| `prefetch` | a `Prefetch` child over a model its relation does not target, or routed off the effective alias | "prefetch `'<path>'` queryset is over `<Model>` rows, but the `'<path>'` relation targets `<Model>` rows" / "is routed to alias" |
 | `alias` | a return routed off an alias that differs from the pinned resolution | "cannot re-route a pinned resolution. Remove the `.using(...)` call." |
 
 ## Test plan

@@ -227,9 +227,7 @@
 "tests/extensions/test_debug.py::test_a_non_finite_duration_is_refused_at_the_serializer" = { reportArgumentType = 1 }
 "tests/extensions/test_debug.py::test_zero_argument_construction_defaults_to_the_safe_answer" = { reportCallIssue = 1 }
 "tests/extensions/test_operation_state.py::_RefusingAssignment.execution_context" = { reportIncompatibleVariableOverride = 1 }
-"tests/extensions/test_operation_state.py::test_a_resolver_assigning_to_a_managed_extension_leaves_nothing_behind.TamperingQuery.tamper" = { reportAttributeAccessIssue = 1 }
 "tests/extensions/test_operation_state.py::test_a_stream_resumed_with_asend_from_another_task_is_bound_the_same_way" = { reportArgumentType = 1 }
-"tests/extensions/test_operation_state.py::test_a_surviving_task_cannot_give_a_managed_extension_state_either.SpawningQuery.spawn.child" = { reportAttributeAccessIssue = 1 }
 "tests/filters/test_base.py::test_filterset_model_field_returns_none_without_model" = { reportArgumentType = 1 }
 "tests/filters/test_base.py::test_related_filter_expansion_surfaces_the_gate_not_a_raw_attribute_error.Parent" = { reportArgumentType = 1 }
 "tests/filters/test_base.py::test_related_filter_gate_names_the_bound_owner" = { reportAttributeAccessIssue = 1 }

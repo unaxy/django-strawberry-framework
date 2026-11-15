@@ -1,10 +1,10 @@
 """Truthful identity reads: facts about an object read from the interpreter, never asked of it.
 
 A consumer class can run arbitrary code in its body, its metaclass and its
-hooks. It cannot misinform the framework about what it is, because every
-identity fact the package records (a class's name, qualname, module, MRO,
-bases, own namespace, and whether it subclasses a framework base) is read
-here, from the interpreter's own type slots, instead of through attribute
+hooks. For the callers of this module it cannot misinform the framework about
+what it is, because each identity fact they record (a class's name, qualname,
+module, MRO, bases, own namespace, and whether it subclasses a framework base)
+is read here, from the interpreter's own type slots, instead of through attribute
 lookup a metaclass property, ``__getattr__`` / ``__getattribute__``,
 ``__class__`` override, ``__instancecheck__`` / ``__subclasscheck__`` or a
 metaclass ``__eq__`` / ``__hash__`` could intercept:
@@ -30,6 +30,9 @@ metaclass ``__eq__`` / ``__hash__`` could intercept:
   ``__getattribute__`` or a descriptor. ``inspect.getattr_static`` is not
   equivalent: it reads ``entry.__dict__`` by ordinary attribute lookup, which a
   metaclass ``__getattribute__`` intercepts.
+
+``types/`` is not among those callers: it reads class identity through
+``utils/introspection.py``, Python's own introspection of the class it is handed.
 
 Scope, exactly. No function here runs a consumer dunder method, property,
 descriptor or metaclass hook, with one exception shared with the interpreter's

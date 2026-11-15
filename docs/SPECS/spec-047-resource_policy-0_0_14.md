@@ -1271,8 +1271,8 @@ check runs rather than about how long anything takes.
 - **A resource extension supplied in `DjangoSchema(extensions=...)` never runs as an
   entry.** The exact class is dropped and an exact instance's `policy=` becomes the schema's
   policy, so exactly one budget is armed; a subclass is refused at construction, and a
-  zero-argument FACTORY resolving to either enforcement extension refuses the operation
-  (`schema.py::DjangoSchema.get_extensions`), because what a factory returns is decided after
+  zero-argument FACTORY resolving to either enforcement extension raises `ConfigurationError`
+  when the operation resolves it (`schema.py::DjangoSchema.get_extensions`), because what a factory returns is decided after
   the schema accepted it.
 - **An upload that cannot report its size** is *rejected*, not charged as zero bytes. Six
   spellings of unmeasurable, all answered the same way: the attribute is absent, it is

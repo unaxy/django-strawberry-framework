@@ -451,7 +451,7 @@ Tests live across the package-internal `tests/` tree and the `examples/fakeshop/
 - `test_both_shape_connection_to_attr_coexists_with_list_and_consumer_prefetch` — list sibling, connection sibling, and consumer accessor prefetch survive `diff_plan_for_queryset`.
 - `test_visibility_target_window_flips_cacheable_false`.
 - `test_planned_resolver_keys_include_connection_field`.
-- `tests/optimizer/test_plans.py::TestApplyWindowPagination` — annotation names, partition, range filters, the reverse branch, the marker and probe shapes, and `.only()` composition; its `test_applies_order_by_to_queryset_not_just_the_window` pins the deterministic tuple on the queryset's own `ORDER BY` in both the forward and reverse branches. `tests/optimizer/test_plans.py::TestDeterministicOrder` — one source, not two agreeing ones: `test_deterministic_order_matches_connection_reexport` asserts `connection._ends_in_unique_column is ends_in_unique_column`, object identity rather than equal behavior.
+- `tests/optimizer/test_plans.py::TestApplyWindowPagination` — annotation names, partition, range filters, the reverse branch, the marker and probe shapes, and `.only()` composition; its `test_applies_order_by_to_queryset_not_just_the_window` pins the deterministic tuple on the queryset's own `ORDER BY` in both the forward and reverse branches. `tests/optimizer/test_plans.py::TestDeterministicOrder` pins the tuple and the unique-terminal predicate it skips on.
 
 ### Slice 2 — `tests/test_relay_connection.py` (extend)
 

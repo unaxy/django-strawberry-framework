@@ -290,7 +290,6 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         would miss it; the before/after length comparison over
         ``collected_errors.errors`` is valid because the list is append-only
         during execution.
-
         """
         if len(self.collected_errors.errors) > errors_before:
             transaction.set_rollback(True, using=alias)
@@ -464,9 +463,9 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
                 executor.shutdown(wait=False)
 
 
-#: The stable ``extensions.code`` name for a schema-configuration refusal,
-#: exported beside ``RESOURCE_LIMIT_ERROR_CODE``; distinct from a resource
-#: rejection, since nothing about a request decides it.
+#: The stable ``extensions.code`` name reserved for a schema-configuration refusal,
+#: exported beside ``RESOURCE_LIMIT_ERROR_CODE``; no package path emits it, and it is
+#: distinct from a resource rejection, since nothing about a request decides it.
 SCHEMA_CONFIGURATION_ERROR_CODE = "SCHEMA_CONFIGURATION_UNAVAILABLE"
 
 
