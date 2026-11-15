@@ -278,6 +278,12 @@ def _package_view_instance(view_func: object) -> View | None:
     descriptor. There is deliberately no ``or {}`` default: an absent attribute
     means "not ours", never "ours, with nothing configured". Forging the marker is
     outside the threat model.
+
+    A ``TypeError`` from the construction is a decline too. A function view
+    decorated with ``functools.wraps(DjangoGraphQLView.as_view())`` copies the
+    marker and an empty ``view_initkwargs`` while building its own view with a
+    schema per request; that class cannot be built from the copied kwargs, and
+    the view it builds supplies the ordering itself.
     """
     if truth.static_attr(view_func, _BOUNDARY_MARKER, default=False) is not True:
         return None
@@ -285,7 +291,10 @@ def _package_view_instance(view_func: object) -> View | None:
     initkwargs = truth.static_attr(view_func, "view_initkwargs", None)
     if not truth.is_type(view_class) or not _is_initkwargs(initkwargs):
         return None
-    return require_instance(object_result(view_class, **initkwargs), View)
+    try:
+        return require_instance(object_result(view_class, **initkwargs), View)
+    except TypeError:
+        return None
 
 
 def _require_boundary_before_csrf() -> None:
