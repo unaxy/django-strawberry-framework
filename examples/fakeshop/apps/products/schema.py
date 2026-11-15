@@ -488,58 +488,45 @@ class UpdateItemViaPrefixedForm(DjangoModelFormMutation):
         operation = "update"
 
 
-class CreateItemViaKwargsPrefixedForm(DjangoModelFormMutation):
+class _ItemPrefixKwargsFormMutation(DjangoModelFormMutation):
+    """Give the form ``prefix="item"`` through ``get_form_kwargs``."""
+
+    @override
+    def get_form_kwargs(
+        self,
+        info: strawberry.Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: Model | None = None,
+    ) -> dict[str, object]:
+        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
+        kwargs["prefix"] = "item"
+        return kwargs
+
+
+class CreateItemViaKwargsPrefixedForm(_ItemPrefixKwargsFormMutation):
     """Create an ``Item`` through ``ItemFlagsModelForm`` given ``prefix="item"`` by ``get_form_kwargs``."""
 
     class Meta:
         form_class = forms.ItemFlagsModelForm
         operation = "create"
 
-    @override
-    def get_form_kwargs(
-        self,
-        info: strawberry.Info[object, object],
-        *,
-        data: dict[str, object],
-        files: dict[str, object],
-        instance: Model | None = None,
-    ) -> dict[str, object]:
-        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
-        kwargs["prefix"] = "item"
-        return kwargs
 
-
-class UpdateItemViaKwargsPrefixedForm(DjangoModelFormMutation):
+class UpdateItemViaKwargsPrefixedForm(_ItemPrefixKwargsFormMutation):
     """Update an ``Item`` through ``ItemFlagsModelForm`` given ``prefix="item"`` by ``get_form_kwargs``."""
 
     class Meta:
         form_class = forms.ItemFlagsModelForm
         operation = "update"
 
-    @override
-    def get_form_kwargs(
-        self,
-        info: strawberry.Info[object, object],
-        *,
-        data: dict[str, object],
-        files: dict[str, object],
-        instance: Model | None = None,
-    ) -> dict[str, object]:
-        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
-        kwargs["prefix"] = "item"
-        return kwargs
 
-
-class CreateItemViaCopiedKwargsPrefixedForm(DjangoModelFormMutation):
-    """Create an ``Item`` through ``ItemFlagsModelForm`` from copies of the data, under ``prefix="item"``.
+class _ItemCopiedKwargsFormMutation(DjangoModelFormMutation):
+    """Bind copies of the data under ``prefix="item"`` through ``get_form_kwargs``.
 
     ``get_form_kwargs`` passes ``dict(data)`` / ``dict(files)``: copies of the bare
     field-keyed mappings, which the package still binds under the prefix.
     """
-
-    class Meta:
-        form_class = forms.ItemFlagsModelForm
-        operation = "create"
 
     @override
     def get_form_kwargs(
@@ -559,95 +546,24 @@ class CreateItemViaCopiedKwargsPrefixedForm(DjangoModelFormMutation):
         }
 
 
-class UpdateItemViaCopiedKwargsPrefixedForm(DjangoModelFormMutation):
+class CreateItemViaCopiedKwargsPrefixedForm(_ItemCopiedKwargsFormMutation):
+    """Create an ``Item`` through ``ItemFlagsModelForm`` from copies of the data, under ``prefix="item"``."""
+
+    class Meta:
+        form_class = forms.ItemFlagsModelForm
+        operation = "create"
+
+
+class UpdateItemViaCopiedKwargsPrefixedForm(_ItemCopiedKwargsFormMutation):
     """Update an ``Item`` through ``ItemFlagsModelForm`` from copies of the data, under ``prefix="item"``."""
 
     class Meta:
         form_class = forms.ItemFlagsModelForm
         operation = "update"
 
-    @override
-    def get_form_kwargs(
-        self,
-        info: strawberry.Info[object, object],
-        *,
-        data: dict[str, object],
-        files: dict[str, object],
-        instance: Model | None = None,
-    ) -> dict[str, object]:
-        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
-        return {
-            **kwargs,
-            "data": dict(data),
-            "files": dict(files),
-            "prefix": "item",
-        }
 
-
-class CreateItemViaRekeyedPrefixedForm(DjangoModelFormMutation):
-    """Create an ``Item`` through ``PrefixedItemFlagsModelForm`` bound by a re-keying ``get_form``."""
-
-    class Meta:
-        form_class = forms.PrefixedItemFlagsModelForm
-        operation = "create"
-
-    @override
-    def get_form(
-        self,
-        info: strawberry.Info[object, object],
-        *,
-        data: dict[str, object],
-        files: dict[str, object],
-        instance: Model | None = None,
-    ) -> ModelForm[models.Item]:
-        """Bind the data keyed ``item-<name>``, as the prefixed form posts it."""
-        return super().get_form(
-            info,
-            data=_keyed_under_item_prefix(data),
-            files=_keyed_under_item_prefix(files),
-            instance=instance,
-        )
-
-
-class UpdateItemViaRekeyedPrefixedForm(DjangoModelFormMutation):
-    """Update an ``Item`` through ``PrefixedItemFlagsModelForm`` bound by a re-keying ``get_form``."""
-
-    class Meta:
-        form_class = forms.PrefixedItemFlagsModelForm
-        operation = "update"
-
-    @override
-    def get_form(
-        self,
-        info: strawberry.Info[object, object],
-        *,
-        data: dict[str, object],
-        files: dict[str, object],
-        instance: Model | None = None,
-    ) -> ModelForm[models.Item]:
-        """Bind the data keyed ``item-<name>``, as the prefixed form posts it."""
-        return super().get_form(
-            info,
-            data=_keyed_under_item_prefix(data),
-            files=_keyed_under_item_prefix(files),
-            instance=instance,
-        )
-
-
-class UpdateItemWithRequiredFileViaPrefixedForm(DjangoModelFormMutation):
-    """Update an ``Item`` through ``PrefixedRequiredFileItemModelForm`` (the prefix ``item``)."""
-
-    class Meta:
-        form_class = forms.PrefixedRequiredFileItemModelForm
-        operation = "update"
-
-
-class UpdateItemWithRequiredFileViaRekeyedPrefixedForm(DjangoModelFormMutation):
-    """Update an ``Item`` through ``PrefixedRequiredFileItemModelForm`` bound by a re-keying ``get_form``."""
-
-    class Meta:
-        form_class = forms.PrefixedRequiredFileItemModelForm
-        operation = "update"
+class _ItemRekeyedFormMutation(DjangoModelFormMutation):
+    """Bind the prefixed form through a re-keying ``get_form``."""
 
     @override
     def get_form(
@@ -665,6 +581,38 @@ class UpdateItemWithRequiredFileViaRekeyedPrefixedForm(DjangoModelFormMutation):
             files=_keyed_under_item_prefix(files),
             instance=instance,
         )
+
+
+class CreateItemViaRekeyedPrefixedForm(_ItemRekeyedFormMutation):
+    """Create an ``Item`` through ``PrefixedItemFlagsModelForm`` bound by a re-keying ``get_form``."""
+
+    class Meta:
+        form_class = forms.PrefixedItemFlagsModelForm
+        operation = "create"
+
+
+class UpdateItemViaRekeyedPrefixedForm(_ItemRekeyedFormMutation):
+    """Update an ``Item`` through ``PrefixedItemFlagsModelForm`` bound by a re-keying ``get_form``."""
+
+    class Meta:
+        form_class = forms.PrefixedItemFlagsModelForm
+        operation = "update"
+
+
+class UpdateItemWithRequiredFileViaPrefixedForm(DjangoModelFormMutation):
+    """Update an ``Item`` through ``PrefixedRequiredFileItemModelForm`` (the prefix ``item``)."""
+
+    class Meta:
+        form_class = forms.PrefixedRequiredFileItemModelForm
+        operation = "update"
+
+
+class UpdateItemWithRequiredFileViaRekeyedPrefixedForm(_ItemRekeyedFormMutation):
+    """Update an ``Item`` through ``PrefixedRequiredFileItemModelForm`` bound by a re-keying ``get_form``."""
+
+    class Meta:
+        form_class = forms.PrefixedRequiredFileItemModelForm
+        operation = "update"
 
 
 class CreateItemHoldViaForm(DjangoModelFormMutation):

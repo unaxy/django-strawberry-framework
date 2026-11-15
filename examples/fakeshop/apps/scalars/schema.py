@@ -685,18 +685,13 @@ def _keyed_under_specimen_prefix(values: dict[str, object]) -> dict[str, object]
     return {f"specimen-{name}": value for name, value in values.items()}
 
 
-class CreateScalarSpecimenViaRekeyedSplitForm(DjangoModelFormMutation):
-    """Create a ``ScalarSpecimen`` through the prefixed split form, bound by a re-keying ``get_form``.
+class _RekeyedSplitFormMutation(DjangoModelFormMutation):
+    """Bind the prefixed split form through a re-keying ``get_form``.
 
     The hook keys every value ``specimen-<name>``, the whole ``occurredAt`` datetime
     included; the package keeps that mapping as bound and adds the date and time keys the
     split widget reads beside it.
     """
-
-    class Meta:
-        form_class = forms.PrefixedScalarSpecimenSplitStampForm
-        operation = "create"
-        permission_classes = []
 
     @override
     def get_form(
@@ -716,7 +711,16 @@ class CreateScalarSpecimenViaRekeyedSplitForm(DjangoModelFormMutation):
         )
 
 
-class UpdateScalarSpecimenViaRekeyedSplitForm(DjangoModelFormMutation):
+class CreateScalarSpecimenViaRekeyedSplitForm(_RekeyedSplitFormMutation):
+    """Create a ``ScalarSpecimen`` through the prefixed split form, bound by a re-keying ``get_form``."""
+
+    class Meta:
+        form_class = forms.PrefixedScalarSpecimenSplitStampForm
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateScalarSpecimenViaRekeyedSplitForm(_RekeyedSplitFormMutation):
     """Update a ``ScalarSpecimen`` through the prefixed split form, bound by a re-keying ``get_form``."""
 
     class Meta:
@@ -724,25 +728,26 @@ class UpdateScalarSpecimenViaRekeyedSplitForm(DjangoModelFormMutation):
         operation = "update"
         permission_classes = []
 
+
+class _PostedTextFormMutation(DjangoModelFormMutation):
+    """Bind the form to the text an HTML form post carries (``forms.as_posted_text``)."""
+
     @override
-    def get_form(
+    def get_form_kwargs(
         self,
         info: strawberry.Info[object, object],
         *,
         data: dict[str, object],
         files: dict[str, object],
         instance: Model | None = None,
-    ) -> ModelForm[models.ScalarSpecimen]:
-        """Bind the data keyed ``specimen-<name>``."""
-        return super().get_form(
-            info,
-            data=_keyed_under_specimen_prefix(data),
-            files=files,
-            instance=instance,
-        )
+    ) -> dict[str, object]:
+        """Bind the data as the text an HTML form post carries (``forms.as_posted_text``)."""
+        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
+        kwargs["data"] = forms.as_posted_text(data)
+        return kwargs
 
 
-class CreateScalarSpecimenViaPostedForm(DjangoModelFormMutation):
+class CreateScalarSpecimenViaPostedForm(_PostedTextFormMutation):
     """Create a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalForm`` bound to posted text."""
 
     class Meta:
@@ -750,22 +755,8 @@ class CreateScalarSpecimenViaPostedForm(DjangoModelFormMutation):
         operation = "create"
         permission_classes = []
 
-    @override
-    def get_form_kwargs(
-        self,
-        info: strawberry.Info[object, object],
-        *,
-        data: dict[str, object],
-        files: dict[str, object],
-        instance: Model | None = None,
-    ) -> dict[str, object]:
-        """Bind the data as the text an HTML form post carries (``forms.as_posted_text``)."""
-        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
-        kwargs["data"] = forms.as_posted_text(data)
-        return kwargs
 
-
-class UpdateScalarSpecimenViaPostedForm(DjangoModelFormMutation):
+class UpdateScalarSpecimenViaPostedForm(_PostedTextFormMutation):
     """Update a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalForm`` bound to posted text."""
 
     class Meta:
@@ -773,22 +764,8 @@ class UpdateScalarSpecimenViaPostedForm(DjangoModelFormMutation):
         operation = "update"
         permission_classes = []
 
-    @override
-    def get_form_kwargs(
-        self,
-        info: strawberry.Info[object, object],
-        *,
-        data: dict[str, object],
-        files: dict[str, object],
-        instance: Model | None = None,
-    ) -> dict[str, object]:
-        """Bind the data as the text an HTML form post carries (``forms.as_posted_text``)."""
-        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
-        kwargs["data"] = forms.as_posted_text(data)
-        return kwargs
 
-
-class CreateScalarSpecimenViaPostedSplitForm(DjangoModelFormMutation):
+class CreateScalarSpecimenViaPostedSplitForm(_PostedTextFormMutation):
     """Create a ``ScalarSpecimen`` through the split-stamp form bound to posted text."""
 
     class Meta:
@@ -796,42 +773,14 @@ class CreateScalarSpecimenViaPostedSplitForm(DjangoModelFormMutation):
         operation = "create"
         permission_classes = []
 
-    @override
-    def get_form_kwargs(
-        self,
-        info: strawberry.Info[object, object],
-        *,
-        data: dict[str, object],
-        files: dict[str, object],
-        instance: Model | None = None,
-    ) -> dict[str, object]:
-        """Bind the data as the text an HTML form post carries (``forms.as_posted_text``)."""
-        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
-        kwargs["data"] = forms.as_posted_text(data)
-        return kwargs
 
-
-class UpdateScalarSpecimenViaPostedSplitForm(DjangoModelFormMutation):
+class UpdateScalarSpecimenViaPostedSplitForm(_PostedTextFormMutation):
     """Update a ``ScalarSpecimen`` through the split-stamp form bound to posted text."""
 
     class Meta:
         form_class = forms.ScalarSpecimenSplitStampForm
         operation = "update"
         permission_classes = []
-
-    @override
-    def get_form_kwargs(
-        self,
-        info: strawberry.Info[object, object],
-        *,
-        data: dict[str, object],
-        files: dict[str, object],
-        instance: Model | None = None,
-    ) -> dict[str, object]:
-        """Bind the data as the text an HTML form post carries (``forms.as_posted_text``)."""
-        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
-        kwargs["data"] = forms.as_posted_text(data)
-        return kwargs
 
 
 class CreateNullableScalarSpecimenViaForm(DjangoModelFormMutation):

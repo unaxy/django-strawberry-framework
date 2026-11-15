@@ -34,16 +34,18 @@ _seq = itertools.count(1).__next__
 _Lookup = TypeVar("_Lookup", bound=models.LookupBase)
 
 
-def _label(key: str) -> str:
+def key_label(key: str) -> str:
+    """Return the display label a lookup row defaults to: ``key`` title-cased, separators as spaces."""
     return key.replace("_", " ").replace("-", " ").title()
 
 
 def _lookup(model: type[_Lookup], key: str, **defaults: object) -> _Lookup:
-    obj, _ = model.objects.get_or_create(key=key, defaults={"label": _label(key), **defaults})
+    obj, _ = model.objects.get_or_create(key=key, defaults={"label": key_label(key), **defaults})
     return obj
 
 
-def _next_order(manager: Manager[Model], **scope: object) -> int:
+def next_order(manager: Manager[Model], **scope: object) -> int:
+    """Return the next free ``order`` value among the ``manager`` rows matching ``scope``."""
     totals: dict[str, int | None] = manager.filter(**scope).aggregate(top=Max("order"))
     current = totals["top"]
     return 0 if current is None else current + 1
@@ -125,7 +127,7 @@ def make_glossary_term_link(
     kind = kind or make_glossary_term_link_kind()
     fields = {
         "raw_label": "",
-        "order": _next_order(source_term.outgoing_links, kind=kind),
+        "order": next_order(source_term.outgoing_links, kind=kind),
         **fields,
     }
     return models.GlossaryTermLink.objects.create(
@@ -145,7 +147,7 @@ def make_glossary_category_membership(
     """Create a category membership for ``term`` with the next ``order`` in the category."""
     category = category or make_glossary_category()
     term = term or make_glossary_term()
-    fields = {"order": _next_order(category.memberships), **fields}
+    fields = {"order": next_order(category.memberships), **fields}
     return models.GlossaryCategoryMembership.objects.create(
         category=category,
         term=term,
@@ -164,7 +166,7 @@ def make_glossary_spec_mention(
         "spec_path": f"docs/SPECS/spec-{_seq():03d}-{fake.slug()}.md",
         "term_text": fake.word(),
         "notes": "",
-        "order": _next_order(term.spec_mentions),
+        "order": next_order(term.spec_mentions),
         **fields,
     }
     return models.GlossarySpecMention.objects.create(term=term, **fields)
@@ -181,7 +183,7 @@ def make_glossary_source_link(
         "label": fake.sentence(nb_words=3).rstrip("."),
         "target": fake.url(),
         "kind": "",
-        "order": _next_order(term.source_links),
+        "order": next_order(term.source_links),
         **fields,
     }
     return models.GlossarySourceLink.objects.create(term=term, **fields)

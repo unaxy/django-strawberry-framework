@@ -227,44 +227,6 @@ class Query:
         graphql_type=list[GlossaryTermType],
     )
 
-    def _all_glossary_statuses(
-        self,
-        info: Info,
-        filter: FilterInput[filters.GlossaryStatusFilter] | None = None,  # noqa: A002 - the GraphQL argument name
-        order_by: list[OrderInput[orders.GlossaryStatusOrder]] | None = None,
-    ) -> QuerySet[models.GlossaryStatus]:
-        """Return ``GlossaryStatus`` rows, filtered and ordered by the arguments."""
-        queryset = models.GlossaryStatus.objects.order_by("order", "label")
-        if filter is not None:
-            queryset = filters.GlossaryStatusFilter.apply_sync(filter, queryset, info)
-        if order_by is not None:
-            queryset = orders.GlossaryStatusOrder.apply_sync(order_by, queryset, info)
-        return queryset
-
-    all_glossary_statuses: QuerySet[models.GlossaryStatus] = strawberry.field(
-        resolver=_all_glossary_statuses,
-        graphql_type=list[GlossaryStatusType],
-    )
-
-    def _all_glossary_categories(
-        self,
-        info: Info,
-        filter: FilterInput[filters.GlossaryCategoryFilter] | None = None,  # noqa: A002 - the GraphQL argument name
-        order_by: list[OrderInput[orders.GlossaryCategoryOrder]] | None = None,
-    ) -> QuerySet[models.GlossaryCategory]:
-        """Return ``GlossaryCategory`` rows, filtered and ordered by the arguments."""
-        queryset = models.GlossaryCategory.objects.order_by("order", "label")
-        if filter is not None:
-            queryset = filters.GlossaryCategoryFilter.apply_sync(filter, queryset, info)
-        if order_by is not None:
-            queryset = orders.GlossaryCategoryOrder.apply_sync(order_by, queryset, info)
-        return queryset
-
-    all_glossary_categories: QuerySet[models.GlossaryCategory] = strawberry.field(
-        resolver=_all_glossary_categories,
-        graphql_type=list[GlossaryCategoryType],
-    )
-
     def _all_glossary_category_memberships(
         self,
         info: Info,
@@ -286,63 +248,6 @@ class Query:
         )
     )
 
-    def _all_glossary_aliases(
-        self,
-        info: Info,
-        filter: FilterInput[filters.GlossaryAliasFilter] | None = None,  # noqa: A002 - the GraphQL argument name
-        order_by: list[OrderInput[orders.GlossaryAliasOrder]] | None = None,
-    ) -> QuerySet[models.GlossaryAlias]:
-        """Return ``GlossaryAlias`` rows, filtered and ordered by the arguments."""
-        queryset = models.GlossaryAlias.objects.order_by("term__title_sort", "label")
-        if filter is not None:
-            queryset = filters.GlossaryAliasFilter.apply_sync(filter, queryset, info)
-        if order_by is not None:
-            queryset = orders.GlossaryAliasOrder.apply_sync(order_by, queryset, info)
-        return queryset
-
-    all_glossary_aliases: QuerySet[models.GlossaryAlias] = strawberry.field(
-        resolver=_all_glossary_aliases,
-        graphql_type=list[GlossaryAliasType],
-    )
-
-    def _all_glossary_term_link_kinds(
-        self,
-        info: Info,
-        filter: FilterInput[filters.GlossaryTermLinkKindFilter] | None = None,  # noqa: A002 - the GraphQL argument name
-        order_by: list[OrderInput[orders.GlossaryTermLinkKindOrder]] | None = None,
-    ) -> QuerySet[models.GlossaryTermLinkKind]:
-        """Return ``GlossaryTermLinkKind`` rows, filtered and ordered by the arguments."""
-        queryset = models.GlossaryTermLinkKind.objects.order_by("order", "label")
-        if filter is not None:
-            queryset = filters.GlossaryTermLinkKindFilter.apply_sync(filter, queryset, info)
-        if order_by is not None:
-            queryset = orders.GlossaryTermLinkKindOrder.apply_sync(order_by, queryset, info)
-        return queryset
-
-    all_glossary_term_link_kinds: QuerySet[models.GlossaryTermLinkKind] = strawberry.field(
-        resolver=_all_glossary_term_link_kinds,
-        graphql_type=list[GlossaryTermLinkKindType],
-    )
-
-    def _all_glossary_term_links(
-        self,
-        info: Info,
-        filter: FilterInput[filters.GlossaryTermLinkFilter] | None = None,  # noqa: A002 - the GraphQL argument name
-        order_by: list[OrderInput[orders.GlossaryTermLinkOrder]] | None = None,
-    ) -> QuerySet[models.GlossaryTermLink]:
-        """Return ``GlossaryTermLink`` rows, filtered and ordered by the arguments."""
-        queryset = models.GlossaryTermLink.objects.order_by("source_term__title_sort", "order")
-        if filter is not None:
-            queryset = filters.GlossaryTermLinkFilter.apply_sync(filter, queryset, info)
-        if order_by is not None:
-            queryset = orders.GlossaryTermLinkOrder.apply_sync(order_by, queryset, info)
-        return queryset
-
-    all_glossary_term_links: QuerySet[models.GlossaryTermLink] = strawberry.field(
-        resolver=_all_glossary_term_links,
-        graphql_type=list[GlossaryTermLinkType],
-    )
-
     def _all_glossary_spec_mentions(
         self,
         info: Info,
@@ -360,25 +265,6 @@ class Query:
     all_glossary_spec_mentions: QuerySet[models.GlossarySpecMention] = strawberry.field(
         resolver=_all_glossary_spec_mentions,
         graphql_type=list[GlossarySpecMentionType],
-    )
-
-    def _all_glossary_source_links(
-        self,
-        info: Info,
-        filter: FilterInput[filters.GlossarySourceLinkFilter] | None = None,  # noqa: A002 - the GraphQL argument name
-        order_by: list[OrderInput[orders.GlossarySourceLinkOrder]] | None = None,
-    ) -> QuerySet[models.GlossarySourceLink]:
-        """Return ``GlossarySourceLink`` rows, filtered and ordered by the arguments."""
-        queryset = models.GlossarySourceLink.objects.order_by("term__title_sort", "order")
-        if filter is not None:
-            queryset = filters.GlossarySourceLinkFilter.apply_sync(filter, queryset, info)
-        if order_by is not None:
-            queryset = orders.GlossarySourceLinkOrder.apply_sync(order_by, queryset, info)
-        return queryset
-
-    all_glossary_source_links: QuerySet[models.GlossarySourceLink] = strawberry.field(
-        resolver=_all_glossary_source_links,
-        graphql_type=list[GlossarySourceLinkType],
     )
 
     def _all_glossary_documents(

@@ -108,15 +108,9 @@
 "django_strawberry_framework/utils/write_values.py::type_check_relation_id" = { PLC0415 = 1 }
 "django_strawberry_framework/write_mixins.py::_id_resolver_seams.resolve_async" = { A002 = 1 }
 "django_strawberry_framework/write_mixins.py::_id_resolver_seams.resolve_sync" = { A002 = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_aliases" = { A002 = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_categories" = { A002 = 1 }
 "examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_category_memberships" = { A002 = 1 }
 "examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_documents" = { A002 = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_source_links" = { A002 = 1 }
 "examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_spec_mentions" = { A002 = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_statuses" = { A002 = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_term_link_kinds" = { A002 = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_term_links" = { A002 = 1 }
 "examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_terms" = { A002 = 1 }
 "examples/fakeshop/apps/kanban/management/commands/import_card_files.py::Command.handle" = { TRY301 = 1 }
 "examples/fakeshop/apps/kanban/schema.py::Query._all_cards" = { A002 = 1 }
@@ -124,11 +118,8 @@
 "examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_attempt_outcomes" = { A002 = 1 }
 "examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_board_doc_kinds" = { A002 = 1 }
 "examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_board_docs" = { A002 = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_card_glossary_terms" = { A002 = 1 }
 "examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_card_items" = { A002 = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_card_transitions" = { A002 = 1 }
 "examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_decisions" = { A002 = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_labels" = { A002 = 1 }
 "examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_milestones" = { A002 = 1 }
 "examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_parity_levels" = { A002 = 1 }
 "examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_priorities" = { A002 = 1 }

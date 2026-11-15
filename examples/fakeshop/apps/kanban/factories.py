@@ -29,10 +29,10 @@ import enum
 import itertools
 from typing import TYPE_CHECKING, Literal, TypeVar
 
-from django.db.models import Manager, Max, Model
+from django.db.models import Max
 from faker import Faker
 
-from apps.glossary.factories import make_glossary_term
+from apps.glossary.factories import key_label, make_glossary_term, next_order
 from apps.kanban import models
 
 if TYPE_CHECKING:
@@ -44,20 +44,10 @@ _seq = itertools.count(1).__next__
 _Lookup = TypeVar("_Lookup", bound=models.LookupBase)
 
 
-def _label(key: str) -> str:
-    return key.replace("_", " ").replace("-", " ").title()
-
-
 def _lookup(model: type[_Lookup], key: str, **defaults: object) -> _Lookup:
     """get_or_create a LookupBase-style row by ``key`` (label defaults from key)."""
-    obj, _ = model.objects.get_or_create(key=key, defaults={"label": _label(key), **defaults})
+    obj, _ = model.objects.get_or_create(key=key, defaults={"label": key_label(key), **defaults})
     return obj
-
-
-def _next_order(manager: Manager[Model], **scope: object) -> int:
-    totals: dict[str, int | None] = manager.filter(**scope).aggregate(top=Max("order"))
-    current = totals["top"]
-    return 0 if current is None else current + 1
 
 
 # --------------------------------------------------------------------------- #
@@ -222,7 +212,7 @@ def make_card_item(
     """Create and return a saved ``CardItem``, filling required relations when not supplied."""
     card = card or make_card()
     section = section or make_section()
-    fields = {"text": fake.sentence(), "order": _next_order(card.items, section=section), **fields}
+    fields = {"text": fake.sentence(), "order": next_order(card.items, section=section), **fields}
     return models.CardItem.objects.create(card=card, section=section, **fields)
 
 
@@ -294,7 +284,7 @@ def make_card_glossary_term(
     """Link a kanban Card to a glossary term (creates both ends if omitted)."""
     card = card or make_card()
     term = term or make_glossary_term()
-    fields = {"raw_text": "", "order": _next_order(card.glossary_links), **fields}
+    fields = {"raw_text": "", "order": next_order(card.glossary_links), **fields}
     return models.CardGlossaryTerm.objects.create(card=card, term=term, **fields)
 
 
@@ -322,7 +312,7 @@ def make_actor(
     """Return the ``Actor`` row for ``key``, creating it on first use."""
     obj, _ = models.Actor.objects.get_or_create(
         key=key,
-        defaults={"label": _label(key), "kind": kind, **defaults},
+        defaults={"label": key_label(key), "kind": kind, **defaults},
     )
     return obj
 
@@ -410,5 +400,5 @@ def make_board_doc_card_reference(
     """Create and return a saved ``BoardDocCardReference``, filling required relations when not supplied."""
     doc = doc or make_board_doc()
     card = card or make_card()
-    fields = {"raw_text": "", "order": _next_order(doc.card_references), **fields}
+    fields = {"raw_text": "", "order": next_order(doc.card_references), **fields}
     return models.BoardDocCardReference.objects.create(doc=doc, card=card, **fields)

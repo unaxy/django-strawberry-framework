@@ -722,25 +722,6 @@ class Query:
         graphql_type=list[CardItemType],
     )
 
-    def _all_kanban_card_glossary_terms(
-        self,
-        info: Info,
-        filter: FilterInput[filters.CardGlossaryTermFilter] | None = None,  # noqa: A002 - the GraphQL argument name
-        order_by: list[OrderInput[orders.CardGlossaryTermOrder]] | None = None,
-    ) -> QuerySet[models.CardGlossaryTerm]:
-        """Every ``CardGlossaryTerm`` row, ordered by card number, then ``order``."""
-        queryset = models.CardGlossaryTerm.objects.order_by("card__number", "order")
-        if filter is not None:
-            queryset = filters.CardGlossaryTermFilter.apply_sync(filter, queryset, info)
-        if order_by is not None:
-            queryset = orders.CardGlossaryTermOrder.apply_sync(order_by, queryset, info)
-        return queryset
-
-    all_kanban_card_glossary_terms: QuerySet[models.CardGlossaryTerm] = strawberry.field(
-        resolver=_all_kanban_card_glossary_terms,
-        graphql_type=list[CardGlossaryTermType],
-    )
-
     def _all_kanban_statuses(
         self,
         info: Info,
@@ -913,25 +894,6 @@ class Query:
         graphql_type=list[TargetVersionType],
     )
 
-    def _all_kanban_labels(
-        self,
-        info: Info,
-        filter: FilterInput[filters.LabelFilter] | None = None,  # noqa: A002 - the GraphQL argument name
-        order_by: list[OrderInput[orders.LabelOrder]] | None = None,
-    ) -> QuerySet[models.Label]:
-        """Every ``Label`` row, ordered by ``key`` by default."""
-        queryset = models.Label.objects.order_by("key")
-        if filter is not None:
-            queryset = filters.LabelFilter.apply_sync(filter, queryset, info)
-        if order_by is not None:
-            queryset = orders.LabelOrder.apply_sync(order_by, queryset, info)
-        return queryset
-
-    all_kanban_labels: QuerySet[models.Label] = strawberry.field(
-        resolver=_all_kanban_labels,
-        graphql_type=list[LabelType],
-    )
-
     def _all_kanban_tracked_paths(
         self,
         info: Info,
@@ -1044,25 +1006,6 @@ class Query:
     all_kanban_verification_kinds: QuerySet[models.VerificationKind] = strawberry.field(
         resolver=_all_kanban_verification_kinds,
         graphql_type=list[VerificationKindType],
-    )
-
-    def _all_kanban_card_transitions(
-        self,
-        info: Info,
-        filter: FilterInput[filters.CardTransitionFilter] | None = None,  # noqa: A002 - the GraphQL argument name
-        order_by: list[OrderInput[orders.CardTransitionOrder]] | None = None,
-    ) -> QuerySet[models.CardTransition]:
-        """Every ``CardTransition`` row, ordered by card number, then ``occurred_at``."""
-        queryset = models.CardTransition.objects.order_by("card__number", "occurred_at")
-        if filter is not None:
-            queryset = filters.CardTransitionFilter.apply_sync(filter, queryset, info)
-        if order_by is not None:
-            queryset = orders.CardTransitionOrder.apply_sync(order_by, queryset, info)
-        return queryset
-
-    all_kanban_card_transitions: QuerySet[models.CardTransition] = strawberry.field(
-        resolver=_all_kanban_card_transitions,
-        graphql_type=list[CardTransitionType],
     )
 
     def _all_kanban_work_attempts(
