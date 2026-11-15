@@ -1,7 +1,7 @@
 """OrderSet declarations for the kanban board app.
 
-One ``OrderSet`` per ``FilterSet`` in ``apps.kanban.filters`` (1:1 with the
-owning ``DjangoType``). Each uses the ``Meta.fields = "__all__"`` shorthand,
+One ``OrderSet`` per kanban type that publishes an ``orderBy`` argument.
+Each uses the ``Meta.fields = "__all__"`` shorthand,
 which expands to every column-backed model field -- the orderable scalars
 (``key`` / ``label`` / ``order`` / ``rank`` / audit timestamps / ``body`` /
 ...) plus forward FK / OneToOne columns (``status`` -> ``status_id``, etc.) --
@@ -107,35 +107,11 @@ class CardOrder(OrderSet):
         fields = "__all__"
 
 
-class CardReferenceOrder(OrderSet):
-    """Orders ``CardReference`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.CardReference
-        fields = "__all__"
-
-
-class CardGlossaryTermOrder(OrderSet):
-    """Orders ``CardGlossaryTerm`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.CardGlossaryTerm
-        fields = "__all__"
-
-
 class CardItemOrder(OrderSet):
     """Orders ``CardItem`` rows by every column-backed field."""
 
     class Meta:
         model = models.CardItem
-        fields = "__all__"
-
-
-class LabelOrder(OrderSet):
-    """Orders ``Label`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.Label
         fields = "__all__"
 
 
@@ -152,14 +128,6 @@ class BoardDocOrder(OrderSet):
 
     class Meta:
         model = models.BoardDoc
-        fields = "__all__"
-
-
-class BoardDocCardReferenceOrder(OrderSet):
-    """Orders ``BoardDocCardReference`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.BoardDocCardReference
         fields = "__all__"
 
 
@@ -187,14 +155,6 @@ class ActorOrder(OrderSet):
         fields = "__all__"
 
 
-class CardTransitionOrder(OrderSet):
-    """Orders ``CardTransition`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.CardTransition
-        fields = "__all__"
-
-
 class WorkAttemptOrder(OrderSet):
     """Orders ``WorkAttempt`` rows by every column-backed field."""
 
@@ -214,17 +174,12 @@ class DecisionOrder(OrderSet):
 __all__ = (
     "ActorOrder",
     "AttemptOutcomeOrder",
-    "BoardDocCardReferenceOrder",
     "BoardDocKindOrder",
     "BoardDocOrder",
-    "CardGlossaryTermOrder",
     "CardItemOrder",
     "CardOrder",
     "CardReferenceKindOrder",
-    "CardReferenceOrder",
-    "CardTransitionOrder",
     "DecisionOrder",
-    "LabelOrder",
     "MilestoneOrder",
     "ParityLevelOrder",
     "PriorityOrder",

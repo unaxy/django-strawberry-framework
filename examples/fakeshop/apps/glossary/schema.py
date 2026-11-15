@@ -25,7 +25,6 @@ class GlossaryStatusType(DjangoType):
             "terms",
         )
         filterset_class = filters.GlossaryStatusFilter
-        orderset_class = orders.GlossaryStatusOrder
 
 
 class GlossaryCategoryType(DjangoType):
@@ -43,7 +42,6 @@ class GlossaryCategoryType(DjangoType):
             "memberships",
         )
         filterset_class = filters.GlossaryCategoryFilter
-        orderset_class = orders.GlossaryCategoryOrder
         optimizer_hints = {"memberships": OptimizerHint.prefetch_related()}
 
 
@@ -97,7 +95,6 @@ class GlossaryAliasType(DjangoType):
             "updated_date",
         )
         filterset_class = filters.GlossaryAliasFilter
-        orderset_class = orders.GlossaryAliasOrder
 
 
 class GlossaryTermLinkKindType(DjangoType):
@@ -114,7 +111,6 @@ class GlossaryTermLinkKindType(DjangoType):
             "links",
         )
         filterset_class = filters.GlossaryTermLinkKindFilter
-        orderset_class = orders.GlossaryTermLinkKindOrder
 
 
 class GlossaryTermLinkType(DjangoType):
@@ -131,7 +127,6 @@ class GlossaryTermLinkType(DjangoType):
             "updated_date",
         )
         filterset_class = filters.GlossaryTermLinkFilter
-        orderset_class = orders.GlossaryTermLinkOrder
 
 
 class GlossaryCategoryMembershipType(DjangoType):
@@ -181,8 +176,6 @@ class GlossarySourceLinkType(DjangoType):
             "created_date",
             "updated_date",
         )
-        filterset_class = filters.GlossarySourceLinkFilter
-        orderset_class = orders.GlossarySourceLinkOrder
 
 
 class GlossaryDocumentType(DjangoType):

@@ -74,20 +74,6 @@ class GlossarySpecMentionFilter(FilterSet):
         }
 
 
-class GlossarySourceLinkFilter(FilterSet):
-    """Filters ``GlossarySourceLink`` rows by the listed columns."""
-
-    class Meta:
-        model = models.GlossarySourceLink
-        fields = {
-            "id": "__all__",
-            "label": "__all__",
-            "target": "__all__",
-            "kind": "__all__",
-            "order": "__all__",
-        }
-
-
 class GlossaryDocumentFilter(FilterSet):
     """Filters ``BoardDoc`` rows by the listed columns."""
 
@@ -136,7 +122,6 @@ __all__ = (
     "GlossaryCategoryFilter",
     "GlossaryCategoryMembershipFilter",
     "GlossaryDocumentFilter",
-    "GlossarySourceLinkFilter",
     "GlossarySpecMentionFilter",
     "GlossaryStatusFilter",
     "GlossaryTermFilter",

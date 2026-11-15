@@ -144,21 +144,6 @@ class ActorFilter(FilterSet):
         }
 
 
-class CardTransitionFilter(FilterSet):
-    """Filters ``CardTransition`` rows by the listed columns.
-
-    Related filtersets: ``from_status``, ``to_status`` and ``actor``.
-    """
-
-    from_status = RelatedFilter(StatusFilter, field_name="from_status")
-    to_status = RelatedFilter(StatusFilter, field_name="to_status")
-    actor = RelatedFilter(ActorFilter, field_name="actor")
-
-    class Meta:
-        model = models.CardTransition
-        fields = {"id": "__all__", "note": "__all__", "occurred_at": "__all__"}
-
-
 class WorkAttemptFilter(FilterSet):
     """Filters ``WorkAttempt`` rows by the listed columns, and across ``actor`` and ``outcome``."""
 
@@ -330,7 +315,6 @@ __all__ = (
     "CardItemFilter",
     "CardReferenceFilter",
     "CardReferenceKindFilter",
-    "CardTransitionFilter",
     "DecisionFilter",
     "LabelFilter",
     "MilestoneFilter",

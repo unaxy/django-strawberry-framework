@@ -442,7 +442,6 @@ class CardReferenceType(DjangoType):
             "uuid",
         )
         filterset_class = filters.CardReferenceFilter
-        orderset_class = orders.CardReferenceOrder
 
 
 class CardGlossaryTermType(DjangoType):
@@ -459,7 +458,6 @@ class CardGlossaryTermType(DjangoType):
             "uuid",
         )
         filterset_class = filters.CardGlossaryTermFilter
-        orderset_class = orders.CardGlossaryTermOrder
 
 
 class ParityClaimType(DjangoType):
@@ -528,7 +526,6 @@ class LabelType(DjangoType):
             "cards",
         )
         filterset_class = filters.LabelFilter
-        orderset_class = orders.LabelOrder
 
 
 class CardTransitionType(DjangoType):
@@ -546,8 +543,6 @@ class CardTransitionType(DjangoType):
             "updated_date",
             "uuid",
         )
-        filterset_class = filters.CardTransitionFilter
-        orderset_class = orders.CardTransitionOrder
 
 
 class WorkAttemptType(DjangoType):
@@ -639,7 +634,6 @@ class BoardDocCardReferenceType(DjangoType):
             "uuid",
         )
         filterset_class = filters.BoardDocCardReferenceFilter
-        orderset_class = orders.BoardDocCardReferenceOrder
 
 
 # ---------------------------------------------------------------------------

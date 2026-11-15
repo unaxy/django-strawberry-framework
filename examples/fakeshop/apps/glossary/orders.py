@@ -1,7 +1,7 @@
 """OrderSet declarations for the glossary data app.
 
-One ``OrderSet`` per ``FilterSet`` in ``apps.glossary.filters`` (1:1 with
-the owning ``DjangoType``). Each uses the ``Meta.fields = "__all__"``
+One ``OrderSet`` per glossary type that publishes an ``orderBy`` argument.
+Each uses the ``Meta.fields = "__all__"``
 shorthand -- every column-backed field (the orderable scalars plus forward
 FK columns such as ``status`` / ``term`` / ``category`` -> ``<field>_id``)
 plus any forward ``ForeignObject``, ordered by its carrier columns; reverse
@@ -19,51 +19,11 @@ from django_strawberry_framework.orders import OrderSet
 from . import models
 
 
-class GlossaryStatusOrder(OrderSet):
-    """Orders ``GlossaryStatus`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.GlossaryStatus
-        fields = "__all__"
-
-
-class GlossaryCategoryOrder(OrderSet):
-    """Orders ``GlossaryCategory`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.GlossaryCategory
-        fields = "__all__"
-
-
 class GlossaryTermOrder(OrderSet):
     """Orders ``GlossaryTerm`` rows by every column-backed field."""
 
     class Meta:
         model = models.GlossaryTerm
-        fields = "__all__"
-
-
-class GlossaryAliasOrder(OrderSet):
-    """Orders ``GlossaryAlias`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.GlossaryAlias
-        fields = "__all__"
-
-
-class GlossaryTermLinkKindOrder(OrderSet):
-    """Orders ``GlossaryTermLinkKind`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.GlossaryTermLinkKind
-        fields = "__all__"
-
-
-class GlossaryTermLinkOrder(OrderSet):
-    """Orders ``GlossaryTermLink`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.GlossaryTermLink
         fields = "__all__"
 
 
@@ -83,14 +43,6 @@ class GlossarySpecMentionOrder(OrderSet):
         fields = "__all__"
 
 
-class GlossarySourceLinkOrder(OrderSet):
-    """Orders ``GlossarySourceLink`` rows by every column-backed field."""
-
-    class Meta:
-        model = models.GlossarySourceLink
-        fields = "__all__"
-
-
 class GlossaryDocumentOrder(OrderSet):
     """Orders shared ``BoardDoc`` rows by every column-backed field."""
 
@@ -100,14 +52,8 @@ class GlossaryDocumentOrder(OrderSet):
 
 
 __all__ = (
-    "GlossaryAliasOrder",
     "GlossaryCategoryMembershipOrder",
-    "GlossaryCategoryOrder",
     "GlossaryDocumentOrder",
-    "GlossarySourceLinkOrder",
     "GlossarySpecMentionOrder",
-    "GlossaryStatusOrder",
-    "GlossaryTermLinkKindOrder",
-    "GlossaryTermLinkOrder",
     "GlossaryTermOrder",
 )
