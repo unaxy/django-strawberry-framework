@@ -86,8 +86,7 @@ Where each pass reaches, stated as the boundary rather than as parity:
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import graphql
 from graphql import (
@@ -156,7 +155,6 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.context import restored_context_keys
 from django_strawberry_framework.utils.inputs import RELATION_MULTI
-from django_strawberry_framework.utils.private_state import PrivateAuthority
 from django_strawberry_framework.utils.typing import (
     graphql_fields,
     graphql_input_fields,
@@ -1662,34 +1660,6 @@ def charge_document(
             walk.fragment(definition)
 
 
-@dataclass(frozen=True)
-class _AcceptedPolicy:
-    """What one ``DjangoResourcePolicyExtension`` construction settled.
-
-    ``policy`` is the explicit override the extension was handed, or ``None``
-    for the supported configuration that has none and reads its schema's policy
-    per operation. Either way the record EXISTS, which is what separates an
-    extension that was constructed from one that never was; a policy of ints
-    and a float points at nothing, so holding this retains nothing but the
-    policy.
-    """
-
-    policy: ResourcePolicy | None
-
-
-#: What each constructed extension settled, held here and by nothing else.
-#:
-#: On a plain ``strawberry.Schema`` an instance entry is accepted as itself, so
-#: it stays reachable through ``info.schema.extensions`` for as long as the
-#: schema lives, and what it holds is what bounds the NEXT operation. An
-#: attribute holding that is a name a resolver writes once - or deletes once,
-#: which selects the schema's policy or the package defaults instead, and those
-#: may be wider than the policy this extension was configured with. A policy is
-#: ints and a float, so holding one here retains nothing but the policy; see
-#: ``utils/private_state.py::PrivateAuthority``.
-_EXPLICIT_POLICY: PrivateAuthority[_AcceptedPolicy] = PrivateAuthority()
-
-
 def restate_admission_verdict(execution_context: ExecutionContext) -> None:
     """Republish this operation's admission verdict over whatever replaced it.
 
@@ -1747,24 +1717,8 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
     enforces nothing.
     """
 
-    _reconstruction_refusal: ClassVar[str] = (
-        "A resource-policy extension is configured when it is constructed; "
-        "re-running its __init__ on an instance a schema is already enforcing "
-        "with would replace the policy it was accepted with."
-    )
-
     def __init__(self, *, policy: ResourcePolicy | None = None) -> None:
-        """Settle the policy this extension enforces; ``None`` defers to the schema's policy."""
-        # An accepted instance is reachable from every resolver the schema
-        # serves, and so is its ``__init__``. Re-running it would nominate a new
-        # budget for every later operation, which is the widening no attribute
-        # on this object admits either. The base constructor refuses that before
-        # either branch here, and answers from the construction record rather
-        # than from the policy in it: an extension deliberately constructed
-        # WITHOUT an override is configured - it inherits its schema's policy -
-        # and reading that as an object nobody ever constructed would leave the
-        # one configuration open to being handed a wider ceiling after
-        # acceptance.
+        """Hold the policy this extension enforces; ``None`` defers to the schema's policy."""
         super().__init__()
         # An explicit policy is canonicalized HERE, where the configuration is
         # accepted, rather than at each hook that reads it. It arrives straight
@@ -1772,38 +1726,21 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
         # normalization ``DjangoSchema(resource_policy=...)`` applies, so until
         # it is read out once into an exact ``ResourcePolicy`` every bound read
         # off it is consumer code that may answer differently each time it is
-        # asked - which is the whole distance between "the extension holds a
-        # policy" and "the operation has a budget". No override settles as none:
-        # the record says the extension inherits, not that it pinned whatever
-        # its schema resolved at the moment it was built.
-        _EXPLICIT_POLICY.settle(
-            self,
-            _AcceptedPolicy(None if policy is None else _operation_policy(policy)),
+        # asked.
+        self._explicit_policy: ResourcePolicy | None = (
+            None if policy is None else _operation_policy(policy)
         )
 
     @property
     def _policy(self) -> ResourcePolicy | None:
         """The explicit policy this extension was configured with, as a copy.
 
-        An extension instance passed to a plain ``strawberry.Schema``'s
-        ``extensions=[...]`` is accepted as the entry itself, so it stays
-        reachable through ``info.schema.extensions`` for the life of the schema
-        - and what it holds is the authority the NEXT operation is bounded by.
-        An ordinary attribute is therefore a seam a resolver widens every later
-        request through, by rebinding it, deleting it, or writing a bound on the
-        object it answers with. ``DjangoSchema`` reads a direct instance entry
-        once and keeps the bound as its own canonical state instead, and this
-        property is how it reads it. The configuration
-        is held as ``utils/private_state.py::PrivateAuthority`` instead, which
-        no name on this object answers with, and each read hands out a
-        duplicate. ``None`` here means this extension was given no policy to
-        hold - by the construction that settled none, or because nothing ever
-        constructed it - and never that one it was given has gone missing.
+        ``DjangoSchema`` reads a direct instance entry once through this
+        property and keeps the bound as its own canonical state; each read
+        hands out a duplicate. ``None`` means this extension was given no
+        policy and reads its schema's.
         """
-        accepted = _EXPLICIT_POLICY.recall(self)
-        if accepted is None or accepted.policy is None:
-            return None
-        return copy.copy(accepted.policy)
+        return None if self._explicit_policy is None else copy.copy(self._explicit_policy)
 
     def _resolved_policy(self) -> ResourcePolicy:
         """Return the explicit policy, else the schema's, else the package defaults.

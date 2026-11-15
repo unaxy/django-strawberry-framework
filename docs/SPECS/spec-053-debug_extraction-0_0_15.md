@@ -23,9 +23,8 @@ verdicts flow from the same evidence standard, applied to opposite facts.
 The optimizer is bidirectionally fused to the type system; the debug
 extension imports stdlib + Django + graphql-core + `typing_extensions`
 **plus a small set of package symbols (the root `logger`,
-`exceptions.ConfigurationError`, the `utils/truth.py` reads,
-`utils/private_state.py::PrivateAuthority`, and the per-operation binding
-base in `extensions/operation_state.py`)**, nothing in the package imports
+`exceptions.ConfigurationError`, the `utils/truth.py` reads, and the
+per-operation binding base in `extensions/operation_state.py`)**, nothing in the package imports
 it back, and it works against ANY
 `strawberry-graphql` + Django schema — no
 `DjangoType`, no registry, no optimizer required. It is the one part of the
@@ -165,9 +164,8 @@ a package-tier suite and a live tier riding a dedicated
 runtime module imports it back** (it is deliberately absent from the root
 `__all__`); **fakeshop deliberately does not enable it**; and — unlike every
 other subsystem — **it imports little from the package**: the root
-`logger`, `exceptions.ConfigurationError`, the `utils/truth.py` reads,
-`utils/private_state.py::PrivateAuthority`, and the per-operation binding
-base (`OperationState`, `_OperationBoundExtension`) from
+`logger`, `exceptions.ConfigurationError`, the `utils/truth.py` reads, and
+the per-operation binding base (`OperationState`, `_OperationBoundExtension`) from
 `extensions/operation_state.py`. It is a low-coupling
 leaf with a genuine standalone audience: any `strawberry-graphql` + Django
 project can use it, framework or not. Carrying it inside this distribution
@@ -193,7 +191,6 @@ evidence — is exactly right for this module, on the same evidence standard.
   `from django_strawberry_framework import logger`,
   `from django_strawberry_framework.exceptions import ConfigurationError`,
   `from django_strawberry_framework.utils import truth`,
-  `from django_strawberry_framework.utils.private_state import PrivateAuthority`,
   and `from .operation_state import OperationState, _OperationBoundExtension`
   (`collections.abc`, the backend wrapper and Strawberry's `ExecutionContext`
   only under `TYPE_CHECKING`).
@@ -311,8 +308,8 @@ standalone package.
 **Evidence** (the same standard that rejected the optimizer split): (a) the
 import surface is stdlib + Django + graphql-core + `typing_extensions` +
 a small set of package symbols (the root `logger`,
-`exceptions.ConfigurationError`, the `utils/truth.py` reads,
-`PrivateAuthority`, and the `extensions/operation_state.py` binding base) —
+`exceptions.ConfigurationError`, the `utils/truth.py` reads, and the
+`extensions/operation_state.py` binding base) —
 no type-system contract, no registry, no optimizer; (b)
 reverse coupling is zero for the module — no package module imports
 `extensions/debug.py` at runtime (the directory as a whole is NOT a leaf:
@@ -352,9 +349,8 @@ its own. The moved suite's `pytest.raises(ConfigurationError, ...)`
 assertion retargets to the vendored class, and its six logger-identity
 assertions (`record.name == "django_strawberry_framework"` — four
 package-tier, two live-tier) retarget to the new namespace. The third
-coupling, `PrivateAuthority` plus `OperationState` /
-`_OperationBoundExtension` (which in turn import `utils/execution_mode.py`
-and `utils/private_state.py`), is the
+coupling, `OperationState` / `_OperationBoundExtension` (which in turn
+import `utils/execution_mode.py`), is the
 per-operation isolation every framework extension shares; how the new
 package carries it is open ([Risks](#risks-and-open-questions)).
 
@@ -568,8 +564,7 @@ Sequencing inside the card is strict: Slice 2 must not land until Slice 1's
 ## Risks and open questions
 
 - **Operation-state coupling**: `DjangoDebugExtension` derives from
-  `extensions/operation_state.py::_OperationBoundExtension` and keeps its
-  acknowledgement behind `utils/private_state.py::PrivateAuthority`; that
+  `extensions/operation_state.py::_OperationBoundExtension`; that
   base is the per-operation isolation every framework extension shares, and
   `schema.py::DjangoSchema.create_extensions_runner` is the runner it binds
   through. The new package cannot import it, so Slice 1 must decide between

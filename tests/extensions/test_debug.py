@@ -53,7 +53,6 @@ Live GraphQL HTTP behavior over fakeshop models belongs in
 """
 
 import asyncio
-import contextlib
 import itertools
 import json
 import logging
@@ -1828,37 +1827,3 @@ def test_one_operations_payload_is_not_the_extensions() -> None:
     assert second.extensions["debug"] == {"sql": [], "exceptions": []}
     assert first.extensions["debug"] is not second.extensions["debug"]
     assert shared._operation_state() is None  # nothing is left on the extension
-
-
-@override_settings(DEBUG=False)
-def test_the_acknowledgement_is_read_from_the_construction_not_from_an_attribute() -> None:
-    """An attribute write does not change what the extension answers, or what it does.
-
-    The wire half - a resolver writing this on a process-lived entry and the
-    NEXT request still withholding - is
-    ``examples/fakeshop/test_query/test_debug_extension_api.py``. What this row
-    pins is the read itself, and its control: an extension constructed WITH the
-    acknowledgement discloses under the same settings.
-    """
-    withheld = DjangoDebugExtension()
-
-    for attempt in (
-        lambda: setattr(withheld, "allow_unsafe_production", True),
-        lambda: withheld.__dict__.update(allow_unsafe_production=True),
-    ):
-        with contextlib.suppress(AttributeError):
-            attempt()
-
-    assert withheld.allow_unsafe_production is False
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        schema = DjangoSchema(query=_OkQuery, extensions=[lambda: withheld])
-    assert "debug" not in (schema.execute_sync("{ ok }").extensions or {})
-
-    acknowledged = DjangoDebugExtension(allow_unsafe_production=True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        control = DjangoSchema(query=_OkQuery, extensions=[lambda: acknowledged])
-    control_result = control.execute_sync("{ ok }")
-    assert control_result.extensions is not None
-    assert control_result.extensions["debug"] == {"sql": [], "exceptions": []}

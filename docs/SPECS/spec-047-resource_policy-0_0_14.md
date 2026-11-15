@@ -391,11 +391,10 @@ so a policy kept in an instance attribute would be reachable by assignment and t
   extension, so the pre-parse scan still stands between the request and the parser.
 - **An extension instance on a plain `strawberry.Schema`.** Strawberry hands an instance
   entry back unchanged, so it stays reachable through `info.schema.extensions` and its
-  policy is what the next operation arms. Its explicit policy is therefore held in
-  `extensions/resource_policy.py::_EXPLICIT_POLICY`, read back as a copy, and the record
-  is of the CONSTRUCTION rather than the policy: an extension built with no override is
-  configured too (it enforces its schema's policy per operation), so re-running its
-  `__init__` to hand it a wider ceiling is refused.
+  policy is what the next operation arms. Its explicit policy is canonicalized at
+  construction into an exact `ResourcePolicy` and read back as a copy
+  (`extensions/resource_policy.py::DjangoResourcePolicyExtension._policy`); an extension
+  built with no override enforces its schema's policy per operation.
 
 Both private stores file entries under `id()`, never the owner itself: a mapping that found
 entries by hash and equality would be finding them by methods a schema subclass may define,
@@ -1230,8 +1229,8 @@ check runs rather than about how long anything takes.
   ([Decision 4](#decision-4--the-document-and-value-budgets-are-one-iterative-walk)).
 - `utils/policies.py::canonical_policy`, `copy.copy` and
   `utils/private_state.py::PrivateAuthority` / `utils/private_state.py::PrivateMembership` —
-  the exact-class rebuild, the per-read copy, and the private stores the schema and the
-  extension hold their configuration in
+  the exact-class rebuild, the per-read copy, and the private stores the schema holds its
+  configuration in
   ([Decision 1](#decision-1--one-immutable-frozen-dataclass-validated-at-construction)).
 
 ## Helper-reuse obligations (DRY)

@@ -35,7 +35,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
-from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypeVar, cast
+from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
 from weakref import WeakKeyDictionary
 
 from django.db import models
@@ -76,7 +76,6 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.connections import resolve_relay_max_results
 from django_strawberry_framework.utils.execution_mode import operation_is_async
-from django_strawberry_framework.utils.private_state import PrivateAuthority
 from django_strawberry_framework.utils.querysets import (
     normalize_query_source,
     run_in_one_sync_boundary,
@@ -955,32 +954,6 @@ class _OptimizerOperationState(OperationState):
         self.stashes: dict[str, object] = {}
 
 
-class _AcceptedOptimizerConfiguration(NamedTuple):
-    """What one ``DjangoOptimizerExtension`` construction settled.
-
-    Both values are primitives, so holding them retains nothing but themselves;
-    the plan cache, which is an object graph and is deliberately shared across
-    requests, stays an ordinary attribute.
-    """
-
-    strictness: str
-    nested_connection_strategy: NestedConnectionStrategy
-
-
-#: Every constructed optimizer's settled configuration, held here and by nothing
-#: else.
-#:
-#: This extension's documented shape is a module-level singleton behind a
-#: factory, because its plan cache is meant to be shared - which also makes the
-#: instance reachable from every resolver of every request for the life of the
-#: process. An ordinary ``self.strictness`` is then a name one resolver writes
-#: to turn a deployment's N+1 guard off for every LATER request, and
-#: ``self.nested_connection_strategy`` one that replaces the strategy the
-#: instance's cached plans were keyed for. Neither is a per-request preference:
-#: both are read at the start of every execution and arm it.
-_OPTIMIZER_CONFIGURATION: PrivateAuthority[_AcceptedOptimizerConfiguration] = PrivateAuthority()
-
-
 class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState]):
     """Strawberry schema extension that optimizes Django querysets per request.
 
@@ -1016,14 +989,12 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
     ``QuerySet`` via ``.all()`` before the ``isinstance(QuerySet)`` gate
     in ``_optimize``, so the optimizer is applied uniformly whether the
     consumer wrote ``Model.objects`` or ``Model.objects.all()``.
-    """
 
-    _reconstruction_refusal: ClassVar[str] = (
-        "An optimizer extension is configured when it is constructed; re-running "
-        "its __init__ on an instance a schema is already serving requests with "
-        "would replace the strictness and the nested-connection strategy its "
-        "cached plans were built under."
-    )
+    ``strictness`` is always the vocabulary's own plain ``str`` (``"off"`` /
+    ``"warn"`` / ``"raise"``), whatever ``str`` subclass spelled it at
+    construction, so every per-request comparison is the package's and never
+    the caller's.
+    """
 
     def __init__(
         self,
@@ -1032,7 +1003,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         execution_context: "ExecutionContext | None" = None,
         nested_connection_strategy: StrategySelection | None = None,
     ) -> None:
-        """Settle the N+1 ``strictness`` and the nested-connection strategy once per instance."""
+        """Set the N+1 ``strictness`` and the nested-connection strategy for this instance."""
         # Strawberry assigns ``extension.execution_context`` once per
         # operation. The documented singleton-factory form returns this SAME
         # extension instance to concurrent and to NESTED operations, so the
@@ -1063,12 +1034,9 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # selects by its fetch-time alias (``optimizer/nested_fetch.py``);
         # cached plans therefore remain valid across router decisions. Unknown
         # names raise ``ConfigurationError`` at construction, not at query time.
-        _OPTIMIZER_CONFIGURATION.settle(
-            self,
-            _AcceptedOptimizerConfiguration(
-                strictness=accepted_strictness,
-                nested_connection_strategy=resolve_strategy(nested_connection_strategy),
-            ),
+        self.strictness: str = accepted_strictness
+        self.nested_connection_strategy: NestedConnectionStrategy = resolve_strategy(
+            nested_connection_strategy,
         )
         self._plan_cache: OrderedDict[PlanCacheKey, OptimizationPlan] = OrderedDict()
         self._cache_hits: int = 0
@@ -1081,45 +1049,6 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
     ) -> _OptimizerOperationState:
         """Build this operation's optimizer state."""
         return _OptimizerOperationState(execution_context)
-
-    def _configuration(self) -> _AcceptedOptimizerConfiguration:
-        """Return the configuration this extension settled, or the safe default for none.
-
-        ``None`` means the constructor never ran - a subclass that skipped it -
-        and the answer for that is the shape a zero-argument construction
-        produces: the N+1 guard off, and the strategy the deployment's setting
-        resolves to.
-        """
-        accepted = _OPTIMIZER_CONFIGURATION.recall(self)
-        if accepted is None:
-            return _AcceptedOptimizerConfiguration(
-                strictness="off",
-                nested_connection_strategy=resolve_strategy(None),
-            )
-        return accepted
-
-    @property
-    def strictness(self) -> str:
-        """The N+1 strictness this extension was constructed with, as a read.
-
-        Always the vocabulary's own plain ``str`` (``"off"`` / ``"warn"`` /
-        ``"raise"``), whatever ``str`` subclass spelled it at construction, so
-        every per-request comparison is the package's and never the caller's.
-        Read-only, because it is armed for the whole of every execution and one
-        write would disarm a deployment's guard for every later request rather
-        than for the one that made it.
-        """
-        return self._configuration().strictness
-
-    @property
-    def nested_connection_strategy(self) -> NestedConnectionStrategy:
-        """The nested-connection fetch strategy this extension was built with.
-
-        Read-only for the reason the plan cache is instance-bound: one cache
-        must never mix plans from two strategies, and the strategy a cached plan
-        was keyed for is settled at construction.
-        """
-        return self._configuration().nested_connection_strategy
 
     def cache_info(self) -> CacheInfo:
         """Return plan-cache statistics (hits, misses, current size).

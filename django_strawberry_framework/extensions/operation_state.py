@@ -24,8 +24,8 @@ mask lands on a result that is not the one going to the client.
 only through a task-local binding while that runner owns it.** Two kinds of
 state separate here and never merge:
 
-- **Configuration** is long-lived, belongs to the extension or the schema, and
-  is read-only to resolvers. It stays where it is (``utils/private_state.py``).
+- **Configuration** is long-lived and belongs to the extension or the schema,
+  which holds it as set at construction.
 - **One operation's mutable state** belongs to the runner created for that
   operation: the engine context, and whatever scratch that extension keeps for
   the operation it is answering.
@@ -44,12 +44,8 @@ and its schema for as long as the task lived. It would also be writable from a
 resolver, which can assign a forged context naming the real schema as often as
 it likes.
 
-The binding carrier is itself security-relevant, so it is not an ordinary
-attribute a resolver can replace or a second ``__init__`` can recreate: one
-``ContextVar`` per extension identity, settled at construction behind
-``utils/private_state.py::PrivateAuthority``. The authority may hold the
-variable strongly because a ``ContextVar`` points back at nothing; the extension
-itself it holds only weakly.
+The binding carrier is one ``ContextVar`` per extension, created in its
+``__init__`` and held on the instance.
 
 **What a carrier holds is a weak reference to the state, and the runner is the
 state's one strong owner,** so the state lives exactly as long as the runner
@@ -116,7 +112,7 @@ from __future__ import annotations
 import contextlib
 import functools
 from contextvars import ContextVar, Token
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, NamedTuple, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, NamedTuple, TypeVar, cast
 from weakref import ref
 
 from strawberry.extensions.base_extension import SchemaExtension
@@ -126,7 +122,6 @@ from typing_extensions import override
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils.execution_mode import OperationMode, bind_operation_mode
-from django_strawberry_framework.utils.private_state import PrivateAuthority
 from django_strawberry_framework.utils.typing import call_forwarded
 
 if TYPE_CHECKING:
@@ -154,7 +149,7 @@ class OperationState:
     The engine context is the state every operation-bound extension needs; a
     subclass adds the scratch its own extension keeps for the operation, and
     nothing else may: state that outlives the operation is configuration and
-    belongs to an authority instead.
+    belongs on the extension instead.
 
     ``__slots__`` rather than a plain namespace, because this object is reached
     from every hook of the operation it belongs to and a typo that silently
@@ -255,39 +250,6 @@ class _RunnerScope(NamedTuple):
     mode: OperationMode | None
 
 
-#: One binding carrier per operation-bound extension, settled at construction.
-#:
-#: The variable holds a weak reference to the state bound for the operation this
-#: extension is answering IN THIS TASK, and nothing else: it is set by the
-#: package runner and reset by it, so two operations on one extension never see
-#: each other's state.
-#:
-#: Held here rather than in an attribute because the carrier decides what
-#: ``execution_context`` answers with, and an attribute holding it is one a
-#: resolver replaces - pointing the read at a variable the runner never binds,
-#: which answers every later operation with whatever that resolver put there.
-#: A ``ContextVar`` points back at nothing, so holding one strongly retains
-#: nothing but the variable; the extension it belongs to is held weakly, and its
-#: entry is dropped when the extension dies.
-_OPERATION_CARRIERS: PrivateAuthority[ContextVar[ref[OperationState] | None]] = PrivateAuthority()
-
-#: Every extension a ``DjangoSchema`` has managed, and nothing else.
-#:
-#: The record is what closes the compatibility setter. An extension the package
-#: runner binds gets its operation state from that runner and needs no other
-#: signal, so once one has been marked here every assignment to it is ignored -
-#: and the assignments that matter are the ones no engine makes: a resolver
-#: holds the shared instance through ``info.schema``'s extension configuration
-#: and can hand it any object at all, which without this mark the setter would
-#: accept as a raw-schema compatibility state, answer direct reads outside the
-#: operation with, and hold for the life of the process.
-#:
-#: Filed behind the same authority as the carriers, for the same two reasons: a
-#: flag on the extension is a flag a resolver clears, and a module-global
-#: holding the extension strongly would keep every schema it is configured on
-#: alive. A ``bool`` payload points at nothing.
-_PACKAGE_MANAGED: PrivateAuthority[bool] = PrivateAuthority()
-
 #: The runner scope bound in this task, or ``None`` outside every runner.
 #:
 #: One variable for every runner rather than one per runner, because the
@@ -375,52 +337,15 @@ def operation_is_nested() -> bool:
     return scope is not None and scope.nested
 
 
-def _carrier(extension: object) -> ContextVar[ref[OperationState] | None]:
-    """Return the binding carrier settled for ``extension`` at construction.
-
-    Absent for one case only: a subclass whose ``__init__`` never reached
-    :meth:`_OperationBoundExtension.__init__`. That extension has no place to
-    bind an operation's state, so the operation it was installed for would run
-    reading whatever the last one left - which is the failure this module
-    exists to remove, and so is refused rather than approximated.
-    """
-    carrier = _OPERATION_CARRIERS.recall(extension)
-    if carrier is None:
-        raise ConfigurationError(
-            f"{truth.name(type(extension))} has no operation-state binding, so its "
-            "__init__ never ran the one this package installs. A subclass "
-            "defining __init__ has to call super().__init__().",
-        )
-    return carrier
-
-
 def _bound_state(extension: _OperationBoundExtension[_StateT_co]) -> _StateT_co | None:
     """Return the state bound to ``extension`` here, or ``None`` outside that binding.
 
     The reference stops resolving when the runner itself is gone.
     """
-    binding = _carrier(extension).get()
+    binding = extension._operation_carrier.get()
     # An extension's carrier is only ever set to a reference to the state its own
     # ``_new_operation_state`` built (``_bind`` over ``_operation_states``).
     return None if binding is None else cast("_StateT_co | None", binding())
-
-
-def _is_package_managed(extension: object) -> bool:
-    """Whether a ``DjangoSchema`` has already managed ``extension``."""
-    return _PACKAGE_MANAGED.settled(extension)
-
-
-def _mark_package_managed(extension: object) -> None:
-    """Record ``extension`` as one the package runner owns the state of.
-
-    Also drops whatever the compatibility branch had left on the instance: an
-    extension that served a raw ``strawberry.Schema`` before being installed on
-    a ``DjangoSchema`` keeps no state from that arrangement, and a read outside
-    an operation answers ``None`` rather than with an earlier schema's context.
-    """
-    if not _PACKAGE_MANAGED.settled(extension):
-        _PACKAGE_MANAGED.settle(extension, state=True)
-    extension.__dict__.pop("_compatibility_state", None)  # truth: ok own instance namespace
 
 
 def _is_operation_bound(extension: object) -> TypeIs[_OperationBoundExtension[OperationState]]:
@@ -450,39 +375,35 @@ def _binds_operation_state(execution_context: object) -> bool:
 class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
     """A ``SchemaExtension`` whose per-operation state is bound, not stored on it.
 
-    Subclasses keep their configuration wherever their own authority holds it
-    and put every value that belongs to ONE operation on the state
-    :meth:`_new_operation_state` builds. What they must not do is call
-    ``__init__`` without reaching this one: the carrier settled here is what
+    Subclasses keep their configuration on the instance and put every value
+    that belongs to ONE operation on the state :meth:`_new_operation_state`
+    builds. What they must not do is call
+    ``__init__`` without reaching this one: the carrier created here is what
     makes ``execution_context`` answer for the operation being served rather
     than for the last one that assigned.
     """
 
-    #: Refusal raised when a constructor runs twice on one instance. Overridden
-    #: by subclasses whose second construction replaces something more specific
-    #: than the binding carrier.
-    _reconstruction_refusal: ClassVar[str] = (
-        "An extension is configured when it is constructed; re-running its "
-        "__init__ on an instance a schema is already serving requests with "
-        "would replace the state binding its operations are read through."
-    )
+    #: Whether a ``DjangoSchema`` has managed this extension; set once, never cleared.
+    _package_managed: bool = False
 
     def __init__(self) -> None:
-        """Settle this extension's binding carrier, once.
-
-        An accepted instance is reachable from every resolver the schema
-        serves, and so is its ``__init__``. A second call would mint a second
-        carrier, leaving the runner binding one variable while every read
-        answers from another - the operation state would then be permanently
-        absent, which is the same disclosure a stale one is.
-        """
-        if _OPERATION_CARRIERS.settled(self):
-            raise ConfigurationError(self._reconstruction_refusal)
-        _OPERATION_CARRIERS.settle(
-            self,
-            ContextVar("django_strawberry_framework_operation_state", default=None),
+        """Create this extension's binding carrier."""
+        self._operation_carrier: ContextVar[ref[OperationState] | None] = ContextVar(
+            "django_strawberry_framework_operation_state",
+            default=None,
         )
         super().__init__()
+
+    def _mark_package_managed(self) -> None:
+        """Record this extension as one the package runner owns the state of.
+
+        Also drops whatever the compatibility branch had left on the instance: an
+        extension that served a raw ``strawberry.Schema`` before being installed on
+        a ``DjangoSchema`` keeps no state from that arrangement, and a read outside
+        an operation answers ``None`` rather than with an earlier schema's context.
+        """
+        self._package_managed = True
+        self.__dict__.pop("_compatibility_state", None)  # truth: ok own instance namespace
 
     @property
     @override
@@ -543,10 +464,10 @@ class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
         resolver makes: an arbitrary object it wants direct reads answered with,
         and the graph behind that object kept for the life of the process.
         """
-        if _is_package_managed(self):
+        if self._package_managed:
             return
         if _binds_operation_state(value):
-            _mark_package_managed(self)
+            self._mark_package_managed()
             return
         namespace = self.__dict__  # truth: ok own instance namespace
         namespace["_compatibility_state"] = (
@@ -571,7 +492,7 @@ class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
         state = _bound_state(self)
         if state is not None:
             return state
-        if _is_package_managed(self):
+        if self._package_managed:
             return None
         return self.__dict__.get("_compatibility_state")  # truth: ok own instance namespace
 
@@ -594,7 +515,7 @@ def _operation_states(
     """
     selected = tuple(extension for extension in extensions if _is_operation_bound(extension))
     for extension in selected:
-        _mark_package_managed(extension)
+        extension._mark_package_managed()
     return tuple(
         (extension, extension._new_operation_state(execution_context)) for extension in selected
     )
@@ -652,7 +573,7 @@ def _bind(
         if scope.mode is not None:
             bindings.append(_binding(*bind_operation_mode(scope.mode)))
         for extension, state in states:
-            carrier = _carrier(extension)
+            carrier = extension._operation_carrier
             bindings.append(_binding(carrier, carrier.set(ref(state))))
             bindings.extend(rebind() for rebind in state.resumed_bindings())
         if registrar:

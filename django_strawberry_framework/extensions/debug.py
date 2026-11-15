@@ -98,7 +98,7 @@ import threading
 import traceback
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connections
@@ -111,7 +111,6 @@ from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import list_of, read_attr
-from django_strawberry_framework.utils.private_state import PrivateAuthority
 
 from .operation_state import OperationState, _OperationBoundExtension
 
@@ -592,24 +591,6 @@ class _DebugOperationState(OperationState):
         self.snapshots: list[_ConnectionSnapshot] | None = None
 
 
-class _AcceptedDisclosure(NamedTuple):
-    """The production-disclosure acknowledgement one construction settled."""
-
-    allow_unsafe_production: bool
-
-
-#: Every constructed extension's acknowledgement, held here and by nothing else.
-#:
-#: This is the gate that decides whether a production response carries unmasked
-#: tracebacks and interpolated SQL parameter values. An ordinary attribute
-#: holding it is a name every resolver the schema serves can write - the
-#: extension is reachable through ``info.schema.extensions``, and an accepted
-#: instance is process-lived - so one assignment inside one resolver arms the
-#: disclosure for every LATER request the process answers. A bool points at
-#: nothing, so holding one here retains nothing but the bool.
-_ACKNOWLEDGEMENT: PrivateAuthority[_AcceptedDisclosure] = PrivateAuthority()
-
-
 def _required_acknowledgement(value: object) -> bool:
     """Return ``allow_unsafe_production`` as the real ``bool`` it must be, else raise.
 
@@ -705,12 +686,6 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
     the diagnostic keeping originals is its documented purpose).
     """
 
-    _reconstruction_refusal: ClassVar[str] = (
-        "A debug extension is configured when it is constructed; re-running its "
-        "__init__ on an instance a schema is already serving requests with would "
-        "replace the production-disclosure acknowledgement it was accepted with."
-    )
-
     def __init__(self, *, allow_unsafe_production: bool = False) -> None:
         """Record the deployment's acknowledgement, defaulting to the safe answer.
 
@@ -732,34 +707,12 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
         ``enabled`` flag.
         """
         super().__init__()
-        _ACKNOWLEDGEMENT.settle(
-            self,
-            _AcceptedDisclosure(_required_acknowledgement(allow_unsafe_production)),
-        )
+        self.allow_unsafe_production: bool = _required_acknowledgement(allow_unsafe_production)
 
     @override
     def _new_operation_state(self, execution_context: "ExecutionContext") -> _DebugOperationState:
         """Build this operation's capture state."""
         return _DebugOperationState(execution_context)
-
-    @property
-    def allow_unsafe_production(self) -> bool:
-        """The acknowledgement this extension was constructed with, as a read.
-
-        A read-only view of the settled bool, kept because it is the name a
-        deployment checks its own configuration with. It is not where the gate
-        reads from and it cannot be written: this decides what a production
-        response discloses, so it is a configuration statement made at
-        construction rather than a preference a request can revise. A value
-        injected straight into ``__dict__`` is answered past by this descriptor
-        for the same reason.
-        """
-        return self._acknowledged()
-
-    def _acknowledged(self) -> bool:
-        """Return the settled acknowledgement, ``False`` for an extension that settled none."""
-        accepted = _ACKNOWLEDGEMENT.recall(self)
-        return accepted is not None and accepted.allow_unsafe_production
 
     def _disclosure_permitted(self) -> bool:
         """Return whether this operation may publish the debug payload (spec-048 Decision 5).
@@ -777,7 +730,7 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
         # malformed value gets, not a request that dies inside the gate. Only the
         # exact boolean ``True`` opens the disclosure path; anything absent,
         # unreadable, or malformed fails closed without touching the operation.
-        if self._acknowledged():
+        if self.allow_unsafe_production:
             return True
         try:
             debug = django_setting("DEBUG")

@@ -1228,7 +1228,7 @@ Strawberry itself never passes that keyword.
 `DjangoDebugExtension` implements three engine seams. Its one `__init__`
 takes only spec-048's keyword-only `allow_unsafe_production` (default `False`,
 so Strawberry's zero-argument construction of a class entry is the fail-closed
-instance) and settles it into the module-private `_ACKNOWLEDGEMENT` authority;
+instance) and sets it as the instance's `allow_unsafe_production` attribute;
 `execution_context` stays engine-assigned and is read through
 `_OperationBoundExtension` ([DRY D6](#helper-reuse-obligations-dry)):
 
@@ -1638,8 +1638,7 @@ down (D-N2–D-N8).
 - [ ] **D6** — pattern conformance with the package's established idioms
   (conformance, not code sharing): the **one `__init__`** initializes only
   configuration — the keyword-only `allow_unsafe_production` bool, validated
-  at construction and settled into a `utils/private_state.py::PrivateAuthority`
-  so a resolver cannot rewrite it through an attribute — and reaches
+  at construction and set as an instance attribute — and reaches
   `_OperationBoundExtension.__init__`; never a `**kwargs` sink, and never a
   claim that a constructor binds `execution_context`, which stays
   engine-assigned. The generator hooks read as the package's established
@@ -1702,7 +1701,7 @@ down (D-N2–D-N8).
   the stash writer tests for and the `GraphQLError` the chain walk types
   against), `typing_extensions`, and from the package only the root `logger`,
   `exceptions.ConfigurationError`, the `utils/truth.py` reads,
-  `utils/private_state.py::PrivateAuthority`, and `extensions/operation_state.py`
+  and `extensions/operation_state.py`
   — nothing from the query/write/input pipeline modules of `utils/`, which
   serve concerns the extension never touches (queryset visibility, generated
   inputs, input traversal, permissions, write decode, relation

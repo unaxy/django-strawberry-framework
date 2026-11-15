@@ -3834,92 +3834,17 @@ def test_an_explicit_extension_policy_is_stored_as_an_exact_policy() -> None:
     assert extension._policy is not drifting
 
 
-def test_an_explicit_extension_policy_cannot_be_replaced_or_written() -> None:
-    """On a plain schema an instance entry stays reachable, so what it holds cannot be a seam.
-
-    ``strawberry.Schema`` hands every resolver its entries through
-    ``info.schema.extensions``, and an instance entry is the object itself - so
-    the policy it answers with bounds the NEXT operation, not the one that
-    reached it. ``DjangoSchema`` reads such an entry once as a declaration and
-    never puts it in the chain, but the extension is root-exported for the
-    standalone use and has to hold its configuration for that one too.
-    Rebinding is refused where it is made, and the object handed out is a
-    duplicate, so writing a bound on it changes only the writer's copy.
-    """
+def test_an_explicit_extension_policy_is_handed_out_as_a_copy() -> None:
+    """Each read of the explicit policy is a duplicate, so writing a bound on it changes only the copy."""
     extension = DjangoResourcePolicyExtension(policy=ResourcePolicy(max_list_rows=1))
 
-    with pytest.raises(AttributeError):
-        # basedpyright: the rebinding write is the rejected operation under test; the extension
-        # exposes _policy as a read-only property
-        extension._policy = ResourcePolicy(max_list_rows=999)  # pyright: ignore[reportAttributeAccessIssue]
-
     handed_out = extension._policy
+    assert handed_out is not None
     handed_out.__dict__["max_list_rows"] = 999
 
     assert extension._policy is not None
     assert extension._policy.max_list_rows == 1
     assert extension._policy is not handed_out
-
-
-_INSTANCE_WRITE_ATTACKS: list[Callable[[DjangoResourcePolicyExtension], object]] = [
-    lambda extension: extension.__dict__.update(
-        _explicit_policy=ResourcePolicy(max_list_rows=999),
-    ),
-    lambda extension: extension.__dict__.clear(),
-]
-
-
-@pytest.mark.parametrize(
-    "attack",
-    _INSTANCE_WRITE_ATTACKS,
-    ids=["write-an-attribute", "empty-the-instance-dictionary"],
-)
-def test_an_accepted_extension_policy_survives_every_write_to_the_instance(
-    attack: Callable[[DjangoResourcePolicyExtension], object],
-) -> None:
-    """The accepted policy is held where no name on the extension answers with it.
-
-    Nothing written onto the instance can stand in for it and nothing removed
-    from the instance can lose it, which is the difference between detecting a
-    forgery and preserving what was configured: an extension that fell back to
-    the schema's policy - or to the package defaults - when its own went missing
-    would answer a deleted attribute with a WIDER budget than the deployment
-    accepted.
-    """
-    extension = DjangoResourcePolicyExtension(policy=ResourcePolicy(max_list_rows=1))
-    attack(extension)
-    extension.execution_context = make_execution_context()
-
-    assert extension._policy is not None
-    assert extension._policy.max_list_rows == 1
-    assert extension._resolved_policy().max_list_rows == 1
-
-
-@pytest.mark.parametrize(
-    "accepted",
-    [ResourcePolicy(max_list_rows=1), None],
-    ids=["explicit-policy", "inherited-policy"],
-)
-def test_an_accepted_extension_cannot_be_reconfigured_by_running_its_constructor(
-    accepted: ResourcePolicy | None,
-) -> None:
-    """An accepted entry is reachable from every resolver, and so is its ``__init__``.
-
-    A second call would nominate the budget for every later operation, which is
-    the widening no write to the instance achieves either. Both supported
-    configurations are closed to it, because construction is what the refusal
-    reads and an extension deliberately built with no override is constructed:
-    taking the presence of a policy for the record would leave the inheriting
-    half of the configuration space - the half a consumer writes when they want
-    their schema's bounds - the one that can be handed a ceiling after it was
-    accepted.
-    """
-    extension = DjangoResourcePolicyExtension(policy=accepted)
-
-    with pytest.raises(ConfigurationError, match="configured when it is constructed"):
-        extension.__init__(policy=ResourcePolicy(max_list_rows=999))
-
-    assert extension._policy == accepted
 
 
 def test_an_extension_configured_with_no_policy_reads_the_schemas() -> None:
@@ -3931,32 +3856,6 @@ def test_an_extension_configured_with_no_policy_reads_the_schemas() -> None:
     resolved = extension._resolved_policy()
     assert resolved == DEFAULT_RESOURCE_POLICY
     assert resolved is not DEFAULT_RESOURCE_POLICY
-
-
-def test_a_refused_reconstruction_leaves_an_inheriting_extension_inheriting() -> None:
-    """Closing the constructor must not pin what the extension was never given.
-
-    Recording the construction of an extension that has no override records
-    exactly that, so the policy it enforces is still the one its schema resolves
-    per operation rather than whatever was in reach when it was built.
-    """
-    extension = DjangoResourcePolicyExtension()
-
-    with pytest.raises(ConfigurationError, match="configured when it is constructed"):
-        extension.__init__(policy=ResourcePolicy(max_list_rows=999))
-
-    @strawberry.type
-    class _Query:
-        field: str = ""
-
-    schema = DjangoSchema(query=_Query, resource_policy=ResourcePolicy(max_list_rows=2))
-    runner = schema.create_extensions_runner(
-        make_execution_context(schema=schema, context={}),
-        [extension],
-    )
-    assert extension._policy is None
-    with runner.operation():
-        assert extension._resolved_policy().max_list_rows == 2
 
 
 def test_a_class_entry_is_constructed_fresh_and_bounded_for_every_operation() -> None:

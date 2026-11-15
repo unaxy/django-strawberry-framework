@@ -931,160 +931,6 @@ def _equal_view(rows: int) -> Callable[..., HttpResponseBase]:
     return view
 
 
-@strawberry.type
-class _AcceptedInstanceQuery:
-    """The seams a resolver can reach on an extension INSTANCE the schema accepted."""
-
-    @strawberry.field
-    def rebind(self, info: strawberry.Info) -> str:
-        """Point the entry that bounds this schema at a wider policy."""
-        entry = _accepted_resource_entry(info)
-        if entry is None:
-            return "unreachable"
-        try:
-            # basedpyright: deliberately writes the read-only property: proves the write is refused
-            entry._policy = ResourcePolicy(max_list_rows=999)  # pyright: ignore[reportAttributeAccessIssue]
-        except AttributeError as exc:
-            return type(exc).__name__
-        return "assigned"
-
-    @strawberry.field
-    def overwrite(self, info: strawberry.Info) -> str:
-        """Write a wider bound onto the policy object that entry answers with."""
-        entry = _accepted_resource_entry(info)
-        if entry is None:
-            return "unreachable"
-        entry._policy.__dict__["max_list_rows"] = 999
-        return "written"
-
-    @strawberry.field
-    def empty_the_entry(self, info: strawberry.Info) -> list[str]:
-        """Delete everything that entry carries, bar the context it is mid-request on."""
-        entry = _accepted_resource_entry(info)
-        if entry is None:
-            return []
-        held = entry.__dict__
-        dropped = sorted(name for name in held if name != "execution_context")
-        for name in dropped:
-            del held[name]
-        return dropped
-
-    @strawberry.field
-    def reachable_authorities(self, info: strawberry.Info) -> list[str]:
-        """Every name on a reachable entry answering with a policy, asked by content."""
-        entry = _accepted_resource_entry(info)
-        if entry is None:
-            return []
-        attributes: dict[str, object] = vars(entry)
-        return sorted(
-            name for name, value in attributes.items() if isinstance(value, ResourcePolicy)
-        )
-
-    @strawberry.field
-    def reconfigure(self, info: strawberry.Info) -> str:
-        """Run that entry's own constructor again, with a wider policy."""
-        entry = _accepted_resource_entry(info)
-        if entry is None:
-            return "unreachable"
-        try:
-            entry.__init__(policy=ResourcePolicy(max_list_rows=999))
-        except ConfigurationError as exc:
-            return type(exc).__name__
-        return "reconfigured"
-
-    @strawberry.field
-    def rows(self, info: strawberry.Info) -> list[str]:
-        return list(bounded_rows(["a", "b", "c"], info, None))
-
-
-def _accepted_resource_entry(
-    info: strawberry.Info[object, object],
-) -> DjangoResourcePolicyExtension | None:
-    """The resource extension a resolver reaches through ``info.schema.extensions``.
-
-    ``None`` is the ordinary answer: the extension that bounds an operation is
-    built per operation from the schema's own record and is not an entry, so a
-    directly supplied one is read as a declaration and does not travel. The
-    resolver-facing fields report that as ``unreachable`` rather than raising,
-    because "there is nothing here to write" is the outcome these rows are about.
-    """
-    return next(
-        (
-            entry
-            for entry in info.schema.extensions
-            if isinstance(entry, DjangoResourcePolicyExtension)
-        ),
-        None,
-    )
-
-
-@cache
-def _accepted_instance_schema() -> DjangoSchema:
-    """A schema configured with an extension INSTANCE carrying its own policy.
-
-    Strawberry deprecates instance entries because one instance shares its
-    charge counters across every request; this package still accepts them as
-    configuration, which is exactly why what one holds must not be a seam. The
-    warning is suppressed HERE rather than at each row, because the mount is
-    built inside a request and a warning raised there would be a response, not
-    a test outcome.
-    """
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        return DjangoSchema(
-            query=_AcceptedInstanceQuery,
-            extensions=[
-                DjangoResourcePolicyExtension(
-                    policy=ResourcePolicy(
-                        max_list_rows=1,
-                        max_container_width=MAX_CONTAINER_WIDTH,
-                    ),
-                ),
-            ],
-        )
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _accepted_instance_view(
-    request: HttpRequest,
-    *args: object,
-    **kwargs: object,
-) -> HttpResponseBase:
-    built = DjangoGraphQLView.as_view(schema=_accepted_instance_schema())
-    return built(request, *args, **kwargs)
-
-
-@cache
-def _inherited_instance_schema() -> DjangoSchema:
-    """A schema configured with an extension instance that declares NO policy of its own.
-
-    The other supported configuration of the same entry: it enforces the policy
-    its schema resolved, per operation, rather than one it was handed. Having no
-    override is a configuration, so this instance is as settled as the one that
-    carries a policy - and closed to the same second construction.
-    """
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        return DjangoSchema(
-            query=_AcceptedInstanceQuery,
-            resource_policy=ResourcePolicy(
-                max_list_rows=1,
-                max_container_width=MAX_CONTAINER_WIDTH,
-            ),
-            extensions=[DjangoResourcePolicyExtension()],
-        )
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _inherited_instance_view(
-    request: HttpRequest,
-    *args: object,
-    **kwargs: object,
-) -> HttpResponseBase:
-    built = DjangoGraphQLView.as_view(schema=_inherited_instance_schema())
-    return built(request, *args, **kwargs)
-
-
 def _widening_factory() -> DjangoResourcePolicyExtension:
     """The entry a resolver would rather the next operation resolved."""
     return DjangoResourcePolicyExtension(policy=ResourcePolicy(max_list_rows=999))
@@ -1192,7 +1038,7 @@ def _narrow_extension_factory() -> _CountedExtension:
 
 @strawberry.type
 class _FactoryQuery:
-    """The legitimate per-operation construction that closing reconstruction must keep."""
+    """A factory entry's per-operation construction, beside a bounded list."""
 
     @strawberry.field
     def rows(self, info: strawberry.Info) -> list[str]:
@@ -1751,8 +1597,6 @@ urlpatterns = [
     path("rp-equal-narrow/", _equal_view(1)),
     path("rp-equal-wide/", _equal_view(3)),
     path("rp-retained/", _retained_view),
-    path("rp-accepted-instance/", _accepted_instance_view),
-    path("rp-inherited-instance/", _inherited_instance_view),
     path("rp-factory-entry/", _factory_view),
     path("rp-emptied-entries/", _membership_view("emptied")),
     path("rp-widened-entries/", _membership_view("widened")),
@@ -4699,30 +4543,11 @@ def test_a_resolver_cannot_put_raw_exception_text_on_the_wire(attempt: str) -> N
 
 
 @pytest.mark.parametrize(
-    "mount",
-    ["/rp-accepted-instance/", "/rp-inherited-instance/"],
-    ids=["explicit-policy", "inherited-policy"],
-)
-def test_no_name_on_an_accepted_extension_answers_with_the_policy_it_enforces(mount: str) -> None:
-    """The same question of the entry a schema was configured WITH.
-
-    Both configurations of that entry are asked: one that carries a policy, and
-    one that carries none and reads its schema's. Neither holds a policy under
-    any name a resolver reaches.
-    """
-    payload = _post(mount, "{ reachableAuthorities }")
-    _no_rejection(payload)
-    assert payload["data"] == {"reachableAuthorities": []}
-
-
-@pytest.mark.parametrize(
     ("mount", "field", "reported"),
     [
         ("/rp-authority/", "reconfigure", "ConfigurationError"),
-        ("/rp-accepted-instance/", "reconfigure", "unreachable"),
-        ("/rp-inherited-instance/", "reconfigure", "unreachable"),
     ],
-    ids=["schema", "accepted-extension", "accepted-extension-inheriting"],
+    ids=["schema"],
 )
 def test_rerunning_a_constructor_over_the_wire_does_not_widen_a_later_request(
     mount: str,
@@ -4733,14 +4558,8 @@ def test_rerunning_a_constructor_over_the_wire_does_not_widen_a_later_request(
 
     A second construction would settle a new ceiling for every later request the
     process serves, which is the widening no attribute write achieves. The
-    schema is refused where the call is made; the extension that spends its
-    policy is not an entry at all, so there is nothing for the resolver to
-    reach and call. Either way the deployment's configuration is what still
-    bounds the next request.
-
-    The initial configuration is varied because an extension built with no
-    override of its own is configured too - it enforces the policy its schema
-    resolved - and both spellings have to answer the same way.
+    schema is refused where the call is made, and the deployment's
+    configuration is what still bounds the next request.
     """
     first = _post(mount, "{ rows }")
     _no_rejection(first)
@@ -4803,7 +4622,7 @@ def test_writing_the_accepted_extensions_does_not_choose_what_runs_the_next_requ
 
 
 def test_an_extension_factory_still_builds_one_per_operation() -> None:
-    """Refusing a SECOND construction of one instance is not refusing construction.
+    """A factory entry builds a fresh extension for every operation.
 
     A factory entry is how a consumer gets an extension per operation, and it is
     called once per operation by design. Each request must still get an instance
@@ -4851,36 +4670,6 @@ def test_losing_the_accepted_extensions_does_not_widen_the_next_request(
     assert attacked["data"] == {field: ["_django_extensions"]}, attacked
 
     second = _post(mount, "{ rows }")
-    _no_rejection(second)
-    assert json_at(second, "data", "rows") == ["a"]
-
-
-@pytest.mark.parametrize(
-    ("field", "reported"),
-    [("rebind", "unreachable"), ("overwrite", "unreachable"), ("emptyTheEntry", [])],
-    ids=["rebind", "overwrite", "empty-the-instance-dictionary"],
-)
-def test_an_accepted_extension_instance_cannot_widen_a_later_request(
-    field: str,
-    reported: str | list[str],
-) -> None:
-    """A declaration is read once and does not travel, so there is nothing left to write.
-
-    Strawberry hands back an accepted instance unchanged and
-    ``info.schema.extensions`` puts it in front of every resolver, which is
-    exactly why an entry of this kind is read as a policy declaration at
-    construction and folded into the schema's own record. Every write spelling
-    these rows aim at the object therefore finds no object to aim at, and the
-    bound the deployment declared is what the next request is held to.
-    """
-    first = _post("/rp-accepted-instance/", "{ rows }")
-    _no_rejection(first)
-    assert json_at(first, "data", "rows") == ["a"]
-
-    attacked = _post("/rp-accepted-instance/", "{ %s }" % field)
-    assert attacked["data"] == {field: reported}, attacked
-
-    second = _post("/rp-accepted-instance/", "{ rows }")
     _no_rejection(second)
     assert json_at(second, "data", "rows") == ["a"]
 

@@ -176,11 +176,6 @@ _SQL_ROW_KEYS = {
 _EXCEPTION_ROW_KEYS = {"excType", "message", "stack"}
 
 
-#: One unacknowledged instance, shared by the schema every request in the
-#: disclosure-arming scenario is served by - the shape a resolver's write would
-#: reach on every LATER request if the acknowledgement were an attribute.
-_WITHHELD = DjangoDebugExtension()
-
 #: One acknowledged instance, for the entry spelling that resolves to the SAME
 #: object every operation: a factory returning a singleton.
 _SHARED_DEBUG = DjangoDebugExtension(allow_unsafe_production=True)
@@ -287,17 +282,6 @@ def install_probe_schema(
             # basedpyright: deliberately ill-typed: proves a non-null completion error is an
             # execution row.
             return None  # pyright: ignore[reportReturnType]
-
-        @strawberry.field
-        def arm_debug_disclosure(self) -> bool:
-            """Try both ways an attribute is written, and report neither took."""
-            for attempt in (
-                lambda: setattr(_WITHHELD, "allow_unsafe_production", True),
-                lambda: _WITHHELD.__dict__.update(allow_unsafe_production=True),
-            ):
-                with contextlib.suppress(AttributeError):
-                    attempt()
-            return _WITHHELD.allow_unsafe_production
 
         @strawberry.field
         def huge_boom(self) -> int:
@@ -898,29 +882,6 @@ def test_a_parse_failure_never_republishes_the_previous_operations_payload(
 
     assert failed.errors is not None
     assert "debug" not in (failed.extensions or {})
-
-
-@override_settings(DEBUG=False)
-@pytest.mark.django_db
-def test_a_resolver_cannot_arm_the_production_disclosure_for_a_later_request(
-    install_probe_schema: _InstallProbeSchema,
-) -> None:
-    """The acknowledgement is a construction statement, not a request-local preference.
-
-    A process-lived entry is reachable from every resolver of every later
-    request through ``info.schema``. Held as an attribute, one assignment inside
-    one resolver would arm unmasked tracebacks and interpolated SQL for all of
-    them - which is why the row reads the request AFTER the write.
-    """
-    install_probe_schema([lambda: _WITHHELD])
-    client = TestClient()
-
-    assert "debug" not in (client.query("query { __typename }").extensions or {})
-
-    attacked = client.query("query { armDebugDisclosure }")
-
-    assert attacked.data == {"armDebugDisclosure": False}
-    assert "debug" not in (client.query("query { __typename }").extensions or {})
 
 
 # ---------------------------------------------------------------------------

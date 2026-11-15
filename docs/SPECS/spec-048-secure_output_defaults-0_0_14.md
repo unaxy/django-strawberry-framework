@@ -568,11 +568,8 @@ operation with the disclosure.
 
 A factory, not a pre-built instance, so the fresh-per-operation contract
 ([Per-operation extension isolation][glossary-per-operation-extension-isolation]) still
-holds. The acknowledgement is held in a private record keyed by the instance
-(`extensions/debug.py #"_ACKNOWLEDGEMENT: PrivateAuthority[_AcceptedDisclosure]"`), not
-an attribute, so a resolver reaching the extension through `info.schema.extensions` cannot
-arm the disclosure for a later request, and re-running `__init__` on a constructed instance
-is refused.
+holds. The validated acknowledgement is the instance's `allow_unsafe_production`
+attribute, set at construction.
 
 At operation start the extension reads `django.conf.settings.DEBUG`. When it is false and
 `allow_unsafe_production` is absent, the extension is **INERT**: it acquires no debug
@@ -1134,7 +1131,6 @@ surface has one live home, so the rows live there:
   `_TRUNCATION_MARKER`.
 - Fresh-instance isolation: the acknowledged factory keeps one instance per operation, and a
   parse failure never republishes the previous operation's payload.
-- A resolver cannot arm the production disclosure for a later request.
 
 **Live tier — `examples/fakeshop/test_query/test_error_policy_api.py`.**
 

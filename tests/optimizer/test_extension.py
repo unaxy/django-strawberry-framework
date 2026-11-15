@@ -3931,54 +3931,6 @@ async def test_shared_singleton_answers_each_operation_with_its_own_context() ->
     assert seen["second"] is contexts[1]
 
 
-class _UnsettledOptimizer(DjangoOptimizerExtension):
-    """An optimizer subclass the test builds without its constructor, so no record is settled."""
-
-
-@pytest.mark.parametrize(
-    "slot",
-    ["strictness", "nested_connection_strategy"],
-    ids=["strictness", "strategy"],
-)
-@pytest.mark.parametrize("via_dict", [False, True], ids=["attribute", "dict"])
-def test_a_resolver_cannot_rewrite_the_optimizer_configuration_for_a_later_request(
-    slot: str,
-    *,
-    via_dict: bool,
-) -> None:
-    """Each reachable write spelling leaves the optimizer's settled configuration unchanged."""
-    extension = DjangoOptimizerExtension(strictness="raise")
-    settled_strategy = extension.nested_connection_strategy
-    value = "off" if slot == "strictness" else "windowed"
-    with contextlib.suppress(AttributeError):
-        if via_dict:
-            extension.__dict__.update({slot: value})
-        else:
-            setattr(extension, slot, value)
-    assert extension.strictness == "raise"
-    assert extension.nested_connection_strategy is settled_strategy
-
-
-def test_an_optimizer_that_settled_no_configuration_reads_the_zero_argument_shape() -> None:
-    """A record that was never settled answers as the construction that settles none.
-
-    The strictness and the nested-connection strategy are read at the start of
-    every execution, so the read cannot be the place a missing record surfaces;
-    it answers with what ``DjangoOptimizerExtension()`` would have produced. Such
-    an extension has no binding carrier either, so the operation it was installed
-    for is refused before either value is spent
-    (``tests/extensions/test_operation_state.py``).
-    """
-    # Built without ``__init__``, as a subclass that skipped ``super().__init__`` leaves it.
-    extension = _UnsettledOptimizer.__new__(_UnsettledOptimizer)
-
-    assert extension.strictness == "off"
-    assert (
-        extension.nested_connection_strategy
-        == DjangoOptimizerExtension().nested_connection_strategy
-    )
-
-
 def _published_optimizer_keys(context: object) -> dict[str, object]:
     """Every optimizer stash currently readable off a request context object."""
     return {key: get_context_value(context, key) for key in DST_OPTIMIZER_KEYS}

@@ -211,7 +211,6 @@
 "examples/fakeshop/test_query/test_list_field_async_api.py::_ProjectQ.resolve_expression" = { reportIncompatibleMethodOverride = 1 }
 "examples/fakeshop/test_query/test_list_field_async_api.py::_async_untrusted" = { reportArgumentType = 1 }
 "examples/fakeshop/test_query/test_mutation_permissions_api.py::test_async_check_permission_override_is_rejected_not_bypassed.AsyncCheckCreateItem.check_permission" = { reportIncompatibleMethodOverride = 1 }
-"examples/fakeshop/test_query/test_resource_policy_api.py::_AcceptedInstanceQuery.rebind" = { reportAttributeAccessIssue = 1 }
 "examples/fakeshop/test_query/test_resource_policy_api.py::_EscapingQuerySet.__getitem__" = { reportIncompatibleMethodOverride = 1 }
 "scripts/_kanban_lib.py::_JSONRow" = { reportExplicitAny = 1 }
 "scripts/_kanban_lib.py::build_dashboard_snapshot" = { cast = 2 }
@@ -482,7 +481,6 @@
 "tests/test_resource_policy.py::test_a_result_cache_that_is_not_a_list_is_refused_rather_than_carried" = { reportAttributeAccessIssue = 1 }
 "tests/test_resource_policy.py::test_a_result_cache_that_is_not_a_list_is_refused_when_awaited" = { reportAttributeAccessIssue = 1 }
 "tests/test_resource_policy.py::test_a_windowed_sequence_subclass_is_bounded_on_every_coordinate._Escape.__getitem__" = { reportIncompatibleMethodOverride = 1 }
-"tests/test_resource_policy.py::test_an_explicit_extension_policy_cannot_be_replaced_or_written" = { reportAttributeAccessIssue = 1 }
 "tests/test_resource_policy.py::test_an_invalid_execution_deadline_is_rejected" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::test_bounded_rows_async_hostile_notes_property_getter_does_not_mask_the_source.HostileError" = { reportAssignmentType = 1 }
 "tests/test_resource_policy.py::test_only_the_literal_true_widens_a_declared_bound_past_the_request_policy" = { reportArgumentType = 1 }

@@ -51,13 +51,7 @@ from typing_extensions import override
 
 from django_strawberry_framework import DjangoSchema
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.extensions import (
-    DjangoDebugExtension,
-    DjangoErrorPolicyExtension,
-    DjangoResourcePolicyExtension,
-)
 from django_strawberry_framework.extensions.operation_state import (
-    _OPERATION_CARRIERS,
     DjangoExtensionsRunner,
     OperationState,
     _binding,
@@ -142,28 +136,12 @@ class _SilentProbe(_OperationBoundExtension[OperationState]):
 
 
 class _Unbuilt(_OperationBoundExtension[OperationState]):
-    """An operation-bound extension built by ``_unbuilt``, with no settled carrier."""
+    """An operation-bound extension built by ``_unbuilt``, with no binding carrier."""
 
 
 def _unbuilt() -> _Unbuilt:
     """An ``_Unbuilt`` whose constructor never ran, as a subclass that skipped ``super`` leaves it."""
     return _Unbuilt.__new__(_Unbuilt)
-
-
-def test_a_subclass_that_skipped_the_base_constructor_is_refused_not_approximated() -> None:
-    """No carrier means no place to bind, and reading the last operation's is the defect.
-
-    An extension whose ``__init__`` never ran this package's would have nowhere
-    to put the operation's state, so every read would answer with whatever was
-    left over. Refusing names the omission; falling back would reintroduce it.
-    """
-    extension = _unbuilt()
-    with pytest.raises(ConfigurationError) as excinfo:
-        _ = extension.execution_context
-    assert str(excinfo.value) == (
-        "_Unbuilt has no operation-state binding, so its __init__ never ran the one this "
-        "package installs. A subclass defining __init__ has to call super().__init__()."
-    )
 
 
 def test_a_hook_context_read_outside_an_operation_is_refused() -> None:
@@ -337,14 +315,14 @@ def test_a_failure_between_the_runner_and_the_operation_retains_nothing() -> Non
 def test_a_binding_that_fails_partway_unwinds_the_ones_already_made() -> None:
     """All-or-nothing, so a half-bound operation never runs.
 
-    The second extension has no carrier, so binding it raises after the first
-    one bound. Leaving that binding in place would leak one operation's state
-    into whatever the task did next.
+    The second extension never ran the base constructor, so it has no carrier
+    and binding it raises after the first one bound. Leaving that binding in
+    place would leak one operation's state into whatever the task did next.
     """
     good = _Probe()
     schema = DjangoSchema(query=_Query, extensions=[lambda: good, _unbuilt])
 
-    with pytest.raises(ConfigurationError, match="has to call super"):
+    with pytest.raises(AttributeError, match="_operation_carrier"):
         schema.execute_sync("{ hello }")
 
     assert good.execution_context is None
@@ -357,7 +335,7 @@ async def test_a_binding_that_fails_partway_unwinds_on_the_async_path_too() -> N
     good = _Probe()
     schema = DjangoSchema(query=_Query, extensions=[lambda: good, _unbuilt])
 
-    with pytest.raises(ConfigurationError, match="has to call super"):
+    with pytest.raises(AttributeError, match="_operation_carrier"):
         await schema.execute("{ hello }")
 
     assert good.execution_context is None
@@ -480,124 +458,6 @@ async def test_a_cancelled_stream_leaves_no_state_bound_either() -> None:
     after = await schema.execute("{ hello }")
     assert after.errors is None
     assert shared.execution_context is None
-
-
-@pytest.mark.parametrize(
-    ("factory", "refusal"),
-    [
-        (DjangoResourcePolicyExtension, "resource-policy extension is configured"),
-        (DjangoErrorPolicyExtension, "extension is configured when it is constructed"),
-        (DjangoDebugExtension, "debug extension is configured"),
-    ],
-    ids=["resource-policy", "error-policy", "debug"],
-)
-def test_rerunning_a_constructor_on_an_accepted_extension_is_refused(
-    factory: type[SchemaExtension],
-    refusal: str,
-) -> None:
-    """An accepted instance is reachable from every resolver, and so is its ``__init__``.
-
-    A second call would mint a second binding carrier, leaving the runner
-    binding one variable while every read answers from another - which is the
-    same permanently-absent state a stale one is.
-    """
-    extension = factory()
-    with pytest.raises(ConfigurationError, match=refusal):
-        extension.__init__()
-
-
-def test_rerunning_the_optimizer_constructor_is_refused() -> None:
-    """The same refusal for the extension whose documented shape IS a singleton.
-
-    Written on its own rather than as a row of the table above: the class may
-    not appear inside a sequence literal, which is the shape
-    ``tests/test_ci_governance.py`` sweeps for to keep a bare optimizer class out
-    of any ``extensions=`` list.
-    """
-    extension = DjangoOptimizerExtension()
-    with pytest.raises(ConfigurationError, match="optimizer extension is configured"):
-        extension.__init__()
-
-
-#: Every way a resolver holding a shared extension can reach for the mechanism
-#: that CARRIES its operation state, and what each one has to be answered with.
-#:
-#: One attack per row, and one row per test node: they are independent attempts
-#: on the same object, so an aggregate node would report the first failure and
-#: leave the rest of the matrix unrun.
-_CARRIER_ATTACKS: list[tuple[Callable[[_Probe], object], str]] = [
-    (lambda extension: setattr(extension, "execution_context", None), "ignored"),
-    (lambda extension: extension.__dict__.update(_compatibility_state=None), "ignored"),
-    (lambda extension: extension.__init__(), "refused"),
-]
-
-_CARRIER_ATTACK_IDS = ["assign-the-context", "inject-a-carrier", "rerun-the-constructor"]
-
-
-@pytest.mark.parametrize(
-    ("attack", "expected"),
-    _CARRIER_ATTACKS,
-    ids=_CARRIER_ATTACK_IDS,
-)
-def test_a_resolver_cannot_reach_the_binding_carrier(
-    attack: Callable[[_Probe], object],
-    expected: str,
-) -> None:
-    """The mechanism that CARRIES operation state is state in its own right.
-
-    Distinct from the configuration-tamper rows: those are about the policy a
-    request is enforced by, this is about the object every one of those reads
-    goes through. A resolver holds the extension through
-    ``info.schema.extensions``, so it can assign over the context, write into
-    ``__dict__``, and call ``__init__`` again - and none of them may change what
-    this operation reads or what the next one gets.
-
-    A fresh extension and a fresh schema per row, so no attempt can be the
-    reason another one is answered the way it is.
-    """
-    shared = _Probe()
-    outcome: list[str] = []
-
-    @strawberry.type
-    class TamperQuery:
-        @strawberry.field
-        def tamper(self) -> str:
-            during = shared.execution_context
-            try:
-                attack(shared)
-            except ConfigurationError:
-                outcome.append("refused")
-            else:
-                outcome.append("ignored")
-            assert shared.execution_context is during, "the running operation lost its state"
-            return "tampered"
-
-        @strawberry.field
-        def hello(self) -> str:
-            return "hi"
-
-    schema = DjangoSchema(query=TamperQuery, extensions=[lambda: shared])
-
-    attacked = schema.execute_sync("{ tamper }")
-    assert attacked.errors is None, attacked.errors
-    assert outcome == [expected]
-
-    after = schema.execute_sync("{ hello }")
-    assert after.data == {"hello": "hi"}
-    assert shared.execution_context is None
-    assert shared._operation_state() is None
-
-
-def test_a_carrier_is_settled_once_per_extension_and_dies_with_it() -> None:
-    """The carrier is held for the extension, not by anything that outlives it."""
-    extension = _Probe()
-    assert _OPERATION_CARRIERS.settled(extension)
-    assert _OPERATION_CARRIERS.recall(extension) is _OPERATION_CARRIERS.recall(extension)
-
-    reference = weakref.ref(extension)
-    del extension
-    gc.collect()
-    assert reference() is None
 
 
 def test_a_plain_strawberry_schema_gets_operation_local_state_from_the_instance() -> None:
