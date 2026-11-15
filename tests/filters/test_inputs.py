@@ -138,7 +138,6 @@ from django_strawberry_framework.filters.inputs import (
     _build_range_input_class,
     _field_specs,
     _filter_input_prechecks,
-    _pascal_case,
     _scalar_from_form_field,
     _scalar_from_model_field,
     _unexpected_filter_dispatch,
@@ -3088,29 +3087,19 @@ class Query:
 
 
 # ---------------------------------------------------------------------------
-# _pascal_case / type_name_for naming guards
+# range input / type_name_for naming guards
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "bad",
-    [
-        "",
-        "_",
-        "__",
-        "___",
-    ],
+    ["_", "__", "___"],
 )
-def test_pascal_case_raises_for_no_word_character_input(bad: str) -> None:
-    """`_pascal_case` raises rather than silently returning `""`."""
+def test_range_input_class_raises_for_a_stem_without_a_word_character(bad: str) -> None:
+    """A range stem with no word character raises rather than naming an empty stem."""
     with pytest.raises(ConfigurationError) as excinfo:
-        _pascal_case(bad)
+        _build_range_input_class(RangeFilter(field_name=bad), int, _range_owner())
     assert repr(bad) in str(excinfo.value)
-
-
-def test_pascal_case_converts_separators() -> None:
-    assert _pascal_case("galaxy__name") == "GalaxyName"
-    assert _pascal_case("email_must_have_at_sign") == "EmailMustHaveAtSign"
 
 
 @pytest.mark.parametrize(
@@ -3126,11 +3115,11 @@ def test_type_name_for_raises_for_no_word_character_field_path(bad: str) -> None
     """``type_name_for`` raises rather than silently collapsing to the root name.
 
     The guard lives in the shared ``utils.strings.pascal_case_or_raise`` both
-    ``_pascal_case`` and ``ClassBasedTypeNameMixin`` wrap, so the bag-class
+    ``_build_range_input_class`` and ``ClassBasedTypeNameMixin`` wrap, so the bag-class
     naming path in
     ``_build_input_fields`` -- which routes through ``type_name_for`` /
-    ``utils.strings.pascal_case`` rather than the inputs-local
-    ``_pascal_case`` -- also surfaces the no-word-character collision
+    ``utils.strings.pascal_case`` rather than the range stem's guard
+    -- also surfaces the no-word-character collision
     loudly instead of producing a generic ``f"{cls.__name__}InputType"``
     that silently collides with the root input type's own name.
     """

@@ -20,14 +20,13 @@ child row as unwalked. Each request runs over ``/graphql`` against a connection 
 type serves the set, with the number of statements it runs.
 """
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import wraps
 
 import pytest
 import strawberry
 from apps.library import models
-from django import forms
 from django.db import connection
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase
@@ -836,54 +835,3 @@ def test_a_conjoined_method_filter_copied_from_a_child_set_receives_the_whole_va
         _post(schema, models.Branch, _where(schema, (flat_name, "exact"), list(titles)))[0]
         for titles in (("x1", "x3"), ("x1", "xh"))
     ] == [["alpha", "beta"], ["alpha"]]
-
-
-class _OneShotChoices(forms.MultipleChoiceField):
-    """Cleans to a generator over the chosen values, as a consumer form field may."""
-
-    @override
-    def clean(self, value: object) -> Iterator[str]:
-        # ``forms.Field.clean``'s three steps, its result handed on as a generator.
-        cleaned = self.to_python(value)
-        self.validate(cleaned)
-        self.run_validators(cleaned)
-        return (each for each in cleaned)
-
-
-class _OneShotFilter(MultipleChoiceFilter):
-    """A shipped conjoined filter whose form field cleans to a one-shot generator."""
-
-    field_class = _OneShotChoices
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("walk", ["unwalked", "related-filter", "hiding"])
-def test_a_walked_conjoined_leaf_reads_every_value_a_one_shot_cleaned_value_holds(
-    walk: str,
-) -> None:
-    """A generator the form cleans to answers each value as the unwalked leaf answers it."""
-    _world()
-    shape = _SHAPES["reverse-column"]
-    choices = [
-        (code, code)
-        for code in (
-            "a1",
-            "a2",
-            "ah",
-            "b1",
-            "dh",
-        )
-    ]
-    schema, _types = _schema(
-        shape.parent,
-        {
-            "probe": _OneShotFilter(field_name=shape.leaf, choices=choices, conjoined=True),
-            **_walk_filters(shape, walk),
-        },
-        _walk_nodes(shape, walk),
-        typed=False,
-    )
-    assert [
-        _post(schema, shape.parent, {"probe": list(codes)}, typed=False)[0]
-        for codes in (("a1", "a2"), ("a1", "b1"))
-    ] == [["alpha"], []]

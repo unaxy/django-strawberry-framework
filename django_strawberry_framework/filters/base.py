@@ -1199,19 +1199,6 @@ def comparison_form_field(
     return _built_filter(filter_class, field_name, params).field
 
 
-def copied_form_field(filter_instance: Filter) -> Field:
-    """Return the form field the filter's own class builds, read on a copy of the filter.
-
-    ``Filter.field`` caches the field in the filter's ``_field`` (and a subclass may write
-    more: a ``queryset`` into ``extra``, a field half built before it raises); a class-level
-    declaration is shared by every request and deep-copied into each one, so a read of it
-    must not write to it. The read runs on ``copied_filter``'s copy, so the filter class's
-    own ``field``, a consumer subclass's override included, builds it, the declaration keeps
-    nothing and no deferred ``choices`` are evaluated.
-    """
-    return copied_filter(filter_instance).field
-
-
 def defers_choices(filter_instance: Filter) -> bool:
     """Whether the filter's ``choices`` are evaluated only by the form each request builds.
 
@@ -1275,6 +1262,13 @@ def copied_filter(filter_instance: Filter) -> Filter:
     override reading ``extra["choices"]``, evaluates them where it is built, as often as it
     would on the declared value. Each request's copy is django-filter's and keeps the
     ``choices`` as declared.
+
+    A read of a filter's form field goes through this copy (``copied_filter(f).field``):
+    ``Filter.field`` caches the field in the filter's ``_field`` (and a subclass may write
+    more: a ``queryset`` into ``extra``, a field half built before it raises), and a
+    class-level declaration is shared by every request and deep-copied into each one, so a
+    read of it must not write to it. The filter class's own ``field``, a consumer
+    subclass's override included, builds it on the copy, and the declaration keeps nothing.
     """
     probe = copy.deepcopy(filter_instance)
     choices = dict_of(probe.extra).get("choices")

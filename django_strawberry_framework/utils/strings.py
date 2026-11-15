@@ -114,7 +114,7 @@ def pascal_case_or_raise(name: str, *, make_error: "Callable[[str], Exception]")
 
     Single-sites the no-token check both consumers wrap:
     ``sets_mixins.py::ClassBasedTypeNameMixin.type_name_for`` and
-    ``filters/inputs.py::_pascal_case``. ``pascal_case`` returns ``""`` for an
+    ``filters/inputs.py::_build_range_input_class``. ``pascal_case`` returns ``""`` for an
     input with no word-character tokens (``""``, ``"_"``, ``"__"``), which
     would silently collide on downstream generated type names; ``make_error``
     keeps each consumer's error type and message consumer-specific while the

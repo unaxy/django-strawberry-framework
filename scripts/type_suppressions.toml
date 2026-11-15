@@ -42,7 +42,6 @@
 "django_strawberry_framework/filters/base.py::_EnumChoiceField" = { reportUnsafeMultipleInheritance = 1 }
 "django_strawberry_framework/filters/base.py::_GlobalIDMultipleChoiceField.to_python" = { reportIncompatibleMethodOverride = 1 }
 "django_strawberry_framework/filters/base.py::_MembershipCSVWidget.value_from_datadict" = { reportIncompatibleMethodOverride = 1 }
-"django_strawberry_framework/filters/sets.py::FilterSet.FILTER_DEFAULTS" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.__init__" = { reportArgumentType = 2 }
 "django_strawberry_framework/filters/sets.py::FilterSet._build_stashed_instance" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._filter_child_rows" = { cast = 1 }
@@ -251,7 +250,6 @@
 "tests/filters/test_sets.py::test_normalize_input_inner_bag_loop_skips_unset_lookups._Input" = { reportAny = 1 }
 "tests/filters/test_sets.py::test_normalize_input_skips_strawberry_unset_attrs._Input" = { reportAny = 1 }
 "tests/filters/test_sets.py::test_normalize_input_walks_strawberry_dataclass._Input" = { reportAny = 1 }
-"tests/filters/test_sets.py::test_private_baseline_is_immutable_and_independent" = { reportIndexIssue = 1 }
 "tests/filters/test_sets.py::test_run_permission_checks_skips_unset_related_branch.BranchInput" = { reportAny = 2 }
 "tests/forms/test_inputs.py::_as_form_class" = { reportReturnType = 1 }
 "tests/forms/test_inputs.py::test_build_form_input_class_rejects_out_of_vocabulary_operation_kind" = { reportArgumentType = 1 }

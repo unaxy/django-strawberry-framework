@@ -1,9 +1,9 @@
 """Class and callable identity for the package's own reads, and the spellings error messages use.
 
-- ``overrides`` and ``mro_attr`` answer what a class stores under a name, read by
-  ``inspect.getattr_static`` so no descriptor runs. A ``classmethod`` or ``staticmethod``
-  wrapped around the same function is the same stored function, so a re-wrap is not an
-  override.
+- ``overrides`` and ``mro_attr`` answer what a class stores under a name, or else its
+  metaclass does, read by ``inspect.getattr_static`` so no descriptor runs. A
+  ``classmethod`` or ``staticmethod`` wrapped around the same function is the same stored
+  function, so a re-wrap is not an override.
 - ``mro_entry`` finds the nearest registered ancestor by identity, never by ``==`` or
   ``hash`` on the class.
 - ``kind`` and ``text`` spell a value for an error message: a class names itself, any other

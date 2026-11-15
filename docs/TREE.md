@@ -600,7 +600,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_finalizer.py         # Finalizer tests for filter binding, owner-aware materialization, and orphan validation.
 │   ├── test_form_binding.py      # Filter form overlays preserve lazy mapping reads and QueryDict copy protocols.
 │   ├── test_inputs.py            # Filter input-generation tests for lookup naming, field construction, normalization, references, and reset.
-│   ├── test_operator_bag_reads.py  # A dict operator bag is classified and read through one base read of its pairs.
+│   ├── test_operator_bag_reads.py  # A dict is a per-field operator bag only when every key is a lookup-attr string.
 │   ├── test_sets.py              # FilterSet construction, generation provenance, form data, callback counts, and object identity.
 │   └── fixtures/    # Fixture modules for filter lazy resolution and cyclic input-generation tests.
 │       └── filtersets.py         # Fixture FilterSet declarations for cross-module lazy resolution and self-referential cycle handling.
@@ -1002,7 +1002,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_finalizer.py         # Finalizer tests for filter binding, owner-aware materialization, and orphan validation.
 │   ├── test_form_binding.py      # Filter form overlays preserve lazy mapping reads and QueryDict copy protocols.
 │   ├── test_inputs.py            # Filter input-generation tests for lookup naming, field construction, normalization, references, and reset.
-│   ├── test_operator_bag_reads.py  # A dict operator bag is classified and read through one base read of its pairs.
+│   ├── test_operator_bag_reads.py  # A dict is a per-field operator bag only when every key is a lookup-attr string.
 │   ├── test_pg_full_text.py      # planned by TODO-BETA-063-0.1.2 - Postgres full-text search filter primitives.
 │   ├── test_search_fields.py     # planned by TODO-BETA-062-0.1.2 - `Meta.search_fields` support.
 │   ├── test_sets.py              # FilterSet construction, generation provenance, form data, callback counts, and object identity.

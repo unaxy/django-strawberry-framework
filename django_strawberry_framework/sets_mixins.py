@@ -132,7 +132,7 @@ class ClassBasedTypeNameMixin:
         ``f"{cls.__name__}{cls._root_type_suffix}"`` (or with a sibling
         field's bag class). The conversion + guard are the shared
         ``utils/strings.py::pascal_case_or_raise`` (shared with
-        ``filters/inputs.py::_pascal_case``); ``pascal_case`` splits on
+        ``filters/inputs.py::_build_range_input_class``); ``pascal_case`` splits on
         ``"_"`` and drops empty tokens, so a ``LOOKUP_SEP`` (``"__"``)
         boundary PascalCases each path segment, matching the cookbook's
         per-segment split. Raising here surfaces the real cause at the

@@ -145,7 +145,6 @@ from .base import (
     _runs_shipped_filter,
     comparison_form_field,
     copied_filter,
-    copied_form_field,
     defers_choices,
     model_choice_model,
     relation_identity_column,
@@ -339,34 +338,6 @@ _materialized_names, _field_specs, _materialize_input, _clear_input_namespace = 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-# Pascal-case helper for input-class names. The conversion AND the
-# no-word-character emptiness check both live in the shared
-# ``utils/strings.py::pascal_case_or_raise`` (single-sited, shared with
-# ``sets_mixins.py::ClassBasedTypeNameMixin.type_name_for``); this wrapper
-# only supplies the ``RangeFilter``-specific error.
-def _pascal_case(name: str) -> str:
-    """Return ``name`` converted to ``PascalCase``, raising on a token-less input.
-
-    Delegates to ``utils/strings.py::pascal_case_or_raise``; an input with no
-    word-character tokens (e.g. ``"_"``, ``""``, ``"__"``) would silently
-    collide on the downstream ``RangeInputType`` naming, so it raises
-    ``ConfigurationError`` instead. Direct caller today:
-    ``_build_range_input_class`` only. The indirect caller, ``_build_input_fields``'s
-    operator-bag class naming, routes through
-    ``sets_mixins.py::ClassBasedTypeNameMixin.type_name_for(field_path)`` and trips the
-    same shared guard with its own error - so the error message below names
-    the ``RangeFilter`` consumer specifically.
-    """
-    return pascal_case_or_raise(
-        name,
-        make_error=lambda bad: ConfigurationError(
-            f"_pascal_case received {truth.render(bad)} which contains no word "
-            "characters; rename the RangeFilter's `field_name=` so its "
-            "name has at least one alphanumeric token.",
-        ),
-    )
 
 
 def _scalar_from_form_field(form_field: object) -> object:
@@ -721,12 +692,12 @@ def _declared_form_field(filter_instance: Filter) -> object:
     """Return the form field the filter's class builds, ``None`` when it builds none unbound.
 
     The filter is the class-level declaration every request deep-copies, so the field
-    is read on a copy (``filters/base.py::copied_form_field``) and the declaration keeps
+    is read on a copy (``filters/base.py::copied_filter``) and the declaration keeps
     nothing. A ``field`` that raises ``AttributeError`` without a bound ``FilterSet``
     (``AllValuesMultipleFilter`` reads the per-request ``model``) builds none here.
     """
     try:
-        return copied_form_field(filter_instance)
+        return copied_filter(filter_instance).field
     except AttributeError:
         return None
 
@@ -2382,16 +2353,20 @@ def normalize_input_value(
     if is_inactive_value(raw_value, unset_sentinel=UNSET):
         return None
 
-    def _gid_multi(_filter: Filter) -> object:
-        items = _require_list_container(_filter, raw_value, "GlobalID list")
-        return [_encode_global_id_input(item) for item in items]
+    def _list_of(
+        label: str,
+        each: Callable[[object], object] = _unwrap_enum_member,
+    ) -> Callable[[Filter], object]:
+        # A list-consuming filter (GlobalID and pk lists, the generated ``in`` / ``range``
+        # CSV filters, ``MultipleChoiceField``, ``ListFilter``) takes the list container,
+        # each member read through ``each``; ``label`` names the list in the refusal.
+        def members(matched: Filter) -> object:
+            return [each(item) for item in _require_list_container(matched, raw_value, label)]
+
+        return members
 
     def _gid(_filter: Filter) -> object:
         return _encode_global_id_input(raw_value)
-
-    def _pk_multi(_filter: Filter) -> object:
-        items = _require_list_container(_filter, raw_value, "primary-key list")
-        return [_unwrap_enum_member(item) for item in items]
 
     def _pk(_filter: Filter) -> object:
         return _unwrap_enum_member(raw_value)
@@ -2400,26 +2375,10 @@ def normalize_input_value(
         # The consumer's model-choice form field cleans the raw value(s) itself.
         if not _model_choice_takes_list(matched):
             return _unwrap_enum_member(raw_value)
-        items = _require_list_container(matched, raw_value, "model-choice list")
-        return [_unwrap_enum_member(item) for item in items]
-
-    def _csv(_filter: Filter) -> object:
-        # ``in`` / ``range`` generated CSV filters consume a list; unwrap
-        # any enum members per element (parity with ``ListFilter`` below).
-        items = _require_list_container(_filter, raw_value, "CSV membership list")
-        return [_unwrap_enum_member(item) for item in items]
-
-    def _multiple_choice(_filter: Filter) -> object:
-        # ``MultipleChoiceField`` cleans a list of choice values.
-        items = _require_list_container(_filter, raw_value, "multiple-choice list")
-        return [_unwrap_enum_member(item) for item in items]
+        return _list_of("model-choice list")(matched)
 
     def _range(matched: Filter) -> object:
         return _normalize_range_value(matched, raw_value, field_name=field_name)
-
-    def _list(_filter: Filter) -> object:
-        items = _require_list_container(_filter, raw_value, "list input")
-        return [_unwrap_enum_member(item) for item in items]
 
     def _typed(matched: Filter) -> object:
         return _scalar(matched)
@@ -2435,17 +2394,17 @@ def normalize_input_value(
     return convert_with_mro(
         filter_instance,
         isinstance_prechecks=_filter_input_prechecks(
-            _gid_multi,
+            _list_of("GlobalID list", _encode_global_id_input),
             _gid,
-            _pk_multi,
+            _list_of("primary-key list"),
             _pk,
             _model_choice,
-            _csv,
+            _list_of("CSV membership list"),
             _range,
-            _list,
+            _list_of("list input"),
             _typed,
             _scalar,
-            _multiple_choice,
+            _list_of("multiple-choice list"),
             _scalar,
         ),
         scalar_registry={},
@@ -2585,7 +2544,15 @@ def _build_range_input_class(
             field_name,
             lookup_expr,
         ) or LOOKUP_SEP.join((field_name, *lookup_expr.split(LOOKUP_SEP)[:-1]))
-    cls_name = f"{truth.name(filterset_cls)}{_pascal_case(value_path)}RangeInputType"
+    # A stem with no word character would collide on the generated name, so it raises.
+    stem = pascal_case_or_raise(
+        value_path,
+        make_error=lambda bad: ConfigurationError(
+            f"RangeFilter stem {truth.render(bad)} contains no word characters; rename the "
+            "RangeFilter's `field_name=` so its name has at least one alphanumeric token.",
+        ),
+    )
+    cls_name = f"{truth.name(filterset_cls)}{stem}RangeInputType"
     return build_input_class(
         cls_name,
         [

@@ -74,7 +74,6 @@ from django_filters import (
     UUIDFilter,
     filterset,
 )
-from django_filters import filters as _df_filters
 from django_filters.conf import settings as _filter_settings
 from django_filters.exceptions import FieldLookupError
 from django_filters.filterset import FilterSetOptions
@@ -100,6 +99,7 @@ from django_strawberry_framework.sets_mixins import (
     ClassBasedTypeNameMixin,
     SetLifecycleAttrs,
     collect_related_declarations,
+    declaration_map,
     expanded_once,
     reject_captured_branches,
     reject_unknown_exclude_names,
@@ -208,6 +208,7 @@ from .base import (
     _NO_ALIASES,
     _RELATION_VIEW_ATTR,
     _SHIPPED_FILTER_PACKAGES,
+    EMPTY_VALUES,
     ArrayFilter,
     EnumChoiceFilter,
     EnumLookupFilter,
@@ -247,7 +248,7 @@ from .base import (
     _runs_shipped_filter,
     comparison_form_field,
     copied_declared_filter,
-    copied_form_field,
+    copied_filter,
     membership_in_filter_class,
     refuse_identityless_relation,
     refuse_listless_lookup,
@@ -536,13 +537,13 @@ def _is_text_pattern_lookup(lookup: object) -> bool:
 def _is_text_column(field_class: type[ModelField]) -> bool:
     """Return whether the package's default filter for ``field_class`` is a ``CharFilter``.
 
-    Read off ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` (the package's class-level defaults
-    table, built from django-filter's ``FILTER_FOR_DBFIELD_DEFAULTS``) by the field class's MRO, never off
-    ``Meta.filter_overrides``: the text columns are ``CharField`` and its
-    subclasses, ``TextField``, ``GenericIPAddressField``, ``FilePathField`` and
-    ``CommaSeparatedIntegerField``.
+    Read off django-filter's ``BaseFilterSet.FILTER_DEFAULTS`` (the table ``FilterSet``
+    inherits) by the field class's MRO, never off ``Meta.filter_overrides``: the text
+    columns are ``CharField`` and its subclasses, ``TextField``, ``GenericIPAddressField``,
+    ``FilePathField`` and ``CommaSeparatedIntegerField``.
     """
-    entry = _entry_by_mro(_PUBLIC_PACKAGE_FILTER_DEFAULTS, field_class)
+    # The display re-keys the table as django-filter fills it (reverse relations too).
+    entry = _entry_by_mro({**filterset.BaseFilterSet.FILTER_DEFAULTS}, field_class)
     filter_class = entry.get("filter_class") if entry is not None else None
     return isinstance(filter_class, type) and issubclass(filter_class, CharFilter)
 
@@ -636,52 +637,20 @@ def _strip_model_choice_extras(extra: Mapping[str, object]) -> dict[str, object]
     return {key: value for key, value in extra.items() if key not in _MODEL_CHOICE_ONLY_EXTRAS}
 
 
-# The generation-policy tables. django-filter's ``FILTER_FOR_DBFIELD_DEFAULTS`` is a
-# mutable, process-shared ``dict`` (``BaseFilterSet.FILTER_DEFAULTS`` by identity), so
-# this module separates THREE concepts:
-#
-#   1. ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` -- django-filter's table, copied entry by
-#      entry when this module is imported and installed as the public
-#      ``FilterSet.FILTER_DEFAULTS``. The per-entry copy is a distinct object graph,
-#      so a later in-place mutation of upstream's dict (or of this table) never
-#      reaches the other. Being a plain, deepcopyable ``dict`` keeps django-filter's
-#      inherited consumer customization seam (``copy.deepcopy(cls.FILTER_DEFAULTS)``
-#      / ``dict(cls.FILTER_DEFAULTS)`` / ``[cls][key] = ...``), which a nested
-#      ``MappingProxyType`` would break on every Python version. django-filter reads
-#      ``FILTER_DEFAULTS`` only through ``dict(cls.FILTER_DEFAULTS)`` (a fresh
-#      shallow copy) plus entry ``.get`` and never mutates it
-#      (``django_filters.filterset.BaseFilterSet.filter_for_lookup``). A relation
-#      class upstream's table does not name (a bare ``ForeignObject``, its
-#      ``ForeignObjectRel`` reverse, a ``GenericRelation``) gets no entry either:
-#      ``FilterSet.filter_for_lookup`` gives its key the identity filters for
-#      ``exact`` / ``in`` and a ``ForeignKey``'s Boolean null test for ``isnull``.
-#
-#   2. ``_PACKAGE_POLICY_BASELINE`` -- a PRIVATE, immutable, NORMALIZED baseline
-#      (``MappingProxyType`` of ``_NormalizedPolicyEntry`` records), one per public
-#      entry. Copying upstream's table does not establish who AUTHORED an entry: a
-#      consumer, reusable app or init hook that mutated django-filter's dict in place
-#      before this module was imported would otherwise be recorded as package policy.
-#      So an entry enters the baseline only when ``_upstream_authored`` proves it
-#      django-filter's own (its ``filter_class`` is the ``django_filters.filters``
-#      class of that name, its ``extra`` provider, if any, is defined in
-#      ``django_filters.filterset``); any other entry records ``_TAINTED_POLICY``,
-#      which no selection equals. The baseline is never installed as a class attr,
-#      exposed or deepcopied, so ``MappingProxyType`` is correct here.
-#
-#   3. Selection provenance -- the ownership oracle
-#      (``FilterSet._generation_origin_for_field``) compares the EFFECTIVE selection
-#      (``FILTER_DEFAULTS`` merged with ``Meta.filter_overrides``) to the baseline by
-#      normalized VALUE, not by object identity: the public dict and the private
-#      baseline are DISTINCT object graphs. A pristine selection re-derives the
-#      baseline's (filter_class, provider) pair, so it is ``framework_default``; a
-#      ``filter_class`` OR ``extra``-provider override (whole entry) diverges, as does
-#      every tainted entry, so each is ``override_generated``.
-_PUBLIC_PACKAGE_FILTER_DEFAULTS: dict[type[ModelField], dict[str, object]] = {
-    field_class: dict(entry)
-    for field_class, entry in filterset.FILTER_FOR_DBFIELD_DEFAULTS.items()
-}
-
-
+# Generation-policy ownership. ``FilterSet`` inherits django-filter's
+# ``BaseFilterSet.FILTER_DEFAULTS``, its inherited customization seam
+# (``copy.deepcopy(cls.FILTER_DEFAULTS)`` / ``dict(cls.FILTER_DEFAULTS)`` / a class-level
+# shadow) included; django-filter reads it only through ``dict(cls.FILTER_DEFAULTS)`` plus
+# entry ``.get`` (``django_filters.filterset.BaseFilterSet.filter_for_lookup``). A relation
+# class upstream's table does not name (a bare ``ForeignObject``, its ``ForeignObjectRel``
+# reverse, a ``GenericRelation``) gets no entry: ``FilterSet.filter_for_lookup`` gives its
+# key the identity filters for ``exact`` / ``in`` and a ``ForeignKey``'s Boolean null test
+# for ``isnull``. The ownership oracle (``FilterSet._generation_origin_for_field``)
+# compares the EFFECTIVE selection (``FILTER_DEFAULTS`` merged with
+# ``Meta.filter_overrides``) to upstream's table entry by normalized VALUE: a pristine
+# selection re-derives upstream's (filter_class, provider) pair, so it is
+# ``framework_default``; a ``filter_class`` OR ``extra``-provider override (whole entry)
+# diverges, so it is ``override_generated``.
 @dataclass(frozen=True)
 class _NormalizedPolicyEntry:
     """Immutable normalized record of one generation-policy entry.
@@ -689,9 +658,8 @@ class _NormalizedPolicyEntry:
     The ownership-bearing content django-filter selects off a ``FILTER_DEFAULTS``
     entry: the ``filter_class`` (a class identity) and the ``extra`` provider (a
     function identity, or ``None``). Two entries are ownership-equal iff both members
-    are equal -- so a pristine selection from the package table equals the baseline,
-    while any consumer ``filter_class`` swap OR ``extra``-provider swap diverges.
-    Frozen, so it is safe as an immutable baseline value.
+    are equal -- so a pristine selection equals django-filter's own table's, while any
+    consumer ``filter_class`` swap OR ``extra``-provider swap diverges.
     """
 
     filter_class: object = None
@@ -709,46 +677,6 @@ def _normalize_policy_entry(entry: Mapping[str, object] | None) -> _NormalizedPo
     if entry is None:
         return None
     return _NormalizedPolicyEntry(entry.get("filter_class"), entry.get("extra"))
-
-
-def _upstream_authored(entry: Mapping[str, object]) -> bool:
-    """Return whether ``entry`` is django-filter's own, unmodified generation policy.
-
-    Its ``filter_class`` must be the class ``django_filters.filters`` exports under that
-    name (a consumer subclass reusing the name is a different object), and its
-    ``extra`` provider, when present, must be defined in ``django_filters.filterset``
-    (the module of ``BaseFilterSet``), where upstream's table defines every one.
-    """
-    filter_class = entry.get("filter_class")
-    extra = entry.get("extra")
-    return (
-        truth.is_type(filter_class)
-        and read_attr(_df_filters, truth.name(filter_class), None) is filter_class
-        and (extra is None or truth.module(extra) == truth.module(filterset.BaseFilterSet))
-    )
-
-
-# The baseline record of a public entry ``_upstream_authored`` rejects. Its fresh
-# members equal no selected entry, so every selection it governs is
-# ``override_generated``; it is truthy, so ``try_dbfield``'s MRO walk stops on it
-# exactly as on the public entry it stands for.
-_TAINTED_POLICY = _NormalizedPolicyEntry(object(), object())
-
-
-# The PRIVATE, immutable, normalized ownership anchor, one record per public entry:
-# the entry's normalized value when ``_upstream_authored`` accepts it, else
-# ``_TAINTED_POLICY``. Never installed as a class attr and never exposed to consumers,
-# so the ``MappingProxyType`` is correct here (unlike the public table, this is never
-# deepcopied or customized). The ownership oracle compares the effective selection
-# against this by normalized VALUE.
-_PACKAGE_POLICY_BASELINE: Mapping[type[ModelField], _NormalizedPolicyEntry | None] = (
-    MappingProxyType(
-        {
-            cls: _normalize_policy_entry(entry) if _upstream_authored(entry) else _TAINTED_POLICY
-            for cls, entry in _PUBLIC_PACKAGE_FILTER_DEFAULTS.items()
-        },
-    )
-)
 
 
 def _entry_by_mro(
@@ -1335,12 +1263,12 @@ def _widget_keys(filter_instance: Filter, name: str) -> list[str]:
     recursing into its sub-widgets; any other widget, or a multi-widget with no
     sub-widget, reads ``name``. The field is the one the filter's own class
     builds, a consumer ``field`` override included, read on a copy so the class-level
-    filter keeps nothing (``filters/base.py::copied_form_field``). A field that cannot be
+    filter keeps nothing (``filters/base.py::copied_filter``). A field that cannot be
     built here (a callable ``queryset`` resolves only with the request) reads ``name``, the
     key a single-value widget reads.
     """
     try:
-        widget = read_attr(copied_form_field(filter_instance), "widget")
+        widget = read_attr(copied_filter(filter_instance).field, "widget")
     except Exception:  # noqa: BLE001 - consumer field code may raise anything; read the bare name
         return [name]
     return widget_keys(widget, name) or [name]
@@ -1754,11 +1682,11 @@ class ProjectedChildFilter(Filter):
         """The child filter's form field: the child instance's once bound, the child class's before.
 
         Before binding, the child class's filter is a class-level declaration every
-        request shares, so its field is read on a copy (``filters/base.py::copied_form_field``).
+        request shares, so its field is read on a copy (``filters/base.py::copied_filter``).
         """
         projection = self._projection
         if getattr(self, "parent", None) is None:
-            return copied_form_field(_projection_child_filter(projection))
+            return copied_filter(_projection_child_filter(projection)).field
         return self._child()._filter_named(projection.name).field
 
     @override
@@ -2565,11 +2493,7 @@ class _KeyMatch:
         if members is None:
             reading = _conjoined_reading(self.terminal, shipped_filter, value)
             try:
-                kept = shipped.filter(
-                    self.terminal,
-                    rows,
-                    value if reading is None else reading.sent,
-                )
+                kept = shipped.filter(self.terminal, rows, value)
             except _SHIPPED_COMPARISON_REFUSALS:
                 # The shipped comparison cannot read the value, so it names no row; the
                 # consumer's ``filter`` answers it on the chain's ``fallback``.
@@ -3217,11 +3141,8 @@ def _cleaned_items(form: forms.BaseForm) -> ItemsView[str, object]:
 class _ConjoinedReading:
     """How a ``conjoined`` multiple-choice filter reads its value one value at a time.
 
-    ``sent`` is the value its call with every value receives: the value as cleaned, or for
-    a one-shot iterator (a consumer form field cleaning to a generator) a fresh iterator
-    over the items it held, so that call reads it as it would read the cleaned value and the
-    per-value calls still see every item. ``items`` are those items; ``values`` reads them
-    in the order sent, each once, as django-filter's loop iterates ``set(value)``, once that
+    ``value`` is the cleaned value its call with every value receives; ``values`` reads its
+    items in order, each once, as django-filter's loop iterates ``set(value)``, once that
     call has read (or refused) them. ``reader`` is a copy of the
     filter whose ``filter``, handed one of ``values`` in a list, runs that value's turn of the
     loop: django-filter asks ``is_noop`` once, of the whole value, before it loops, so the
@@ -3231,13 +3152,12 @@ class _ConjoinedReading:
     """
 
     reader: MultipleChoiceFilter
-    sent: object
-    items: Iterable[object]
+    value: Iterable[object]
 
     @property
     def values(self) -> list[object]:
-        """The items in the order sent, each once."""
-        return list(dict.fromkeys(self.items))
+        """The value's items in order, each once."""
+        return list(dict.fromkeys(self.value))
 
 
 def _conjoined_reading(
@@ -3257,7 +3177,7 @@ def _conjoined_reading(
     ``in`` lookup, which applies the whole list in one predicate) reads its values one at a
     time, and never one the filter holds of its own (``_own_filter``). A value the loop
     cannot iterate (``None``, which the call with every value skips) reads none. Asked
-    before that call, which receives ``sent`` (``_ConjoinedReading``).
+    before that call, which receives the cleaned value.
     """
     if not (isinstance(filter_instance, MultipleChoiceFilter) and filter_instance.conjoined):
         return None
@@ -3267,15 +3187,9 @@ def _conjoined_reading(
         or not isinstance(value, Iterable)
     ):
         return None
-    held: Iterable[object] = value
-    items = list(held) if isinstance(held, Iterator) else held
     reader = copy.copy(filter_instance)
     reader.always_filter = True
-    return _ConjoinedReading(
-        reader,
-        iter(items) if items is not held else held,
-        items,
-    )
+    return _ConjoinedReading(reader, value)
 
 
 def _declared_as_text(filter_instance: Filter) -> Filter:
@@ -3823,16 +3737,7 @@ def _own_related_filters(filterset: type[object]) -> Mapping[str, RelatedFilter]
     Read from the class's own ``__dict__``, so an inherited map is never mistaken for the
     set's own; a set the metaclass stored none on declares none.
     """
-    stored = truth.class_dict(filterset).get("related_filters")
-    return {} if stored is None else require(stored, _is_related_filter_map)
-
-
-def _is_related_filter_map(value: object) -> TypeIs[dict[str, RelatedFilter]]:
-    """Whether ``value`` is a ``dict`` of ``RelatedFilter`` declarations keyed by field name."""
-    return is_dict(value) and all(
-        is_str(name) and truth.is_instance(declaration, RelatedFilter)
-        for name, declaration in dict_items(value)
-    )
+    return declaration_map(truth.class_dict(filterset).get("related_filters", {}), RelatedFilter)
 
 
 def _is_filterset_class(value: object) -> TypeIs[type[FilterSet]]:
@@ -3999,22 +3904,6 @@ class FilterSet(
     key's own relation's model); the own-PK branch reads it and keeps the
     upstream shape while the class is unbound.
     """
-
-    # The public generation-policy table. Installed in place of django-filter's
-    # mutable, process-shared ``BaseFilterSet.FILTER_DEFAULTS`` as the package's own
-    # per-entry copy of it (``_PUBLIC_PACKAGE_FILTER_DEFAULTS``), a plain, deepcopyable
-    # ``dict``, so a later mutation of upstream's dict never reaches it and the
-    # inherited django-filter customization seam (``deepcopy`` / ``dict(...)`` /
-    # ``[cls][key] = ...``) keeps working. An unmodified subclass
-    # inherits this by identity (``_is_generation_capable`` checks it); ownership is
-    # decided against the PRIVATE normalized ``_PACKAGE_POLICY_BASELINE`` by value, not
-    # against this public object's identity.
-    # basedpyright: the stub keys ``FILTER_DEFAULTS`` by ``type[Field]``, but django-filter's own
-    # table also keys the reverse relations (``OneToOneRel`` / ``ManyToOneRel`` /
-    # ``ManyToManyRel``); it rejects the invariant override with the true wider key
-    FILTER_DEFAULTS: ClassVar[dict[type[ModelField], dict[str, object]]] = (  # pyright: ignore[reportIncompatibleVariableOverride]
-        _PUBLIC_PACKAGE_FILTER_DEFAULTS
-    )
 
     # Binding seam - populated by `finalize_django_types` phase 2.5.
     _owner_definition: DjangoTypeDefinition | None = None
@@ -4674,22 +4563,7 @@ class FilterSet(
         self._bind_unavailable_names = set()
         hops: list[RelationHop] = []
         for name, value in _cleaned_items(form):
-            if name in self._unnamed_copies or value is None:
-                continue
-            if (
-                truth.is_exact_one_of(
-                    value,
-                    truth.IdentitySet(
-                        (
-                            str,
-                            list,
-                            tuple,
-                            dict,
-                        ),
-                    ),
-                )
-                and not value
-            ):
+            if name in self._unnamed_copies or value in EMPTY_VALUES:
                 continue
             filter_instance = self._copied_filters.get(name)
             if filter_instance is None or not _runs_shipped_filter(filter_instance):
@@ -4729,12 +4603,7 @@ class FilterSet(
         rows = self.queryset
         self._suppress_new_bind_hooks = self._native_form_is_invalid(form)
         self._build_logic_arms_native(arms, rows, stop_on_error=False)
-        all_sets = (self, *(probed.instance for probed in arms.values()))
-        native_errors = any(
-            instance._native_form_is_invalid(instance.form) for instance in all_sets
-        )
-        for instance in all_sets:
-            instance._suppress_new_bind_hooks = native_errors
+        self._settle_sibling_bind_hooks(arms)
         self._prepare_postclean_binding_sync(form)
         return True
 
@@ -5209,15 +5078,6 @@ class FilterSet(
         return published
 
     @classmethod
-    def _unexpanded_filters(cls) -> OrderedDict[str, Filter]:
-        """Return this set's declared + Meta-derived filters, no ``RelatedFilter`` expanded.
-
-        django-filter's own ``get_filters``: a fresh ``OrderedDict`` per call,
-        its ``RelatedFilter`` declarations kept as branch heads.
-        """
-        return super().get_filters()
-
-    @classmethod
     def _expand_along(
         cls,
         path: tuple[type[FilterSet], ...],
@@ -5243,7 +5103,7 @@ class FilterSet(
         behind a ``flat=False`` declaration included. Past the limit it raises,
         after the contribution that crossed it is built.
         """
-        filters = cls._unexpanded_filters()
+        filters = super().get_filters()
         if cls._meta.model is None:
             return filters
         # During ``FilterSetMetaclass.__new__``, the new class does not own
@@ -5283,7 +5143,7 @@ class FilterSet(
         """Return the filters this set contributes as the target of the last set on ``path``.
 
         The cycle rule of the flat surface. A set already on ``path`` (by identity)
-        contributes its own filters unexpanded (``_unexpanded_filters``), its
+        contributes its own filters unexpanded (django-filter's ``get_filters``), its
         ``RelatedFilter`` heads included, so every path ends one step after it
         returns to a set it passed. A set that reaches no set on ``path`` expands
         exactly as it does alone, so its own published table (``_filter_table``)
@@ -5302,7 +5162,7 @@ class FilterSet(
         key = (id(cls), frozenset(id(visited) for visited in along))
         kept = scope.surfaces.get(key)
         if kept is None:
-            surface = cls._unexpanded_filters() if on_path else cls._expand_along(along, scope)
+            surface = super().get_filters() if on_path else cls._expand_along(along, scope)
             kept = scope.surfaces[key] = cls._reshape(surface)
         return kept
 
@@ -5889,25 +5749,18 @@ class FilterSet(
            (merge order preserved, so a more-derived ``FILTER_DEFAULTS`` entry shadows
            a less-derived override) -- then NORMALIZE that selected entry
            (``_normalize_policy_entry``) and compare it BY VALUE against the normalized
-           ``_PACKAGE_POLICY_BASELINE`` selection: the PRIVATE, immutable, package-owned
-           baseline derived from ``_PUBLIC_PACKAGE_FILTER_DEFAULTS``, NOT django-filter's
-           mutable, shared ``BaseFilterSet.FILTER_DEFAULTS`` and NOT the public table's
-           object identity. The public table and the
-           private baseline are DISTINCT object graphs, so object identity could never
-           hold between a selected raw entry and a baseline record; the ownership anchor
-           is a normalized VALUE comparison of the ownership-bearing members
-           (``filter_class`` + the ``extra`` provider identity). A pristine selection
-           re-derives the SAME (filter_class, provider) pair the baseline holds, so it is
+           selection off django-filter's ``BaseFilterSet.FILTER_DEFAULTS``: the
+           ownership anchor is a normalized VALUE comparison of the ownership-bearing
+           members (``filter_class`` + the ``extra`` provider identity), never the
+           identity of a selected raw entry. A pristine selection
+           re-derives the SAME (filter_class, provider) pair upstream's table holds, so it is
            ``framework_default``; a consumer seam that genuinely governs the selection --
            a ``Meta.filter_overrides`` entry that wins the merged walk OR a class-level
            ``FILTER_DEFAULTS`` shadow that replaced the entry -- carries a different
            ``filter_class`` and/or a different (consumer) ``extra`` provider, so its
            normalized value diverges and it is ``override_generated``. Whole-entry
            normalization catches an ``extra``-only override (restricted queryset,
-           ``to_field_name``, requiredness), not just a ``filter_class`` change. An entry a consumer
-           mutation of django-filter's table put there before this module was imported
-           is not upstream-authored, so its baseline record is tainted and every
-           selection of it is ``override_generated``.
+           ``to_field_name``, requiredness), not just a ``filter_class`` change.
 
         This is the SINGLE defaults-table ownership oracle both ``filter_for_lookup`` (which
         decides whether to convert a framework-owned relation key to a package
@@ -5956,26 +5809,23 @@ class FilterSet(
         # ``override_generated`` -- declining a legitimate Relay conversion (wire-shape
         # regression) and dropping a genuine framework leaf from routing (false-closed).
         #
-        # Comparing the merged SELECTION by NORMALIZED VALUE against the private,
-        # package-owned ``_PACKAGE_POLICY_BASELINE`` selection subsumes BOTH
+        # Comparing the merged SELECTION by NORMALIZED VALUE against the selection off
+        # django-filter's ``BaseFilterSet.FILTER_DEFAULTS`` subsumes BOTH
         # consumer-selection seams in one check:
         #   * ``Meta.filter_overrides`` -- when an override entry ACTUALLY governs the
         #     selection class (upstream would select it), the merged walk returns that
-        #     override entry; its normalized (filter_class, extra) pair differs from the
-        #     baseline record -> ``override_generated``.
+        #     override entry; its normalized (filter_class, extra) pair differs from
+        #     upstream's -> ``override_generated``.
         #   * a class-level ``FILTER_DEFAULTS`` shadow -- a subclass
         #     that reassigns ``FILTER_DEFAULTS`` changes the whole generation policy; its
         #     REPLACED entry normalizes to a different value -> ``override_generated``,
         #     while an untouched shallow ``{**FilterSet.FILTER_DEFAULTS, Field: {...}}``
         #     copy carries the SAME (filter_class, provider) pair for every unchanged
-        #     class, so those normalize equal to the baseline and stay
+        #     class, so those normalize equal to upstream's and stay
         #     ``framework_default``.
-        # The baseline records only upstream-authored entries of
-        # ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` (any other entry is tainted), and the
-        # comparison is by VALUE, so a pre-import mutation of django-filter's table never
-        # reads as package policy and the public table and baseline being distinct
-        # object graphs does not matter: a pristine selection re-derives
-        # the baseline's (filter_class, provider) pair. The compared members are the
+        # The comparison is by VALUE, so a copied table (``dict(...)`` / ``deepcopy``)
+        # does not matter: a pristine selection re-derives upstream's
+        # (filter_class, provider) pair. The compared members are the
         # single ownership-bearing values django-filter selects (its ``filter_class`` AND
         # its ``extra`` provider -- a restricted relation queryset, a ``to_field_name``,
         # requiredness), so an ``extra``-only override is caught, not just a
@@ -5989,13 +5839,15 @@ class FilterSet(
         Step 3 of ``_generation_origin_for_field``, for a caller that already holds the
         resolved field (``filter_for_lookup`` receives the output field django-filter
         resolved): ``framework_default`` when the merged ``FILTER_DEFAULTS`` plus
-        ``Meta.filter_overrides`` selection equals the package baseline by normalized
+        ``Meta.filter_overrides`` selection equals django-filter's own table's by normalized
         value, ``override_generated`` otherwise.
         """
         # ``_entry_by_mro`` is ``try_dbfield``'s walk: each read is one of its mapping's values.
         selected_entry = _entry_by_mro(cls._merged_filter_defaults(), selection_cls)
         selected_norm = _normalize_policy_entry(selected_entry)
-        base_norm = _entry_by_mro(_PACKAGE_POLICY_BASELINE, selection_cls)
+        base_norm = _normalize_policy_entry(
+            _entry_by_mro({**filterset.BaseFilterSet.FILTER_DEFAULTS}, selection_cls),
+        )
         if selected_norm != base_norm:
             return "override_generated"
         return "framework_default"
@@ -6065,15 +5917,12 @@ class FilterSet(
           package-generated.
         * ``FILTER_DEFAULTS`` override -- the class-level generation hook: a
           consumer shadowing ``FILTER_DEFAULTS`` changes which filter classes the
-          default path selects; an unmodified subclass inherits the package's
-          public ``_PUBLIC_PACKAGE_FILTER_DEFAULTS`` table by identity, so any class
+          default path selects; an unmodified subclass inherits django-filter's
+          ``BaseFilterSet.FILTER_DEFAULTS`` table by identity, so any class
           that reassigned ``FILTER_DEFAULTS`` is non-capable and
-          nothing it generates is routable. Comparing against the package's public
-          table (not django-filter's mutable ``BaseFilterSet.FILTER_DEFAULTS``, which
-          it copied) means capability tracks whether the class still uses the exact
-          table this module installed. Value-level ownership of an
+          nothing it generates is routable. Value-level ownership of an
           individual entry is a separate concern handled by
-          ``_generation_origin_for_field`` against the private normalized baseline;
+          ``_generation_origin_for_field`` by normalized value;
           this identity check is the coarse whole-table-replacement gate.
         * ``__init__`` override (``_customizes_instances``) -- the standard place a
           consumer replaces or mutates ``self.filters`` per request. A subclass that
@@ -6088,7 +5937,8 @@ class FilterSet(
         """
         return (
             not truth.overrides(cls, FilterSet, *FilterSet._GENERATION_SEAMS)
-            and truth.static_attr(cls, "FILTER_DEFAULTS") is _PUBLIC_PACKAGE_FILTER_DEFAULTS
+            and truth.static_attr(cls, "FILTER_DEFAULTS")
+            is filterset.BaseFilterSet.FILTER_DEFAULTS
             and not cls._customizes_instances()
         )
 
@@ -6998,21 +6848,16 @@ class FilterSet(
         # transform chain's ``year_gt``). ``start`` / ``end`` are in neither
         # unless this field publishes them, so a lookup another field
         # publishes never turns a range value into a bag. Strawberry-input dataclass
-        # bags (the schema-driven path) always delegate unchanged. The pairs
-        # are read once through the base ``dict.items`` slot and each key is
-        # reduced to an exact ``str`` before the membership test, so a dict
-        # subclass cannot report one set of pairs to the classification and
-        # another to the normalizer, and a key's own ``__eq__`` / ``__hash__``
-        # never answers for a lookup name.
+        # bags (the schema-driven path) always delegate unchanged; a dict with a
+        # key that is not a string is no bag.
         if is_dict(raw_value):
             pairs: list[tuple[str, object]] = []
-            for key, value in dict_items(raw_value):
-                if not truth.is_instance(key, str):
+            for key, value in raw_value.items():
+                if not isinstance(key, str):
                     return None
-                lookup_attr = truth.text(key)
-                if lookup_attr not in _LOOKUP_PYTHON_ATTRS and lookup_attr not in head_lookups:
+                if key not in _LOOKUP_PYTHON_ATTRS and key not in head_lookups:
                     return None
-                pairs.append((lookup_attr, value))
+                pairs.append((key, value))
             return pairs or None
         return iter_input_items(raw_value)
 
@@ -7248,7 +7093,7 @@ class FilterSet(
         """Fail closed when ``_depth`` passes this FilterSet's traversal budget.
 
         The FilterSet-side binding of the shared depth-cap check: every
-        enforcement site (``_iter_logic_arms``, ``_probe_logic_arms``,
+        enforcement site (``_iter_logic_arms``, ``_own_arms``,
         ``_check_permission_depth``, ``_evaluate_logic_tree``, ``apply_sync``,
         ``apply_async``) composes this binding, which composes
         ``utils/input_values.py::assert_set_traversal_depth`` with the
@@ -9141,6 +8986,59 @@ class FilterSet(
             return recorded[1]
         return None
 
+    def _own_arms(self) -> Iterator[tuple[str, object]]:
+        """Yield ``(path, child input)`` for each ``and`` / ``or`` / ``not`` arm of this set's input.
+
+        The arm walk every probe and native build shares: this set's own data, the
+        depth cap at its logical depth, each arm's path under this set's branch path.
+        """
+        tree = self.data
+        if not is_dict(tree) or not tree:
+            return
+        cls = type(self)
+        cls._assert_logic_depth(self._logic_depth)
+        for op, children in cls._iter_logic_branches(tree):
+            for index, child_input in enumerate(children):
+                yield _branch_key(self._branch_path, op.arm_key(index)), child_input
+
+    async def _await_annotations_ready(
+        self,
+        input_value: object,
+        needed: tuple[RelationHop, ...],
+        *,
+        ready: bool,
+        native_only: bool = False,
+    ) -> None:
+        """Await the bind owners this form's staged validation asks for until it is ready.
+
+        Each round awaits ``needed`` outside the sync worker over this set's request-wide
+        hop map, then stages this same instance and form again in one worker
+        (``_stage_known_annotation_validation``).
+        """
+        while not ready:
+            await type(self)._await_hop_visibility_async(
+                needed,
+                self._apply_info,
+                self._hop_visibility(),
+                parent_db=self._annotation_owner_alias(),
+            )
+            needed, _names, ready = await run_in_one_sync_boundary(
+                partial(
+                    self._stage_known_annotation_validation,
+                    input_value,
+                    native_only=native_only,
+                ),
+            )
+
+    def _settle_sibling_bind_hooks(self, arms: dict[str, _ProbedArm]) -> None:
+        """Suppress new bind-only owners on this set and every arm when any form has native errors."""
+        all_sets = (self, *(probed.instance for probed in arms.values()))
+        native_errors = any(
+            instance._native_form_is_invalid(instance.form) for instance in all_sets
+        )
+        for instance in all_sets:
+            instance._suppress_new_bind_hooks = native_errors
+
     def _probe_logic_arms(
         self,
         arms: dict[str, _ProbedArm],
@@ -9165,20 +9063,13 @@ class FilterSet(
         has every arm built, validated and probed. Returns the hops of every arm
         leaf that constrains, which ``apply_async`` awaits before the ``.qs`` read.
         """
-        cls = type(self)
         hops: list[RelationHop] = []
-        tree = self.data
-        if not is_dict(tree) or not tree:
-            return ()
-        cls._assert_logic_depth(self._logic_depth)
-        for op, children in cls._iter_logic_branches(tree):
-            for index, _child_input in enumerate(children):
-                path = _branch_key(self._branch_path, op.arm_key(index))
-                arm = arms[path].instance
-                arm._absent_leaf_verdicts = self._absent_leaf_verdicts
-                _ = arm._finish_known_annotation_validation((), defer_bind=False)
-                hops.extend(arm._probe_absent_relation_leaves())
-                hops.extend(arm._probe_logic_arms(arms, rows))
+        for path, _child_input in self._own_arms():
+            arm = arms[path].instance
+            arm._absent_leaf_verdicts = self._absent_leaf_verdicts
+            _ = arm._finish_known_annotation_validation((), defer_bind=False)
+            hops.extend(arm._probe_absent_relation_leaves())
+            hops.extend(arm._probe_logic_arms(arms, rows))
         return tuple(hops)
 
     def _new_logic_arm(
@@ -9234,25 +9125,18 @@ class FilterSet(
         stop_on_error: bool = True,
     ) -> None:
         """Clean all logical forms before any new complete-field bind owner runs."""
-        cls = type(self)
-        tree = self.data
         if stop_on_error:
             self._validate_native_errors()
-        if not is_dict(tree) or not tree:
-            return
-        cls._assert_logic_depth(self._logic_depth)
-        for op, children in cls._iter_logic_branches(tree):
-            for index, child_input in enumerate(children):
-                path = _branch_key(self._branch_path, op.arm_key(index))
-                arm = self._new_logic_arm(child_input, path, rows, arms)
-                arm._prepare_annotation_hops_sync(child_input)
-                _ = arm._stage_known_annotation_validation(child_input, native_only=True)
-                arm._build_logic_arms_native(arms, rows, stop_on_error=stop_on_error)
-                if any(
-                    probed.instance._native_form_is_invalid(probed.instance.form)
-                    for probed in arms.values()
-                ):
-                    self._suppress_new_bind_hooks = True
+        for path, child_input in self._own_arms():
+            arm = self._new_logic_arm(child_input, path, rows, arms)
+            arm._prepare_annotation_hops_sync(child_input)
+            _ = arm._stage_known_annotation_validation(child_input, native_only=True)
+            arm._build_logic_arms_native(arms, rows, stop_on_error=stop_on_error)
+            if any(
+                probed.instance._native_form_is_invalid(probed.instance.form)
+                for probed in arms.values()
+            ):
+                self._suppress_new_bind_hooks = True
 
     async def _build_logic_arms_native_async(
         self,
@@ -9260,45 +9144,25 @@ class FilterSet(
         rows: models.QuerySet[models.Model],
     ) -> None:
         """Await missing parser owners, then clean every arm on its one form."""
-        cls = type(self)
-        tree = self.data
         await run_in_one_sync_boundary(self._validate_native_errors)
-        if not is_dict(tree) or not tree:
-            return
-        cls._assert_logic_depth(self._logic_depth)
-        for op, children in cls._iter_logic_branches(tree):
-            for index, child_input in enumerate(children):
-                path = _branch_key(self._branch_path, op.arm_key(index))
+        for path, child_input in self._own_arms():
 
-                def stage_arm(
-                    child_input: object,
-                    path: str,
-                ) -> tuple[FilterSet, tuple[RelationHop, ...], bool]:
-                    arm = self._new_logic_arm(child_input, path, rows, arms)
-                    needed, _names, ready = arm._stage_known_annotation_validation(
-                        child_input,
-                        native_only=True,
-                    )
-                    return arm, needed, ready
-
-                arm, needed, ready = await run_in_one_sync_boundary(
-                    partial(stage_arm, child_input, path),
+            def stage_arm(
+                child_input: object,
+                path: str,
+            ) -> tuple[FilterSet, tuple[RelationHop, ...], bool]:
+                arm = self._new_logic_arm(child_input, path, rows, arms)
+                needed, _names, ready = arm._stage_known_annotation_validation(
+                    child_input,
+                    native_only=True,
                 )
-                while not ready:
-                    await cls._await_hop_visibility_async(
-                        needed,
-                        self._apply_info,
-                        self._hop_visibility(),
-                        parent_db=arm._annotation_owner_alias(),
-                    )
-                    needed, _names, ready = await run_in_one_sync_boundary(
-                        partial(
-                            arm._stage_known_annotation_validation,
-                            child_input,
-                            native_only=True,
-                        ),
-                    )
-                await arm._build_logic_arms_native_async(arms, rows)
+                return arm, needed, ready
+
+            arm, needed, ready = await run_in_one_sync_boundary(
+                partial(stage_arm, child_input, path),
+            )
+            await arm._await_annotations_ready(child_input, needed, ready=ready, native_only=True)
+            await arm._build_logic_arms_native_async(arms, rows)
 
     async def _probe_logic_arms_async(
         self,
@@ -9306,34 +9170,17 @@ class FilterSet(
         rows: models.QuerySet[models.Model],
     ) -> tuple[RelationHop, ...]:
         """Finalize prebuilt logical siblings, awaiting postclean bind owners once."""
-        cls = type(self)
-        tree = self.data
-        if not is_dict(tree) or not tree:
-            return ()
-        cls._assert_logic_depth(self._logic_depth)
         hops: list[RelationHop] = []
-        for op, children in cls._iter_logic_branches(tree):
-            for index, child_input in enumerate(children):
-                path = _branch_key(self._branch_path, op.arm_key(index))
-
-                arm = arms[path].instance
-                arm._absent_leaf_verdicts = self._absent_leaf_verdicts
-                needed, _initial_names, ready = await run_in_one_sync_boundary(
-                    partial(arm._stage_known_annotation_validation, child_input),
-                )
-                while not ready:
-                    await cls._await_hop_visibility_async(
-                        needed,
-                        self._apply_info,
-                        self._hop_visibility(),
-                        parent_db=arm._annotation_owner_alias(),
-                    )
-                    needed, _initial_names, ready = await run_in_one_sync_boundary(
-                        partial(arm._stage_known_annotation_validation, child_input),
-                    )
-                absent = await run_in_one_sync_boundary(arm._probe_absent_relation_leaves)
-                hops.extend(absent)
-                hops.extend(await arm._probe_logic_arms_async(arms, rows))
+        for path, child_input in self._own_arms():
+            arm = arms[path].instance
+            arm._absent_leaf_verdicts = self._absent_leaf_verdicts
+            needed, _initial_names, ready = await run_in_one_sync_boundary(
+                partial(arm._stage_known_annotation_validation, child_input),
+            )
+            await arm._await_annotations_ready(child_input, needed, ready=ready)
+            absent = await run_in_one_sync_boundary(arm._probe_absent_relation_leaves)
+            hops.extend(absent)
+            hops.extend(await arm._probe_logic_arms_async(arms, rows))
         return tuple(hops)
 
     def _chain_base(
@@ -9541,11 +9388,7 @@ class FilterSet(
         # over the parent's relation: one row set per value, each folded to the parent on its
         # own. The call with every value stays the one that skips or refuses the value.
         reading = _conjoined_reading(terminal, _class_filter(terminal), value)
-        rows = self._filter_child_rows(
-            terminal,
-            source,
-            value if reading is None else reading.sent,
-        )
+        rows = self._filter_child_rows(terminal, source, value)
         if _constrains_nothing(rows, source):
             return queryset
         row_sets = (
@@ -10466,12 +10309,7 @@ class FilterSet(
         arms: dict[str, _ProbedArm] = {}
         filterset_instance._probed_arms = arms
         filterset_instance._build_logic_arms_native(arms, constrained)
-        all_sets = (filterset_instance, *(probed.instance for probed in arms.values()))
-        native_errors = any(
-            instance._native_form_is_invalid(instance.form) for instance in all_sets
-        )
-        for instance in all_sets:
-            instance._suppress_new_bind_hooks = native_errors
+        filterset_instance._settle_sibling_bind_hooks(arms)
         _ = filterset_instance._finish_known_annotation_validation((), defer_bind=False)
         hops = (
             *filterset_instance._probe_absent_relation_leaves(),
@@ -10696,47 +10534,25 @@ class FilterSet(
             ready,
             root_absent,
         ) = await run_in_one_sync_boundary(constrained_stage)
-        while not ready:
-            await cls._await_hop_visibility_async(
-                needed,
-                info,
-                flat_hop_visibility,
-                parent_db=filterset_instance._annotation_owner_alias(),
-            )
-            needed, _initial_names, ready = await run_in_one_sync_boundary(
-                partial(
-                    filterset_instance._stage_known_annotation_validation,
-                    input_value,
-                    native_only=True,
-                ),
-            )
+        await filterset_instance._await_annotations_ready(
+            input_value,
+            needed,
+            ready=ready,
+            native_only=True,
+        )
         arms: dict[str, _ProbedArm] = {}
         filterset_instance._probed_arms = arms
         await filterset_instance._build_logic_arms_native_async(arms, constrained)
 
         def prepare_bind_phase() -> tuple[tuple[RelationHop, ...], bool]:
-            all_sets = (filterset_instance, *(probed.instance for probed in arms.values()))
-            native_errors = any(
-                instance._native_form_is_invalid(instance.form) for instance in all_sets
-            )
-            for instance in all_sets:
-                instance._suppress_new_bind_hooks = native_errors
+            filterset_instance._settle_sibling_bind_hooks(arms)
             needed, _names, ready = filterset_instance._stage_known_annotation_validation(
                 input_value,
             )
             return needed, ready
 
         needed, ready = await run_in_one_sync_boundary(prepare_bind_phase)
-        while not ready:
-            await cls._await_hop_visibility_async(
-                needed,
-                info,
-                flat_hop_visibility,
-                parent_db=filterset_instance._annotation_owner_alias(),
-            )
-            needed, _names, ready = await run_in_one_sync_boundary(
-                partial(filterset_instance._stage_known_annotation_validation, input_value),
-            )
+        await filterset_instance._await_annotations_ready(input_value, needed, ready=ready)
         root_absent = await run_in_one_sync_boundary(
             filterset_instance._probe_absent_relation_leaves,
         )
