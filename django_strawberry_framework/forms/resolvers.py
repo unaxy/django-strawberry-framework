@@ -105,9 +105,10 @@ and the form-specific invariants this module owns:
   reads its parts under that name's ``<key>_0`` .. keys. A bound ``data`` mapping holding
   bare field names and none of those keys is re-keyed: each value whole under
   ``form.add_prefix(name)``, its parts under the widget's keys (a ``MultiWidget`` splits a
-  value with its own ``decompress``, and one it cannot split, such as a hook's text for a
-  ``SplitDateTimeField``'s datetime, is a ``ConfigurationError`` before ``is_valid()``, while
-  an aware datetime whose wall clock in the current time zone leaves years 1..9999 is the
+  value with its own ``decompress``: one it answers no list or tuple for, or overflows on,
+  is a ``ConfigurationError`` before ``is_valid()``, any other exception it raises, such as
+  the ``AttributeError`` a hook's text for a ``SplitDateTimeField``'s datetime meets,
+  propagates, and an aware datetime whose wall clock in the current time zone leaves years 1..9999 is the
   field's ``invalid`` error there (``UNREPRESENTABLE_IN_ZONE_MESSAGE``), on an update
   omitting the field over such a stored value too; a
   ``SplitArrayWidget`` gets one element per index, padded to its ``size`` with ``None``); a
@@ -1117,8 +1118,9 @@ def _widget_parts(
     ``SplitArrayWidget``'s ``size``) answers Django's ``ArrayMaxLengthValidator``
     ``ValidationError`` instead, and so does an aware datetime a ``SplitDateTimeWidget``
     cannot split into the current time zone's wall clock (its ``invalid`` error); one a
-    ``MultiWidget``'s ``decompress`` cannot split (the text a hook binds for a datetime)
-    raises ``ConfigurationError``. A ``disabled`` field
+    ``MultiWidget``'s ``decompress`` answers no list or tuple for, or overflows on, raises
+    ``ConfigurationError``, and any other exception ``decompress`` raises (the text a hook
+    binds for a datetime) propagates. A ``disabled`` field
     reads no data (Django cleans its initial), so its value is bound whole under that one
     key, never split nor refused.
     """

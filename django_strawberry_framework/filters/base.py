@@ -127,6 +127,7 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.errors import (
+    FILTER_INVALID_ERROR_CODE,
     GLOBALID_INVALID_ERROR_CODE,
     GLOBALID_UNVALIDATABLE_ERROR_CODE,
     coded_error_extensions,
@@ -327,6 +328,24 @@ def _apply_lookup_predicate(
     field = _bound_field_name(filter_instance) if field_name is None else field_name
     lookup = f"{field}__{_bound_lookup_expr(filter_instance)}"
     return _apply_lookups(filter_instance, qs, {lookup: value})
+
+
+def _list_value(
+    value: object,
+    message: str,
+    code: str = FILTER_INVALID_ERROR_CODE,
+) -> list[object] | tuple[object, ...]:
+    """Return a list-shaped filter's ``value``, refusing one that is no list or tuple.
+
+    A ``FilterSet`` hands the value its form field cleans, which passes a value that is no
+    form text through as sent (``_MembershipCSVWidget``, a consumer ``widget=``), and a
+    caller can hand ``filter`` any value directly; a string is never iterated char-wise
+    (``in: "26"`` as ``IN ('2','6')``) and a scalar never leaks a ``TypeError``: either is
+    the caller's coded error.
+    """
+    if not is_list_or_tuple(value):
+        raise GraphQLError(message, extensions=coded_error_extensions(code))
+    return value
 
 
 def _match_none_queryset(filter_instance: Filter, qs: models.QuerySet[_M]) -> models.QuerySet[_M]:
@@ -1376,7 +1395,8 @@ class _MembershipCSVWidget(BaseCSVWidget):
     empty set; raw form data keeps django-filter's own rule (an empty ``?name=`` applies
     no constraint) by reading it as ``None``. Any other value (a list or tuple, the shape
     the GraphQL input layer sends) reaches the field as sent, so only a list or tuple
-    reaches the filter as an explicit ``[]``.
+    reaches the filter as an explicit ``[]``, and the list filters refuse one that is no
+    list or tuple with the coded ``FILTER_INVALID`` error (``_list_value``).
     """
 
     # basedpyright: the stub types the CSV widget's return as ``list[str]``; the base already
@@ -1443,15 +1463,18 @@ class _ElementField(Field):
     to no ``FilterSet``, a path neither its model nor that queryset resolves, an expression
     with no output field, a relation compared on more than one column or on none, a
     crossing pair on a filter holding a ``filter`` of its own, a ``method=`` filter on a
-    relation, a column django-filter builds no filter for), passes through as sent for the
-    filter to judge. Under a lookup that is Django's ``Range`` (``bounds``) a non-empty list
-    of other than two members is the field's error, django-filter's ``BaseRangeField`` rule,
-    message and code (``invalid_values``); an empty list keeps the filter's meaning.
+    relation, a column django-filter builds no filter for), passes through as sent:
+    ``ListFilter`` refuses a value that is no list or tuple with the coded ``FILTER_INVALID``
+    error (``_list_value``), ``ArrayFilter`` hands it to its lookup. Under a lookup that is
+    Django's ``Range`` (``bounds``) a non-empty list of other than two members is the
+    field's error, django-filter's ``BaseRangeField`` rule, message and code
+    (``invalid_values``); an empty list keeps the filter's meaning.
 
     Raw form data reads as the generated ``in`` reads it (``_MembershipCSVWidget``, rendered
     as a text input): ``?name=a,b`` is ``["a", "b"]``, an empty ``?name=`` applies no
     constraint, and a list or tuple passes through, so an explicit ``[]`` keeps its meaning.
-    A consumer ``widget=`` replaces it.
+    A consumer ``widget=`` replaces it; text it hands on unsplit (``?name=26``) is
+    ``ListFilter``'s coded refusal, never a char-wise ``IN ('2','6')``.
     """
 
     widget: type[Widget] | Widget = _MembershipCSVTextInput
@@ -2181,12 +2204,12 @@ class ListFilter(_ElementCleanedFilter):
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
         """Short-circuit empty-list inputs to `qs.none()` (every row when excluding).
 
-        ``value`` is the list the form field cleans; a non-empty one goes through
-        ``_ElementCleanedFilter._filter_elements``.
+        A value that is no list or tuple is refused (``_list_value``); a non-empty list
+        goes through ``_ElementCleanedFilter._filter_elements``.
         """
         if value is None:
             return super().filter(qs, value)
-        if not value:
+        if not _list_value(value, "Invalid filter value: expected a list."):
             return _match_none_queryset(self, qs)
         return self._filter_elements(qs, value)
 
@@ -2213,10 +2236,10 @@ class MembershipInFilter(BaseInFilter):
 
     @override
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
-        """Match nothing for an explicit ``[]``; otherwise django-filter's ``__in``."""
+        """Refuse a value that is no list or tuple; match nothing for ``[]``; else ``__in``."""
         if value is None:
             return qs
-        if not value:
+        if not _list_value(value, "Invalid filter value: expected a list."):
             return _match_none_queryset(self, qs)
         return super().filter(qs, value)
 
@@ -2227,7 +2250,7 @@ def membership_in_filter_class(in_filter_class: type[BaseInFilter]) -> type[Memb
     ``class ConcreteInFilter(MembershipInFilter, in_filter_class): pass`` over whatever
     ``BaseInFilter`` subclass ``BaseFilterSet.filter_for_lookup`` returned, keeping its
     name: a ``class`` statement, so the body carries exactly the interpreter's
-    structural dunders the sequence-profile validator
+    structural dunders the dynamic-CSV validator
     (``filters/sets.py::_dynamic_csv_profile_for``) unwraps, and a NEW class per call,
     as upstream builds, so a class one filter set's instantiation has deep-copied (which
     stamps ``copyreg``'s ``__slotnames__`` on it) is never another filter set's.
@@ -2280,11 +2303,11 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
         """Coerce members, matching nothing when the input is empty or fully drops.
 
-        ``value`` is the list the form field cleans.
+        A value that is no list or tuple is refused (``_list_value``).
         """
         if value is None:
             return super().filter(qs, value)
-        value = list(require(value, is_list_or_tuple))
+        value = list(_list_value(value, "Invalid filter value: expected a list of integers."))
         if _reads_integer_transform(self, qs.query):
             # A transform's output names no stored column: each member binds as the
             # lookup prepares it, so one past the integer range the database stores for
@@ -3238,7 +3261,8 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
         queryset; an explicit ``[]`` is the match-none membership predicate
         (``ListFilter`` empty-set semantics for every list-shaped lookup, not
         upstream ``MultipleChoiceFilter``'s ``if not value: return qs`` skip).
-        Both run BEFORE decode. Every remaining element is decoded
+        A value that is no list or tuple is refused under the ``GLOBALID_INVALID`` code a
+        malformed member gets. All three run BEFORE decode. Every remaining element is decoded
         and validated by ``_decode_and_validate_global_id``, which rejects a
         malformed payload, a wrong ``type_name``, AND a well-typed empty-id
         GlobalID (an empty decoded id is ``GLOBALID_INVALID`` with its list
@@ -3260,7 +3284,12 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
         """
         if value is None:
             return super().filter(qs, None)
-        if not value:
+        members = _list_value(
+            value,
+            "Invalid GlobalID list: expected a list of GlobalIDs.",
+            GLOBALID_INVALID_ERROR_CODE,
+        )
+        if not members:
             return _match_none_queryset(self, qs)
         target = _globalid_target(self, aliases=_query_aliases(qs))
         node_ids = [
@@ -3272,7 +3301,7 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
                 alias=qs.db,
                 query=qs.query,
             )
-            for idx, item in enumerate(require(value, is_list_or_tuple))
+            for idx, item in enumerate(members)
         ]
         path = _globalid_predicate_path(self, target)
         lookup_expr = _bound_lookup_expr(self)
@@ -3686,12 +3715,10 @@ class RelationPkMultipleFilter(Filter):
         """
         if value is None:
             return qs
+        members = _list_value(value, "Invalid filter value: expected a list of primary keys.")
         kept = [
             coerced
-            for coerced in (
-                _coerce_relation_identity(self, member, qs.db)
-                for member in require(value, is_list_or_tuple)
-            )
+            for coerced in (_coerce_relation_identity(self, member, qs.db) for member in members)
             if coerced is not None
         ]
         if not kept:

@@ -24,10 +24,6 @@ subclasses, unprintable large ints, pickle / repr of ``ListArgumentError``,
 synthesis, wire-name fallback without an executable schema, and malformed
 published metadata. The consumer argument matrix is the live sync suite.
 
-Capture-scope internals: the ``ContextVar`` ledger the offset guard consumes,
-including reset after a post-``OrderSet`` seal rejection. Consumer-context
-isolation over HTTP is the live sibling.
-
 Adapter / cleanup protocol: ``_AsyncQuerySetRows`` wrap/unwrap, declined sync
 generator suspension, iterator ``aclose`` notes, Future cancellation (the JSON
 error cannot show ``Future.cancelled()``). Live async HTTP covers exotic
@@ -115,7 +111,6 @@ from django_strawberry_framework.list_field import (
     _is_readable_order_node,
     _ListArguments,
     _normalize_list_arguments,
-    _order_normalization_scope,
     _resolve_argument_wire_name,
     _synthesized_list_signature,
     _validate_djangotype_target,
@@ -125,7 +120,6 @@ from django_strawberry_framework.orders import (
     _helper_referenced_ordersets,
     order_input_type,
 )
-from django_strawberry_framework.orders.sets import _ORDER_NORMALIZATION_CAPTURE
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.resource_policy import (
     ResourcePolicy,
@@ -808,82 +802,6 @@ def test_list_field_signature_with_orderset() -> None:
     assert ItemOrder in _helper_referenced_ordersets
     assert read_attr(sig, "return_annotation") is inspect.Signature.empty
     assert "return" not in ann
-
-
-@pytest.mark.parametrize(
-    "shape",
-    [
-        "limit_alone",
-        "zero_offset_with_order",
-        "positive_offset_on_model_ordering",
-        "order_alone",
-        "positive_offset_and_order_without_orderset",
-    ],
-)
-def test_the_capture_scope_stays_closed_for_shapes_the_offset_guard_cannot_use(shape: str) -> None:
-    """The normalization handoff is paid for by the one request shape that consumes it.
-
-    ``OrderSet._input_has_active_terms`` has exactly one caller - the non-zero
-    offset guard's active-order check - and it runs only when a positive
-    ``offset`` arrives WITH an ``orderBy`` on a field that captured an
-    ``OrderSet`` to normalize through. Every other argument-bearing shape has
-    nothing to hand over, so it must not allocate a ledger, set a
-    ``ContextVar``, or take the deferred ``orders`` import.
-
-    The no-``OrderSet`` row is the one the predicate can only decide because the
-    field's captured sidecar is passed in: over the wire that target publishes
-    no ``orderBy`` at all, but a direct call can supply one, and it must reach
-    ``require_orderset_class``'s rejection without a scope having been opened
-    for a handoff that can never happen.
-    """
-
-    class SomeOrder(OrderSet):
-        pass
-
-    def _record(
-        *,
-        offset: int | None = None,
-        limit: int | None = None,
-        order_by_supplied: bool = False,
-    ) -> _ListArguments:
-        return _ListArguments(
-            offset=offset,
-            limit=limit,
-            order_by=None,
-            order_by_supplied=order_by_supplied,
-            any_argument_supplied=True,
-        )
-
-    args_record, orderset_class = {
-        "limit_alone": (_record(limit=5), SomeOrder),
-        "zero_offset_with_order": (_record(offset=0, order_by_supplied=True), SomeOrder),
-        "positive_offset_on_model_ordering": (_record(offset=3), SomeOrder),
-        "order_alone": (_record(order_by_supplied=True), SomeOrder),
-        "positive_offset_and_order_without_orderset": (
-            _record(offset=3, order_by_supplied=True),
-            None,
-        ),
-    }[shape]
-    with _order_normalization_scope(args_record, orderset_class):
-        assert _ORDER_NORMALIZATION_CAPTURE.get() is None
-
-
-def test_the_capture_scope_opens_for_a_positive_offset_with_an_orderset() -> None:
-    """The one shape the offset guard consumes does open a capture scope, then resets."""
-
-    class SomeOrder(OrderSet):
-        pass
-
-    args_record = _ListArguments(
-        offset=3,
-        limit=None,
-        order_by=None,
-        order_by_supplied=True,
-        any_argument_supplied=True,
-    )
-    with _order_normalization_scope(args_record, SomeOrder):
-        assert _ORDER_NORMALIZATION_CAPTURE.get() is not None
-    assert _ORDER_NORMALIZATION_CAPTURE.get() is None
 
 
 @pytest.mark.django_db
@@ -2098,62 +2016,6 @@ def test_require_orderset_class_rejects_a_target_without_one() -> None:
         match=r"Field target Orderless has no orderset_class configured\.",
     ):
         require_orderset_class(Orderless, None)
-
-
-@pytest.mark.django_db
-def test_djangolistfield_resets_the_capture_scope_when_the_seal_rejects() -> None:
-    """A rejected ordering result still closes the capture scope it was opened in.
-
-    The post-``OrderSet`` seal runs after ``apply_sync`` has published its
-    normalization into the scope, so the rejection path is the one exit that
-    leaves a record with the guard never reached. The scope's token is reset in
-    ``finally``, so the failing request cannot poison the next resolution on the
-    same task, and the consumer context is never written.
-    """
-    services.seed_data(1)
-
-    class EvaluatedReturningOrder(OrderSet):
-        class Meta:
-            model = Category
-            fields = ["name"]
-
-        @classmethod
-        @override
-        def apply_sync(
-            cls,
-            input_value: object,
-            queryset: QuerySet[_M],
-            info: object,
-        ) -> QuerySet[Category]:
-            # Publishes the normalization record, then returns a candidate the
-            # seal rejects.
-            super().apply_sync(input_value, queryset, info)
-            evaluated = Category.objects.all()
-            evaluated._result_cache = []
-            return evaluated
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            orderset_class = EvaluatedReturningOrder
-
-    @strawberry.type
-    class Query:
-        cats: list[CategoryType] = DjangoListField(CategoryType)
-
-    finalize_django_types()
-    schema = strawberry.Schema(query=Query)
-
-    context: dict[str, object] = {"request": RequestFactory().get("/")}
-    result = schema.execute_sync(
-        "{ cats(orderBy: [{name: ASC}]) { id name } }",
-        context_value=context,
-    )
-    assert result.errors is not None
-    assert "got evaluated defect" in str(result.errors[0])
-    assert set(context) == {"request"}
-    assert _ORDER_NORMALIZATION_CAPTURE.get() is None
 
 
 async def test_list_field_rejected_async_iterator_is_closed_when_building_the_rejection_fails() -> (

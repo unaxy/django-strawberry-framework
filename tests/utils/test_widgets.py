@@ -4,8 +4,8 @@
 entries binding a value under them; the form flavors bind through them
 (``tests/forms/test_resolvers.py`` drives that end to end, on PostgreSQL for the real
 ``SplitArrayField``). These rows pin the recursion, the ``decompress`` split (an answer
-that is no list or tuple is a ``ConfigurationError``, its ``ValidationError`` kept, its ``OverflowError``
-over an aware datetime the value's ``invalid`` ``ValidationError``), the padding and the
+that is no list or tuple is a ``ConfigurationError``, any other exception it raises kept, its
+``OverflowError`` over an aware datetime the value's ``invalid`` ``ValidationError``), the padding and the
 ``size`` refusal on their own, PostgreSQL's ``SplitArrayWidget`` through its
 driver-free double (``tests/_postgres_fields.py::FakeSplitArrayWidget``) and, on the
 Postgres tier, as itself. ``multi_widget_keys`` is pinned by the filter rows that read it
@@ -188,6 +188,16 @@ def test_a_validation_error_from_decompress_propagates_as_the_value_s_refusal() 
         widget_entries(_RefusingSplitWidget(), "f", "whole")
 
     assert caught.value.code == "refused"
+
+
+def test_any_other_exception_from_decompress_propagates_unchanged() -> None:
+    """A ``decompress`` failure that is no ``OverflowError`` is never a ``ConfigurationError``.
+
+    ``SplitDateTimeWidget.decompress`` reads a datetime; text bound in its place fails
+    inside Django's ``to_current_timezone`` with that call's own ``AttributeError``.
+    """
+    with pytest.raises(AttributeError, match="'str' object has no attribute 'utcoffset'"):
+        widget_entries(forms.SplitDateTimeWidget(), "f", "2026-01-02 03:04")
 
 
 @pytest.mark.parametrize(

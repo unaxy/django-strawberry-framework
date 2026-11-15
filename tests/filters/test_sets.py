@@ -160,7 +160,6 @@ from django_strawberry_framework.filters.inputs import (
     filter_lookup_table,
 )
 from django_strawberry_framework.filters.sets import (
-    _ALL_FAMILY_PROFILES,
     _AUDITED_DJANGO_FILTER_RANGE,
     _EMPTY_BODY_DYNAMIC_CSV_ATTRS,
     _FILTER_FAMILY_REGISTRY,
@@ -168,7 +167,6 @@ from django_strawberry_framework.filters.sets import (
     _MODEL_CHOICE_ONLY_EXTRAS,
     _PACKAGE_POLICY_BASELINE,
     _PUBLIC_PACKAGE_FILTER_DEFAULTS,
-    _SEQUENCE_LOOKUP_PROFILE,
     CandidateFilterMetadata,
     ChildProjection,
     ExpansionSnapshot,
@@ -12340,7 +12338,7 @@ def test_a_custom_generated_child_keeps_its_class_provenance_and_no_candidate() 
     leaf = ParentBookFilter.get_filters()["loans__note__icontains"]
     assert isinstance(leaf, CustomChildGenerated)
     assert _provenance(leaf).origin == "framework_default"
-    assert _family_profile_for(leaf) is None  # unaudited subclass -> no family
+    assert not _family_profile_for(leaf)  # unaudited subclass -> no family
     assert "loans__note__icontains" not in _snapshot(ParentBookFilter).candidates
 
 
@@ -12367,7 +12365,7 @@ def test_a_stock_generated_child_copy_is_owned_by_the_declared_branch() -> None:
     assert ParentBookFilter._is_generation_capable() is True
     assert ChildLoanFilter._is_generation_capable() is True
     leaf = ParentBookFilter.get_filters()["loans__note__icontains"]
-    assert _family_profile_for(leaf) is not None
+    assert _family_profile_for(leaf)
     assert "loans__note__icontains" not in _snapshot(ParentBookFilter).candidates
 
 
@@ -12500,7 +12498,7 @@ def test_method_owned_leaf_is_ineligible_on_framework_many_side_path() -> None:
         leaf,
         FilterGenerationProvenance(origin="framework_default"),
     )
-    assert _family_profile_for(leaf) is not None  # CharFilter IS a registered family
+    assert _family_profile_for(leaf)  # CharFilter IS a registered family
     row = _candidate_metadata_for(library_models.Book, leaf)
     assert isinstance(row, CandidateFilterMetadata)
     assert row.path_plan.first_many_index is not None  # genuinely many-side
@@ -13467,10 +13465,10 @@ def test_genuine_dynamic_concrete_in_and_range_resolve_to_sequence_profile(looku
         inner = concrete.__bases__[1]
         assert inner.__bases__ == (BaseInFilter, CharFilter)
         assert issubclass(inner, Filter)
-        assert _family_profile_for(object.__new__(inner)) is _SEQUENCE_LOOKUP_PROFILE
+        assert _family_profile_for(object.__new__(inner)) is True
     else:
         assert concrete.__bases__[0] is BaseRangeFilter
-    assert _family_profile_for(object.__new__(concrete)) is _SEQUENCE_LOOKUP_PROFILE
+    assert _family_profile_for(object.__new__(concrete)) is True
 
 
 @pytest.mark.parametrize("shape", ["unaudited-inner", "audited-inner", "wrapper-body"])
@@ -13494,8 +13492,7 @@ def test_membership_wrapper_only_unwraps_an_audited_empty_body(shape: str) -> No
         "audited-inner": membership_in_filter_class(GenuineIn),
         "wrapper-body": WrapperWithBody,
     }[shape]
-    expected = _SEQUENCE_LOOKUP_PROFILE if shape == "audited-inner" else None
-    assert _family_profile_for(object.__new__(wrapped)) is expected
+    assert _family_profile_for(object.__new__(wrapped)) is (shape == "audited-inner")
 
 
 def test_in_lookup_inherited_as_a_non_base_in_filter_fails_at_build() -> None:
@@ -13530,47 +13527,19 @@ def test_in_lookup_inherited_as_a_non_base_in_filter_fails_at_build() -> None:
         _ScalarInFilterSet.filter_for_lookup(django_models.CharField(name="code"), "in")
 
 
-@pytest.mark.parametrize(
-    ("specific", "base"),
-    [
-        (GlobalIDMultipleChoiceFilter, MultipleChoiceFilter),
-        (ModelMultipleChoiceFilter, MultipleChoiceFilter),
-        (ModelChoiceFilter, ChoiceFilter),
-    ],
-)
-def test_exact_match_keeps_registered_subclass_and_base_distinct(
-    specific: type[Filter],
-    base: type[Filter],
-) -> None:
-    """A registered subclass and its registered base resolve to their OWN profiles.
-
-    No "MRO most-specific" lookup applies: each is an exact registry key, so
-    ``_family_profile_for`` returns each one's own (distinct) profile by exact type.
-    """
-    assert issubclass(specific, base)
-    specific_profile = _family_profile_for(object.__new__(specific))
-    base_profile = _family_profile_for(object.__new__(base))
-    assert specific_profile is _FILTER_FAMILY_REGISTRY[specific]
-    assert base_profile is _FILTER_FAMILY_REGISTRY[base]
-    assert specific_profile is not base_profile
-
-
 def test_integer_in_resolves_by_exact_type_and_bare_base_in_is_unregistered() -> None:
-    """``IntegerInFilter`` resolves by exact key; the bare ``BaseInFilter`` base is None.
+    """``IntegerInFilter`` is an exact member; the bare ``BaseInFilter`` base is not.
 
-    ``BaseInFilter`` / ``BaseRangeFilter`` are not registry keys (the structural validator
-    does their MRO-walk job), so a bare ``BaseInFilter`` instance resolves to no
-    profile -- only the STATIC package ``IntegerInFilter`` (an exact key) still routes.
+    ``BaseInFilter`` / ``BaseRangeFilter`` are not registry members (the structural
+    validator does their MRO-walk job), so a bare ``BaseInFilter`` instance is no audited
+    family -- only the STATIC package ``IntegerInFilter`` (an exact member) still routes.
     """
     assert IntegerInFilter in _FILTER_FAMILY_REGISTRY
     assert BaseInFilter not in _FILTER_FAMILY_REGISTRY
     assert BaseRangeFilter not in _FILTER_FAMILY_REGISTRY
-    assert (
-        _family_profile_for(object.__new__(IntegerInFilter))
-        is _FILTER_FAMILY_REGISTRY[IntegerInFilter]
-    )
-    assert _family_profile_for(object.__new__(BaseInFilter)) is None
-    assert _family_profile_for(object.__new__(BaseRangeFilter)) is None
+    assert _family_profile_for(object.__new__(IntegerInFilter))
+    assert not _family_profile_for(object.__new__(BaseInFilter))
+    assert not _family_profile_for(object.__new__(BaseRangeFilter))
 
 
 @pytest.mark.parametrize(
@@ -13579,7 +13548,7 @@ def test_integer_in_resolves_by_exact_type_and_bare_base_in_is_unregistered() ->
     ids=["CharFilter", "ModelMultipleChoiceFilter", "BaseInFilter"],
 )
 def test_unregistered_subclass_of_registered_category_fails_closed(base_cls: type[Filter]) -> None:
-    """An unaudited subclass of EACH broad registered category resolves to NO profile.
+    """An unaudited subclass of EACH broad registered category is no audited family.
 
     The dangerous case: a subclass of a registered base (with an overridden
     ``.filter`` and added state) is NOT accepted through its ancestor. Exact match misses
@@ -13595,7 +13564,7 @@ def test_unregistered_subclass_of_registered_category_fails_closed(base_cls: typ
         def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
             return qs
 
-    assert _family_profile_for(object.__new__(_UnauditedSubclass)) is None
+    assert not _family_profile_for(object.__new__(_UnauditedSubclass))
 
 
 @pytest.mark.parametrize(
@@ -13680,7 +13649,7 @@ def test_dynamic_csv_subclass_with_added_behavior_fails_closed(shape: str) -> No
         "unaudited-scalar": _EvilInUnauditedScalar,
         "non-csv-first-base": _TwoBaseFirstNotCsv,
     }
-    assert _family_profile_for(object.__new__(variants[shape])) is None
+    assert not _family_profile_for(object.__new__(variants[shape]))
 
 
 @pytest.mark.parametrize("lookup", ["in", "range"], ids=["in", "range"])
@@ -13706,17 +13675,15 @@ def test_empty_body_dynamic_csv_reference_matches_genuine_class_own_names(lookup
 )
 def test_registry_is_a_closed_exact_allowlist(family_cls: type[Filter]) -> None:
     """An audited family's identity is accepted, while an arbitrary subclass is refused."""
-    profile = _FILTER_FAMILY_REGISTRY[family_cls]
-    assert profile in _ALL_FAMILY_PROFILES
-    assert _family_profile_for(object.__new__(family_cls)) is profile
+    assert _family_profile_for(object.__new__(family_cls))
     generated_subclass = type(f"Sub_{family_cls.__name__}", (family_cls,), {})
-    assert _family_profile_for(object.__new__(generated_subclass)) is None
+    assert not _family_profile_for(object.__new__(generated_subclass))
 
 
 def test_bare_filter_base_is_not_a_registered_family() -> None:
-    """The universal ``Filter`` base resolves to NO profile (not a catch-all key)."""
+    """The universal ``Filter`` base is no audited family (not a catch-all member)."""
     assert Filter not in _FILTER_FAMILY_REGISTRY
-    assert _family_profile_for(object.__new__(Filter)) is None
+    assert not _family_profile_for(object.__new__(Filter))
 
 
 def test_unknown_family_leaf_is_ineligible_on_framework_many_side_path() -> None:
@@ -13734,7 +13701,7 @@ def test_unknown_family_leaf_is_ineligible_on_framework_many_side_path() -> None
         leaf,
         FilterGenerationProvenance(origin="framework_default"),
     )
-    assert _family_profile_for(leaf) is None
+    assert not _family_profile_for(leaf)
     row = _candidate_metadata_for(library_models.Book, leaf)
     assert isinstance(row, CandidateFilterMetadata)
     assert row.path_plan.first_many_index is not None  # genuinely many-side
@@ -14157,7 +14124,7 @@ def test_projected_leaf_gets_no_candidate_row() -> None:
 
     leaf = BookParent.get_filters()["loans__note__icontains"]
     assert isinstance(leaf, ProjectedChildFilter)
-    assert _family_profile_for(leaf) is None
+    assert not _family_profile_for(leaf)
     assert _provenance(leaf).origin == "framework_default"
     snapshot = BookParent._expansion_snapshot()
     assert snapshot is not None
@@ -18273,11 +18240,11 @@ def test_enum_choice_filter_resolves_to_the_choice_family_profile() -> None:
     """The generated choice ``exact`` class shares ``ChoiceFilter``'s audited family.
 
     ``EnumChoiceFilter`` only adds the enum-member-is-a-value predicate, so it is an exact
-    registry key under the choice profile; without the key a generated to-many choice leaf
+    registry member; without it a generated to-many choice leaf
     would resolve to no family and lose its row-preserving routing.
     """
     instance = object.__new__(EnumChoiceFilter)
-    assert _family_profile_for(instance) is _FILTER_FAMILY_REGISTRY[ChoiceFilter]
+    assert _family_profile_for(instance)
 
 
 def test_generated_choice_exact_over_to_many_path_is_an_eligible_enum_choice_leaf() -> None:
@@ -18337,10 +18304,10 @@ def test_every_text_choice_lookup_resolves_to_an_enum_member_filter(lookup: str)
     leaf = _ShelfConditionLookupFilter.get_filters()[_condition_filter_name(lookup)]
     if lookup == "exact":
         assert type(leaf) is EnumChoiceFilter
-        assert _family_profile_for(leaf) is _FILTER_FAMILY_REGISTRY[ChoiceFilter]
+        assert _family_profile_for(leaf)
     else:
         assert type(leaf) is EnumLookupFilter
-        assert _family_profile_for(leaf) is _FILTER_FAMILY_REGISTRY[CharFilter]
+        assert _family_profile_for(leaf)
 
 
 @pytest.mark.parametrize("clone", [copy.deepcopy, pickle_roundtrip])

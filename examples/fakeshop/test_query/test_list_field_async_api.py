@@ -83,7 +83,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
-from django_strawberry_framework.orders import Ordering, OrderSet
+from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.resource_policy import (
     DST_RESOURCE_DEADLINE,
@@ -3555,9 +3555,8 @@ async def test_async_ordering_leaves_the_consumer_context_exactly_as_found(
 ) -> None:
     """An async ordered surface adds nothing to ``info.context`` its control does not.
 
-    The list and the connection reach the order-normalization handoff by
-    different paths, so each owns a node: a leak on one must not be masked by the
-    other's arm failing first.
+    The list and the connection order by different paths, so each owns a node: a
+    leak on one must not be masked by the other's arm failing first.
     """
     for name in ("Alpha", "Bravo"):
         await sync_to_async(library_models.Branch.objects.create)(name=name, city="Boston")
@@ -3743,7 +3742,7 @@ async def test_async_a_database_reading_sidecar_gate_answers_its_own_verdict(sha
 
 
 # ---------------------------------------------------------------------------
-# Child-delegated ordering: the applied normalization reaches the offset guard
+# Child-delegated ordering: an override applying in a child task serves its page
 # ---------------------------------------------------------------------------
 
 
@@ -3775,9 +3774,8 @@ async def test_async_child_delegated_ordering_still_orders_and_pages(
 ) -> None:
     """An ``apply_async`` override that applies in a child task serves a correct page.
 
-    The rejection row below only proves the guard SEES the child's work; this row
-    proves the override stays usable - the ordering the client asked for is the
-    ordering the page is cut from, with a positive offset riding it.
+    The ordering the client asked for is the ordering the page is cut from, with a
+    positive offset riding it.
     """
     for name, city in (("Alpha", "Denver"), ("Bravo", "Boston"), ("Charlie", "Austin")):
         await sync_to_async(library_models.Branch.objects.create)(name=name, city=city)
@@ -3792,45 +3790,6 @@ async def test_async_child_delegated_ordering_still_orders_and_pages(
     assert "errors" not in payload, payload
     # city ASC is Austin / Boston / Denver, so offset 1 limit 1 is Bravo.
     assert json_at(payload, "data", "allLibraryBranches") == [{"name": "Bravo", "city": "Boston"}]
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_async_child_delegated_impure_ordering_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A/B/B across a child-task delegation raises the typed purity rejection.
-
-    The ordering the client receives is built inside the child task from the
-    FIRST normalization. A handoff that could not carry that attestation back
-    would leave the offset guard comparing the second and third normalizations
-    to each other, agreeing, and blessing a page cut from terms it never saw.
-    """
-    for name, city in (("Alpha", "Denver"), ("Bravo", "Boston")):
-        await sync_to_async(library_models.Branch.objects.create)(name=name, city=city)
-
-    sequence = [[("city", Ordering.ASC)], [("name", Ordering.DESC)], [("name", Ordering.DESC)]]
-    calls = {"n": 0}
-
-    def _impure_normalize(
-        _cls: type[BranchOrder],
-        _order_input: object,
-    ) -> list[tuple[str, Ordering]]:
-        result = sequence[min(calls["n"], len(sequence) - 1)]
-        calls["n"] += 1
-        return result
-
-    monkeypatch.setattr(BranchOrder, "_normalize_input", classmethod(_impure_normalize))
-    monkeypatch.setattr(BranchOrder, "apply_async", classmethod(_child_delegating_apply_async))
-    schema = _build_child_delegating_schema()
-
-    payload = await _post_async(
-        schema,
-        "{ allLibraryBranches(orderBy: [{ city: ASC }], offset: 1) { name } }",
-        extra_settings=_ERROR_POLICY_PASS_THROUGH,
-    )
-    assert payload["data"] is None
-    assert "BranchOrder._normalize_input is not pure" in json_str(payload, "errors", 0, "message")
-    assert calls["n"] == 2
 
 
 # ---------------------------------------------------------------------------

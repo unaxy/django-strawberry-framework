@@ -955,7 +955,7 @@ _FRAMEWORK_GENERATED_ORIGINS: frozenset[FilterOrigin] = frozenset(
 
 
 # ======================================================================
-# Executable behavior-profile registry -- the SINGLE source of truth for the
+# Executable audited-family registry -- the SINGLE source of truth for the
 # supported generated django-filter families.
 #
 # A framework-generated many-side leaf is routable through the correlated
@@ -967,20 +967,20 @@ _FRAMEWORK_GENERATED_ORIGINS: frozenset[FilterOrigin] = frozenset(
 # dataclass / applicator -- makes the eligibility boundary EXECUTABLE and
 # fail-CLOSED: a novel family introduced by a future ``django-filter`` release, or
 # by any path that places an unaudited filter class behind a framework origin,
-# resolves to NO profile, is marked ineligible by ``_candidate_metadata_for``, is
+# is no member, is marked ineligible by ``_candidate_metadata_for``, is
 # therefore never routable, and falls back to django-filter's original outer
 # invocation until it is audited and added here.
 #
-# Family recognition is EXACT-CLASS: a profile is minted from a known generation decision, never
+# Family recognition is EXACT-CLASS: membership comes from a known generation decision, never
 # rediscovered from arbitrary ancestry. An unregistered subclass of an audited
 # base is a CONSUMER-owned class whose behavior this package has not reviewed, so
-# it receives NO profile -- it stays fully supported and simply runs on the outer
+# it is no member -- it stays fully supported and simply runs on the outer
 # queryset. The only two recognized shapes are (a) exact audited / package-owned
 # classes (registry keys) and (b) django-filter's genuine empty-body dynamic
 # ``in`` / ``range`` CSV classes over an exact-audited scalar family, validated
 # structurally in ``_family_profile_for``.
 #
-# A profile is a bare family IDENTITY. There is deliberately no per-family runtime
+# Membership is the whole answer. There is deliberately no per-family runtime
 # read table and no request-time re-verification of a leaf's behavior: routing is
 # decided ONCE at build time (see ``CandidateFilterMetadata``), and process-wide
 # mutation of django-filter's own classes is out of contract (see
@@ -1028,75 +1028,23 @@ def _projected_terminal(filter_instance: Filter) -> Filter:
     return filter_instance
 
 
-@dataclass(frozen=True)
-class _FilterFamilyProfile:
-    """Immutable IDENTITY of ONE supported generated filter family.
-
-    A bare, hashable family tag -- nothing more. The exact-class registry
-    (``_FILTER_FAMILY_REGISTRY``) maps each supported class to its profile and
-    ``_family_profile_for`` returns it; ``None`` from that lookup is the fail-closed
-    signal ``_candidate_metadata_for`` consumes to mark a leaf ineligible.
-
-    It carries NO per-family read inventory and no executable behavior description. The
-    profile answers exactly one question -- "is this leaf's class one of the audited
-    generated families?" -- which is the eligibility half of the build-time routing
-    verdict (``CandidateFilterMetadata``). A module-level singleton per family, so
-    identity comparison is meaningful in tests and the set of families is closed.
-    """
-
-    name: str
-
-
-# Behavior-family identities. Families with identical effective behavior MAY share one
-# profile object (e.g. scalar and dynamic-CSV sequence lookups): the profile answers only
-# "is this an audited generated family?", and both members are audited, so sharing never
-# widens what is routable.
-_SCALAR_LOOKUP_PROFILE = _FilterFamilyProfile("scalar_lookup")
-_SEQUENCE_LOOKUP_PROFILE = _FilterFamilyProfile("sequence_lookup")
-_CHOICE_PROFILE = _FilterFamilyProfile("choice")
-_MODEL_CHOICE_PROFILE = _FilterFamilyProfile("model_choice")
-_MULTIPLE_CHOICE_PROFILE = _FilterFamilyProfile("multiple_choice")
-_MODEL_MULTIPLE_CHOICE_PROFILE = _FilterFamilyProfile("model_multiple_choice")
-_GLOBALID_PROFILE = _FilterFamilyProfile("globalid")
-_GLOBALID_MULTIPLE_PROFILE = _FilterFamilyProfile("globalid_multiple")
-_RELATION_PK_PROFILE = _FilterFamilyProfile("relation_pk")
-_RELATION_PK_MULTIPLE_PROFILE = _FilterFamilyProfile("relation_pk_multiple")
-
-# Every distinct family identity, in a stable order -- the CLOSED set a registered class or
-# a structurally-recognized dynamic CSV class may resolve to. The structurally-recognized
-# dynamic ``in`` / ``range`` CSV classes resolve to ``_SEQUENCE_LOOKUP_PROFILE``, already in
-# this tuple.
-_ALL_FAMILY_PROFILES: tuple[_FilterFamilyProfile, ...] = (
-    _SCALAR_LOOKUP_PROFILE,
-    _SEQUENCE_LOOKUP_PROFILE,
-    _CHOICE_PROFILE,
-    _MODEL_CHOICE_PROFILE,
-    _MULTIPLE_CHOICE_PROFILE,
-    _MODEL_MULTIPLE_CHOICE_PROFILE,
-    _GLOBALID_PROFILE,
-    _GLOBALID_MULTIPLE_PROFILE,
-    _RELATION_PK_PROFILE,
-    _RELATION_PK_MULTIPLE_PROFILE,
-)
-
-
-# Exact-class supported-family -> profile registry. Resolution is by EXACT type
-# (``_family_profile_for`` never walks the MRO), so mapping ORDER is cosmetic. ``Filter``
+# Exact-class supported-family registry. Membership is by EXACT type
+# (``_family_profile_for`` never walks the MRO), so member ORDER is cosmetic. ``Filter``
 # itself is DELIBERATELY absent (an exact bare ``Filter`` is not a supported family), and
 # so are ``BaseInFilter`` / ``BaseRangeFilter``: django-filter's dynamic ``in`` / ``range``
 # CSV classes are recognised structurally by ``_dynamic_csv_profile_for`` (reached
 # through ``_family_profile_for``), which references those two bases directly. An
 # arbitrary subclass of any key below is NOT audited (it may
-# override ``.filter`` or add state this package never reviewed) and therefore resolves
-# to NO profile.
-_FILTER_FAMILY_REGISTRY: truth.IdentityMap[type[object], _FilterFamilyProfile] = truth.IdentityMap(
-    {
+# override ``.filter`` or add state this package never reviewed) and therefore is no
+# member.
+_FILTER_FAMILY_REGISTRY: truth.IdentitySet[type[object]] = truth.IdentitySet(
+    (
         # Package Relay-GlobalID relation families.
-        GlobalIDMultipleChoiceFilter: _GLOBALID_MULTIPLE_PROFILE,
-        GlobalIDFilter: _GLOBALID_PROFILE,
+        GlobalIDMultipleChoiceFilter,
+        GlobalIDFilter,
         # Package raw-primary-key relation families (the non-Relay target siblings).
-        RelationPkMultipleFilter: _RELATION_PK_MULTIPLE_PROFILE,
-        RelationPkFilter: _RELATION_PK_PROFILE,
+        RelationPkMultipleFilter,
+        RelationPkFilter,
         # Package typed sequence / integer families. Their effective ``.filter``
         # (including a consumer ``method=`` install that swaps in a custom
         # ``FilterMethod``) is signed by the core descriptor pair; a set ``method``
@@ -1104,37 +1052,37 @@ _FILTER_FAMILY_REGISTRY: truth.IdentityMap[type[object], _FilterFamilyProfile] =
         # (they carry their own ``.filter`` etc.), so they are matched by exact key
         # here -- they would FAIL the empty-body dynamic-CSV check and MUST be caught
         # before it.
-        IntegerInFilter: _SEQUENCE_LOOKUP_PROFILE,
-        IntegerRangeFilter: _SEQUENCE_LOOKUP_PROFILE,
-        ListFilter: _SEQUENCE_LOOKUP_PROFILE,
-        ArrayFilter: _SEQUENCE_LOOKUP_PROFILE,
-        RangeFilter: _SEQUENCE_LOOKUP_PROFILE,
-        # Model-choice families and their choice bases, each an exact key with its own
-        # profile (a ``ModelChoiceFilter`` reads a ``to_field`` a bare ``ChoiceFilter``
-        # does not, so they are distinct entries -- exact match keeps them separate).
-        ModelMultipleChoiceFilter: _MODEL_MULTIPLE_CHOICE_PROFILE,
-        ModelChoiceFilter: _MODEL_CHOICE_PROFILE,
-        MultipleChoiceFilter: _MULTIPLE_CHOICE_PROFILE,
-        ChoiceFilter: _CHOICE_PROFILE,
+        IntegerInFilter,
+        IntegerRangeFilter,
+        ListFilter,
+        ArrayFilter,
+        RangeFilter,
+        # Model-choice families and their choice bases, each an exact member (a
+        # ``ModelChoiceFilter`` reads a ``to_field`` a bare ``ChoiceFilter`` does not, so
+        # they are distinct entries -- exact match keeps them separate).
+        ModelMultipleChoiceFilter,
+        ModelChoiceFilter,
+        MultipleChoiceFilter,
+        ChoiceFilter,
         # The package's generated choice-column classes: ``ChoiceFilter`` / ``CharFilter``
-        # plus the enum-member-is-a-value predicate, so each shares its base's family.
-        EnumChoiceFilter: _CHOICE_PROFILE,
-        EnumLookupFilter: _SCALAR_LOOKUP_PROFILE,
+        # plus the enum-member-is-a-value predicate, each audited as its base is.
+        EnumChoiceFilter,
+        EnumLookupFilter,
         # The text-pattern leaf on a non-text column: ``CharFilter`` under its own name.
-        TextPatternFilter: _SCALAR_LOOKUP_PROFILE,
+        TextPatternFilter,
         # Plain-lookup scalar Filter families, each enumerated by class (they share
         # only ``Filter`` as a base, which must never be a key). A scalar key here is
         # also the audited scalar base the dynamic-CSV validator accepts as the SECOND
         # base of a genuine ``ConcreteInFilter`` / ``ConcreteRangeFilter``.
-        CharFilter: _SCALAR_LOOKUP_PROFILE,
-        NumberFilter: _SCALAR_LOOKUP_PROFILE,
-        BooleanFilter: _SCALAR_LOOKUP_PROFILE,
-        DateFilter: _SCALAR_LOOKUP_PROFILE,
-        DateTimeFilter: _SCALAR_LOOKUP_PROFILE,
-        TimeFilter: _SCALAR_LOOKUP_PROFILE,
-        DurationFilter: _SCALAR_LOOKUP_PROFILE,
-        UUIDFilter: _SCALAR_LOOKUP_PROFILE,
-    }.items(),
+        CharFilter,
+        NumberFilter,
+        BooleanFilter,
+        DateFilter,
+        DateTimeFilter,
+        TimeFilter,
+        DurationFilter,
+        UUIDFilter,
+    ),
 )
 
 
@@ -1159,8 +1107,8 @@ _EMPTY_BODY_DYNAMIC_CSV_ATTRS: frozenset[str] = frozenset(
 )
 
 
-def _dynamic_csv_profile_for(klass: type[object]) -> _FilterFamilyProfile | None:
-    """Return the sequence profile IFF ``klass`` is a genuine dynamic ``in``/``range`` CSV class.
+def _dynamic_csv_profile_for(klass: type[object]) -> bool:
+    """Return whether ``klass`` is a genuine dynamic ``in``/``range`` CSV class.
 
     django-filter builds ``class ConcreteInFilter(BaseInFilter, <scalar>): pass`` (and the
     ``BaseRangeFilter`` variant) per consumer ``in`` / ``range`` lookup on a scalar field
@@ -1187,7 +1135,7 @@ def _dynamic_csv_profile_for(klass: type[object]) -> _FilterFamilyProfile | None
 
     A consumer hand-crafting this exact empty-body shape over an audited scalar is
     behaviorally identical to a package-generated one (pure CSV-of-scalar semantics, no
-    added state), so granting it the sequence profile is safe -- and it cannot route
+    added state), so admitting it is safe -- and it cannot route
     anyway unless the ownership oracle independently marks it framework-origin.
 
     The generated ``in`` class is an empty-body ``(MembershipInFilter, <django-filter's
@@ -1206,41 +1154,36 @@ def _dynamic_csv_profile_for(klass: type[object]) -> _FilterFamilyProfile | None
         case (csv_base, scalar_base):
             pass
         case _:
-            return None
-    if csv_base is not BaseInFilter and csv_base is not BaseRangeFilter:
-        return None
-    if scalar_base not in _FILTER_FAMILY_REGISTRY:
-        return None
-    if frozenset(truth.class_dict(klass)) != _EMPTY_BODY_DYNAMIC_CSV_ATTRS:
-        return None
-    return _SEQUENCE_LOOKUP_PROFILE
+            return False
+    return (
+        (csv_base is BaseInFilter or csv_base is BaseRangeFilter)
+        and scalar_base in _FILTER_FAMILY_REGISTRY
+        and frozenset(truth.class_dict(klass)) == _EMPTY_BODY_DYNAMIC_CSV_ATTRS
+    )
 
 
-def _family_profile_for(filter_instance: object) -> _FilterFamilyProfile | None:
-    """Return the behavior profile of ``filter_instance``'s supported filter family.
+def _family_profile_for(filter_instance: object) -> bool:
+    """Return whether ``filter_instance``'s class is an audited supported filter family.
 
     Resolution is fail-closed and never rediscovered from arbitrary ancestry:
 
-    1. EXACT match first -- ``_FILTER_FAMILY_REGISTRY.get(type(filter_instance))``. No MRO
+    1. EXACT membership first -- ``type(filter_instance) in _FILTER_FAMILY_REGISTRY``. No MRO
        walk, so an unregistered subclass of an audited base is NOT accepted through its
        ancestor: a consumer subclass may override ``.filter`` or add state this package
        has never reviewed against the correlated rewrite.
     2. Otherwise, structurally-validated dynamic-CSV recognition -- django-filter's genuine
        empty-body ``ConcreteInFilter`` / ``ConcreteRangeFilter`` over an exact-audited
-       scalar family resolves to ``_SEQUENCE_LOOKUP_PROFILE`` (see
-       ``_dynamic_csv_profile_for``); anything that adds a method, descriptor, or
-       state-bearing attribute fails closed.
-    3. Otherwise ``None``.
+       scalar family is admitted (see ``_dynamic_csv_profile_for``); anything that adds a
+       method, descriptor, or state-bearing attribute fails closed.
+    3. Otherwise ``False``.
 
-    ``None`` is the fail-closed signal ``_candidate_metadata_for`` consumes: no profile ->
-    the leaf is ineligible, so it is never routable and runs django-filter's original
+    ``False`` is the fail-closed signal ``_candidate_metadata_for`` consumes: the leaf is
+    ineligible, so it is never routable and runs django-filter's original
     outer invocation. Upgrading django-filter therefore cannot add a routable default
     class merely through inheritance.
     """
-    profile = _FILTER_FAMILY_REGISTRY.get(type(filter_instance))
-    if profile is not None:
-        return profile
-    return _dynamic_csv_profile_for(type(filter_instance))
+    klass = type(filter_instance)
+    return klass in _FILTER_FAMILY_REGISTRY or _dynamic_csv_profile_for(klass)
 
 
 @dataclass(frozen=True)
@@ -1281,11 +1224,11 @@ class CandidateFilterMetadata:
       leaves get a row), the ORM path crosses a many-side hop
       (``path_plan.first_many_index is not None``), the leaf carries no
       consumer ``method``, AND its filter class resolves to an audited supported
-      family (``_family_profile_for`` is not ``None``). The last conjunct is the
+      family (``_family_profile_for``). The last conjunct is the
       executable fail-closed boundary: an unaudited family placed behind a
       framework origin -- e.g. a
       consumer subclass, or a class introduced by a future ``django-filter`` release
-      -- has no profile and is ineligible, so it is never routed until it is audited
+      -- is ineligible, so it is never routed until it is audited
       and registered in ``_FILTER_FAMILY_REGISTRY``. No consumer-origin ``distinct``
       check is needed: a consumer-origin ``distinct`` can exist only on a
       ``declared`` / ``override_generated`` leaf, which is already ineligible by
@@ -1466,8 +1409,8 @@ def _candidate_metadata_for(
 
     Eligibility is read off the plan + instance per
     ``CandidateFilterMetadata.eligible``: a many-side path, no consumer ``method``,
-    AND an audited supported family (``_family_profile_for`` is not ``None``). An
-    unaudited / ambiguous family resolves to no profile and is ineligible -- so a
+    AND an audited supported family (``_family_profile_for``). An
+    unaudited / ambiguous family is ineligible -- so a
     consumer subclass, or a future ``django-filter`` release that places a novel class
     behind a framework origin, fails CLOSED to the outer invocation until it is
     registered.
@@ -1485,7 +1428,7 @@ def _candidate_metadata_for(
     eligible = (
         path_plan.first_many_index is not None
         and getattr(filter_instance, "method", None) is None
-        and _family_profile_for(filter_instance) is not None
+        and _family_profile_for(filter_instance)
     )
     return CandidateFilterMetadata(
         path_plan=path_plan,

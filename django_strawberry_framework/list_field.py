@@ -6,7 +6,6 @@ Extension spec: ``docs/SPECS/spec-050-list_field_arguments-0_0_15.md``.
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 from dataclasses import dataclass
 from types import GenericAlias
@@ -1385,42 +1384,6 @@ def _check_nonzero_offset_guard(
         )
 
 
-def _order_normalization_scope(
-    args_record: _ListArguments,
-    orderset_class: type[OrderSet] | None,
-) -> contextlib.AbstractContextManager[None]:
-    """Return the capture scope this request actually needs, or an inert one.
-
-    The handoff exists for exactly one consumer: the non-zero-offset guard's
-    active-order check, which is the only caller of
-    ``OrderSet._input_has_active_terms``. It runs only when a positive ``offset``
-    arrives WITH an ``orderBy`` AND the field captured an ``OrderSet`` to
-    normalize through, so every other argument-bearing request - a ``limit``
-    alone, ``offset: 0``, positive offset riding model ``Meta.ordering`` - has
-    nothing to hand over and does not pay for the scope. One conditional
-    context, chosen here, keeps both colorings' pipelines identical in shape and
-    the cost on the path that uses it.
-
-    ``orderset_class`` is the field's captured sidecar, so the no-``OrderSet``
-    condition is decidable here rather than asserted: over the wire that target
-    publishes no ``orderBy`` at all, and the direct call that supplies one
-    reaches the rejection in
-    ``django_strawberry_framework/utils/querysets.py::require_orderset_class``
-    without having opened a scope first.
-    """
-    if (
-        args_record.order_by_supplied
-        and orderset_class is not None
-        and args_record.offset is not None
-        and args_record.offset > 0
-    ):
-        # Deferred: ``orders`` stays out of the package-root import graph.
-        from .orders.sets import capture_applied_order_normalization  # noqa: PLC0415 - keeps orders/filters out of the root graph
-
-        return capture_applied_order_normalization()
-    return contextlib.nullcontext()
-
-
 #: The ``SyncMisuseError`` recourse ``_execute_queryset_pipeline_sync`` appends when
 #: the target's ``get_queryset`` is ``async def``: the field is driven by the
 #: synchronous executor, and the asynchronous one awaits the same hook on every
@@ -1453,24 +1416,19 @@ def _execute_queryset_pipeline_sync(
     if not args_record.any_argument_supplied:
         return _windowed_rows(post_vis_qs, info, max_rows, trusted=trusted_max_rows)
 
-    # One task-local capture scope spans public ordering and the offset guard,
-    # so the base ``OrderSet`` can hand its normalized terms to the guard without
-    # writing into the consumer's ``info.context`` - opened only when that
-    # handoff can happen.
-    with _order_normalization_scope(args_record, orderset_class):
-        if args_record.order_by_supplied:
-            post_order_qs = apply_orderset_sync(
-                target_type,
-                orderset_class,
-                post_vis_qs,
-                args_record.order_by,
-                info,
-                model=model,
-            )
-        else:
-            post_order_qs = post_vis_qs
+    if args_record.order_by_supplied:
+        post_order_qs = apply_orderset_sync(
+            target_type,
+            orderset_class,
+            post_vis_qs,
+            args_record.order_by,
+            info,
+            model=model,
+        )
+    else:
+        post_order_qs = post_vis_qs
 
-        _check_nonzero_offset_guard(post_order_qs, args_record, orderset_class, info)
+    _check_nonzero_offset_guard(post_order_qs, args_record, orderset_class, info)
 
     return _windowed_rows(
         post_order_qs,
@@ -1498,24 +1456,19 @@ async def _execute_queryset_pipeline_async(
         bounded = _windowed_rows(post_vis_qs, info, max_rows, trusted=trusted_max_rows)
         return wrap_async_queryset_adapter(bounded)
 
-    # One task-local capture scope spans public ordering and the offset guard,
-    # so the base ``OrderSet`` can hand its normalized terms to the guard without
-    # writing into the consumer's ``info.context`` - opened only when that
-    # handoff can happen.
-    with _order_normalization_scope(args_record, orderset_class):
-        if args_record.order_by_supplied:
-            post_order_qs = await apply_orderset_async(
-                target_type,
-                orderset_class,
-                post_vis_qs,
-                args_record.order_by,
-                info,
-                model=model,
-            )
-        else:
-            post_order_qs = post_vis_qs
+    if args_record.order_by_supplied:
+        post_order_qs = await apply_orderset_async(
+            target_type,
+            orderset_class,
+            post_vis_qs,
+            args_record.order_by,
+            info,
+            model=model,
+        )
+    else:
+        post_order_qs = post_vis_qs
 
-        _check_nonzero_offset_guard(post_order_qs, args_record, orderset_class, info)
+    _check_nonzero_offset_guard(post_order_qs, args_record, orderset_class, info)
 
     bounded = _windowed_rows(
         post_order_qs,

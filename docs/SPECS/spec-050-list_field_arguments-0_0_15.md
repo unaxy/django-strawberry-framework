@@ -133,8 +133,6 @@ Release: [`django_strawberry_framework.__version__`][package-init] reads `"0.0.1
   - [ ] The optimizer carries the child definition the relation was resolved through into the
         nested planner, and no optimizer decision about a relation target reads
         `__django_strawberry_definition__` off the target class.
-  - [ ] The order-normalization ledger closes terminally: a descendant holding the copied
-        context can neither publish into nor claim from a closed ledger.
   - [ ] The raw-list seam windows a source that arrives evaluated from the rows it already
         holds, an exact queryset and a project queryset class alike, with the query count
         pinned at zero in the package tier and the fakeshop `Loan` model's override-free
@@ -1831,8 +1829,8 @@ Where each part of the surface lives, keyed to the slice checklist:
 | Slice | Files | Carries |
 |---|---|---|
 | 1 | [`django_strawberry_framework/list_field.py`][list-field], [`django_strawberry_framework/resource_policy.py`][resource-policy], [`django_strawberry_framework/__init__.py`][package-init] | `list_field.py`: the synthesized list signature (`_synthesized_list_signature`), argument normalization into `_ListArguments` with independent supplied/window/order fields and the no-argument fast path (`_normalize_list_arguments`), wire names read from the executable schema only on the error path (`_resolve_argument_wire_name` over `utils/typing.py::published_argument`), and `ListArgumentError`. `resource_policy.py`: the package-private window seams `_windowed_rows` / `_windowed_rows_async` beneath the exported coordinate-free `bounded_rows` / `bounded_rows_async`, and the shared async-iterator cleanup (`_cleanup_rejected_async_iterable` over `_close_async_iterator`). `__init__.py`: the root `ListArgumentError` export. |
-| 2 | [`django_strawberry_framework/list_field.py`][list-field], [`django_strawberry_framework/orders/sets.py`][orders-sets], [`django_strawberry_framework/utils/querysets.py`][querysets], [`django_strawberry_framework/optimizer/extension.py::DjangoOptimizerExtension._optimize`][optimizer-extension] | `list_field.py`: the sync/async queryset pipelines, the positive-offset guard and its order-normalization scope. `orders/sets.py`: `OrderSet._input_has_active_terms` and the invocation-scoped attestation ledger (`capture_applied_order_normalization`). `utils/querysets.py`: `apply_orderset_sync` / `apply_orderset_async`, the post-apply seal under `_SIDECAR_RESULT_POLICY`, `selected_order`, and the async-only queryset completion adapter (`wrap_async_queryset_adapter` / `unwrap_async_queryset_adapter`). `optimizer/extension.py`: the one unwrap/rewrap arm that preserves optimization through the adapter. |
-| 3 | [`tests/test_list_field.py`][test-list-field], [`tests/test_resource_policy.py`][test-resource-policy], [`tests/orders/test_sets.py`][test-orders-sets], [`tests/base/test_init.py`][test-base-init] | Package-tier rows HTTP cannot isolate: construction/direct-call mechanics, naming fallback, the `ListArgumentError` pickle round trip, active-term/override call counts, post-apply validator arms, exact iterator consumption and cleanup precedence, model-order state, query low/high marks, and the root export. |
+| 2 | [`django_strawberry_framework/list_field.py`][list-field], [`django_strawberry_framework/orders/sets.py`][orders-sets], [`django_strawberry_framework/utils/querysets.py`][querysets], [`django_strawberry_framework/optimizer/extension.py::DjangoOptimizerExtension._optimize`][optimizer-extension] | `list_field.py`: the sync/async queryset pipelines, the positive-offset guard. `orders/sets.py`: `OrderSet._input_has_active_terms`. `utils/querysets.py`: `apply_orderset_sync` / `apply_orderset_async`, the post-apply seal under `_SIDECAR_RESULT_POLICY`, `selected_order`, and the async-only queryset completion adapter (`wrap_async_queryset_adapter` / `unwrap_async_queryset_adapter`). `optimizer/extension.py`: the one unwrap/rewrap arm that preserves optimization through the adapter. |
+| 3 | [`tests/test_list_field.py`][test-list-field], [`tests/test_resource_policy.py`][test-resource-policy], [`tests/orders/test_sets.py`][test-orders-sets], [`tests/base/test_init.py`][test-base-init] | Package-tier rows HTTP cannot isolate: construction/direct-call mechanics, naming fallback, the `ListArgumentError` pickle round trip, post-apply validator arms, exact iterator consumption and cleanup precedence, model-order state, query low/high marks, and the root export. |
 | 4 | `examples/fakeshop/test_query/test_list_field_api.py`, [`examples/fakeshop/test_query/test_list_field_async_api.py`][fakeshop-test-list-field-async], [`examples/fakeshop/test_query/test_resource_policy_api.py`][fakeshop-test-resource-policy], [`examples/fakeshop/test_query/test_multi_db.py`][fakeshop-test-multi-db], [`examples/fakeshop/apps/kanban/constants.py`][fakeshop-kanban-constants] | Live rows over the library schema's three Branch list fields (`allLibraryBranchesViaListField` and its nullable and manager-resolver variants), with exceptional fields mounted only in test-local schemas: ordered pages, visibility, caps, errors, naming, sync/async shapes, routing, and SQL. The kanban constants module carries both list-field suites' tracked paths. |
 | 5 | [`docs/GLOSSARY.md`][glossary] (DB), [`docs/README.md`][docs-readme], [`docs/TREE.md`][tree], [`README.md`][readme], [`examples/fakeshop/test_query/README.md`][fakeshop-test-query-readme], KANBAN DB/exports | The argument, returned-row and skip semantics; the live-tier guide's entries for both list-field suites and the async suite's `AsyncTestClient` transport; the generated tree entries for both suites. |
 
@@ -1889,74 +1887,9 @@ Where each part of the surface lives, keyed to the slice checklist:
   entry point that would bypass that override. Active input
   must also leave the returned queryset materially ordered, so a malformed no-op override
   cannot satisfy the offset guard on an otherwise unordered source merely by receiving a
-  non-null input. `_normalize_input` overrides are therefore required to be pure and
-  deterministic, and that is an explicit COMPATIBILITY CONSTRAINT on the method rather than
-  merely a test counter: a request that reaches the active-term helper invokes normalization
-  once inside public apply and once inside the helper, so a stateful override can otherwise
-  produce different application and activity verdicts from one request. That second
-  normalization is what the constraint is about, and it exists on exactly one path - an
-  `orderBy` arriving with a positive `offset` through a field carrying an `OrderSet`. The
-  check is therefore scoped to that path by construction rather than by omission: everywhere
-  else normalization runs once, and a single verdict has nothing to disagree with. The
-  requirement is documented on
-  `django_strawberry_framework/orders/sets.py::OrderSet._normalize_input` itself. Over the wire
-  the input it re-normalizes is already bounded: on a `DjangoSchema` every field argument is
-  charged against the resource policy's value bounds (`max_input_nodes`,
-  `max_container_width`, `max_value_depth`) by
-  `django_strawberry_framework/extensions/resource_policy.py::_DocumentWalk.charge_arguments`
-  before execution. An override whose second normalization disagrees with its first surfaces
-  an actionable `ConfigurationError` naming the method rather than silently deciding the offset
-  guard on an incidental verdict. Instrumented tests in
-  [`tests/orders/test_sets.py`][test-orders-sets] pin the call counts, the purity requirement,
-  and the disagreement error. The base
-  `django_strawberry_framework/orders/sets.py::OrderSet._apply_orderings` hands its validated
-  terms to the helper through one invocation-scoped ATTESTATION LEDGER
-  (`django_strawberry_framework/orders/sets.py::_NormalizationLedger`, bound to a `ContextVar`
-  that `django_strawberry_framework/orders/sets.py::capture_applied_order_normalization` opens
-  around public ordering and the offset guard, CLOSING the ledger and then resetting the
-  binding in nested `finally` blocks): when a scope is active the base implementation APPENDS
-  an immutable `_AppliedNormalization` naming the orderset class, the input OBJECT, and its
-  terms, and the
-  helper CLAIMS the entries matching its own class and input object, then re-normalizes once to
-  prove purity. Outside any scope - a connection, a hand-written resolver, any direct public
-  call - publishing is a no-op, so a public `apply_*` call never writes, overwrites, or clears
-  anything on the consumer's `info.context`, and a concurrent resolution that opened its own
-  scope has its own ledger.
-
-  The transport is a LEDGER rather than a slot because two requirements pull in opposite
-  directions. A supported public `apply_async` override may delegate to `super()` inside a
-  child task, and the ordering the client receives is then built there, so the guard must
-  receive an attestation published from a child task, a copied context, or a `sync_to_async`
-  worker thread - otherwise it compares its own second and third normalizations to each other,
-  agrees, and blesses a page cut from terms it never saw. At the same time an UNRELATED
-  application in any of those, or a different `OrderSet` invoked between publication and check,
-  must not be able to displace the one the guard is waiting for. A shared mutable slot loses the
-  parent's record to the last writer; a rebinding-only slot loses a legitimate child's record to
-  context isolation. So nothing ever overwrites: every application appends, entries are matched
-  by class AND input IDENTITY (never equality - a consumer `__eq__` has no say in whether an
-  attestation applies), claiming is once per class-and-input pair for the whole resolution, and
-  two applicable attestations that DISAGREE fail the claim closed rather than picking one.
-  Appends and claims are lock-synchronized, because a copied context genuinely reaches one
-  ledger from two threads.
-
-  Closure is TERMINAL, not merely emptying. A descendant created while the scope was live holds
-  the ledger OBJECT through the context it copied and may not resume until after the owning
-  resolution has ended; an emptied-but-open ledger would let it append, claim its own
-  attestation, and keep the input object alive in an orphan context past the resolution the
-  records describe. `close()` therefore sets a tombstone and clears both collections under one
-  lock acquisition, after which publishing is inert and claiming answers nothing - exactly what
-  an application outside any scope already does. Closure runs before the binding reset and in
-  its own `finally`, so a descendant observes the tombstone the moment the scope ends and a
-  failing reset cannot skip it.
-
-  The scope is opened only for the request shape whose guard can consume it: an `orderBy`
-  arriving WITH a positive `offset` on a field that captured an `OrderSet` to normalize through.
-  Every other argument-bearing request takes an inert context and pays for neither the ledger
-  nor the deferred `orders` import; the no-`OrderSet` condition is DECIDABLE there rather than
-  asserted, because the field's captured sidecar is passed to the predicate. An override that
-  does not delegate to the base implementation attests nothing and the helper takes the
-  double-normalization path, so public override dispatch is honored without a parallel
-  state-returning entry point.
+  non-null input. The helper normalizes the input once more, so a `_normalize_input` override
+  is expected to be a pure function of its input (documented on
+  `django_strawberry_framework/orders/sets.py::OrderSet._normalize_input`, not enforced).
 - [`django_strawberry_framework/utils/typing.py::schema_config_from_info`][typing-utils]
   is the neutral schema-config lookup for the optimizer and connection readers. Argument
   error names combine Strawberry `Info.get_argument_definition` with the executable schema's
@@ -2163,10 +2096,6 @@ Where each part of the surface lives, keyed to the slice checklist:
   class-predicate fallback. `DjangoType.__init_subclass__` registers type and definition in
   one atomic call, so no real `DjangoType` presents that shape; a bare class registered
   directly has no definition to read.
-- A descendant task or worker thread that resumes after the ordering scope has exited
-  publishes nothing and claims nothing, so its own active-term check takes the standalone
-  double-normalization path - identical to applying outside any scope. A live descendant
-  inside an open scope keeps the delegation and A/B/B rejection behavior.
 
 ## Test plan
 
@@ -2832,16 +2761,8 @@ here: the public field refuses it, the helper supports it. The same module pins:
 [`tests/orders/test_sets.py`][test-orders-sets] pins that the active-term helper shares the
 canonical normalization/flat-order rules, reports false for empty/all-null input, and does not
 replace either public apply method (`test_input_has_active_terms_contract`,
-`test_input_has_active_terms_public_apply_override_independence`), the documented double
-normalization of pure/deterministic `_normalize_input` overrides
-(`test_input_has_active_terms_independent_query_and_double_normalization`), and ledger closure:
-a descendant delayed past scope exit through `asyncio.create_task` and through
-`contextvars.copy_context()` plus a worker thread finds the closed ledger empty, claims
-nothing, and leaves its term check on the standalone path
-(`test_a_task_that_outlives_the_scope_cannot_reopen_the_closed_ledger`,
-`test_a_worker_thread_that_outlives_the_scope_cannot_reopen_the_closed_ledger`). Live child
-delegation inside an open scope is `test_async_child_delegated_ordering_still_orders_and_pages`
-and `test_async_child_delegated_impure_ordering_is_rejected`.
+`test_input_has_active_terms_public_apply_override_independence`). Live child delegation is
+`test_async_child_delegated_ordering_still_orders_and_pages`.
 
 Metadata integrity is proven at the boundary it lives on. The validator rows above hand the
 factory a target the registry has dropped. `tests/test_connection.py::test_a_warm_connection_cache_refuses_alternate_metadata_for_its_target`
@@ -3230,9 +3151,6 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       proves each warm entry's provenance, and the optimizer plans a relation from the child
       definition it resolved the relation through - leaving no request-time
       `__django_strawberry_definition__` read keyed by a target class on the planned path.
-- [ ] Ledger closure is terminal, proven for a descendant task and a worker thread that each
-      resume after the owning scope ended, without regressing live child delegation or the
-      disagreement rejection inside an open scope.
 
 <!-- LINK DEFINITIONS -->
 

@@ -44,7 +44,6 @@
 "django_strawberry_framework/forms/resolvers.py::_blank_type_errors" = { BLE001 = 1 }
 "django_strawberry_framework/keyset.py::_cursor_crypto_types" = { PLC0415 = 2 }
 "django_strawberry_framework/list_field.py::DjangoListField" = { N802 = 1 }
-"django_strawberry_framework/list_field.py::_order_normalization_scope" = { PLC0415 = 1 }
 "django_strawberry_framework/list_field.py::_synthesized_list_signature" = { PLC0415 = 1 }
 "django_strawberry_framework/middleware/debug_toolbar.py::DebugToolbarMiddleware._postprocess" = { BLE001 = 1 }
 "django_strawberry_framework/middleware/debug_toolbar.py::_DebugToolbarMiddleware" = { E402 = 1 }

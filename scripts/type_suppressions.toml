@@ -86,7 +86,6 @@
 "django_strawberry_framework/optimizer/selections.py::with_runtime_prefix" = { cast = 1 }
 "django_strawberry_framework/optimizer/walker.py::_hint_prefetch_over_pk_set" = { cast = 1 }
 "django_strawberry_framework/orders/base.py::RelatedOrder.orderset" = { reportPropertyTypeMismatch = 1 }
-"django_strawberry_framework/orders/sets.py::OrderSet._active_order_terms" = { reportUnnecessaryIsInstance = 1 }
 "django_strawberry_framework/resource_policy.py::ResourceLimitExceeded" = { reportUnsafeMultipleInheritance = 1 }
 "django_strawberry_framework/rest_framework/accessors.py::base_fields" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/rest_framework/accessors.py::child_relation_of" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
@@ -339,15 +338,12 @@
 "tests/orders/test_inputs.py::_order_input_subscript_form" = { reportInvalidTypeArguments = 1 }
 "tests/orders/test_inputs.py::test_order_input_subscript_rejects_non_orderset_naming_the_subscript" = { reportArgumentType = 1, reportInvalidTypeArguments = 1 }
 "tests/orders/test_inputs.py::test_order_input_type_raises_typeerror_for_non_orderset" = { reportArgumentType = 1 }
-"tests/orders/test_sets.py::test_input_has_active_terms_rejects_non_str_path_term.BadTermOrder._normalize_input" = { reportIncompatibleMethodOverride = 1 }
 "tests/orders/test_sets.py::test_metaclass_none_removal_survives_diamond_inheritance.CombinedOwner" = { reportIncompatibleVariableOverride = 1 }
 "tests/orders/test_sets.py::test_metaclass_none_removal_survives_diamond_inheritance.RemovedOwner.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/orders/test_sets.py::test_orderset_clear_order_input_namespace_clears_subclass_caches.SubOrder.Meta" = { reportIncompatibleVariableOverride = 1 }
-"tests/orders/test_sets.py::test_orderset_normalize_input_validation_contract.InvalidDirectionOrder._normalize_input" = { reportIncompatibleMethodOverride = 1 }
 "tests/orders/test_sets.py::test_orderset_normalize_input_validation_contract.NonListOrder._normalize_input" = { reportIncompatibleMethodOverride = 1 }
 "tests/orders/test_sets.py::test_orderset_normalize_input_validation_contract.NonTupleTermOrder._normalize_input" = { reportIncompatibleMethodOverride = 1 }
 "tests/orders/test_sets.py::test_resolve_order_expressions_handles_non_class_model_on_path_error" = { reportArgumentType = 1 }
-"tests/orders/test_sets.py::test_resolve_order_expressions_rejects_non_ordering_direction" = { reportArgumentType = 2 }
 "tests/rest_framework/test_converter.py::test_consumer_declared_list_field_over_json_column_names_both_scalars.ListOverJsonSer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/rest_framework/test_converter.py::test_model_field_without_wrapped_field_raises" = { reportArgumentType = 1 }
 "tests/rest_framework/test_converter.py::test_register_converter_rejects_non_callable" = { reportArgumentType = 1 }

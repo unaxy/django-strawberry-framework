@@ -167,9 +167,11 @@ def widget_entries(widget: object, key: str, value: object) -> dict[str, object]
 
     A widget reading one key binds ``{key: value}``. A ``MultiWidget`` binds each part
     of ``value`` under its sub-widget's key: a list or tuple is its parts, any other value
-    is split by the widget's own ``decompress`` (``_decompressed``: one it cannot split is a
-    ``ConfigurationError``, an aware ``datetime`` whose wall clock in the current time zone
-    leaves years 1..9999 the ``invalid`` ``ValidationError``), and a part past the end is
+    is split by the widget's own ``decompress`` (``_decompressed``: one it answers no list or
+    tuple for, or overflows on other than an aware ``datetime``, is a ``ConfigurationError``,
+    an aware ``datetime`` whose wall clock in the current time zone leaves years 1..9999 the
+    ``invalid`` ``ValidationError``, and any other exception it raises propagates), and a
+    part past the end is
     ``None``, as ``MultiWidget.get_context`` renders it. A ``SplitArrayWidget`` binds each
     element under ``<key>_<index>`` and pads to its ``size`` with ``None``, so an empty
     list binds every key and is never read as an omitted field; ``None`` binds no element

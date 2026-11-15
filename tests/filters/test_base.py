@@ -750,6 +750,24 @@ def test_declared_list_filter_under_django_filter_backend_reads_raw_form_members
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("parent", [FilterSet, django_filters.FilterSet])
+def test_a_consumer_text_widget_on_a_list_filter_refuses_unsplit_text(
+    parent: type[django_filters.FilterSet | FilterSet],
+) -> None:
+    """``widget=TextInput`` hands ``?f=26`` on unsplit: a coded refusal, never ``IN ('2','6')``."""
+    filterset = _declared_set(
+        parent,
+        models.Shelf,
+        f=ListFilter(field_name="code", lookup_expr="in", widget=TextInput),
+    )(data=QueryDict("f=26"), queryset=models.Shelf.objects.all())
+
+    with pytest.raises(GraphQLError, match=r"^Invalid filter value: expected a list\.$") as exc:
+        _ = filterset.qs
+
+    assert exc.value.extensions == {"code": "FILTER_INVALID"}
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
 def test_declared_list_filter_under_django_filter_backend_answers_a_bad_member_with_400(
     filterset_class: type[django_filters.FilterSet | FilterSet],
@@ -2038,7 +2056,8 @@ def test_list_filter_field_cleans_each_element_with_its_element_field(
 
     Over an array of arrays (``depth`` past 1), outside an ``in`` over it, a list or tuple
     member is descended at any depth, a ``None`` at any depth stays ``None`` and every other
-    member is cleaned by ``element_field``. Live refusal of an element the column cannot hold:
+    member is cleaned by ``element_field``. A non-list reaches ``ListFilter.filter``, which
+    refuses it (``_list_value``). Live refusal of an element the column cannot hold:
     ``test_scalars_filter_api.py::test_price_among_element_the_column_cannot_hold_is_filter_invalid``.
     """
     assert ListFilter.field_class is ArrayFilter.field_class is _ElementField
@@ -2236,8 +2255,8 @@ def test_membership_in_field_reads_a_raw_empty_string_as_omission() -> None:
 def test_membership_wrapper_keeps_the_upstream_name_and_builds_a_fresh_class() -> None:
     """Exact dynamic Python class identity, name and MRO stay construction observations.
 
-    Admitted membership runs through native HTTP at
-    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_admit_lists``.
+    Direct scalar rejection and admitted membership run through native HTTP at
+    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_refuse_scalar_containers``.
     """
     wrapped = membership_in_filter_class(_CharInFilter)
     assert wrapped is not membership_in_filter_class(_CharInFilter)
@@ -3559,8 +3578,8 @@ def test_validate_range_rejects_non_two_element_sequences(invalid_value: object)
 def test_a_standalone_integer_primitive_keeps_parent_and_omission_identity() -> None:
     """The absent parent slot and exact queryset identity are Python observations.
 
-    Native direct primitive acceptance is owned by
-    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_admit_lists``.
+    Native direct primitive acceptance and scalar refusal are owned by
+    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_refuse_scalar_containers``.
     """
     queryset = models.Shelf.objects.none()
     primitive = IntegerInFilter(field_name="id", lookup_expr="in")

@@ -64,7 +64,6 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
-from django_strawberry_framework.orders import Ordering
 from django_strawberry_framework.resource_policy import (
     _windowed_rows,
     bounded_rows,
@@ -4124,51 +4123,6 @@ def test_holder_branches_a_malformed_apply_sync_result_names_its_own_defect(
     assert len(branch_sql) == resolver_queries, branch_sql
 
 
-@pytest.mark.django_db
-def test_holder_branches_hostile_normalized_term_is_rejected_before_it_can_run(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ``_normalize_input`` override returning a ``str`` SUBCLASS term is a configuration error.
-
-    The term never reaches the purity compare or the flat-order walk, so its
-    ``__eq__`` / ``__format__`` hooks never fire; the request reports the
-    boundary's actionable error instead of the hook's own failure.
-    """
-    library_models.Branch.objects.create(name="A", city="Boston")
-
-    class _HostileStr(str):
-        @override
-        def __eq__(self, other: object) -> bool:
-            raise RuntimeError("hostile equality ran")
-
-        __hash__ = str.__hash__
-
-        @override
-        def __format__(self, spec: str) -> str:
-            raise RuntimeError("hostile format ran")
-
-    def _hostile_terms(
-        _cls: type[BranchOrder],
-        _input_value: object,
-    ) -> list[tuple[str, Ordering | None]]:
-        return [(_HostileStr("city"), Ordering.ASC)]
-
-    monkeypatch.setattr(
-        BranchOrder,
-        "_normalize_input",
-        classmethod(_hostile_terms),
-    )
-    with override_settings(**_ERROR_POLICY_PASS_THROUGH), CaptureQueriesContext(connection) as ctx:
-        payload = graphql_payload(
-            "{ allLibraryBranchesViaListField(orderBy: [{ city: ASC }], offset: 1) { name } }",
-        )
-    assert payload["data"] is None
-    message = json_str(payload, "errors", 0, "message")
-    assert "BranchOrder._normalize_input returned invalid term" in message
-    assert "hostile" not in message
-    assert [q for q in ctx.captured_queries if "library_branch" in q["sql"].lower()] == []
-
-
 class _UpperConverter(NameConverter):
     """Publishes every schema name upper-cased, so no wire name matches its default spelling."""
 
@@ -5176,11 +5130,10 @@ def test_holder_ordering_leaves_the_consumer_context_exactly_as_found(
 ) -> None:
     """An ordered surface adds nothing to ``info.context`` its control request does not.
 
-    The order-normalization handoff is task-local, so the context object holds the
-    same attribute set after an ordered request as after the same field without
-    ordering, and a consumer attribute set before execution survives by identity.
-    The list and the connection reach that handoff by different paths, so each
-    owns a node rather than sharing one that stops at the first leak.
+    The context object holds the same attribute set after an ordered request as after
+    the same field without ordering, and a consumer attribute set before execution
+    survives by identity. The list and the connection order by different paths, so
+    each owns a node rather than sharing one that stops at the first leak.
     """
     create_users(1)
     client = _staff_client()

@@ -1,7 +1,8 @@
 """Ordinary JSON arguments reach the public filter primitives directly.
 
 These consumers call public Filter.filter directly, with no form or normalizer between
-the argument and the primitive, and no generated FilterInput shaping the value.
+the argument and the primitive, and no generated FilterInput shaping the value, so a
+container the primitive refuses reaches it as sent.
 """
 
 import pytest
@@ -11,7 +12,7 @@ from django.db.models import Model, QuerySet
 from django.http import HttpRequest
 from django_filters import BaseInFilter, CharFilter
 from django_filters.filters import Filter
-from graphql_client import RecordCompiledSql, json_at, json_list
+from graphql_client import JSONObject, RecordCompiledSql, json_at, json_list
 from strategy_schemas import make_django_type
 from strawberry.scalars import JSON
 from test_declared_key_primitives_api import _answer, _schema
@@ -38,6 +39,7 @@ class _TextInFilter(BaseInFilter, CharFilter):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("shape", ["number", "string", "admitted"])
 @pytest.mark.parametrize(
     "family",
     [
@@ -48,8 +50,14 @@ class _TextInFilter(BaseInFilter, CharFilter):
         "global-id",
     ],
 )
-def test_direct_public_membership_primitives_admit_lists(family: str) -> None:
-    """A JSON list reaches each primitive as its one membership predicate."""
+def test_direct_public_membership_primitives_refuse_scalar_containers(
+    family: str,
+    shape: str,
+) -> None:
+    """A JSON list is one membership predicate; a scalar is the primitive's coded refusal.
+
+    A string is never char-wise membership and an integer never leaks an iteration error.
+    """
     branch = models.Branch.objects.create(name="Primitive shapes")
     for code in ("2", "6", "26"):
         models.Shelf.objects.create(branch=branch, code=code)
@@ -59,12 +67,14 @@ def test_direct_public_membership_primitives_admit_lists(family: str) -> None:
             email=f"{name}@example.test",
             lifetime_fines_cents=fines,
         )
+    values: object = 42 if shape == "number" else "26"
     if family in {"integer", "unbound-integer"}:
         source = models.Patron
         leaf = IntegerInFilter(lookup_expr="in")
         field_name, selection = "lifetime_fines_cents", "name"
         expected, universe = ["twenty-six"], ["six", "twenty-six", "two"]
         admitted: list[object] = [26]
+        message = "Invalid filter value: expected a list of integers."
     else:
         source = models.Shelf
         field_name, selection = "code", "code"
@@ -77,6 +87,11 @@ def test_direct_public_membership_primitives_admit_lists(family: str) -> None:
         else:
             leaf = GlobalIDMultipleChoiceFilter(lookup_expr="in")
             field_name = "pk"
+        message = (
+            "Invalid GlobalID list: expected a list of GlobalIDs."
+            if family == "global-id"
+            else "Invalid filter value: expected a list."
+        )
     schema = _schema(
         source,
         leaf,
@@ -91,7 +106,18 @@ def test_direct_public_membership_primitives_admit_lists(family: str) -> None:
         admitted = [
             global_id_for(output, saved_pk(models.Shelf.objects.get(code="26")), schema=schema),
         ]
-    _answer(schema, admitted, selection, expected, universe)
+    if shape == "admitted":
+        _answer(schema, admitted, selection, expected, universe)
+        return
+    query = f"query($values: JSON) {{ matches(values: $values) {{ {selection} }} }}"
+    payload = _post(schema, query, {"values": values})
+    expected_error: JSONObject = {
+        "message": message,
+        "locations": [{"line": 1, "column": query.index("matches") + 1}],
+        "path": ["matches"],
+        "extensions": {"code": "GLOBALID_INVALID" if family == "global-id" else "FILTER_INVALID"},
+    }
+    assert payload == {"data": None, "errors": [expected_error]}, payload
 
 
 @pytest.mark.django_db
