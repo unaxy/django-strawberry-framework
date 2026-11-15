@@ -948,7 +948,7 @@ class DjangoType:
         column the manager annotates is answered at a root and in a nested list
         or connection, and across a hop, a cascade edge or a single-valued
         relation only when the type's ``get_queryset`` adds it. Whatever the
-        override returns is rebuilt into a plain ``QuerySet`` before the
+        override returns is checked and cloned (``QuerySet.all()``) before the
         framework composes onto it.
 
         An override may be ``def`` or ``async def``. Under the asynchronous
@@ -1673,13 +1673,13 @@ def _hinted_prefetch_seed_defect(model: type[models.Model], prefetch: object) ->
     Django's relation metadata through
     ``utils/querysets.py::_prefetch_relation_target_or_none``, over the lookup
     read as exact text (a ``TextChoices`` / ``StrEnum`` member resolves as its
-    text, as the prefetch seal reads it); a lookup it cannot resolve (a generic
+    text); a lookup it cannot resolve (a generic
     relation, a lazy string target) is left to Django at fetch. Only a
     ``Prefetch`` without ``to_attr`` is checked: a ``to_attr`` lands its rows on
     that attribute, which only a consumer-assigned resolver reads, never on the
     relation's cache, and a ``Prefetch`` with no queryset has no seed. Every read
     is of the instance state Django's ``Prefetch``, ``QuerySet`` and ``Query``
-    store, the same reads the prefetch seal makes; a seed that is not a
+    store; a seed that is not a
     ``QuerySet`` (a manager, say) carries no ``Query`` and is refused as such.
     """
     prefetch_state = truth.instance_state(prefetch)

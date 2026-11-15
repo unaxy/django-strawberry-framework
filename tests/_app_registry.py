@@ -72,9 +72,6 @@ def _restore_app_registry(request: pytest.FixtureRequest) -> Iterator[None]:
         ``django_strawberry_framework/utils/relations.py::_classify_path_cached`` and
         ``::_path_traverses_to_many_cached``) nor ``django_strawberry_framework.registry``;
         the opt-in ``isolate_global_registry`` fixture handles the registry.
-    (c) ``tests/utils/test_querysets.py::_ProxyTargetCategory`` and
-        ``tests/utils/test_querysets.py::_ProxyTargetHolder`` register in a private
-        ``Meta.apps`` and are outside the snapshot by design.
     """
     if "django_db" in request.keywords:
         request.getfixturevalue("db")

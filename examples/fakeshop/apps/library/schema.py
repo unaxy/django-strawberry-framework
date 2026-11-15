@@ -84,13 +84,9 @@ def _reading_lists_without_default_order(
 
 
 # Consumer ``Prefetch`` children over a proxy-targeted relation
-# (``models.BranchNote.branch``, declared to ``models.ProxyBranch``). A source
-# queryset a ``DjangoListField`` receives is sealed before the visibility hook
-# runs, and that seal proves each ``Prefetch`` child belongs to the relation the
-# lookup names. The proof is a TABLE proof: a proxy reads its concrete model's
-# table, so both the proxy and the concrete ``Branch`` are legitimate children
-# here, while a child over any other table is refused. The three resolvers below
-# are those three verdicts, each reachable from a real ``/graphql/`` query.
+# (``models.BranchNote.branch``, declared to ``models.ProxyBranch``): one over the
+# proxy itself and one over the concrete ``Branch``, each reachable from a real
+# ``/graphql/`` query.
 
 
 def _branch_notes_over_proxy_child_resolver(
@@ -110,19 +106,6 @@ def _branch_notes_over_concrete_child_resolver(
     """Prefetch the proxy-targeted relation with a child over the CONCRETE model."""
     return models.BranchNote.objects.prefetch_related(
         Prefetch("branch", queryset=models.Branch.objects.all()),
-    ).order_by("id")
-
-
-def _branch_notes_over_unrelated_child_resolver(
-    _root: object,
-    _info: Info,
-) -> QuerySet[models.BranchNote]:
-    """Prefetch the proxy-targeted relation with a child over an UNRELATED table.
-
-    Refused by the seal: a proxy target does not widen the rule to any model.
-    """
-    return models.BranchNote.objects.prefetch_related(
-        Prefetch("branch", queryset=models.Genre.objects.all()),
     ).order_by("id")
 
 
@@ -165,27 +148,15 @@ _LOAN_PREFETCH_ANNOTATIONS: Mapping[str, Callable[[], Expression]] = {
 }
 
 
-#: The fetch modes ``FAKESHOP_TEST_LOAN_FETCH_MODE`` names: two of Django 6.1's own and a
-#: project ``FetchPeers`` subclass. Empty below 6.1, which has no fetch modes (the flag is
-#: set only where they exist).
+#: The fetch modes ``FAKESHOP_TEST_LOAN_FETCH_MODE`` names: two of Django 6.1's own. Empty
+#: below 6.1, which has no fetch modes (the flag is set only where they exist).
 _loan_fetch_modes: "Mapping[str, FetchMode]"
 try:
     from django.db.models import FETCH_PEERS, FETCH_RAISE
-    from django.db.models.fetch_modes import FetchPeers
 except ImportError:
     _loan_fetch_modes = {}
 else:
-
-    class ProjectFetchPeers(FetchPeers):
-        """A project's own ``FetchPeers`` subclass, a fetch mode Django never builds."""
-
-        __slots__ = ()
-
-    _loan_fetch_modes = {
-        "FETCH_PEERS": FETCH_PEERS,
-        "FETCH_RAISE": FETCH_RAISE,
-        "PROJECT_FETCH_PEERS": ProjectFetchPeers(),
-    }
+    _loan_fetch_modes = {"FETCH_PEERS": FETCH_PEERS, "FETCH_RAISE": FETCH_RAISE}
 
 
 # The DjangoType declaration order is intentionally awkward. Several
@@ -227,12 +198,10 @@ class LoanType(DjangoType):
       whose annotation a sibling clone already fetched is served. Ignored while
       ``FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK`` is set.
     - ``FAKESHOP_TEST_LOAN_FETCH_MODE``: name a fetch mode (``"FETCH_PEERS"`` /
-      ``"FETCH_RAISE"``, Django 6.1's own, or ``"PROJECT_FETCH_PEERS"``, a project
-      ``FetchPeers`` subclass) for a ``get_queryset`` that returns
+      ``"FETCH_RAISE"``, Django 6.1's own) for a ``get_queryset`` that returns
       ``queryset.fetch_mode(<mode>)``, so live requests can pin that the sealed loan
       rows load their unplanned ``patron`` (hinted ``skip``) under the project's fetch
-      mode, and that a mode Django never builds is refused. Ignored while either hook
-      flag above is set.
+      mode. Ignored while either hook flag above is set.
     """
 
     if getattr(settings, "FAKESHOP_TEST_LOAN_QUERYSET_METHOD_HOOK", False):
@@ -1548,7 +1517,7 @@ class Query:
     # ``branch`` under any of these also makes the optimizer plan its own
     # ``Prefetch`` for the same forward key - ``ProxyBranchType`` carries a
     # ``get_queryset`` hook - so the consumer child and the planned one
-    # reconcile on the shape the seal has just proven.
+    # reconcile.
     all_library_branch_notes_over_proxy_child: list[BranchNoteType] = DjangoListField(
         BranchNoteType,
         resolver=_branch_notes_over_proxy_child_resolver,
@@ -1556,10 +1525,6 @@ class Query:
     all_library_branch_notes_over_concrete_child: list[BranchNoteType] = DjangoListField(
         BranchNoteType,
         resolver=_branch_notes_over_concrete_child_resolver,
-    )
-    all_library_branch_notes_over_unrelated_child: list[BranchNoteType] = DjangoListField(
-        BranchNoteType,
-        resolver=_branch_notes_over_unrelated_child_resolver,
     )
 
     def _named_library_records(

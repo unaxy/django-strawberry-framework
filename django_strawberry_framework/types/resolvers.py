@@ -69,7 +69,6 @@ from django_strawberry_framework.utils.querysets import (
     is_manager,
     materialized_rows,
     model_for,
-    normalized_row_source,
     related_queryset,
     run_in_one_sync_boundary,
 )
@@ -476,7 +475,7 @@ def _visible_many_rows(
     """Apply target visibility, then bound and materialize a many-side relation.
 
     The async branch iterates the bound with ``async for`` unconditionally: the
-    visibility boundary normalizes every hook return to a framework-owned plain
+    visibility boundary normalizes every hook return to a fresh clone of a
     ``QuerySet`` (``querysets.py::_normalized_visibility_result`` fails closed on
     a list), slicing one keeps it a ``QuerySet``, and every ``QuerySet`` is
     ``AsyncIterable``. A sync-iterable fallback here would be unreachable.
@@ -486,7 +485,7 @@ def _visible_many_rows(
         async def _resolve() -> list[object]:
             visible = await apply_type_visibility_async(target_type, source, info)
             # ``querysets.py::_normalized_visibility_result`` returns a fresh, unsliced,
-            # UNEVALUATED plain ``QuerySet`` (its seal never carries ``_result_cache``),
+            # UNEVALUATED ``QuerySet`` (its seal is a clone, which drops ``_result_cache``),
             # so the bound's slice is a ``QuerySet``, never the evaluated-cache list.
             bounded = require(await bounded_rows_async(visible, info), is_queryset)
             return [row async for row in bounded]
@@ -643,9 +642,6 @@ def _make_relation_resolver(
     # GraphQL-surface / optimizer-key vocabulary. They diverge for reverse
     # relations without ``related_name``.
     accessor_name = instance_accessor(field)
-    # Where a refused prefetch-cache entry came from, so the error names the
-    # relation Django cached rather than a resolver the consumer never wrote.
-    prefetch_origin = f"the prefetch cache for {accessor_name!r} held"
     field_meta = _field_meta_for_resolver(field, parent_type)
     kind = field_meta.relation_kind
     visibility_type = _custom_visibility_type(field_meta)
@@ -688,15 +684,9 @@ def _make_relation_resolver(
                     ):
                         manager_rows = require(read_attr(root, accessor_name), is_manager).all()
                         return _visible_many_rows(manager_rows, visibility_type, info)
-                    # The cache entry is a queryset, and reading what it has
-                    # already fetched through ``getattr`` would dispatch a
-                    # consumer subclass's own attribute access for the value the
-                    # bound is then applied to. It is normalized first, so the
-                    # rows come out of Django's own slot on an object this
-                    # package owns, and a rebuilt subclass carries those same
-                    # rows onto the rebuild - so the prefetched path costs no
-                    # query whichever class the relation manager built.
-                    cached = normalized_row_source(cached, origin=prefetch_origin)
+                    # The cache entry is a queryset holding the rows Django
+                    # fetched, so the prefetched path costs no query whichever
+                    # class the relation manager built.
                     result_cache = materialized_rows(cached)
                     cached_rows = result_cache if result_cache is not None else cached
                     return bounded_rows(cached_rows, info)
@@ -719,8 +709,7 @@ def _make_relation_resolver(
             # Without a hook, the queryset itself is asked whether Django served it
             # from such a cache: an evaluated one is bounded from the rows it holds,
             # with no query, as the prefetched branch bounds a cache entry.
-            row_source = normalized_row_source(source)
-            fetched_rows = materialized_rows(row_source)
+            fetched_rows = materialized_rows(source)
             if fetched_rows is not None:
                 return bounded_rows(fetched_rows, info)
             if async_execution():
@@ -729,15 +718,14 @@ def _make_relation_resolver(
                 # asynchronously instead - the same rows in the same order.
 
                 async def _resolve() -> list[object]:
-                    # ``row_source`` is an exact, unevaluated ``QuerySet``: a manager's
-                    # ``all()`` is a queryset, ``normalized_row_source`` rebuilds a
-                    # subclass into a plain one, and the evaluated case was routed
-                    # above. Its slice is therefore a ``QuerySet``, never a ``list``.
-                    bounded = require(await bounded_rows_async(row_source, info), is_queryset)
+                    # ``source`` is an unevaluated ``QuerySet``: a manager's ``all()`` is a
+                    # queryset, and the evaluated case was routed above. Its slice is
+                    # therefore a ``QuerySet``, never a ``list``.
+                    bounded = require(await bounded_rows_async(source, info), is_queryset)
                     return [row async for row in bounded]
 
                 return _resolve()
-            return list(bounded_rows(row_source, info))
+            return list(bounded_rows(source, info))
 
         return _name_resolver(many_resolver, field_name)
 

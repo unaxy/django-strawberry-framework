@@ -397,7 +397,7 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
     ``None`` when the path does not resolve;
     ``utils/querysets.py::_prefetch_relation_target_or_none`` answers the
     terminal model or ``None`` (fail-open, with the default ``<model>_set``
-    accessor spelling) for prefetch sealing;
+    accessor spelling) for the consumer-``Prefetch`` target check;
     ``list_field.py::_resolve_order_field_path`` answers ``(field, related
     opts)`` or ``None`` for ordering-term certification. A caller needing
     another walker's answer, or this classifier gaining an accessor-name

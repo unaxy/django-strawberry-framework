@@ -1331,7 +1331,7 @@ def _extra_order_term(
 
     ``django/db/models/sql/compiler.py::SQLCompiler._order_by_pairs`` runs an
     ``extra`` ordering through the same per-term loop as an explicit one, so an
-    expression (only a queryset no visibility seal walked carries one), ``"?"``, a
+    expression, ``"?"``, a
     selected alias (an annotation or an ``extra(select=)`` key) and a field path
     compile identically from either collection and move verbatim.
     The one arm only an ``extra`` term reaches is a dotted ``table.column``

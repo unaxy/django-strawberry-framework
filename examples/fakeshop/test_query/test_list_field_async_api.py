@@ -95,7 +95,6 @@ from django_strawberry_framework.resource_policy import (
 from django_strawberry_framework.schema import DjangoSchema
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._queryset_private import (
-    set_queryset_deferred_filter,
     set_queryset_hints,
 )
 from django_strawberry_framework.utils.context import get_context_value, stash_on_context
@@ -2476,10 +2475,9 @@ _GUARD_REFUSED_ORDERINGS: tuple[
 
 
 #: The annotated twins of the project-class rows above. ``annotate`` resolves the
-#: project class into the query graph, so the post-``OrderSet`` seal refuses the
-#: queryset as untrusted before the offset guard reads it. ``(id, ordering,
-#: registrations)``.
-_SEAL_REFUSED_ORDERINGS: tuple[
+#: project class into the query graph at once, so the guard reads it as a node of
+#: the returned query rather than as a spelling. ``(id, ordering, registrations)``.
+_ANNOTATED_REFUSED_ORDERINGS: tuple[
     tuple[str, _BranchOrdering, tuple[_LookupRegistration, ...]],
     ...,
 ] = (
@@ -2830,16 +2828,16 @@ async def test_async_offset_refuses_an_order_compiling_to_sql_it_cannot_read(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("ordering", "registrations"),
-    [row[1:] for row in _SEAL_REFUSED_ORDERINGS],
-    ids=[row[0] for row in _SEAL_REFUSED_ORDERINGS],
+    [row[1:] for row in _ANNOTATED_REFUSED_ORDERINGS],
+    ids=[row[0] for row in _ANNOTATED_REFUSED_ORDERINGS],
 )
-async def test_async_offset_annotated_project_sql_is_refused_by_the_seal_first(
+async def test_async_offset_refuses_an_annotated_project_sql_order(
     monkeypatch: pytest.MonkeyPatch,
     record_compiled_sql: RecordCompiledSql,
     ordering: _BranchOrdering,
     registrations: tuple[_LookupRegistration, ...],
 ) -> None:
-    """``annotate`` resolves the project class into the graph, so the async seal names it first."""
+    """``annotate`` resolves the project class into the graph, which the async guard refuses."""
     await _seed_three_branches_async()
 
     payload, branch_sql = await _branch_offset_page_under(
@@ -2847,12 +2845,11 @@ async def test_async_offset_annotated_project_sql_is_refused_by_the_seal_first(
         record_compiled_sql,
         ordering,
         registrations,
-        extra_settings=_ERROR_POLICY_PASS_THROUGH,
     )
 
-    assert payload["data"] is None
-    message = json_str(payload, "errors", 0, "message")
-    assert message.startswith(_BRANCH_ORDER_ASYNC_SHAPE_PREFIX + "untrusted defect"), message
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == [], branch_sql
 
 
@@ -3058,7 +3055,7 @@ async def test_async_holder_shelves_a_warm_prefetch_returned_by_a_resolver_is_re
     record_compiled_sql: RecordCompiledSql,
     parents: int,
 ) -> None:
-    """``root.<relation>.all()`` from a warm prefetch is a cached queryset the async seal rebuilds."""
+    """``root.<relation>.all()`` from a warm prefetch is a cached queryset the async seal clones."""
     await _seed_three_shelves_async()
 
     @strawberry.type
@@ -3103,10 +3100,6 @@ async def test_async_holder_shelves_a_warm_prefetch_returned_by_a_resolver_is_re
 _BRANCH_ORDER_ASYNC_SHAPE_PREFIX = (
     "BranchOrder.apply_async must return an unevaluated, unsliced QuerySet of Branch rows; got "
 )
-
-
-class _AsyncDeferredFilterQuerySet(models.QuerySet[library_models.Branch]):
-    """A project queryset class, planted with a deferred-filter state Django never writes."""
 
 
 class _ResidualAwaitable:
@@ -3189,21 +3182,6 @@ async def _async_in_place_routing(
     return queryset
 
 
-async def _async_untrusted(
-    _cls: type[BranchOrder],
-    _order_input: object,
-    _queryset: models.QuerySet[library_models.Branch],
-    _info: object,
-    **_kwargs: object,
-) -> _AsyncDeferredFilterQuerySet:
-    candidate = _AsyncDeferredFilterQuerySet(model=library_models.Branch)
-    # ``negate`` decides whether the predicate is inverted and is truth-tested to
-    # do it, so Django's exact ``bool`` is the only shape the bake accepts there.
-    # basedpyright: plants a non-``bool`` negate, a deferred-filter shape Django never writes
-    set_queryset_deferred_filter(candidate, (1, (), {"name": "A"}))  # pyright: ignore[reportArgumentType]
-    return candidate
-
-
 def _async_non_awaitable(
     _cls: type[BranchOrder],
     _order_input: object,
@@ -3273,12 +3251,6 @@ _MALFORMED_APPLY_ASYNC_ROWS = (
         _async_in_place_routing,
         "BranchOrder.apply_async changed database routing intent",
         ("got db=None, hints={'tenant': 2}",),
-    ),
-    (
-        "malformed-deferred-filter",
-        _async_untrusted,
-        _BRANCH_ORDER_ASYNC_SHAPE_PREFIX + "untrusted defect",
-        ("deferred filter negate is a int",),
     ),
     (
         "sync-override-of-an-async-seam",
@@ -3988,43 +3960,6 @@ async def test_async_iterable_with_awaitable_children_completes_over_http() -> N
     assert payload["data"] == {"children": [{"name": "resolved"}]}
 
 
-class _HostileBranchQuerySet(models.QuerySet[library_models.Branch]):
-    """A predicate-erasing subclass: ``__iter__`` yields the raw table.
-
-    Hand-copied from ``test_list_field_api.py``; see that copy for why the pair is
-    kept separate and why a change to the adversary is a change to both files.
-    """
-
-    @override
-    def filter(self, *args: object, **kwargs: object) -> models.QuerySet[library_models.Branch]:
-        return library_models.Branch.objects.all()
-
-    @override
-    def order_by(self, *args: object, **kwargs: object) -> models.QuerySet[library_models.Branch]:
-        return library_models.Branch.objects.all()
-
-    @override
-    def __iter__(self) -> Iterator[library_models.Branch]:
-        return iter(library_models.Branch.objects.all().order_by("pk"))
-
-    @override
-    def __aiter__(self) -> AsyncIterator[library_models.Branch]:
-        return library_models.Branch.objects.all().order_by("pk").__aiter__()
-
-
-def _hostile_branch_hook(
-    _cls: type[library_schema.BranchType],
-    _queryset: models.QuerySet[library_models.Branch],
-    _info: strawberry.Info[object, object],
-    **_kwargs: object,
-) -> models.QuerySet[library_models.Branch]:
-    """Apply the visibility predicate through unbound ``QuerySet.filter``."""
-    return models.QuerySet[library_models.Branch].filter(
-        _HostileBranchQuerySet(model=library_models.Branch),
-        city="Boston",
-    )
-
-
 def _degrading_branch_manager() -> models.Manager[library_models.Branch]:
     def _all(_self: models.Manager[library_models.Branch]) -> list[str]:
         return ["secret"]
@@ -4033,32 +3968,6 @@ def _degrading_branch_manager() -> models.Manager[library_models.Branch]:
     manager.model = library_models.Branch
     manager._db = None
     return manager
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_async_hostile_queryset_subclass_cannot_leak_restricted_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The async view seals a hostile ``QuerySet`` subclass the same way the sync one does."""
-    await sync_to_async(library_models.Branch.objects.create)(name="Alpha", city="Boston")
-    await sync_to_async(library_models.Branch.objects.create)(name="Hidden", city="restricted")
-    monkeypatch.setattr(
-        library_schema.BranchType,
-        "get_queryset",
-        classmethod(_hostile_branch_hook),
-    )
-
-    @strawberry.type
-    class _BranchQuery:
-        branches: list[library_schema.BranchType] = DjangoListField(library_schema.BranchType)
-
-    payload = await _post_async(
-        DjangoSchema(query=_BranchQuery, config=strawberry_config()),
-        "{ branches { name } }",
-    )
-    assert "errors" not in payload, payload
-    names = [json_at(row, "name") for row in json_list(payload, "data", "branches")]
-    assert names == ["Alpha"]
 
 
 @pytest.mark.django_db(transaction=True)

@@ -45,12 +45,11 @@ finalize-time refusal and ordering, orphan rejection, and registry reset.
 from __future__ import annotations
 
 import contextlib
-import copy
 import functools
 import sys
 import threading
 from collections import OrderedDict
-from collections.abc import Callable, Generator, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, NoReturn
 
@@ -87,10 +86,8 @@ from django.db import connection
 from django.db.models import (
     BigIntegerField,
     CharField,
-    DateTimeField,
     F,
     ForeignKey,
-    IntegerField,
     Lookup,
     Model,
     QuerySet,
@@ -99,8 +96,7 @@ from django.db.models import (
     Transform,
 )
 from django.db.models import Field as ModelFieldClass
-from django.db.models.functions import Abs, ExtractHour
-from django.db.models.lookups import GreaterThan, IStartsWith
+from django.db.models.functions import Abs
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext, isolate_apps, register_lookup
@@ -144,11 +140,9 @@ from django_strawberry_framework.filters import (
     ListFilter,
     RangeFilter,
     RelatedFilter,
-    _connection_served_filtersets,
     _helper_referenced_filtersets,
     filter_input_type,
 )
-from django_strawberry_framework.filters import inputs as filter_inputs_module
 from django_strawberry_framework.filters.base import (
     IntegerRangeFilter,
     _lookup_operand,
@@ -168,7 +162,6 @@ from django_strawberry_framework.types.finalizer import (
     _bind_filterset_owner,
 )
 from django_strawberry_framework.types.relay import apply_interfaces
-from django_strawberry_framework.utils import querysets as querysets_module
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_dict,
@@ -4029,7 +4022,7 @@ def test_finalize_refuses_an_uncopyable_filter_before_an_unregistered_target(
 
 
 # ---------------------------------------------------------------------------
-# Served leaves the visibility seal refuses.
+# Project lookups and transforms on a generated set.
 # ---------------------------------------------------------------------------
 
 
@@ -4038,13 +4031,6 @@ class _Doubled(Transform):
 
     lookup_name = "doubled"
     template = "(%(expressions)s * 2)"
-
-
-class _AbsoluteValue(Transform):
-    """A project transform built on a database function, ``ABS``."""
-
-    lookup_name = "absolute"
-    function = "ABS"
 
 
 class _NotEqual(Lookup):
@@ -4059,10 +4045,6 @@ class _NotEqual(Lookup):
         return f"{lhs} <> {rhs}", (*lhs_params, *rhs_params)
 
 
-class _SubclassedHour(ExtractHour):
-    """A subclass of Django's ``ExtractHour`` that overrides nothing."""
-
-
 @pytest.fixture(autouse=True)
 def _fresh_lookup_operands() -> Iterator[None]:
     """Drop the filter operands resolved while a test's lookup registration was live.
@@ -4075,23 +4057,6 @@ def _fresh_lookup_operands() -> Iterator[None]:
     yield
     _lookup_operand.cache_clear()
     _model_lookup_operand.cache_clear()
-
-
-@contextlib.contextmanager
-def _instance_lookup(
-    model: type[Model],
-    field_name: str,
-    lookup: type[Lookup],
-    lookup_name: str,
-) -> Generator[None]:
-    """Register ``lookup`` as ``lookup_name`` on ``model``'s ``field_name`` instance alone while open."""
-    field = model._meta.get_field(field_name)
-    assert isinstance(field, ModelFieldClass)
-    _ = field.register_instance_lookup(lookup, lookup_name)
-    try:
-        yield
-    finally:
-        field._unregister_instance_lookup(lookup, lookup_name)
 
 
 def _specimen_set(
@@ -4135,16 +4100,6 @@ def _serve_at_root(filterset_cls: type[FilterSet]) -> type[DjangoType]:
     return node
 
 
-def _serve_nested_only(filterset_cls: type[FilterSet]) -> None:
-    """Serve ``filterset_cls`` (over ``NullableScalarSpecimen``) only as a nested connection.
-
-    A Relay ``ScalarSpecimen`` node with no set of its own selects the to-many
-    ``nullable_partners``, whose Relay target grows ``nullablePartnersConnection(filter:)``.
-    """
-    _ = _relay_node(NullableScalarSpecimen, ("id", "label"), filterset_cls)
-    _ = DjangoConnectionField(_relay_node(ScalarSpecimen, ("id", "nullable_partners"), None))
-
-
 def _serve_through_related_filter(child: type[FilterSet]) -> None:
     """Serve a partner set at the root that reaches ``child`` (over ``ScalarSpecimen``) nested only."""
     parent = _specimen_set(
@@ -4157,252 +4112,12 @@ def _serve_through_related_filter(child: type[FilterSet]) -> None:
     _ = _serve_at_root(parent)
 
 
-def _unsealable_refusal(subject: str, lookup: str, refused: type[object]) -> str:
-    """The refusal of a served leaf whose predicate holds ``refused``."""
-    return (
-        f"{subject} with lookup {lookup!r} resolves to {refused.__module__}."
-        f"{refused.__qualname__}, which is not one of Django's own lookup or transform "
-        "classes. A connection serves this filter (a DjangoConnectionField, or the "
-        "<relation>Connection a Relay type grows for a to-many relation) and runs its filter: "
-        "argument inside the visibility boundary, which admits only Django's own lookup and "
-        "transform classes, so every request naming the filter would be refused. Filter "
-        "through a Django class (registered under any lookup name), apply a FilterSet no "
-        "connection serves from a resolver of your own (FilterInput[...] and apply_sync), or "
-        'set Meta.relation_shapes = {"<relation>": "list"} on the type whose to-many '
-        "relation grows the connection."
-    )
-
-
-@dataclass(frozen=True)
-class _UnsealableCase:
-    """A served set whose one leaf resolves to a class the seal refuses, and what its refusal names."""
-
-    register: Callable[[], contextlib.AbstractContextManager[object]]
-    serve: Callable[[], object]
-    subject: str
-    lookup: str
-    refused: type[object]
-
-
 def _doubled() -> contextlib.AbstractContextManager[object]:
     return register_lookup(BigIntegerField, _Doubled)
 
 
 def _not_equal_on_big() -> contextlib.AbstractContextManager[object]:
     return register_lookup(BigIntegerField, _NotEqual)
-
-
-_UNSEALABLE_CASES: dict[str, _UnsealableCase] = {
-    "project-transform-generated-root": _UnsealableCase(
-        _doubled,
-        lambda: _serve_at_root(_specimen_set({"signed_big": ["doubled"]})),
-        "SpecimenFilter: NumberFilter on 'signed_big'",
-        "doubled",
-        _Doubled,
-    ),
-    "project-lookup-declared-lookup-expr-root": _UnsealableCase(
-        _not_equal_on_big,
-        lambda: _serve_at_root(
-            _specimen_set([], {"other": NumberFilter(field_name="signed_big", lookup_expr="ne")}),
-        ),
-        "SpecimenFilter: NumberFilter on 'signed_big'",
-        "ne",
-        _NotEqual,
-    ),
-    "func-transform-declared-field-name-root": _UnsealableCase(
-        lambda: register_lookup(BigIntegerField, _AbsoluteValue),
-        lambda: _serve_at_root(
-            _specimen_set([], {"size": NumberFilter(field_name="signed_big__absolute")}),
-        ),
-        "SpecimenFilter: NumberFilter on 'signed_big__absolute'",
-        "exact",
-        _AbsoluteValue,
-    ),
-    "django-subclass-filter-overrides-root": _UnsealableCase(
-        lambda: register_lookup(DateTimeField, _SubclassedHour, lookup_name="hour_of"),
-        lambda: _serve_at_root(
-            _specimen_set(
-                {"occurred_at": ["hour_of"]},
-                meta={"filter_overrides": {IntegerField: {"filter_class": CharFilter}}},
-            ),
-        ),
-        "SpecimenFilter: CharFilter on 'occurred_at'",
-        "hour_of",
-        _SubclassedHour,
-    ),
-    "django-lookup-on-a-project-transform": _UnsealableCase(
-        lambda: _both(_doubled(), register_lookup(_Doubled, GreaterThan, lookup_name="above")),
-        lambda: _serve_at_root(_specimen_set({"signed_big": ["doubled__above"]})),
-        "SpecimenFilter: NumberFilter on 'signed_big'",
-        "doubled__above",
-        _Doubled,
-    ),
-    "project-lookup-on-a-django-transform-output": _UnsealableCase(
-        lambda: register_lookup(IntegerField, _NotEqual),
-        lambda: _serve_at_root(_specimen_set({"occurred_at": ["hour__ne"]})),
-        "SpecimenFilter: NumberFilter on 'occurred_at'",
-        "hour__ne",
-        _NotEqual,
-    ),
-    "instance-registration": _UnsealableCase(
-        lambda: _instance_lookup(ScalarSpecimen, "signed_big", _NotEqual, "unequal"),
-        lambda: _serve_at_root(_specimen_set({"signed_big": ["unequal"]})),
-        "SpecimenFilter: NumberFilter on 'signed_big'",
-        "unequal",
-        _NotEqual,
-    ),
-    "nested-connection-only": _UnsealableCase(
-        _doubled,
-        lambda: _serve_nested_only(
-            _specimen_set(
-                {"signed_big": ["doubled"]},
-                name="PartnerFilter",
-                model=NullableScalarSpecimen,
-            ),
-        ),
-        "PartnerFilter: NumberFilter on 'signed_big'",
-        "doubled",
-        _Doubled,
-    ),
-    "related-filter-nested-only-child": _UnsealableCase(
-        _doubled,
-        lambda: _serve_through_related_filter(
-            _specimen_set(
-                {"label": ["exact"]},
-                {"twice": NumberFilter(field_name="signed_big", lookup_expr="doubled")},
-            ),
-        ),
-        "SpecimenFilter.twice: NumberFilter on 'signed_big' (reached through PartnerFilter.partner)",
-        "doubled",
-        _Doubled,
-    ),
-    "meta-fields-relation-path": _UnsealableCase(
-        _doubled,
-        lambda: _serve_at_root(
-            _specimen_set(
-                {"partner__signed_big": ["doubled"]},
-                name="PartnerFilter",
-                model=NullableScalarSpecimen,
-            ),
-        ),
-        "PartnerFilter: NumberFilter on 'partner__signed_big'",
-        "doubled",
-        _Doubled,
-    ),
-    "in-leaf": _UnsealableCase(
-        _doubled,
-        lambda: _serve_at_root(_specimen_set({"signed_big": ["doubled__in"]})),
-        "SpecimenFilter: IntegerInFilter on 'signed_big'",
-        "doubled__in",
-        _Doubled,
-    ),
-    "range-leaf": _UnsealableCase(
-        _doubled,
-        lambda: _serve_at_root(_specimen_set({"signed_big": ["doubled__range"]})),
-        "SpecimenFilter: IntegerRangeFilter on 'signed_big'",
-        "doubled__range",
-        _Doubled,
-    ),
-    "isnull-leaf": _UnsealableCase(
-        _doubled,
-        lambda: _serve_at_root(_specimen_set({"signed_big": ["doubled__isnull"]})),
-        "SpecimenFilter: BooleanFilter on 'signed_big'",
-        "doubled__isnull",
-        _Doubled,
-    ),
-    "reverse-relation-key": _UnsealableCase(
-        lambda: register_lookup(ForeignKey, _NotEqual, lookup_name="exact"),
-        lambda: _serve_at_root(_specimen_set({"children": ["exact"]})),
-        "SpecimenFilter: ModelMultipleChoiceFilter on 'children'",
-        "exact",
-        _NotEqual,
-    ),
-}
-
-
-@contextlib.contextmanager
-def _both(
-    first: contextlib.AbstractContextManager[object],
-    second: contextlib.AbstractContextManager[object],
-) -> Generator[None]:
-    """Hold ``first`` and then ``second`` open together."""
-    with first, second:
-        yield
-
-
-@pytest.mark.parametrize("case", list(_UNSEALABLE_CASES.values()), ids=list(_UNSEALABLE_CASES))
-def test_finalize_refuses_a_served_leaf_the_visibility_seal_refuses(case: _UnsealableCase) -> None:
-    """A leaf a connection serves whose predicate holds a class not Django's own fails the build.
-
-    The connection runs its ``filter:`` argument inside the visibility boundary, whose seal
-    refuses such a class on every request, so the build names the declaring set, the
-    filter class, the path, the lookup and the refused class, wherever the leaf comes
-    from (generated, declared, ``Meta.filter_overrides``, a relation path, a
-    ``RelatedFilter`` child only the nested branch reaches, a reverse relation key) and
-    whichever connection serves it (root, or only a nested ``<relation>Connection``).
-    """
-    with case.register():
-        _ = case.serve()
-        with pytest.raises(ConfigurationError) as exc_info:
-            finalize_django_types()
-    assert str(exc_info.value) == _unsealable_refusal(case.subject, case.lookup, case.refused)
-
-
-def test_a_connection_declared_after_finalize_refuses_an_unsealable_leaf() -> None:
-    """A root connection declared once the registry is finalized is refused where it is declared."""
-    with _doubled():
-        node = _relay_node(ScalarSpecimen, ("id",), _specimen_set({"signed_big": ["doubled"]}))
-        finalize_django_types()
-        with pytest.raises(ConfigurationError) as exc_info:
-            _ = DjangoConnectionField(node)
-    subject = "SpecimenFilter: NumberFilter on 'signed_big'"
-    assert str(exc_info.value) == _unsealable_refusal(subject, "doubled", _Doubled)
-
-
-def test_the_seal_predicate_is_the_one_the_build_asks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The build asks ``utils/querysets.py::_type_is_genuinely_django`` itself, never a copy.
-
-    ``filters/inputs.py`` imports the predicate by name, so the build's own reference is the
-    one replaced, beside the defining module's. With the predicate refusing Django's
-    ``Abs``, a served leaf through ``Abs`` (registered under another name) is refused
-    naming it.
-    """
-    genuine = querysets_module._type_is_genuinely_django
-    assert read_attr(filter_inputs_module, "_type_is_genuinely_django") is genuine
-
-    def genuine_but_abs(node_type: type[object]) -> bool:
-        return node_type is not Abs and genuine(node_type)
-
-    monkeypatch.setattr(querysets_module, "_type_is_genuinely_django", genuine_but_abs)
-    monkeypatch.setattr(filter_inputs_module, "_type_is_genuinely_django", genuine_but_abs)
-    with register_lookup(BigIntegerField, Abs, lookup_name="magnitude"):
-        _ = _serve_at_root(_specimen_set({"signed_big": ["magnitude"]}))
-        with pytest.raises(ConfigurationError) as exc_info:
-            finalize_django_types()
-    subject = "SpecimenFilter: NumberFilter on 'signed_big'"
-    assert str(exc_info.value) == _unsealable_refusal(subject, "magnitude", Abs)
-
-
-def _doubled_is(queryset: QuerySet[Model], name: str, value: object) -> QuerySet[Model]:
-    """A plain-function ``method=``: rows whose doubled ``signed_big`` is ``value``."""
-    del name
-    return queryset.filter(signed_big__doubled=value)
-
-
-class _OwnFilterNumberFilter(NumberFilter):
-    """A consumer ``NumberFilter`` whose own ``filter`` decides what its value means."""
-
-    @override
-    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
-        return qs
-
-
-class _OwnFilterModelMultipleChoiceFilter(ModelMultipleChoiceFilter):
-    """A consumer ``ModelMultipleChoiceFilter`` whose own ``filter`` decides what its value means."""
-
-    @override
-    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
-        return qs
 
 
 def _post(schema: object, query: str) -> object:
@@ -4438,113 +4153,6 @@ def _labels(data: object) -> list[str]:
     return sorted(str(json_at(edge, "node", "label")) for edge in json_list(data, "rows", "edges"))
 
 
-_DJANGO_CLASSES_RENAMED = [
-    pytest.param(
-        lambda: register_lookup(DateTimeField, ExtractHour, lookup_name="hour_of_day"),
-        {"occurred_at": ["hour_of_day"]},
-        "occurredAt: {hourOfDay: 3}",
-        ["dropped", "kept"],
-        id="extract-hour-as-hour-of-day",
-    ),
-    pytest.param(
-        lambda: register_lookup(BigIntegerField, Abs, lookup_name="magnitude"),
-        {"signed_big": ["magnitude"]},
-        'signedBig: {magnitude: "7"}',
-        ["kept"],
-        id="abs-as-magnitude",
-    ),
-    pytest.param(
-        lambda: _instance_lookup(ScalarSpecimen, "label", IStartsWith, "begins"),
-        {"label": ["begins"]},
-        'label: {begins: "KE"}',
-        ["kept"],
-        id="istartswith-instance-registered-as-begins",
-    ),
-]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    (
-        "register",
-        "fields",
-        "where",
-        "expected",
-    ),
-    _DJANGO_CLASSES_RENAMED,
-)
-def test_a_served_leaf_through_a_django_class_under_another_name_answers(
-    register: Callable[[], contextlib.AbstractContextManager[object]],
-    fields: dict[str, list[str]],
-    where: str,
-    expected: list[str],
-) -> None:
-    """A Django lookup or transform class registered under a new name builds and filters.
-
-    The seal admits the class by identity, whatever name it is registered under, on a
-    field class or on one field instance.
-    """
-    cleaned_specimen("kept", kept=True)
-    cleaned_specimen("dropped", kept=False)
-    with register():
-        schema = _served_schema(_specimen_set(fields))
-        data = _post(schema, f"{{ rows(filter: {{{where}}}) {{ edges {{ node {{ label }} }} }} }}")
-    assert _labels(data) == expected
-
-
-_UNWALKED_SERVED_LEAVES = [
-    pytest.param(
-        lambda: NumberFilter(field_name="signed_big", method=_doubled_is),
-        id="method-over-a-project-transform",
-    ),
-    pytest.param(
-        lambda: _OwnFilterNumberFilter(field_name="signed_big", lookup_expr="doubled"),
-        id="filter-override-over-a-project-transform",
-    ),
-    pytest.param(
-        lambda: NumberFilter(field_name="twice", lookup_expr="exact"),
-        id="declared-over-an-annotation",
-    ),
-    pytest.param(
-        lambda: NumberFilter(field_name="signed_big__gt", method=_doubled_is),
-        id="method-over-a-path-django-refuses",
-    ),
-    pytest.param(
-        lambda: _OwnFilterNumberFilter(field_name="signed_big__gt"),
-        id="filter-override-over-a-path-django-refuses",
-    ),
-    pytest.param(
-        lambda: NumberFilter(field_name="parent__bogus"),
-        id="name-past-a-relation-its-model-lacks",
-    ),
-    pytest.param(
-        lambda: _OwnFilterModelMultipleChoiceFilter(
-            field_name="children",
-            lookup_expr="icontains",
-            queryset=_scalar_specimens(),
-        ),
-        id="filter-override-over-a-to-many-key-lookup-the-relation-refuses",
-    ),
-]
-
-
-@pytest.mark.parametrize("declare", _UNWALKED_SERVED_LEAVES)
-def test_a_served_leaf_the_build_does_not_walk_builds(declare: Callable[[], Filter]) -> None:
-    """A served leaf whose query is consumer code, or whose path the model cannot walk, builds.
-
-    A ``method=`` filter and a ``filter`` override build their own query, over a path or a
-    relation's lookup Django refuses too, and a queryset annotation has no walk from the
-    model: no class reaches the seal from the build's walk, which leaves each to the request.
-    A name past a relation the related model lacks is read on the rows a walked hop's type
-    shapes, so it is not refused as unresolvable
-    (``filters/base.py::refuse_unresolvable_lookup``).
-    """
-    with _doubled():
-        _ = _serve_at_root(_specimen_set([], {"twice_of": declare()}))
-        finalize_django_types()
-    assert hasattr(sys.modules[INPUTS_MODULE_PATH], "SpecimenFilterInputType")
-
-
 class _DoubledSpecimenFilter(FilterSet):
     """A set whose one declared leaf runs the project transform ``doubled``."""
 
@@ -4556,12 +4164,22 @@ class _DoubledSpecimenFilter(FilterSet):
 
 
 @pytest.mark.django_db
-def test_an_unserved_set_with_a_project_leaf_answers_through_its_own_resolver() -> None:
-    """A set no connection serves keeps a project leaf: a project resolver applies it.
+def test_a_set_with_a_project_leaf_answers_through_a_connection() -> None:
+    """A connection serves a project leaf: its ``filter:`` filters through ``doubled``."""
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("dropped", kept=False)
+    with _doubled():
+        schema = _served_schema(_DoubledSpecimenFilter)
+        data = _post(
+            schema,
+            "{ rows(filter: {twice: {doubled: 14}}) { edges { node { label } } } }",
+        )
+    assert _labels(data) == ["kept"]
 
-    ``FilterInput[...]`` and ``apply_sync`` run outside the visibility boundary, so the
-    leaf builds and filters through ``doubled``.
-    """
+
+@pytest.mark.django_db
+def test_an_unserved_set_with_a_project_leaf_answers_through_its_own_resolver() -> None:
+    """``FilterInput[...]`` and ``apply_sync`` in a project resolver filter through ``doubled``."""
     cleaned_specimen("kept", kept=True)
     cleaned_specimen("dropped", kept=False)
     with _doubled():
@@ -4590,9 +4208,9 @@ def test_an_unserved_set_with_a_project_leaf_answers_through_its_own_resolver() 
     assert data == {"rows": [{"label": "kept"}]}
 
 
-@pytest.mark.parametrize("served", [True, False], ids=["served", "unserved"])
+@pytest.mark.parametrize("served", [True, False], ids=["connection", "no-connection"])
 def test_all_leaves_out_a_project_lookup_on_its_column(*, served: bool) -> None:
-    """``"__all__"`` publishes no lookup class that is not Django's own, served or not.
+    """``"__all__"`` publishes no lookup class that is not Django's own, whatever serves the set.
 
     The set builds either way, with the column's Django lookups and without ``ne``.
     """
@@ -4605,350 +4223,6 @@ def test_all_leaves_out_a_project_lookup_on_its_column(*, served: bool) -> None:
         finalize_django_types()
     assert "signed_big__ne" not in filterset_cls.base_filters
     assert {"signed_big", "signed_big__gt", "signed_big__in"} <= set(filterset_cls.base_filters)
-
-
-def test_registry_clear_clears_the_connection_served_ledger() -> None:
-    """A connection records its set as served until ``registry.clear()`` resets the ledger."""
-    filterset_cls = _specimen_set({"signed_big": ["exact"]})
-    _ = _serve_at_root(filterset_cls)
-    assert filterset_cls in _connection_served_filtersets
-
-    registry.clear()
-
-    assert _connection_served_filtersets == set()
-
-
-def _signed_big_is(qs: QuerySet[Model], value: object) -> QuerySet[Model]:
-    """A consumer ``filter``: rows whose ``signed_big`` is ``value``, no transform applied."""
-    if value in (None, ""):
-        return qs
-    return qs.filter(signed_big=value)
-
-
-class _SignedBigIsFilter(NumberFilter):
-    """A consumer ``NumberFilter`` whose class-level ``filter`` override owns its query."""
-
-    @override
-    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
-        return _signed_big_is(qs, value)
-
-
-class _HeldSignedBigIsFilter(NumberFilter):
-    """A consumer ``NumberFilter`` whose ``__init__`` holds its own ``filter`` on the instance."""
-
-    def __init__(self, *, field_name: str, lookup_expr: str) -> None:
-        super().__init__(field_name=field_name, lookup_expr=lookup_expr)
-        self.filter = _signed_big_is
-
-
-class _InitOverridingChildFilter(FilterSet):
-    """A child set overriding ``__init__``, whose leaf's ``filter`` override owns its query.
-
-    The override makes the parent's expansion project the child's leaves, so a flat copy
-    runs package code that answers for the child's own ``filter``.
-    """
-
-    twice = _SignedBigIsFilter(field_name="signed_big", lookup_expr="doubled")
-
-    def __init__(
-        self,
-        data: Mapping[str, object] | None = None,
-        queryset: QuerySet[Model] | None = None,
-        *,
-        request: HttpRequest | None = None,
-        prefix: str | None = None,
-    ) -> None:
-        super().__init__(data, queryset, request=request, prefix=prefix)
-
-    class Meta:
-        model = ScalarSpecimen
-        fields: ClassVar[list[str]] = ["label"]
-
-
-class _HeldFilterChildFilter(FilterSet):
-    """A child set whose leaf holds its own ``filter`` on the instance."""
-
-    twice = _HeldSignedBigIsFilter(field_name="signed_big", lookup_expr="doubled")
-
-    class Meta:
-        model = ScalarSpecimen
-        fields: ClassVar[list[str]] = ["label"]
-
-
-def _seed_partners() -> None:
-    """A partner of the kept specimen (``signed_big`` 7) and one of the dropped (900)."""
-    NullableScalarSpecimen.objects.create(label="pa", partner=cleaned_specimen("a", kept=True))
-    NullableScalarSpecimen.objects.create(label="pb", partner=cleaned_specimen("b", kept=False))
-
-
-def _partner_rows_schema(child: type[FilterSet]) -> strawberry.Schema:
-    """Serve a partner set reaching ``child`` through ``partner`` at the root ``rows``."""
-    parent = _specimen_set(
-        ["label"],
-        {"partner": RelatedFilter(child, field_name="partner")},
-        name="PartnerFilter",
-        model=NullableScalarSpecimen,
-    )
-    _ = _relay_node(ScalarSpecimen, ("id", "label"), None)
-    return _served_schema(parent, NullableScalarSpecimen)
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    "child",
-    [_InitOverridingChildFilter, _HeldFilterChildFilter],
-    ids=["child-overriding-init", "leaf-holding-its-own-filter"],
-)
-def test_a_related_child_leaf_whose_filter_is_its_own_answers(child: type[FilterSet]) -> None:
-    """A ``RelatedFilter`` child's leaf whose ``filter`` is consumer code builds and answers.
-
-    The leaf is judged on the child set that declares it, never through the parent's flat
-    copy (a projected copy runs package code that answers for the child's own ``filter``),
-    so its ``filter`` owns its query, nested and flat alike.
-    """
-    _seed_partners()
-    with _doubled():
-        schema = _partner_rows_schema(child)
-        nested = _post(
-            schema,
-            "{ rows(filter: {partner: {twice: {doubled: 7}}}) { edges { node { label } } } }",
-        )
-        flat = _post(
-            schema,
-            "{ rows(filter: {partnerTwice: {doubled: 7}}) { edges { node { label } } } }",
-        )
-    assert _labels(nested) == _labels(flat) == ["pa"]
-
-
-def test_a_related_child_leaf_is_refused_without_its_flat_copy() -> None:
-    """A child set the nested branch serves is asked itself, whatever flat copies the parent keeps.
-
-    The parent's ``get_filters`` drops every flat copy, so the child's leaf reaches the
-    connection only as the nested branch's, and is refused naming the child's declaration.
-    """
-
-    class ChildFilter(FilterSet):
-        twice = NumberFilter(field_name="signed_big", lookup_expr="doubled")
-
-        class Meta:
-            model = ScalarSpecimen
-            fields: ClassVar[list[str]] = ["label"]
-
-    class PartnerFilter(FilterSet):
-        partner = RelatedFilter(ChildFilter, field_name="partner")
-
-        class Meta:
-            model = NullableScalarSpecimen
-            fields: ClassVar[list[str]] = ["label"]
-
-        @classmethod
-        @override
-        def get_filters(cls) -> OrderedDict[str, Filter]:
-            own = super().get_filters()
-            return OrderedDict((name, leaf) for name, leaf in own.items() if "__" not in name)
-
-    with _doubled():
-        _ = _relay_node(ScalarSpecimen, ("id", "label"), None)
-        _ = _serve_at_root(PartnerFilter)
-        assert "partner__twice" not in PartnerFilter._filter_table()
-        with pytest.raises(ConfigurationError) as exc_info:
-            finalize_django_types()
-    subject = (
-        "ChildFilter.twice: NumberFilter on 'signed_big' (reached through PartnerFilter.partner)"
-    )
-    assert str(exc_info.value) == _unsealable_refusal(subject, "doubled", _Doubled)
-
-
-@pytest.mark.django_db
-def test_a_related_child_behind_a_dropped_branch_builds() -> None:
-    """A child set whose branch the parent's ``get_filters`` drops is served by no connection.
-
-    The parent declares the ``RelatedFilter`` but publishes neither its branch nor its flat
-    copies, so no request reaches the child, and its project leaf builds; the parent's own
-    ``label`` filter answers.
-    """
-    _seed_partners()
-
-    class ChildFilter(FilterSet):
-        twice = NumberFilter(field_name="signed_big", lookup_expr="doubled")
-
-        class Meta:
-            model = ScalarSpecimen
-            fields: ClassVar[list[str]] = ["label"]
-
-    class PartnerFilter(FilterSet):
-        partner = RelatedFilter(ChildFilter, field_name="partner")
-
-        class Meta:
-            model = NullableScalarSpecimen
-            fields: ClassVar[list[str]] = ["label"]
-
-        @classmethod
-        @override
-        def get_filters(cls) -> OrderedDict[str, Filter]:
-            own = super().get_filters()
-            return OrderedDict(
-                (name, leaf) for name, leaf in own.items() if not name.startswith("partner")
-            )
-
-    with _doubled():
-        _ = _relay_node(ScalarSpecimen, ("id", "label"), None)
-        schema = _served_schema(PartnerFilter, NullableScalarSpecimen)
-        data = _post(
-            schema,
-            '{ rows(filter: {label: {exact: "pa"}}) { edges { node { label } } } }',
-        )
-    assert _labels(data) == ["pa"]
-
-
-def _keep_head_under_its_name(own: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
-    """Replace the ``partner`` head with a deep copy under its declared name, dropping its flat copies."""
-    kept = OrderedDict((name, leaf) for name, leaf in own.items() if "__" not in name)
-    kept["partner"] = copy.deepcopy(kept["partner"])
-    return kept
-
-
-def _deep_copy_every_filter(own: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
-    """Return a deep copy of every filter, the head and its flat copies included."""
-    return copy.deepcopy(own)
-
-
-def _move_head_to_a_new_key(own: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
-    """Publish the declared ``partner`` head itself under another key, dropping its flat copies."""
-    kept = OrderedDict(
-        (name, leaf) for name, leaf in own.items() if not name.startswith("partner")
-    )
-    kept["counterpart"] = own["partner"]
-    return kept
-
-
-def _keep_only_the_flat_copies(own: OrderedDict[str, Filter]) -> OrderedDict[str, Filter]:
-    """Drop the ``partner`` head, keeping its flat copies."""
-    return OrderedDict((name, leaf) for name, leaf in own.items() if name != "partner")
-
-
-@pytest.mark.parametrize(
-    "reshape",
-    [
-        _keep_head_under_its_name,
-        _deep_copy_every_filter,
-        _move_head_to_a_new_key,
-        _keep_only_the_flat_copies,
-    ],
-    ids=[
-        "deep-copied-head-under-its-name",
-        "deep-copy-of-every-filter",
-        "declared-head-under-a-new-key",
-        "flat-copies-without-the-head",
-    ],
-)
-def test_a_related_child_behind_a_copied_branch_is_refused(
-    reshape: Callable[[OrderedDict[str, Filter]], OrderedDict[str, Filter]],
-) -> None:
-    """A parent ``get_filters`` publishing a copy of its branch still serves the child.
-
-    A deep copy of the branch under its declared name, a deep copy of every filter, the
-    declared ``RelatedFilter`` under another key, or the branch's flat copies alone (each
-    recording the child set) still reach the child, so its project leaf is refused naming
-    the child's declaration and the branch.
-    """
-
-    class ChildFilter(FilterSet):
-        twice = NumberFilter(field_name="signed_big", lookup_expr="doubled")
-
-        class Meta:
-            model = ScalarSpecimen
-            fields: ClassVar[list[str]] = ["label"]
-
-    class PartnerFilter(FilterSet):
-        partner = RelatedFilter(ChildFilter, field_name="partner")
-
-        class Meta:
-            model = NullableScalarSpecimen
-            fields: ClassVar[list[str]] = ["label"]
-
-        @classmethod
-        @override
-        def get_filters(cls) -> OrderedDict[str, Filter]:
-            return reshape(super().get_filters())
-
-    with _doubled():
-        _ = _relay_node(ScalarSpecimen, ("id", "label"), None)
-        _ = _serve_at_root(PartnerFilter)
-        with pytest.raises(ConfigurationError) as exc_info:
-            finalize_django_types()
-    subject = (
-        "ChildFilter.twice: NumberFilter on 'signed_big' (reached through PartnerFilter.partner)"
-    )
-    assert str(exc_info.value) == _unsealable_refusal(subject, "doubled", _Doubled)
-
-
-def _hidden_copies_partner_set(*, keep_head: bool) -> type[FilterSet]:
-    """A partner set reaching a child with a project leaf, its head kept or popped, copies kept."""
-
-    class ChildFilter(FilterSet):
-        twice = NumberFilter(field_name="signed_big", lookup_expr="doubled")
-
-        class Meta:
-            model = ScalarSpecimen
-            fields: ClassVar[list[str]] = ["label"]
-
-    class PartnerFilter(FilterSet):
-        partner = RelatedFilter(ChildFilter, field_name="partner")
-
-        class Meta:
-            model = NullableScalarSpecimen
-            fields: ClassVar[list[str]] = ["label"]
-
-        @classmethod
-        @override
-        def get_filters(cls) -> OrderedDict[str, Filter]:
-            own = super().get_filters()
-            if keep_head:
-                return own
-            return _keep_only_the_flat_copies(own)
-
-    return PartnerFilter
-
-
-@pytest.mark.django_db
-def test_a_related_child_behind_hidden_flat_copies_alone_builds() -> None:
-    """Flat copies ``HIDE_FLAT_FILTERS`` hides, with the branch popped, serve the child nothing.
-
-    The schema publishes neither the branch nor its copies, so no request reaches the
-    child, and its project leaf builds; the parent's own ``label`` filter answers.
-    """
-    _seed_partners()
-    with (
-        override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}),
-        _doubled(),
-    ):
-        _ = _relay_node(ScalarSpecimen, ("id", "label"), None)
-        schema = _served_schema(
-            _hidden_copies_partner_set(keep_head=False),
-            NullableScalarSpecimen,
-        )
-        data = _post(
-            schema,
-            '{ rows(filter: {label: {exact: "pa"}}) { edges { node { label } } } }',
-        )
-    assert _labels(data) == ["pa"]
-
-
-def test_a_related_child_behind_hidden_flat_copies_is_refused_through_its_branch() -> None:
-    """With ``HIDE_FLAT_FILTERS`` set, the branch the table keeps still serves the child."""
-    with (
-        override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}),
-        _doubled(),
-    ):
-        _ = _relay_node(ScalarSpecimen, ("id", "label"), None)
-        _ = _serve_at_root(_hidden_copies_partner_set(keep_head=True))
-        with pytest.raises(ConfigurationError) as exc_info:
-            finalize_django_types()
-    subject = (
-        "ChildFilter.twice: NumberFilter on 'signed_big' (reached through PartnerFilter.partner)"
-    )
-    assert str(exc_info.value) == _unsealable_refusal(subject, "doubled", _Doubled)
 
 
 # ---------------------------------------------------------------------------

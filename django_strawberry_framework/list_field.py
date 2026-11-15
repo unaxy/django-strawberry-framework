@@ -1118,8 +1118,8 @@ def _order_node_state_is_stock(term: object) -> bool:
     """Return whether an approved node carries only the SQL its class supplies.
 
     Approving a class approves the ``as_sql`` it defines, and that method
-    formats instance state into the statement. The seal admits text in every
-    such slot (``utils/querysets.py::_SQL_TEMPLATE_ATTRS``) and in the ``extra``
+    formats instance state into the statement. Django formats text from every
+    such slot (``utils/querysets.py::_SQL_TEMPLATE_ATTRS``) and from the ``extra``
     mapping ``Func`` merges into its template, so ``Lower("name",
     template="RANDOM()")`` is an exact ``Lower`` that compiles to ``RANDOM()``.
     The state is read from the instance namespace, which dispatches nothing,

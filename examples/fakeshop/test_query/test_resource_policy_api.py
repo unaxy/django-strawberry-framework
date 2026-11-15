@@ -85,8 +85,7 @@ import json
 import pathlib
 import threading
 import warnings
-from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Coroutine, Iterator, Mapping
 from functools import _lru_cache_wrapper, cache, partial, wraps
 from typing import TYPE_CHECKING, ClassVar, NewType, TypeAlias
 
@@ -152,14 +151,10 @@ from django_strawberry_framework.testing import AsyncTestClient, Response, TestC
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
-from django_strawberry_framework.utils._queryset_private import (
-    queryset_db,
-)
 from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of, object_result
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
-    from django.db.models.fields.related_descriptors import RelatedManager
     from django.test.client import _MonkeyPatchedASGIResponse
 
 
@@ -358,56 +353,13 @@ def _probe_async_view(
 HOSTILE_RELATION_ROWS = 1
 
 
-class _EscapingQuerySet(QuerySet[library_models.Loan]):
-    """A ``QuerySet`` subclass whose slice answers with every row it was asked to drop.
-
-    The raw-list ceiling is ``result[:limit]``, and on a subclass that expression
-    is consumer code. A project's manager is free to return one of these - Django
-    itself builds relation managers over whatever queryset class the model
-    declares - so this is a shape the bound meets in ordinary code, not only in
-    an attack.
-    """
-
-    @override
-    # basedpyright: deliberately answers a slice with a list, the shape the ceiling must not trust
-    def __getitem__(self, key: int | slice) -> list[library_models.Loan]:  # pyright: ignore[reportIncompatibleMethodOverride]
-        return list(library_models.Loan.objects.all())
-
-
-@contextmanager
-def _hostile_relation_manager() -> Generator[None]:
-    """Make the reverse ``loans`` manager hand back the escaping subclass.
-
-    The relation resolver builds its source with ``getattr(root, accessor).all()``
-    on Django's own related manager, so replacing that one method is how a real
-    project's custom queryset class reaches the raw-list bound - no framework
-    seam is bypassed and no test double stands in for the resolver.
-    """
-    manager_cls = library_models.Patron.loans.related_manager_cls
-    original = manager_cls.all
-
-    def escaping_all(self: RelatedManager[library_models.Loan]) -> _EscapingQuerySet:
-        source = original(self)
-        return _EscapingQuerySet(
-            model=library_models.Loan,
-            query=source.query,
-            using=queryset_db(source),
-        )
-
-    manager_cls.all = escaping_all
-    try:
-        yield
-    finally:
-        manager_cls.all = original
-
-
 @cache
 def _hostile_relation_schema(patron_type: type) -> DjangoSchema:
-    """A ``DjangoListField`` schema over a type whose many-side target seals nothing.
+    """A ``DjangoListField`` schema over a type whose many-side target has no hook.
 
     ``PatronType`` and ``LoanType`` both leave ``get_queryset`` at the default, so
     the generated ``loans`` resolver takes the no-custom-visibility branch - the
-    one path to the raw-list bound that no visibility rebuild stands in front of.
+    one path to the raw-list bound that no visibility hook stands in front of.
     No shipped root pairs a ``DjangoListField`` with such a target, so the root
     is declared here rather than borrowed.
 
@@ -426,7 +378,7 @@ def _hostile_relation_schema(patron_type: type) -> DjangoSchema:
             (),
             {
                 "__annotations__": {"patrons": list[patron_type]},
-                "__doc__": "A raw-list root over a type whose many-side target seals nothing.",
+                "__doc__": "A raw-list root over a type whose many-side target has no hook.",
                 "patrons": DjangoListField(patron_type),
             },
         ),
@@ -4361,69 +4313,27 @@ _HOSTILE_RELATION_QUERY = "{ patrons { name loans { note } } }"
 
 
 @pytest.mark.django_db
-def test_a_relation_manager_cannot_widen_the_raw_list_bound_with_its_own_slice() -> None:
-    """The many-side relation is bounded by what the package slices, not by the source.
+def test_a_project_queryset_class_relation_is_bounded_in_sql() -> None:
+    """A many-side relation over a project queryset class carries the bound as ``LIMIT``.
 
-    The generated ``loans`` resolver hands its source straight to the raw-list
-    bound, and that source is whatever the relation manager returned. A manager
-    returning a ``QuerySet`` subclass does not put the ceiling in that
-    subclass's ``__getitem__``: four related rows exist, and a real request
-    under a bound of one gets one.
+    ``Loan`` declares ``LoanQuerySet.as_manager()``, so the relation resolver's
+    source is that class; the bound slices it, and the loans statement asks the
+    database for one row rather than fetching all four and counting.
     """
     _seed_hostile_relation()
-    with _hostile_relation_manager():
+    with CaptureQueriesContext(connection) as captured:
         payload = _post("/rp-hostile-relation/", _HOSTILE_RELATION_QUERY)
     _no_rejection(payload)
+    loans_sql = [
+        query["sql"] for query in captured.captured_queries if '"library_loan"' in query["sql"]
+    ]
+    assert loans_sql
+    assert all("LIMIT 1" in sql for sql in loans_sql), loans_sql
     assert payload["data"] == {
         "patrons": [
             {"name": "hostile-patron", "loans": [{"note": "loan-0"}]},
         ],
     }
-    assert len(json_list(payload, "data", "patrons", 0, "loans")) == HOSTILE_RELATION_ROWS
-
-
-@pytest.mark.django_db
-def test_an_ordinary_relation_manager_is_bounded_the_same_way() -> None:
-    """The control: the same mount, the same document, Django's own manager.
-
-    Without it the row above would prove only that something rejected four rows,
-    not that the bound is the thing doing it.
-    """
-    _seed_hostile_relation()
-    payload = _post("/rp-hostile-relation/", _HOSTILE_RELATION_QUERY)
-    _no_rejection(payload)
-    assert payload["data"] == {
-        "patrons": [
-            {"name": "hostile-patron", "loans": [{"note": "loan-0"}]},
-        ],
-    }
-
-
-@pytest.mark.django_db(transaction=True)
-def test_a_relation_manager_cannot_widen_the_raw_list_bound_on_the_async_transport() -> None:
-    """Sync/async parity: the awaited relation branch is bounded by the same seam.
-
-    The async many-side branch iterates the bound asynchronously instead of
-    calling ``list(...)``, so it reaches the row source through its own call and
-    owes its own proof.
-    """
-    _seed_hostile_relation()
-    with _hostile_relation_manager():
-        response = _await_response(
-            AsyncTestClient().query(
-                _HOSTILE_RELATION_QUERY,
-                assert_no_errors=False,
-                url="/rp-hostile-relation-async/",
-            ),
-        )
-    payload = response_json(response.response)
-    _no_rejection(payload)
-    assert payload["data"] == {
-        "patrons": [
-            {"name": "hostile-patron", "loans": [{"note": "loan-0"}]},
-        ],
-    }
-    assert len(json_list(payload, "data", "patrons", 0, "loans")) == HOSTILE_RELATION_ROWS
 
 
 def _seed_carry_relation(patrons: int, loans_each: int) -> None:

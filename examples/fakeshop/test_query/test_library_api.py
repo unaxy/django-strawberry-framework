@@ -16,7 +16,7 @@ import re
 import string
 import sys
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from functools import wraps
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
@@ -1741,74 +1741,6 @@ def test_library_loan_get_queryset_fetch_raise_blocks_the_sealed_rows_lazy_load(
     assert str(exc_info[1]) == "Fetching of Loan.patron blocked."
     assert _sql_from_table(captured, "library_patron") == []
     assert len(captured) == statements, captured.captured_queries
-
-
-@_REQUIRES_FETCH_MODES
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    (
-        "flags",
-        "document",
-        "expected",
-        "patron_path",
-        "statements",
-    ),
-    _LOAN_FETCH_MODE_CASES,
-)
-def test_library_loan_get_queryset_project_fetch_mode_is_refused(
-    project_schema_override: Callable[[], None],
-    caplog: pytest.LogCaptureFixture,
-    flags: dict[str, bool],
-    document: str,
-    expected: JSONObject,
-    patron_path: list[str | int],
-    statements: int,
-) -> None:
-    """A hook's fetch mode that is not one of Django's own fails the seal closed.
-
-    Under ``FAKESHOP_TEST_LOAN_FETCH_MODE="PROJECT_FETCH_PEERS"`` the hook returns
-    ``queryset.fetch_mode(ProjectFetchPeers())``, a ``FetchPeers`` subclass whose
-    ``fetch`` would run on every row load. The seal refuses it with the ``untrusted``
-    defect before any loan statement: the client gets the masked error at the field
-    the sealed surface serves, and the server log names the fetch mode.
-    """
-    del expected, statements
-    _seed_loan_patron_graph()
-    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
-    with override_settings(**flags, FAKESHOP_TEST_LOAN_FETCH_MODE="PROJECT_FETCH_PEERS"):
-        project_schema_override()
-        with CaptureQueriesContext(connection) as captured:
-            response = _post_graphql(document)
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert json_at(payload, "data") is None
-    errors = json_list(payload, "errors")
-    assert len(errors) == 1, errors
-    error = json_object(errors[0])
-    assert error["message"] == "An unexpected error occurred."
-    assert error["path"] == patron_path[:1]
-    records = [
-        record
-        for record in caplog.records
-        if record.name == "django_strawberry_framework" and record.exc_info is not None
-    ]
-    assert len(records) == 1, caplog.records
-    exc_info = records[0].exc_info
-    assert exc_info is not None
-    assert type(exc_info[1]) is ConfigurationError
-    assert str(exc_info[1]) == (
-        "LoanType.get_queryset returned a queryset that cannot be sealed into a "
-        "framework-owned execution queryset (LoanQuerySet._fetch_mode is a "
-        "ProjectFetchPeers); the seal rebuilds only state made of Django's own objects, "
-        "so it refuses a Query subclass; a consumer-defined expression, lookup, "
-        "where-node or join class; a method assigned onto a query or node instance; a "
-        "non-builtin value where Django stores a builtin; a foreign row iterable; a fetch "
-        "mode other than Django's FETCH_ONE, FETCH_PEERS or FETCH_RAISE; a Prefetch it "
-        "cannot rebuild; or deferred-filter state Django never writes. Build the queryset "
-        "with Django's own query, expression and lookup classes, and do not assign to its "
-        "internals."
-    )
-    assert _sql_from_table(captured, "library_loan") == []
 
 
 def _loan_nodes_document(positions: tuple[int, ...]) -> str:
@@ -12979,50 +12911,6 @@ async def _post_async_shipped(
     return response_json(result.response)
 
 
-class _HostileBookQuerySet(QuerySet[models.Book]):
-    """Would leak if dispatched: ``filter`` drops the predicate; terminals synthesize rows."""
-
-    @override
-    def filter(self, *args: object, **kwargs: object) -> QuerySet[models.Book]:
-        return models.Book.objects.all()
-
-    @override
-    def first(self) -> models.Book:
-        return models.Book(title="secret-from-first")
-
-    @override
-    def get(self, *args: object, **kwargs: object) -> models.Book:
-        return models.Book(title="secret-from-get")
-
-    @override
-    async def afirst(self) -> models.Book:
-        return models.Book(title="secret-from-afirst")
-
-    @override
-    async def aget(self, *args: object, **kwargs: object) -> models.Book:
-        return models.Book(title="secret-from-aget")
-
-    @override
-    async def __aiter__(self) -> AsyncIterator[models.Book]:
-        yield models.Book(title="secret-from-aiter")
-
-
-def _hostile_book_hook(
-    _cls: type[DjangoType],
-    _queryset: QuerySet[models.Book],
-    _info: strawberry.Info[object, object],
-    **_kwargs: object,
-) -> QuerySet[models.Book]:
-    """Seed the real repair-exclusion through unbound ``QuerySet.filter``."""
-    return (
-        QuerySet[models.Book]
-        .filter(_HostileBookQuerySet(model=models.Book))
-        .exclude(
-            circulation_status=models.Book.CirculationStatus.REPAIR,
-        )
-    )
-
-
 def _typed_genre_nodes_schema() -> strawberry.Schema:
     """Holder schema whose only root field is typed ``DjangoNodesField(GenreType)``."""
 
@@ -15371,106 +15259,6 @@ def test_node_hidden_row_null_live() -> None:
     staff_payload = response_json(staff)
     assert "errors" not in staff_payload, staff_payload
     assert json_at(staff_payload, "data", "node") == {"title": "Withdrawn"}
-
-
-@pytest.mark.django_db
-def test_node_hostile_subclass_hook_is_sealed_sync(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Sync ``node(id:)`` of a hostile-subclass hook serves only the visible book.
-
-    A repair (hidden) pk refetches null and a public pk resolves - the
-    predicate-erasing ``.filter()`` and synthetic ``.first()`` / ``.get()``
-    overrides never dispatch on the sealed plain queryset.
-    """
-    monkeypatch.setattr(library_schema.BookType, "get_queryset", classmethod(_hostile_book_hook))
-    shelf = _seed_shelf()
-    public = models.Book.objects.create(title="Kindred", shelf=shelf)
-    private = models.Book.objects.create(
-        title="Dune",
-        shelf=shelf,
-        circulation_status=models.Book.CirculationStatus.REPAIR,
-    )
-
-    hidden = _post_node(
-        global_id_for(library_schema.BookType, private.pk),
-        "... on BookType { title }",
-    )
-    assert "errors" not in hidden, hidden
-    assert json_at(hidden, "data", "node") is None
-
-    visible = _post_node(
-        global_id_for(library_schema.BookType, public.pk),
-        "... on BookType { title }",
-    )
-    assert "errors" not in visible, visible
-    assert json_at(visible, "data", "node") == {"title": "Kindred"}
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_node_hostile_subclass_hook_is_sealed_async(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Async single-node refetch over ``/graphql-async/`` ignores synthetic ``.afirst()``."""
-    monkeypatch.setattr(library_schema.BookType, "get_queryset", classmethod(_hostile_book_hook))
-    branch = await models.Branch.objects.acreate(name="Relay", city="Boston")
-    shelf = await models.Shelf.objects.acreate(
-        code="R-h",
-        topic="Relay fixtures",
-        branch=branch,
-    )
-    public = await models.Book.objects.acreate(title="Kindred", shelf=shelf)
-    private = await models.Book.objects.acreate(
-        title="Dune",
-        shelf=shelf,
-        circulation_status=models.Book.CirculationStatus.REPAIR,
-    )
-
-    private_id = global_id_for(library_schema.BookType, private.pk)
-    hidden = await _post_async_shipped(
-        f'query {{ node(id: "{private_id}") {{ ... on BookType {{ title }} }} }}',
-    )
-    assert "errors" not in hidden, hidden
-    assert json_at(hidden, "data", "node") is None
-
-    public_id = global_id_for(library_schema.BookType, public.pk)
-    visible = await _post_async_shipped(
-        f'query {{ node(id: "{public_id}") {{ ... on BookType {{ title }} }} }}',
-    )
-    assert "errors" not in visible, visible
-    assert json_at(visible, "data", "node") == {"title": "Kindred"}
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_nodes_hostile_subclass_hook_is_sealed_async_aiter(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Async ``nodes(ids:)`` ignores the synthetic ``.__aiter__()`` override.
-
-    The hidden pk becomes a positional ``null`` hole and the visible pk
-    resolves - never the ``secret-from-aiter`` synthetic row.
-    """
-    monkeypatch.setattr(library_schema.BookType, "get_queryset", classmethod(_hostile_book_hook))
-    branch = await models.Branch.objects.acreate(name="Relay", city="Boston")
-    shelf = await models.Shelf.objects.acreate(
-        code="R-ha",
-        topic="Relay fixtures",
-        branch=branch,
-    )
-    public = await models.Book.objects.acreate(title="Kindred", shelf=shelf)
-    private = await models.Book.objects.acreate(
-        title="Dune",
-        shelf=shelf,
-        circulation_status=models.Book.CirculationStatus.REPAIR,
-    )
-    document = _nodes_query(
-        (
-            global_id_for(library_schema.BookType, private.pk),
-            global_id_for(library_schema.BookType, public.pk),
-        ),
-    )
-    payload = await _post_async_shipped(document)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "nodes") == [
-        None,
-        {"__typename": "BookType", "title": "Kindred"},
-    ]
 
 
 @pytest.mark.django_db
@@ -25932,60 +25720,6 @@ def _seed_branch_notes() -> None:
     ["allLibraryBranchNotesOverProxyChild", "allLibraryBranchNotesOverConcreteChild"],
     ids=["proxy-child", "concrete-child"],
 )
-def test_library_prefetch_child_of_proxy_targeted_relation_resolves_over_http(field: str) -> None:
-    """A consumer ``Prefetch`` over a relation declared TO a proxy survives the seal.
-
-    ``apps/library/schema.py::BranchNoteType`` parents a foreign key whose
-    declared target is ``models.ProxyBranch``. The source queryset a
-    ``DjangoListField`` receives is sealed before its visibility hook runs, and
-    that seal proves every ``Prefetch`` child belongs to the relation the lookup
-    names. The proof is a TABLE proof - a proxy reads its concrete model's
-    table - so a child over the proxy AND a child over the concrete ``Branch``
-    are both legitimate here. Held to the declared class instead, neither is:
-    the relation's own proxy is refused for reading the very table the relation
-    targets, and the field fails closed with no rows at all.
-
-    The response rows are the evidence the child was USED: the prefetched
-    ``branch`` is read out of the related cache the child populated. The SQL
-    shape is the evidence it was a prefetch and not a join - the root query
-    carries no ``JOIN``, and a second query reads ``library_branch`` keyed on
-    the notes' foreign key column.
-    """
-    _seed_branch_notes()
-
-    with CaptureQueriesContext(connection) as captured:
-        response = _post_graphql(
-            f"""
-            query {{
-              {field} {{
-                body
-                branch {{ name city }}
-              }}
-            }}
-            """,
-        )
-
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", field) == [
-        {"body": "shelving audit", "branch": {"name": "Proxy Central", "city": "Boston"}},
-        {"body": "reopened after repairs", "branch": {"name": "Proxy Central", "city": "Boston"}},
-    ]
-    library_sql = _library_sql(captured)
-    root_sql = _sql_from_table(captured, "library_branchnote")
-    branch_sql = _sql_from_table(captured, "library_branch")
-    assert len(root_sql) == 1, library_sql
-    assert "JOIN" not in root_sql[0], root_sql[0]
-    assert branch_sql, library_sql
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    "field",
-    ["allLibraryBranchNotesOverProxyChild", "allLibraryBranchNotesOverConcreteChild"],
-    ids=["proxy-child", "concrete-child"],
-)
 def test_library_consumer_prefetched_relation_keeps_target_visibility_over_http(
     field: str,
 ) -> None:
@@ -26027,55 +25761,6 @@ def test_library_consumer_prefetched_relation_keeps_target_visibility_over_http(
             {"body": "vault inventory", "branch": {"name": "Proxy Vault", "city": "restricted"}},
         ],
     }
-
-
-@pytest.mark.django_db
-def test_library_prefetch_child_over_unrelated_table_is_refused_over_http() -> None:
-    """A proxy relation target does not widen the child rule to any model.
-
-    ``allLibraryBranchNotesOverUnrelatedChild`` prefetches the same
-    proxy-targeted ``branch`` relation with a child over ``library_genre``.
-    Reducing both sides of the comparison to their concrete model admits the
-    proxy's own table and nothing else, so this child is still refused and the
-    request fails closed rather than populating ``branch`` with genre rows no
-    visibility hook ever saw.
-    """
-    _seed_branch_notes()
-
-    query = """
-    query {
-      allLibraryBranchNotesOverUnrelatedChild {
-        body
-        branch { name }
-      }
-    }
-    """
-    response = _post_graphql(query)
-
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert payload["data"] is None, payload
-    assert [json_at(error, "path") for error in json_list(payload, "errors")] == [
-        ["allLibraryBranchNotesOverUnrelatedChild"],
-    ]
-    # The shipped error policy masks the seal's own detail; what the default
-    # wire shows is that the field failed closed with no rows.
-    assert json_at(payload, "errors", 0, "message") == "An unexpected error occurred."
-
-    # Under error policy debug pass-through, the seal's unmasked refusal wording
-    # travels over the wire.
-    with override_settings(**_ERROR_POLICY_PASS_THROUGH):
-        debug_response = _post_graphql(query)
-    assert debug_response.status_code == 200
-    debug_payload = response_json(debug_response)
-    assert debug_payload["data"] is None, debug_payload
-    debug_message = json_str(debug_payload, "errors", 0, "message")
-    assert "prefetch 'branch' queryset is over Genre rows" in debug_message
-    assert "relation targets ProxyBranch rows" in debug_message
-    assert (
-        "a prefetch child over an unrelated table would populate the relation with "
-        "rows the related type's visibility hook never saw"
-    ) in debug_message
 
 
 # ---------------------------------------------------------------------------

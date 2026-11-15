@@ -91,8 +91,7 @@ def test_branch_note_str_and_proxy_targeted_relation() -> None:
 
     The forward side resolves to a proxy instance and the reverse ``notes``
     accessor hangs off the proxy, while the rows live in the concrete
-    ``Branch`` table - the table identity the prefetch-child seal proves a
-    relation by.
+    ``Branch`` table.
     """
     branch = ProxyBranch.objects.create(name="Proxy Central", city="Boston")
     note = BranchNote.objects.create(branch=branch, body="shelving audit")

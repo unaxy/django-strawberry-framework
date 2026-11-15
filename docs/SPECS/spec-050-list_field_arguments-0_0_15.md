@@ -51,7 +51,7 @@ Release: [`django_strawberry_framework.__version__`][package-init] reads `"0.0.1
   `TODO-ALPHA-055-0.0.15` cuts the `0.0.15` release this card ships in.
 - The [visibility boundary][glossary-visibility-boundary] and its
   [sealed execution queryset][glossary-sealed-execution-queryset] - the shared seam whose
-  `require_unevaluated` and `carry_result_cache` options the list field's seals use.
+  `require_unevaluated` option the list field's post-sidecar seal uses.
 - [`ListArgumentError`][glossary-listargumenterror], the
   [list offset order precondition][glossary-list-offset-order-precondition], and the
   [async queryset completion adapter][glossary-async-queryset-completion-adapter] - this
@@ -136,14 +136,11 @@ Release: [`django_strawberry_framework.__version__`][package-init] reads `"0.0.1
   - [ ] The order-normalization ledger closes terminally: a descendant holding the copied
         context can neither publish into nor claim from a closed ledger.
   - [ ] The raw-list seam windows a source that arrives evaluated from the rows it already
-        holds, exact queryset and rebuilt subclass alike, with the query count pinned at zero
-        in the package tier and the fakeshop `Loan` model's override-free
+        holds, an exact queryset and a project queryset class alike, with the query count
+        pinned at zero in the package tier and the fakeshop `Loan` model's override-free
         `LoanQuerySet.as_manager()` declaration pinned live at an absolute two-query prefetch
-        cost, its pending
-        reverse-relation predicate baked onto the rebuild by the same unbound `Query.add_q` an
-        exact queryset's is, and a deferred-filter state Django never writes refused with the
-        typed error at both tiers. The dynamic manager stays migration-safe through Django's
-        `use_in_migrations=False` default.
+        cost and at a `LIMIT` in the relation's own statement. The dynamic manager stays
+        migration-safe through Django's `use_in_migrations=False` default.
   - [ ] A queryset or manager a `DjangoListField` resolver returns passes the visibility seal
         before the raw-list seam, which drops its result cache, so an evaluated return is
         executed again by a positive-width window - once per resolution, so once per parent
@@ -819,16 +816,13 @@ For a request carrying any non-null list argument, the color-specific queryset p
    rejects an already-sliced queryset before the consumer hook runs, and its result seal
    rejects a hook-returned sliced queryset before later ordering or pagination. A combined
    queryset (`union`, `intersection`, or `difference`) is served at both seals as the set of
-   primary keys it selects (the `rewrite_combined` axis of
-   [`django_strawberry_framework/utils/querysets.py::_SealPolicy`][querysets], built by
+   primary keys it selects (built by
    `django_strawberry_framework/utils/querysets.py::_pk_membership_query_or_defect`), so the
    hook, `OrderSet` and the optimizer narrow, order and window a query Django can compose; a
    combined shape that rewrite would change fails closed with the `combined` defect's
-   `ConfigurationError`, which both visibility message sites render. The rewrite runs inside
-   `_seal_or_defect`, after the pre-clone and post-bake `_combined_query_table_defect` proof
-   passes, not in a list-field pre-check. The seal is a rebuild boundary whose complete
-   combined-branch proof runs twice when deferred filters are baked, and the list field does not
-   weaken it into a one-off validator.
+   `ConfigurationError`, which both visibility message sites render, and a branch over another
+   model fails closed as `table`. The rewrite runs inside `_seal_or_defect`, not in a
+   list-field pre-check.
 4. If supplied, run the canonical public `OrderSet.apply_sync` / `apply_async` path. The
    async wrapper calls `apply_async` without assuming that an override kept `async def`:
    a non-awaitable return is a schema-author defect and raises an actionable
@@ -837,48 +831,33 @@ For a request carrying any non-null list argument, the color-specific queryset p
    The resulting value is validated before active order state is consulted, through the shared
    queryset sealing machinery with surface-specific error text, under
    `django_strawberry_framework/utils/querysets.py::_SIDECAR_RESULT_POLICY`, the post-sidecar
-   policy that sets `require_unevaluated`. The requirement is on the SEALED OUTPUT, never on the
-   candidate's class. The shared seal accepts a sealable `QuerySet` SUBCLASS and rebuilds it
-   into a framework-owned plain `models.QuerySet`; that is a central feature of the boundary and
-   is not narrowed here. A custom `OrderSet.apply_*` returning a project's own `QuerySet`
-   subclass is therefore accepted, and what the pipeline carries forward is the plain sealed
-   rebuild rather than the subclass itself. That sealed output is unevaluated, unsliced,
-   non-projection, and over the same model and concrete table, with the input's effective
-   database routing; a combined result is served as its primary-key set, as a combined source
-   is. A `Manager`, list, `None`, wrong-model queryset, values/values-list queryset, populated
-   `_result_cache`, or malformed query state is a schema-author defect and raises an actionable
-   `ConfigurationError` naming the public apply method. A pending `_deferred_filter` is not a
-   failure on any class: the seal bakes it onto the detached clone for a subclass exactly as for
-   an exact queryset, and what fails closed as `untrusted` is a deferred-filter STATE that is not
-   the exact shape Django writes (Decision 8). A sync-path awaitable is disposed and rejected
-   under the one-await policy. The require-unevaluated option is enforced inside
+   policy that sets `require_unevaluated`. The requirement is on the shape, never on the
+   candidate's class: a custom `OrderSet.apply_*` returning a project's own `QuerySet`
+   subclass is accepted, and what the pipeline carries forward is the seal's clone of it, of
+   that same class. That sealed output is unevaluated, unsliced, non-projection, and over the
+   same model and concrete table, with the input's effective database routing; a combined
+   result is served as its primary-key set, as a combined source is. A `Manager`, list,
+   `None`, wrong-model queryset, values/values-list queryset or populated `_result_cache` is a
+   schema-author defect and raises an actionable `ConfigurationError` naming the public apply
+   method. A pending `_deferred_filter` is not a failure on any class: the clone's `query`
+   read bakes it, as Django's own does. A sync-path awaitable is disposed and rejected under
+   the one-await policy. The require-unevaluated option is enforced inside
    [`django_strawberry_framework/utils/querysets.py::_seal_or_defect`][querysets] and emits its
-   own `evaluated` defect rather than reusing another code: no seal that recomposes onto its
-   result carries `_result_cache` forward, so without the option an evaluated candidate would
-   be silently normalized into a fresh unevaluated queryset - an override that ran its own SQL
-   and returned rows would be turned into a second identical query instead of rejected. The
-   raw-list row source is the one policy that does carry it, and it recomposes nothing
-   (Decision 8). The option defaults off; `_SIDECAR_RESULT_POLICY` is the one policy that sets
-   it.
+   own `evaluated` defect rather than reusing another code: the seal's clone never carries
+   `_result_cache`, so without the option an evaluated candidate would be silently turned into
+   a fresh unevaluated queryset - an override that ran its own SQL and returned rows would be
+   turned into a second identical query instead of rejected. The option defaults off;
+   `_SIDECAR_RESULT_POLICY` is the one policy that sets it.
 
-   The seal's defect codes have one canonical ordering every message site shares: `type`,
-   `table`, `untrusted`, `routing`, `evaluated`, `sliced`, `projection`, `combined`, `alias`.
-   That ordering is the vocabulary each site renders from, not the order the checks run. In
-   `_seal_or_defect` the checks run: `type` (the real class is not a `QuerySet` subclass);
-   `table` (the candidate's `model` slot is not over the concrete table); `untrusted` (the
-   `_query` slot is not exactly `sql.Query`, then a retained `QuerySet.__dict__` slot fails
-   `_queryset_state_defect`); `routing` (only under a frozen routing record); then the query
-   graph walk (`_combined_query_table_defect`, reporting `table` or `untrusted`), the clone's
-   reconstruction, the deferred-filter bake and its re-walk, the row-iterable class, the
-   prefetch lookups and, under the carry policy, the `_result_cache` shape (each `untrusted`);
-   then `evaluated`, `sliced`, `projection`, `combined` and `alias` in that order. Routing is
-   therefore compared once the outer query type and the retained slots are proven, and before
-   any graph walk, clone or reconstruction. Each message-building site renders only the subset
-   it can reach: the post-sidecar site,
+   The seal's defect codes have one canonical ordering every message site shares and the
+   checks run in: `type`, `table`, `routing` (only under a frozen routing record),
+   `evaluated`, `sliced`, `projection`, `combined`, `alias`. Routing is therefore compared
+   before the clone. Each message-building site renders only the subset it can reach: the
+   post-sidecar site,
    `django_strawberry_framework/utils/querysets.py::_validate_post_orderset_result`, renders
-   `routing` and `combined` in their own wording and `type`, `table`, `untrusted`, `evaluated`,
-   `sliced` and `projection` under one shape wording, with no `alias` arm because the routing
-   check subsumes it there; the two visibility sites,
+   `routing` and `combined` in their own wording and `type`, `table`, `evaluated`, `sliced`
+   and `projection` under one shape wording, with no `alias` arm because the routing check
+   subsumes it there; the two visibility sites,
    [`django_strawberry_framework/utils/querysets.py::_visibility_result_error`][querysets] and
    [`django_strawberry_framework/utils/querysets.py::_prepared_visibility_source`][querysets],
    reach neither `evaluated` nor `routing`, because no `get_queryset` seal sets
@@ -888,18 +867,13 @@ For a request carrying any non-null list argument, the color-specific queryset p
    code added without an arm self-names as a framework defect rather than mislabelling an
    evaluated-result rejection as an alias mismatch or a wrong-table error. The failure is
    legible rather than silent, but an unarmed code still reaches the schema author as an
-   unactionable message, so every code a site can reach owes that site an arm. The
-   retained-state helper `_queryset_state_defect` is not the home of `evaluated`: that helper
-   pins the `QuerySet.__dict__` fields every seal carries forward (`_db`, `_hints`, `_fields`,
-   `_sticky_filter`, `_for_write`, `_fetch_mode`) and emits only `untrusted`, and `_result_cache` is not among
-   them - the one policy that carries it pins its exact `list` shape in the seal itself
-   (Decision 8).
+   unactionable message, so every code a site can reach owes that site an arm.
 
    Same-route needs its own definition, because `_db` equality alone is not it. Django
    resolves an unrouted queryset's alias through the database router using both the model and
    `_hints`, so two querysets can each carry `_db is None` and still resolve to different
-   databases when their hints differ - and the seal preserves whatever hints the candidate
-   carried, copying them into the rebuild.
+   databases when their hints differ - and the seal's clone keeps whatever hints the
+   candidate carried.
 
    The invariant is therefore stated on the CONNECTION, not on the hint contents. Before the
    public `apply_*` call runs,
@@ -907,7 +881,7 @@ For a request carrying any non-null list argument, the color-specific queryset p
    record carrying the sealed source's `_db`, a copy of its `_hints`, and the EFFECTIVE ALIAS
    that state answers to: the source's own `_db` when it is set, otherwise the answer of the
    same `ConnectionRouter` method Django's own `QuerySet.db` property would use. The accepted
-   result is then reconstructed PINNED to that frozen alias. Hint comparison remains part of the
+   result's clone is then PINNED to that frozen alias. Hint comparison remains part of the
    seal (`django_strawberry_framework/utils/querysets.py::_routing_hints_equal`: the candidate's
    `_db` must equal the snapshot's, `None` included, and every hint value must be the SAME OBJECT
    the snapshot holds, because a router is free to tell two equal tokens apart by identity), but
@@ -961,10 +935,8 @@ framework visibility guarantee; a malicious override that discards the input and
 a fresh manager is outside it. The tests prove conforming delegation and every mechanically
 enforceable violation rather than claiming to authenticate arbitrary consumer code.
 
-This third seal is a full graph walk and rebuild, not an `isinstance` guard, and its cost is
-accepted (*derivation: see the [rationale][rationale-d5]*). It runs on every public `apply_*`
-return; there is no fast path. The list field never duplicates the seal's state reads locally
-in order to skip it.
+This third seal runs on every public `apply_*` return; there is no fast path. Its cost is one
+clone. The list field never duplicates the seal's state reads locally in order to skip it.
 
 The client window is applied by the one raw-list bounding seam rather than sliced locally in
 [`django_strawberry_framework/list_field.py`][list-field], and it is not on the exported
@@ -1080,8 +1052,8 @@ enabled, no explicit or extra ordering has replaced it, and a grouping shape has
 suppressed it. A consumer resolver or `get_queryset` hook that calls `.order_by()` clears the
 model default; one that installs a private explicit order replaces it. Neither can cite
 `Meta.ordering` as the public offset guarantee. This state is read only after the visibility
-boundary has rebuilt a framework-owned plain queryset, so the list field does not inspect
-hostile consumer queryset internals or create another source classifier.
+boundary has sealed the queryset, so the list field does not create another source
+classifier.
 
 Both branches read ONE classification of the sealed queryset, and it is the classification
 Django's own compiler makes (`django_strawberry_framework/utils/querysets.py::selected_order`,
@@ -1256,7 +1228,7 @@ under its own exact type; it decides only whether an `OrderSet` term reads its c
 parent rows.
 
 An approved class is not the whole of a node's SQL. Its `as_sql` formats instance state into the
-statement, and the seal admits text in every such slot, so `Lower("name", template="RANDOM()")`
+statement, and Django formats text from every such slot, so `Lower("name", template="RANDOM()")`
 is an exact `Lower` compiling to `RANDOM()`. Every approved node and readable leaf must therefore
 carry only what its class supplies
 (`django_strawberry_framework/list_field.py::_order_node_state_is_stock`): no template,
@@ -1319,11 +1291,9 @@ aggregate's `filter=` from Django 6.0): a `WhereNode` is punctuation over its ch
 of Django's connectors, and an empty-result marker, an `extra` fragment or a bare raw fragment
 among the children is refused. An annotation holds exactly that graph, so
 `annotate(k=Case(When(city="Boston", ...))).order_by("k")` and the direct spelling are one
-ordering with one verdict, with one exception: an annotation resolves a consumer-defined class
-into the query graph at once, so the post-sidecar seal refuses it as untrusted before the guard
-reads it, where the direct spelling, resolved only by the guard, is refused there.
-The shared post-apply seal rejects consumer-defined expression classes as untrusted query
-state. For approved forms over readable leaves that pass the seal, volatility in what the
+ordering with one verdict: an annotation resolves a consumer-defined class into the query
+graph at once, and the guard refuses it there by its exact class as it refuses the direct
+spelling. For approved forms over readable leaves, volatility in what the
 database makes of them is the schema author's responsibility under Decision 7's
 weaker-than-total-order contract; the list field reads terms and reverse-engineers no SQL.
 The `OrderSet` input emits only certified forms
@@ -1389,76 +1359,41 @@ visible order guarantee below; an opaque Python iterable cannot establish it. On
 single bounding seam is handed validated coordinates, the window is applied with an operation
 the package owns the meaning of. A value whose exact type is one of
 `django_strawberry_framework/resource_policy.py::_SLICE_BOUNDED_ROW_TYPES` - `list`, `tuple`,
-`str`, `bytes`, `bytearray` or `django.db.models.QuerySet` - receives `[start:stop]`: on the
-queryset, slicing is what carries the bound into SQL as `LIMIT`, and each built-in sequence keeps
-its type. Every other shape - a subclass of one of those sequence types, a mapping, a
+`str`, `bytes` or `bytearray` - and any `django.db.models.QuerySet` (a project's own class
+included) receives `[start:stop]`: on a queryset, slicing is what carries the bound into SQL as
+`LIMIT`, and each built-in sequence keeps its type. Every other shape - a subclass of one of those sequence types, a mapping, a
 non-subscriptable iterable - is counted into a fresh list with `itertools.islice(start, stop)`.
 Which operation applies follows from what the value IS, never from whether a subscript happened
 to answer, because `__getitem__` on a consumer's own sequence type is consumer code and a bound
 enforced by calling it is a bound the bounded party decides.
 
-A `QuerySet` SUBCLASS is the one shape that is neither sliced as itself nor counted. It is
-normalized first, by the one shared seam every raw-list caller runs
-(`django_strawberry_framework/utils/querysets.py::normalized_row_source`), which rebuilds it into
-a plain framework-owned queryset through the same sealer the visibility boundary uses -
-preserving model, query graph, routing, row iterable and prefetch state - and then slices that.
-A subclass whose declared model is not a model class, or whose state cannot be faithfully
-rebuilt, is refused with a typed `ConfigurationError`; the fallback is never its own
-`__getitem__`.
-
-A pending reverse-relation predicate is not that case. Django's related-manager machinery leaves
-a `_deferred_filter` - the `(negate, args, kwargs)` tuple it has not yet baked into the query -
-on every relation queryset it builds, whatever class the model's manager was made from, so
-refusing it for a subclass would refuse `Manager.from_queryset` at every relation it is used on.
-The rebuild resolves it identically for every candidate: each argument is proven inert or a
-genuine, unshadowed Django expression first, and the predicate is then added to the DETACHED
-clone through the UNBOUND `sql.Query.add_q`, never through the candidate's own methods and never
-mutating the candidate. What fails closed is the pending STATE rather than the class holding it -
-a shape Django never writes (a non-3-tuple, a `negate` that is not an exact `bool`, a `kwargs`
-that is not an exact `dict`, an `args` that is neither `tuple` nor `list`, a non-string kwarg
-key, a prohibited connector kwarg, a value that is neither inert nor genuine Django, or a
-predicate `add_q` cannot resolve) is the typed `ConfigurationError`, never a raw exception. The
-`negate` slot is pinned to an exact `bool` for the same reason the others are pinned: it is
-truth-tested to decide whether the predicate is negated, and an object planted there would decide
-that through its own `__bool__`. Sealability therefore does not depend on which surface seals: a
-`Manager.from_queryset` relation is admitted at the raw-list row source, at the visibility
-boundary, and at the post-sidecar result seal alike.
+A project `QuerySet` class is application code and is trusted (GOAL.md "Trust boundary"), so
+it is sliced as itself and keeps the SQL `LIMIT` a counted truncation would lose. A pending
+reverse-relation predicate (the `_deferred_filter` Django's related-manager machinery leaves on
+every relation queryset it builds, whatever class the model's manager was made from) is baked
+by Django's own `query` read when the slice runs.
 
 The fakeshop acceptance model uses that declaration directly: `Loan` declares
 `objects = LoanQuerySet.as_manager()` over an override-free `LoanQuerySet`, so Django's ordinary
 manager and reverse-relation machinery hand the live plan a `QuerySet` subclass. The dynamic
 manager is left out of migration state through Django's `use_in_migrations=False` default.
 
-Counting a sealable subclass into a Python list would restore the row ceiling but lose the SQL
-`LIMIT` for a legitimate project queryset class. The shape is read from `type(value)` rather
-than `isinstance`, because `isinstance` falls back to a consumer-defined `__class__` and an object
-that merely claims to be a queryset would select the slice arm. `isinstance` results and consumer
-`__getitem__` results define no part of the ceiling. The same rule governs the relation cache:
-the generated many-side resolver normalizes the cached source before reading the rows it already
-fetched, so that read is Django's own slot on an object the package owns rather than an
-attribute lookup the subclass answers. *Derivation and rejected alternatives: see the
+Counting a project queryset class into a Python list would restore the row ceiling but lose
+the SQL `LIMIT`. The shape is read from the real class rather than `isinstance`, because
+`isinstance` falls back to a consumer-defined `__class__` and an object that merely claims to be
+a queryset would select the slice arm. *Derivation and rejected alternatives: see the
 [rationale][rationale-d8].*
 
 Evaluation state travels with the source wherever no visibility seal stands in front of the
 seam. A source that reaches the raw-list seam already evaluated - the generated many-side
 resolver's warm prefetch cache, or a materialized value - is windowed from the rows it holds,
-with no further query, for the exact type and for a rebuilt subclass alike.
-The rows are read from the instance dictionary through
-`django_strawberry_framework/utils/truth.py::instance_state`, the read the sealer takes, never
-through attribute access. The generated many-side resolver hands that fetched `list` itself to
-`bounded_rows` (`django_strawberry_framework/utils/querysets.py::materialized_rows`), and an
-evaluated exact or rebuilt queryset reaching `_windowed_rows` is sliced by Django's own
-`QuerySet.__getitem__`, which answers from the populated cache. Re-querying a project queryset
-class for rows it had already fetched would make `Manager.from_queryset` cost one query per
-parent row more than Django's manager at every relation it is used on, and on the prefetched
-branch of the generated many-side resolver it would hand list completion an unevaluated rebuilt
-source, fetched again per parent row and, under async, through one worker hop each. The rebuild
-therefore carries the fetched rows forward when the
-source it rebuilt held them, and drops nothing but the subclass's own methods. A source whose
-query selects an annotation is served the same way: the row converter Django caches on the
-annotation's node at the fetch is a derived cache the rebuilt node recomputes, not state the
-rebuild carries (spec-045 Decision 8). That carry
-belongs to the raw-list seam alone, the one place where nothing is composed after the rebuild.
+with no further query, for an exact queryset and a project queryset class alike. The
+generated many-side resolver hands the fetched `list` itself to `bounded_rows`
+(`django_strawberry_framework/utils/querysets.py::materialized_rows`), and an evaluated
+queryset reaching `_windowed_rows` is sliced by Django's own `QuerySet.__getitem__`, which
+answers from the populated cache. Re-querying a project queryset class for rows it had already
+fetched would make `Manager.from_queryset` cost one query per parent row more than Django's
+manager at every relation it is used on.
 No other seal carries it, and what the others do with an evaluated source is two rules, not one.
 `require_unevaluated` - the axis that refuses an evaluated candidate outright - is on for the
 post-sidecar result seal
@@ -1466,15 +1401,15 @@ post-sidecar result seal
 every public `FilterSet.apply_*` and `OrderSet.apply_*` return; a `DjangoListField` reaches it
 through `orderBy` alone. The field invoked that method one step earlier and takes its window on
 what comes back, so rows already fetched mean the override filtered, ordered or paged something
-other than the query about to run. A visibility seal ADMITS an evaluated source and drops its
-`_result_cache` in the rebuild, on the hook's input and on the hook's result alike, so no cached
-or injected row crosses the boundary and a consumer that evaluates inside the hook pays one
+other than the query about to run. A visibility seal ADMITS an evaluated source and its clone
+drops the `_result_cache`, on the hook's input and on the hook's result alike, so no cached
+or shared row crosses the boundary and a consumer that evaluates inside the hook pays one
 extra query - a cost, not a broken seal. That hook's contract is shared with the Relay node,
 connection and relation surfaces, so holding it to the stricter rule here would make one hook's
 verdict depend on which field called it. For a `DjangoListField` that cost is the ordinary case:
 a queryset or manager its resolver returns passes `get_queryset` and that visibility seal before
-the raw-list seam, so an evaluated return - one the resolver iterated, a `keep_class` project
-subclass, or a `root.<relation>.all()` handed back from a warm prefetch - reaches the seam with
+the raw-list seam, so an evaluated return - one the resolver iterated, a project
+queryset class, or a `root.<relation>.all()` handed back from a warm prefetch - reaches the seam with
 its cache dropped. A positive-width window therefore executes it again: one more row query per
 resolution, so one per parent row when the field is nested, plus whatever `prefetch_related`
 work it carries. A list return is windowed from the rows it holds, and a zero-width window
@@ -2195,7 +2130,7 @@ Where each part of the surface lives, keyed to the slice checklist:
   an annotated filtered `Count` are each served as their direct spellings are, while a
   resolved predicate over a random alias, a raw fragment or an unlisted lookup such as
   `iexact` is refused. A project class resolved into an annotation is refused by the
-  post-sidecar seal as untrusted before the guard runs.
+  guard by its exact class, as its direct spelling is.
 - A `DjangoListField` resolver returning an evaluated queryset has its cache dropped by the
   visibility seal, so a positive-width window reads it again, once per resolution and so once
   per parent row when nested; a list return and a zero-width window do not.
@@ -2217,11 +2152,10 @@ Where each part of the surface lives, keyed to the slice checklist:
   and all-null included; a combined shape that rewrite would change (`union(all=True)`, for
   one) fails closed with the `combined` defect.
 - A custom `OrderSet.apply_*` result must SEAL to a lazy, unsliced, model-row-shaped,
-  same-model, same-route plain queryset, a combinator served as its primary-key set. A sealable
-  `QuerySet` SUBCLASS is accepted and normalized into that plain rebuild rather than rejected
-  for its class. Same-route is a claim about the CONNECTION: the candidate's `_db` must equal
-  the sealed source's (`None` included) and every hint value must be the same OBJECT, and the
-  accepted rebuild is pinned to the effective alias resolved before the override ran, so a hint
+  same-model, same-route queryset, a combinator served as its primary-key set. A `QuerySet`
+  SUBCLASS is accepted and handed on as a clone of its own class. Same-route is a claim about
+  the CONNECTION: the candidate's `_db` must equal the sealed source's (`None` included) and
+  every hint value must be the same OBJECT, and the accepted clone is pinned to the effective alias resolved before the override ran, so a hint
   object mutated behind a preserved identity cannot move the read. Arbitrary custom code is
   trusted to preserve the sealed source predicates.
 - An async-only iterable's iterator is closed when it exposes `aclose` and consumption does
@@ -2531,8 +2465,8 @@ which are functions in `test_list_field_async_api.py`, or given with their modul
     column and over a nullable right-hand column), a comparison with `None` over a project
     field, a negation whose join an earlier term promoted, and an `F` naming an `extra` select
     alias that shadows a field.
-    `test_shipped_branches_offset_annotated_project_sql_is_refused_by_the_seal_first`
-    pins the annotated twins of the project-class rows at the seal's untrusted defect, and
+    `test_shipped_branches_offset_refuses_an_annotated_project_sql_order`
+    pins the annotated twins of the project-class rows at the guard's `order_required`, and
     `test_shipped_branches_offset_certifies_an_order_whatever_spelling_resolves_it` serves,
     each written directly and held by an annotation, a conditional, its negation, a `__year`
     predicate, an `__in` holding an expression, an `F` transform as a predicate value, as a
@@ -2828,10 +2762,9 @@ sync or async HTTP request cannot isolate:
   its immutability and the policy-free omitted path (`test_list_field_record_independence`,
   `test_list_arguments_immutability`, `test_omitted_list_arguments_do_not_resolve_policy`,
   `test_normalize_list_arguments_treats_unset_as_omitted`);
-- seal-axis mechanics: a sealable `QuerySet` SUBCLASS post-apply result normalized into a
-  plain queryset and routing intent enforced
-  (`test_list_field_seal_axis_subclass_and_routing_intent`), and routing intent extracted with
-  no consumer dispatch (`test_list_field_post_orderset_validator_zero_consumer_dispatch`);
+- seal-axis mechanics: a `QuerySet` SUBCLASS post-apply result handed on as a clone of its
+  own class and routing intent enforced
+  (`test_list_field_seal_axis_subclass_and_routing_intent`);
 - a retained sync generator truncated by a client window still suspended and resumable
   afterward - the sync cleanup contract Decision 8 declines
   (`test_list_field_declined_sync_cleanup_generator_suspended`, beside
@@ -2872,19 +2805,9 @@ routes through:
   (`test_routing_intent_fails_closed_on_a_non_string_router_answer`), and a member answer is
   frozen as its exact text
   (`test_routing_intent_freezes_a_member_router_answer_as_its_exact_text`);
-- deferred-filter state: a subclass carrying a well-formed pending `_deferred_filter` seals
-  with that predicate baked into the compiled SQL
-  (`test_a_subclass_result_with_a_pending_deferred_filter_seals_with_it_baked`), and a
-  deferred-filter state Django never writes fails closed as `untrusted` on a subclass and on an
-  exact queryset alike - a wrong-arity tuple, a `negate` that is not an exact `bool` (refused
-  without reaching its own `__bool__`), a non-`dict` `kwargs`, and a value that is neither
-  inert nor genuine Django (`test_a_subclass_deferred_filter_state_django_never_writes_fails_closed`,
-  `test_a_deferred_filter_negate_that_is_not_a_bool_fails_closed_on_an_exact_queryset`,
-  `test_a_deferred_filter_negate_is_refused_without_reaching_its_own_bool`,
-  `test_deferred_filter_wrong_arity_tuple_fails_closed`,
-  `test_bake_deferred_non_dict_kwargs_fails_closed`,
-  `test_deferred_value_arbitrary_object_fails_closed`); the malformed case is also live on both
-  public overrides (row 11);
+- deferred-filter state: a subclass carrying a pending `_deferred_filter` seals with that
+  predicate baked into the compiled SQL
+  (`test_a_subclass_result_with_a_pending_deferred_filter_seals_with_it_baked`);
 - the sealer's own admission: a value whose `__class__` raises and one whose `__class__` names
   `QuerySet` are both the typed `type` defect rather than a raw exception or an admission
   (`test_a_value_whose_class_property_raises_is_a_typed_seal_defect`,
@@ -2993,28 +2916,19 @@ asserts the same for the keyset vocabulary's nested window.
 
 ### The raw-list row source
 
-The ceiling's ownership is proven at both tiers, because the seam is shared and the relation
-branch that reaches it has no visibility rebuild in front of it.
+The ceiling is proven at both tiers, because the seam is shared and the relation branch that
+reaches it has no visibility seal in front of it.
 
-Package rows in [`tests/test_resource_policy.py`][test-resource-policy] take a `QuerySet`
-subclass whose slice returns every row through `bounded_rows` and `bounded_rows_async`
-(`test_a_queryset_subclass_cannot_answer_its_own_row_bound` and its `_when_awaited` twin), and
-through the private `_windowed_rows` / `_windowed_rows_async` arms with a coordinate window
-(`test_a_windowed_queryset_subclass_is_windowed_on_the_rebuilt_queryset`) and a zero-width one
+Package rows in [`tests/test_resource_policy.py`][test-resource-policy] pin an exact-queryset
+control asserting the SQL `high_mark` is the effective ceiling
+(`test_an_exact_queryset_still_carries_the_row_bound_into_sql`), a project queryset class
+sliced as itself with that `high_mark` rather than counted in Python
+(`test_a_project_queryset_class_keeps_the_row_bound_in_sql`), a zero-width window on one
 (`test_a_zero_width_window_on_a_queryset_subclass_returns_no_rows` and its `_when_awaited`
-twin). Beside them: an exact-queryset control asserting the SQL `high_mark` is still the
-effective ceiling (`test_an_exact_queryset_still_carries_the_row_bound_into_sql`), a sealable
-subclass asserting the rebuild keeps that `high_mark` rather than counting the rows in Python
-(`test_a_sealable_queryset_subclass_keeps_the_row_bound_in_sql`), an unrebuildable subclass
-asserting a typed `ConfigurationError` rather than a fallback to its own subscript
-(`test_a_queryset_subclass_that_cannot_be_sealed_is_refused_not_sliced`), a class-spoofing
-non-queryset asserting it reaches the counting arm
-(`test_a_value_that_only_claims_to_be_a_queryset_cannot_reach_the_slice`), and a source whose
-declared model is not a model class refused
-(`test_a_queryset_subclass_without_a_model_class_is_refused`). The warm cache is pinned both
-ways: an exact queryset's fetched rows are read out of Django's slot
-(`test_rows_a_source_already_fetched_are_read_from_the_frameworks_own_slot`), and a subclass
-answers none (`test_a_queryset_subclass_is_never_asked_what_it_has_already_fetched`).
+twin), a class-spoofing non-queryset asserting it reaches the counting arm
+(`test_a_value_that_only_claims_to_be_a_queryset_cannot_reach_the_slice`), and an exact
+queryset's fetched rows read out of Django's slot
+(`test_rows_a_source_already_fetched_are_read_from_the_frameworks_own_slot`).
 
 Evaluation state is pinned beside them: an evaluated exact queryset and an evaluated project
 queryset class with no overrides are each windowed through `bounded_rows` and
@@ -3022,8 +2936,7 @@ queryset class with no overrides are each windowed through `bounded_rows` and
 leading window of what the source held
 (`test_an_evaluated_exact_queryset_is_windowed_from_the_rows_it_holds`,
 `test_an_evaluated_project_queryset_class_is_windowed_from_the_rows_it_holds`, and their
-`_from_its_own_rows_when_awaited` twins), and a `_result_cache` that is not a list is refused
-(`test_a_result_cache_that_is_not_a_list_is_refused_rather_than_carried`).
+`_from_its_own_rows_when_awaited` twins).
 `QuerySet.as_manager()` and `Manager.from_queryset` name the same shape throughout this spec -
 a project queryset class behind a model's default manager - and a row proving one proves the
 other.
@@ -3031,18 +2944,15 @@ other.
 The pending reverse-relation predicate every relation queryset carries is pinned at the same
 tier. `test_a_relation_source_from_a_project_queryset_class_keeps_its_relation_predicate`
 builds a no-override subclass whose predicate Django's own `_apply_rel_filters` leaves
-pending, windows it from the rows it holds, and asserts the SQL its rebuild compiles carries
-the relation predicate.
+pending, asserts the SQL it compiles carries the relation predicate, and windows it to the
+relation's own rows.
 
 Live rows in [`examples/fakeshop/test_query/test_resource_policy_api.py`][fakeshop-test-resource-policy]
 mount a `DjangoListField` root over `PatronType`, whose many-side `loans` target declares no
-custom `get_queryset`, at `max_list_rows=1` over a patron seeded with four loans. The reverse
-manager's `.all()` is made to return a `QuerySet` subclass, and the complete wire payload
-carries one loan on the sync transport and one on `AsyncDjangoGraphQLView`
-(`test_a_relation_manager_cannot_widen_the_raw_list_bound_with_its_own_slice`,
-`test_a_relation_manager_cannot_widen_the_raw_list_bound_on_the_async_transport`); the same
-document with Django's own manager is the control
-(`test_an_ordinary_relation_manager_is_bounded_the_same_way`). A second pair exercises the
+custom `get_queryset`, at `max_list_rows=1` over a patron seeded with four loans. `Loan`'s
+manager returns its project `LoanQuerySet`, and the payload carries one loan while the loans
+statement carries `LIMIT 1` (`test_a_project_queryset_class_relation_is_bounded_in_sql`). A
+second pair exercises the
 fakeshop `Loan` model's override-free `LoanQuerySet.as_manager()` declaration under a
 prefetching plan at two parent cardinalities and asserts the expected payload and an ABSOLUTE two-query count -
 one parent query plus one prefetch
@@ -3282,27 +3192,17 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       OFFSET; no spec, docstring, glossary, or error text promises a stable or repeatable page,
       and a published `offset` is documented as a runtime precondition rather than a per-field
       pagination capability.
-- [ ] No raw-list row source decides its own ceiling. An unevaluated exact `QuerySet` is
-      sliced and keeps its SQL `LIMIT`; a `QuerySet` SUBCLASS is rebuilt into a plain
-      framework-owned queryset through the shared sealer and sliced there, so a sealable,
-      unevaluated project queryset class keeps that `LIMIT` and an unrebuildable one is
-      refused with a typed `ConfigurationError` instead of falling back to its own
-      `__getitem__`. A pending reverse-relation predicate does not make a subclass
-      unrebuildable: Django leaves one on every relation queryset it builds whatever class the
-      manager was made from, and the seal bakes it onto the detached clone, while a
-      deferred-filter state that is not the exact shape Django writes - the `negate` slot's
-      exact `bool` included, refused without reaching its own `__bool__` - is refused with
-      that same typed error. An object whose `__class__` merely claims to be a queryset cannot
-      select the slice arm at all. The shape is read from `type(value)` at every admission,
-      including the sealer's own, so a `__class__` property can neither be consulted nor raise
-      out of a shape proof.
+- [ ] A raw-list row source is bounded by slicing when it is a `QuerySet` (a project queryset
+      class included, so it keeps its SQL `LIMIT`) or an exact built-in sequence, and by
+      counting into a fresh list otherwise. An object whose `__class__` merely claims to be a
+      queryset cannot select the slice arm: the shape is read from the real class.
 - [ ] The generated many-side relation resolver reaches that seam on its no-custom-visibility
-      branch too - the one path with no visibility rebuild in front of it - and normalizes the
-      relation cache before reading the rows it holds. Proven live on both transports with a
-      relation manager returning a `QuerySet` subclass over a `DjangoListField` root: the
-      response carries `max_list_rows` rows, not the relation's.
+      branch too - the one path with no visibility seal in front of it. Proven live with the
+      fakeshop `Loan` relation, whose manager returns a project queryset class, under a
+      `DjangoListField` root: the response carries `max_list_rows` rows and the statement
+      carries the `LIMIT`.
 - [ ] A source that reaches the raw-list seam evaluated is windowed from the rows it holds with
-      no further query, exact queryset and rebuilt subclass alike, through `bounded_rows` and
+      no further query, exact queryset and project queryset class alike, through `bounded_rows` and
       `bounded_rows_async`; the fakeshop `Loan` model's override-free
       `LoanQuerySet.as_manager()` declaration returns the expected rows at an ABSOLUTE two-query prefetch cost at two
       parent cardinalities, and returns those same rows on the async transport (Decision 8).

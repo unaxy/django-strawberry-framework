@@ -195,7 +195,7 @@ class RecognizedFetchQuerySet(QuerySet[models.Model, models.Model]):
 
     @classmethod
     def rebind(cls, queryset: QuerySet[models.Model], spec: object) -> RecognizedFetchQuerySet:
-        """Rebind ``queryset`` (a plain windowed ``QuerySet``) as this class.
+        """Rebind ``queryset`` (an exact ``QuerySet``, the windowed body) as this class.
 
         A chain-then-reclass: a subclass adds no construction-time state beyond
         the spec attribute ``_dst_spec_attr`` names, so the class swap on a

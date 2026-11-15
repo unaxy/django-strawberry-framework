@@ -104,7 +104,6 @@ from django_strawberry_framework.utils.inputs import (
     optional_field_kwargs,
 )
 from django_strawberry_framework.utils.querysets import (
-    _type_is_genuinely_django,
     joinless_relation_on,
 )
 from django_strawberry_framework.utils.relations import generated_column_source
@@ -1344,9 +1343,9 @@ def _is_hidden_flat_copy(filterset_cls: type[FilterSet], filter_instance: Filter
     A ``RelatedFilter`` expansion's copy of one of the set's own declarations
     (``filters/sets.py::_is_flat_copy``) is hidden when the key is set (its truthiness is
     this consumer's own semantics); every other filter of the set's table is published.
-    The input builder (``_build_input_fields``) and the served-leaf audit
-    (``_refuse_unsealable_served_leaves``) read the one answer, so the set the build checks
-    is the set the schema publishes.
+    The input builder (``_build_input_fields``) and the reach of a served set
+    (``_served_reach``) read the one answer, so the set the build checks is the set the
+    schema publishes.
     """
     from .sets import _is_flat_copy  # noqa: PLC0415 - import cycle
 
@@ -1405,84 +1404,6 @@ def _served_reach(
                 pending.append(
                     (root, child, (*through, f"{truth.name(filterset_cls)}.{branch}")),
                 )
-
-
-def _refuse_unsealable_served_leaves(served: Iterable[type[FilterSet]]) -> None:
-    """Refuse a leaf of a connection-served set whose predicate holds a class the seal refuses.
-
-    A ``DjangoConnectionField`` (root, or the ``<relation>Connection`` a Relay type grows)
-    applies its ``filter:`` argument inside the visibility boundary
-    (``utils/querysets.py::apply_filterset_sync``), whose seal admits only Django's own node
-    classes (``utils/querysets.py::_type_is_genuinely_django``, spec-045 Decision 2). A leaf
-    whose path resolves to any other transform or lookup class (a project ``Transform`` or
-    ``Lookup``, a ``Func``-based transform, a subclass of a Django class, a third-party
-    app's lookup; registered on a field class, on an instance, or on a transform) is
-    published on that argument yet refused on every request, so the build refuses it. The
-    classes asked are the ones Django's query resolves for the leaf's ``field_name`` and
-    ``lookup_expr`` (``filters/base.py::_filterset_lookup_operand``, the ``get_transform`` /
-    ``get_lookup`` walk), each asked of the seal's own predicate, so the build and the
-    request cannot disagree.
-
-    Every set a served set reaches through a ``RelatedFilter`` is served too, as its nested
-    branch (``_served_reach``, the reach the GlobalID audit reads too). Each reached set's
-    own filter table is asked, its expansion copies skipped
-    (``filters/sets.py::_expansion_record``), so every leaf is judged once, on the set that
-    declares it, and named there with the ``RelatedFilter`` path it was reached through. A
-    leaf whose ``filter`` is consumer code on its own set (a ``method=`` filter, a
-    ``filter`` override, a ``filter`` held on the instance, a ``get_filter_predicate``
-    override: ``filters/base.py::_runs_shipped_filter``) owns its query, and a path the
-    model alone cannot resolve (a queryset annotation) has no walk; the seal judges both
-    per request. A predicate Django resolves on no queryset never reaches here: its set
-    refused it when it published (``filters/base.py::refuse_unresolvable_lookup``). A set
-    no connection serves, applied from the project's own resolver, is never sealed and is
-    not asked.
-    """
-    from .sets import _expansion_record  # noqa: PLC0415 - import cycle
-
-    for _root, filterset_cls, through in _served_reach(served):
-        table = filterset_cls._filter_table()
-        for name, leaf in table.items():
-            if (
-                truth.is_instance(leaf, RelatedFilter)
-                or _expansion_record(leaf) is not None
-                or not _runs_shipped_filter(leaf)
-            ):
-                continue
-            node_types = _filterset_lookup_operand(filterset_cls, leaf).node_types
-            refused = next((t for t in node_types if not _type_is_genuinely_django(t)), None)
-            if refused is not None:
-                raise _unsealable_leaf_refusal(leaf, name, filterset_cls, through, refused)
-
-
-def _unsealable_leaf_refusal(
-    leaf: Filter,
-    name: str,
-    filterset_cls: type[FilterSet],
-    through: tuple[str, ...],
-    refused: type[object],
-) -> ConfigurationError:
-    """Build the refusal of a served leaf whose predicate holds ``refused``, a class not Django's own.
-
-    ``leaf`` is ``name`` on ``filterset_cls``, the set declaring it, reached from the served
-    set across the ``RelatedFilter`` attributes ``through`` (empty for the served set's own).
-    """
-    from .sets import _LeafDeclaration  # noqa: PLC0415 - import cycle
-
-    attribute = f"{truth.name(filterset_cls)}.{name}" if through else None
-    declaration = _LeafDeclaration(leaf, attribute, through, filterset_cls)
-    return ConfigurationError(
-        f"{_declaration_subject(declaration, filterset_cls)} with lookup "
-        f"{truth.render(leaf.lookup_expr)} resolves to "
-        f"{truth.module(refused)}.{truth.qualname(refused)}, which is not one of Django's own "
-        "lookup or transform classes. A connection serves this filter (a "
-        "DjangoConnectionField, or the <relation>Connection a Relay type grows for a to-many "
-        "relation) and runs its filter: argument inside the visibility boundary, which admits "
-        "only Django's own lookup and transform classes, so every request naming the filter "
-        "would be refused. Filter through a Django class (registered under any lookup name), "
-        "apply a FilterSet no connection serves from a resolver of your own (FilterInput[...] "
-        'and apply_sync), or set Meta.relation_shapes = {"<relation>": "list"} on the type '
-        "whose to-many relation grows the connection.",
-    )
 
 
 def _range_axis_scalar(filter_instance: Filter, filterset_cls: type[FilterSet]) -> object:

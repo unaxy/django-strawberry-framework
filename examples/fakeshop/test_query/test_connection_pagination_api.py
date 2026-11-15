@@ -23,7 +23,7 @@ the node type: ``allLibraryGenresConnection`` publishes ``filter:`` and
 The post-``OrderSet`` seal on the connection field is pinned here as well. The
 connection takes the Relay window on whatever ordering returned, so a consumer
 ``apply_sync`` override handing back an evaluated, materialized, projected,
-wrong-model, sliced, combined, awaitable, re-routed or unrebuildable-state
+wrong-model, sliced, combined, awaitable or re-routed
 value would otherwise
 produce a silently wrong page or foreign rows. One row per defect shape
 (``materialized-list`` and ``none`` share the ``type`` branch) drives
@@ -571,20 +571,6 @@ _GENRE_CONNECTION_ORDER_QUERY = (
 )
 
 
-class _DeferredFilterQuerySet(models.QuerySet[library_models.Genre]):
-    """A project queryset class, used here to carry a deferred filter Django never writes.
-
-    A PENDING predicate is ordinary: Django's related-manager machinery leaves
-    one on every relation queryset whatever class built it, and the seal bakes
-    it. What cannot be faithfully rebuilt is a deferred-filter STATE outside the
-    exact shape Django writes, which is what this class is planted with.
-    """
-
-    # The pending ``(negate, args, kwargs)`` slot ``QuerySet.__init__`` sets, which the
-    # stubs leave undeclared.
-    _deferred_filter: tuple[object, tuple[object, ...], dict[str, object]] | None
-
-
 async def _awaitable_queryset(
     queryset: models.QuerySet[library_models.Genre],
 ) -> models.QuerySet[library_models.Genre]:
@@ -616,28 +602,6 @@ def _override_evaluated(
 ) -> models.QuerySet[library_models.Genre]:
     list(queryset)
     return queryset
-
-
-def _untrusted_genre_queryset() -> _DeferredFilterQuerySet:
-    """Build the deferred-filter state Django never writes, for the untrusted rows.
-
-    Both the sync and the async arms plant the same shape, so the state lives
-    in one place and each override simply returns it.
-    """
-    candidate = _DeferredFilterQuerySet(model=library_models.Genre)
-    # ``negate`` decides whether the predicate is inverted and is truth-tested to
-    # do it, so Django's exact ``bool`` is the only shape the bake accepts there.
-    candidate._deferred_filter = (1, (), {"name": "A"})
-    return candidate
-
-
-def _override_untrusted(
-    _cls: type[GenreOrder],
-    _order_input: object,
-    _queryset: models.QuerySet[library_models.Genre],
-    _info: object,
-) -> _DeferredFilterQuerySet:
-    return _untrusted_genre_queryset()
 
 
 def _override_in_place_routing(
@@ -773,13 +737,6 @@ _CONNECTION_MALFORMED_APPLY_SYNC_ROWS: tuple[
         _override_in_place_routing,
         "GenreOrder.apply_sync changed database routing intent",
         ("expected db=None, hints={}", "got db=None, hints={'tenant': 2}"),
-        0,
-    ),
-    (
-        "malformed-deferred-filter",
-        _override_untrusted,
-        _GENRE_ORDER_SHAPE_PREFIX + "untrusted defect",
-        ("deferred filter negate is a int",),
         0,
     ),
 )
@@ -1042,16 +999,6 @@ async def _override_async_projection(
     return queryset.values("name")
 
 
-async def _override_async_untrusted(
-    _cls: type[GenreOrder],
-    _order_input: object,
-    _queryset: models.QuerySet[library_models.Genre],
-    _info: object,
-) -> _DeferredFilterQuerySet:
-    _ASYNC_APPLY_CALLS.append("malformed-deferred-filter")
-    return _untrusted_genre_queryset()
-
-
 def _override_async_non_awaitable(
     _cls: type[GenreOrder],
     _order_input: object,
@@ -1170,13 +1117,6 @@ _CONNECTION_MALFORMED_APPLY_ASYNC_ROWS: tuple[
         _override_async_in_place_routing,
         "GenreOrder.apply_async changed database routing intent",
         ("expected db=None, hints={}", "got db=None, hints={'tenant': 2}"),
-        None,
-    ),
-    (
-        "malformed-deferred-filter",
-        _override_async_untrusted,
-        _GENRE_ORDER_ASYNC_SHAPE_PREFIX + "untrusted defect",
-        ("deferred filter negate is a int",),
         None,
     ),
     (
@@ -1388,16 +1328,6 @@ async def _filter_override_async_projection(
     return queryset.values("name")
 
 
-async def _filter_override_async_untrusted(
-    _cls: type[GenreFilter],
-    _filter_input: object,
-    _queryset: models.QuerySet[library_models.Genre],
-    _info: object,
-) -> _DeferredFilterQuerySet:
-    _ASYNC_APPLY_CALLS.append("filter-malformed-deferred-filter")
-    return _untrusted_genre_queryset()
-
-
 def _filter_override_async_non_awaitable(
     _cls: type[GenreFilter],
     _filter_input: object,
@@ -1512,13 +1442,6 @@ _CONNECTION_MALFORMED_FILTER_APPLY_ASYNC_ROWS: tuple[
         _filter_override_async_in_place_routing,
         "GenreFilter.apply_async changed database routing intent",
         ("expected db=None, hints={}", "got db=None, hints={'tenant': 2}"),
-        None,
-    ),
-    (
-        "malformed-deferred-filter",
-        _filter_override_async_untrusted,
-        _GENRE_FILTER_ASYNC_SHAPE_PREFIX + "untrusted defect",
-        ("deferred filter negate is a int",),
         None,
     ),
     (

@@ -174,11 +174,9 @@ Spec: [Decision 5][spec-050-d5].
 
 *Derivation on the cost of the third seal:*
 
-- Deep recursive query-graph validation and canonical reconstruction occurs twice in the
-  visibility boundary (source and hook result), and a supplied `orderBy` adds a third full walk
-  and rebuild of every annotation, subquery, `Prefetch` tree, and expression node. The cost is
-  accepted because the alternative is trusting arbitrary public override output, and it is paid
-  on every request that supplies an order.
+- The visibility boundary seals twice (source and hook result), and a supplied `orderBy` adds a
+  third seal over the override's return. Each is a shape check and one `QuerySet.all()` clone,
+  paid on every request that supplies an order.
 
 ### Decision 6 — nonzero offset requires a materially active order
 
@@ -265,55 +263,22 @@ Spec: [Decision 8][spec-050-d8].
   every generated relation list, so closing a consumer's retained generator would be an
   observable behavior change on every relation list, not only on this field.
 - **Directly reading `source.query.is_sliced` or importing the private seal in list field:**
-  Would duplicate or weaken the shared hardened classifier in the visibility boundary.
-- **Treating `isinstance(value, QuerySet)` as proof that the package owns the slice:** It is not
-  a proof of anything. `isinstance` falls back to the value's own `__class__`, so a non-queryset
-  can select the SQL-slice arm; and even when the answer is true, the subscript that follows is
-  the subclass's `__getitem__`. The universal raw-list ceiling would then be a call the bounded
-  object decides the result of, reachable through a real relation over a real request.
+  Would duplicate the shared classifier in the visibility boundary.
+- **Treating `isinstance(value, QuerySet)` as the slice test:** `isinstance` falls back to the
+  value's own `__class__`, so a non-queryset could select the SQL-slice arm. The test reads the
+  real class instead.
 - **Exact type plus `islice` as the whole fix:** Restores the row ceiling and loses the SQL one.
   A project queryset class returned by a custom manager is ordinary Django, and demoting every
   one of them to a counted Python truncation would fetch the whole relation to discard its tail
-  - trading a wire-level bound for a database-level regression.
+  - trading a wire-level bound for a database-level regression. A project queryset class is
+  application code, trusted under GOAL.md "Trust boundary", so it is sliced as itself.
 - **Rejecting every `QuerySet` subclass outright:** `Manager.from_queryset` and
   `QuerySet.as_manager` are the documented way to give a model its own queryset class, so this
-  would refuse ordinary Django. The seal already answers the real question - can this state be
-  faithfully rebuilt - and only the states it cannot rebuild fail closed.
-- **A second, cheaper rebuild primitive for this seam:** Two rebuilds proving different things
-  is how one of them comes to prove less. The shared sealer is reused with its own policy
-  instead, switching off only the axes that guard a RECOMPOSITION, because nothing recomposes
-  here - one `[start:stop]` is taken, and Django takes it on a sliced query and on a combinator
-  alike.
-- **Running the full seal on every source:** The exact queryset is the common case by an
-  enormous margin, and a per-parent-row recursive validation would turn nested relation lists
-  into an N+1 validation cost for a rebuild that would return an equivalent object. It is
-  returned unchanged instead, and only the untrusted shape pays.
-- **Reading the relation cache's `_result_cache` with `getattr` after normalizing:** The read is
-  the same consumer dispatch point the slice is. The rows come out of Django's own slot on an
-  exact queryset this package owns, never through an attribute lookup a subclass answers; a
-  subclass source reaches that slot by being rebuilt, and the rebuild brings its rows with it.
+  would refuse ordinary Django.
 
-*Fact behind the pending-predicate admission:* Django's
-`RelatedManager._apply_rel_filters` sets `_defer_next_filter` and then calls
-`.filter(**core_filters)`, whose `_filter_or_exclude` stores the `(negate, args, kwargs)` tuple on
-`self._chain()` — an object of the CANDIDATE's class. So **every** relation queryset carries a
-pending `_deferred_filter`, on an exact `QuerySet` and on a `Manager.from_queryset` class alike
-(the same relation built both ways carries the identical tuple). A seal that refused a subclass
-carrying that state would refuse a `Manager.from_queryset` relation at the raw-list row source
-and at the visibility boundary, and Decision 8's promise that a sealable project queryset class
-keeps its `LIMIT` would be unreachable for the relation case. The seal therefore proves the
-tuple's values and bakes it onto the detached clone
-(`django_strawberry_framework/utils/querysets.py::_bake_deferred_filter_or_defect`).
-
-*Rejected — refusing `Manager.from_queryset` relations as unsupported:* It is the documented way
-to give a model its own queryset class, so this refuses ordinary Django on a false premise about
-Django. Decision 19 names that shape as standard application code the package answers for.
-
-*Rejected — re-querying the relation instead of carrying its rows:* The cached rows are already
-in memory. Re-fetching them costs one query per parent row, and on the prefetched branch of the
-generated many-side resolver it returns an unevaluated rebuilt source that list completion
-fetches once per parent row, under async through one worker hop each. The alternative is
-therefore a statement and a hop on every parent row the cache already answered.
+*Rejected — re-querying the relation instead of windowing its fetched rows:* The cached rows
+are already in memory. Re-fetching them costs one query per parent row, and under async one
+worker hop each.
 
 *Rejected — mounting the live proof on a shape that never reaches the branch:* replacing the
 reverse relation manager's queryset class. The optimizer seeds the generated `Prefetch` child
@@ -321,21 +286,6 @@ from the related model's `_default_manager.all()`, and Django's `prefetch_one_le
 `manager._apply_rel_filters(lookup.queryset._chain())`, so that mount leaves an exact `QuerySet`
 in the cache and a row over it passes while exercising nothing. The live rows mount the model's
 default manager instead (`Loan.objects = LoanQuerySet.as_manager()`).
-
-*Rejected — confining the admission to a `_SealPolicy` axis on the raw-list row source:* It would
-leave the same project shape refused at the visibility boundary, where it is equally reachable,
-so it is a knowingly partial fix. It would also encode two admission rules for one state slot
-with no mechanical difference between them: the bake dispatches no candidate code and proves the
-same things whichever surface calls it, whereas every policy axis names a real difference (what
-the rows are, whether the surface recomposes, which connection, whether the surface demanded the
-result). Sealability is one rule, defined once.
-
-*Why the `negate` slot takes an exact-`bool` check:* the bake's contract is that it runs only
-genuine Django machinery over pre-proven arguments, and `negate` is the one slot in the tuple that
-would otherwise reach consumer code — `~predicate if negate else predicate` truth-tests it, so a
-planted object's `__bool__` would decide whether the predicate is negated. Pinning it completes a
-proof the `tuple` / `dict` / `list` checks beside it already perform, rather than opening a new
-threat model.
 
 ### Decision 9 — a request with no list argument runs the plain bounded path; async only adapts completion
 

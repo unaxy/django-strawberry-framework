@@ -756,13 +756,11 @@ coordinates are checked against.
   positive-width window executes it again, once per resolution and so once per parent row
   when nested.
 - **What truncates follows from what the value IS**, never from whether a subscript
-  happened to answer. An exact `list`, `tuple`, `str`, `bytes`, `bytearray` or `QuerySet`
-  is sliced; every other shape (a subclass of one of the sequence types, a mapping, a bare
-  iterable) is counted through `islice` into a list the package built, so neither an
-  unsliceable value nor a sequence whose own `__getitem__` is consumer code escapes the
-  bound. A `QuerySet` subclass is rebuilt into a plain framework-owned queryset first
-  (`utils/querysets.py::normalized_row_source`) and sliced there, keeping its SQL `LIMIT`;
-  a state that cannot be rebuilt fails closed with a `ConfigurationError`.
+  happened to answer. An exact `list`, `tuple`, `str`, `bytes` or `bytearray`, and any
+  `QuerySet` (a project's own class included, so it keeps its SQL `LIMIT`), is sliced;
+  every other shape (a subclass of one of the sequence types, a mapping, a bare iterable)
+  is counted through `islice` into a list the package built, so neither an unsliceable
+  value nor a sequence whose own `__getitem__` is consumer code escapes the bound.
 - **Ordering against the visibility hook is a correctness constraint, not a preference.**
   The bound is applied AFTER
   [`get_queryset`][glossary-get_queryset-visibility-hook] and after the consumer-resolver

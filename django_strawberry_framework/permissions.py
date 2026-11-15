@@ -122,22 +122,17 @@ from .utils.lazy import unwrap_lazy_object
 # reuses it as the per-edge probe so the package keeps ONE sync-misuse site
 # (spec-034 Decision 10). The runner is also the shared sealed visibility boundary:
 # it owns the hook-result shape / concrete-table / alias contract (Manager
-# coercion, sealing into a framework-owned plain QuerySet rebuilt from validated
-# query state, alias pinned at construction, explicit cross-alias rejection),
-# rendered through the cascade's per-edge error seam (``_edge_error_renderer``);
-# because the boundary returns a SEALED queryset, the cascade's
-# ``.values(...)`` re-projection runs on a genuine ``QuerySet.values`` (never a
-# consumer ``_values`` override), and only the RE-PROJECTION battery -- the
-# rejections that exist because the cascade calls ``.values(...)`` -- stays
+# coercion, the shape checks, a fresh clone of the hook's return, alias pinned at
+# construction, explicit cross-alias rejection), rendered through the cascade's
+# per-edge error seam (``_edge_error_renderer``); only the RE-PROJECTION battery --
+# the rejections that exist because the cascade calls ``.values(...)`` -- stays
 # cascade-local.
 from .utils.querysets import (
     _CASCADE_SEAL_POLICY,
     _COMBINED_WHAT,
-    _UNSEALABLE_STATE_CAUSES,
     SyncMisuseError,
     _defect_message,
     _prepared_visibility_source,
-    _restated_as_source_class,
     apply_type_visibility_sync,
     model_for,
     related_queryset,
@@ -158,8 +153,6 @@ if TYPE_CHECKING:
 # public name.
 __all__ = ("SyncMisuseError", "aapply_cascade_permissions", "apply_cascade_permissions")
 
-_M = TypeVar("_M", bound=models.Model)
-_R = TypeVar("_R")
 _QS = TypeVar("_QS", bound=models.QuerySet[models.Model, object])
 
 _ASYNC_RECOURSE = (
@@ -357,7 +350,7 @@ def _root_error_renderer(
     The twin of :func:`_edge_error_renderer`, for the other end of the helper:
     ``apply_cascade_permissions`` seals its root through
     ``utils/querysets.py::_prepared_visibility_source``, which owns the
-    shape / concrete-table / sealability / composability contract but words its
+    shape / concrete-table / composability contract but words its
     defaults for ``apply_type_visibility``. The consumer never called that
     function -- they called this one, from inside their own ``get_queryset`` --
     so the cascade keeps its own prose (and its own recourse) on every source
@@ -368,10 +361,9 @@ def _root_error_renderer(
     for a hook return), ``reject_sliced`` on (the walk narrows by
     ``.filter(...)``, which Django refuses after a slice, so accepting one would
     leak a raw ``TypeError`` mid-walk instead of the fail-closed configuration
-    error) and ``rewrite_combined`` on (a combinator is walked as its
-    primary-key set, which takes ``.filter(...)``; a combinator that set would
-    change fails closed). The reachable codes are therefore ``type``,
-    ``table``, ``untrusted``, ``sliced`` and ``combined``.
+    error); a combinator is walked as its primary-key set, which takes
+    ``.filter(...)``, and a combinator that set would change fails closed. The
+    reachable codes are therefore ``type``, ``table``, ``sliced`` and ``combined``.
     """
 
     def _render(code: str, detail: str) -> str:
@@ -387,12 +379,6 @@ def _root_error_renderer(
                 "table": (
                     f"apply_cascade_permissions for {name} requires a QuerySet "
                     f"over {truth.name(model)}'s concrete table; got a {detail} queryset."
-                ),
-                "untrusted": (
-                    f"apply_cascade_permissions for {name} got a root queryset that "
-                    f"cannot be sealed into a framework-owned execution queryset ({detail}); "
-                    f"the cascade narrows a rebuilt queryset rather than the caller's object, "
-                    f"and {_UNSEALABLE_STATE_CAUSES}"
                 ),
                 "sliced": (
                     f"apply_cascade_permissions for {name} got a sliced "
@@ -423,15 +409,12 @@ def _edge_error_renderer(
     this seam keeps the cascade's path-rich per-edge prose on those failures.
     The ``type`` / ``table`` / ``alias`` / ``sliced`` wordings are the
     cascade's established strings, ``combined`` shares the boundary's
-    combined-queryset text (``_COMBINED_WHAT``), and ``untrusted`` (a queryset
-    whose state the boundary cannot seal into a framework-owned execution queryset, with the
-    causes ``utils/querysets.py #"_UNSEALABLE_STATE_CAUSES = ("`` names)
-    is boundary-new and gets cascade-flavored prose of its own. The cascade runs
+    combined-queryset text (``_COMBINED_WHAT``). The cascade runs
     under ``_CASCADE_SEAL_POLICY``, whose ``require_model_rows=False`` means the
     boundary never raises the ``projection`` code here - a ``.values()`` return
     is the cascade's supported input, not a defect - while its
-    ``reject_sliced`` and ``rewrite_combined`` surface the sliced shape and the
-    combined shapes ``_validated_target_subquery`` cannot re-project.
+    ``reject_sliced`` surfaces the sliced shape, and the seal's combinator rewrite
+    the combined shapes ``_validated_target_subquery`` cannot re-project.
     """
 
     def _render(code: str, detail: str) -> str:
@@ -451,13 +434,6 @@ def _edge_error_renderer(
                     f"{truth.name(field.related_model)}; the subquery must stay on the "
                     f"target's concrete table (proxy siblings are compatible, MTI "
                     f"children are not)."
-                ),
-                "untrusted": (
-                    f"{name}.get_queryset returned a queryset that cannot be "
-                    f"sealed into a framework-owned execution queryset ({detail}) for the "
-                    f"cascade subquery on {edge}; the cascade "
-                    f"re-projects the sealed queryset to the edge's target column, and "
-                    f"{_UNSEALABLE_STATE_CAUSES}"
                 ),
                 "sliced": (
                     f"{name}.get_queryset returned a sliced queryset "
@@ -609,10 +585,7 @@ def apply_cascade_permissions(
     visibility policy to apply. Returns a fresh instance of ``queryset``'s own
     class, same model and row type (a project ``QuerySet`` subclass in, that
     subclass out), so a project ``QuerySet`` method chains after the cascade;
-    the source is sealed and narrowed as a framework-owned plain rebuild first,
-    so the class's own ``filter`` never sees the cascade predicate, and
-    attributes the class sets on an instance outside Django's constructor
-    arguments are not carried. It never evaluates, reorders, or projects the
+    the narrowing is that class's own ``filter``. It never evaluates, reorders, or projects the
     caller's queryset -- pure ``.filter(...)`` composition, so the ``__in``
     subqueries compile into the caller's single ``SELECT`` and add zero query
     round-trips (spec-034 Decision 7).
@@ -628,8 +601,8 @@ def apply_cascade_permissions(
 
     Raises:
         ConfigurationError: a malformed ``queryset`` (non-``QuerySet`` /
-            wrong concrete table / unsealable query state / sliced -- the walk
-            narrows a rebuilt queryset by ``.filter(...)``, which Django refuses
+            wrong concrete table / sliced -- the walk
+            narrows by ``.filter(...)``, which Django refuses
             after a slice -- or a combinator whose primary-key set would change
             its rows); a bare-string ``fields=``
             or a ``fields=``
@@ -652,18 +625,10 @@ def apply_cascade_permissions(
 
     """
     model = model_for(cls)
-    # The caller's class, read once before the seal: the seal and the walk below stay
-    # plain, so no consumer ``filter`` override is ever dispatched on the cascade
-    # predicate, and the narrowed result is restated as this class at each exit.
-    source_class: type[_QS] = truth.class_of(queryset)
-    # The helper is called from inside a consumer-owned ``get_queryset`` hook,
-    # so its root argument is untrusted query state even when it claims to be a
-    # ``QuerySet``. Validate and rebuild it through the shared visibility
-    # boundary before dispatching ``.filter(...)`` below: a consumer subclass
-    # (or an instance-shadowed method on an exact ``QuerySet``) must not be able
-    # to erase the cascade predicate and then pass an apparently valid but
-    # unfiltered query back to the outer hook-result seal. The cascade's own
-    # renderer keeps the source defects attributed to THIS call, and
+    # The root runs through the shared visibility source check before the walk
+    # narrows it, so a shape ``.filter(...)`` cannot narrow fails as a typed
+    # configuration error rather than mid-walk. The cascade's own renderer keeps
+    # the source defects attributed to THIS call, and
     # ``_CASCADE_SEAL_POLICY`` states the cascade's whole contract in one place:
     # a ``.values()`` root is supported input, a sliced root (which ``.filter(...)``
     # cannot narrow) is rejected by the seal itself rather than by a second battery
@@ -710,7 +675,7 @@ def apply_cascade_permissions(
                 # the enclosing edge's subquery carries exactly the hook's own
                 # direct narrowing. Any re-entry that would walk an edge (a
                 # full walk or a non-empty subset) stays fail-closed below.
-                return _restated_as_source_class(sealed, source_class)
+                return sealed
             raise _cycle_error(state, cls)
         state = dataclasses.replace(state, active=(*state.active, cls))
     token = _cascade_state.set(state)
@@ -718,17 +683,17 @@ def apply_cascade_permissions(
         narrowed = _walk(cls, model, sealed, info, names_to_walk, state)
     finally:
         _cascade_state.reset(token)
-    return _restated_as_source_class(narrowed, source_class)
+    return narrowed
 
 
 def _walk(
     cls: type[DjangoType],
     model: type[models.Model],
-    queryset: models.QuerySet[_M, _R],
+    queryset: _QS,
     info: object,
     names_to_walk: set[str] | None,
     state: _TraversalState,
-) -> models.QuerySet[_M, _R]:
+) -> _QS:
     """Intersect one visibility constraint per qualifying edge of ``model``.
 
     The caller owns the walk-frame lifecycle (state install / cycle raise /

@@ -499,10 +499,7 @@ def _build_child_queryset(
         # returning an explicitly routed queryset therefore fails closed instead of
         # scheduling the parent and its related rows on two connections; an unrouted
         # child inherits the parent's connection at fetch time, so a routed parent
-        # still carries its children. A consumer-supplied ``Prefetch`` child meets the
-        # same rule in ``utils/querysets.py::_sealed_prefetch_related_lookups``, which
-        # the generated one never passes through: the plan applies it after the
-        # parent's own seal has run.
+        # still carries its children.
         # ``has_custom_qs`` is True only for a resolved target type.
         if target_type is None:
             raise TypeError("a custom get_queryset verdict reached a relation with no target type")

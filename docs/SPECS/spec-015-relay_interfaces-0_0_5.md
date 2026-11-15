@@ -269,7 +269,7 @@ There is no `resolve_node` default. Strawberry's own `strawberry/relay/types.py:
 
 `info` is keyword-only on both resolvers that take it, mirroring Strawberry's own `relay.Node` signatures: every Relay caller passes it by keyword (`cls.resolve_nodes(info=info, node_ids=..., required=...)`, `cls.resolve_id(root, info=info)`).
 
-The node default never calls `cls.get_queryset` directly. Both route it through the shared visibility boundary in `django_strawberry_framework/utils/querysets.py`, which treats the hook's return as untrusted query state, awaits an async hook on the async path, and rejects one on the sync path (Decision 9).
+The node default never calls `cls.get_queryset` directly. Both route it through the shared visibility boundary in `django_strawberry_framework/utils/querysets.py`, which checks the hook's return and clones it, awaits an async hook on the async path, and rejects one on the sync path (Decision 9).
 
 The rejected alternatives, the upstream borrow justifications, and the recursion the `super()` spelling would have shipped are in the [rationale companion][spec-015-rationale].
 ### Decision 4: validation

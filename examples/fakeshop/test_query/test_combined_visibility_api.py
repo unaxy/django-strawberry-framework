@@ -1123,6 +1123,57 @@ def test_consumer_prefetch_of_a_combined_queryset_serves_its_rows(
     }
 
 
+@_OPTIMIZER
+@_EVERY_SHAPE
+@pytest.mark.django_db
+def test_consumer_prefetch_of_a_combined_queryset_two_levels_down_serves_its_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+    *,
+    optimizer: bool,
+) -> None:
+    """A combined ``loans`` child under a hook's ``books`` ``Prefetch`` serves each book's own loans.
+
+    Django hoists the inner lookup into the outer prefetch and filters it by each book,
+    a predicate a combinator's compiler ignores, so the child is served as its
+    primary-key set like a combined child one level up.
+    """
+    books = _seed_books()
+    patrons = [models.Patron.objects.create(name=f"Reader {word}") for word in _WORDS]
+    for title, book in books.items():
+        for word, patron in zip(_WORDS, patrons, strict=True):
+            models.Loan.objects.create(book=book, patron=patron, note=f"{word} {title}")
+    results: dict[bool, JSONObject] = {}
+    for combined in (True, False):
+        chosen = _SHAPES[shape].combined if combined else _SHAPES[shape].uncombined
+
+        def _body(
+            queryset: QuerySet[Model],
+            info: strawberry.Info[object, object],
+            chosen: Callable[[QuerySet[Model], str], QuerySet[Model]] = chosen,
+        ) -> QuerySet[Model]:
+            del info
+            loans = chosen(models.Loan.objects.all(), "note")
+            inner = models.Book.objects.prefetch_related(Prefetch("loans", queryset=loans))
+            return queryset.prefetch_related(Prefetch("books", queryset=inner))
+
+        _install(monkeypatch, "GenreType", _body)
+        results[combined] = _data(
+            "{ allLibraryGenresViaListField { name books { title loans { note } } } }",
+            optimizer=optimizer,
+        )
+
+    assert _order_free(results[True]) == _order_free(results[False])
+    served = [
+        (json_str(book, "title"), json_str(loan, "note"))
+        for row in json_list(results[True], "allLibraryGenresViaListField")
+        for book in json_list(row, "books")
+        for loan in json_list(book, "loans")
+    ]
+    assert served
+    assert all(note.endswith(f" {title}") for title, note in served), served
+
+
 @_EVERY_SHAPE
 @pytest.mark.django_db
 def test_strictness_raise_plans_a_combined_child(

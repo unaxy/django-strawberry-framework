@@ -32,7 +32,7 @@ from apps.products.models import Category, Item
 from apps.scalars.models import ScalarSpecimen
 from asgiref.sync import sync_to_async
 from django.db import connection as db_connection
-from django.db import models, router
+from django.db import router
 from django.db.models import Model, QuerySet
 from django.utils import timezone
 from graphql import OperationType
@@ -45,7 +45,7 @@ from django_strawberry_framework import (
     DjangoType,
     finalize_django_types,
 )
-from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
+from django_strawberry_framework.exceptions import OptimizerError
 from django_strawberry_framework.optimizer._context import (
     DST_OPTIMIZER_FK_ID_ELISIONS,
     DST_OPTIMIZER_PLANNED,
@@ -1602,34 +1602,6 @@ def test_sync_forward_and_many_resolver_visibility() -> None:
             end_execution_frame(warn_frame)
     finally:
         end_execution_frame(frame)
-
-
-def test_an_unsealable_prefetch_cache_is_refused_under_the_accessor_it_was_read_from() -> None:
-    """A prefetch-cache entry the seal refuses is named as the cache it came from.
-
-    The consumer wrote no collection resolver here; the queryset is the one
-    Django cached under the relation's accessor, so that is what the error names.
-    """
-
-    class _ProjectQuerySet(models.QuerySet[Item]):
-        """A project's own queryset class."""
-
-    cached = _ProjectQuerySet(model=Item)
-    # basedpyright: the planted foreign row iterable is the hostile input under test; django-stubs
-    # types the slot as one of Django's BaseIterable classes
-    cached._iterable_class = list  # pyright: ignore[reportAttributeAccessIssue]
-    resolver = _make_relation_resolver(
-        Category._meta.get_field("items"),
-        parent_type=_parent_type(Category),
-    )
-    root = SimpleNamespace(_prefetched_objects_cache={"items": cached})
-    info = make_info(path=response_path("category", "items"), context={})
-    with pytest.raises(ConfigurationError) as excinfo:
-        resolver(root, info)
-    message = str(excinfo.value)
-    assert message.startswith("The prefetch cache for 'items' held a _ProjectQuerySet ")
-    assert "cannot be sealed into a framework-owned execution queryset" in message
-    assert "collection resolver" not in message
 
 
 def test_resolver_helpers_edge_cases() -> None:

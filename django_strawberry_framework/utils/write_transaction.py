@@ -875,8 +875,8 @@ def base_visible_queryset(
 
     The same ``pk__in`` reduction, so it carries every queryset shape the lock does. The
     base manager's queryset starts from Django's default fetch mode, so the visible
-    queryset's own (Django 6.1's ``QuerySet.fetch_mode``, one of Django's own modes as the
-    visibility seal proved) is carried onto it: a located row loads its deferred fields and
+    queryset's own (Django 6.1's ``QuerySet.fetch_mode``, when it is one of Django's own
+    modes) is carried onto it: a located row loads its deferred fields and
     relations under the mode the project's ``get_queryset`` chose, as a read of the same
     row does. Below 6.1 there is none to carry.
     """

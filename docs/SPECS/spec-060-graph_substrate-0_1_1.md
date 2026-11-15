@@ -1096,8 +1096,7 @@ per-parent fallback pipeline are sync and compile with `graph.apply`,
 handing it the `info` they already pass to target visibility; the
 `graph.apply` output passes the same
 [sealed visibility boundary][glossary-sealed-execution-queryset] with the
-same allow-sliced posture — and the same admitted-bound-value rule over
-every predicate payload (see `Edge cases and constraints`) — as the
+same allow-sliced posture as the
 target-visibility helpers. Strictness
 resolver keys publish only after successful attachment — planning failure
 stays visible. [`apply_cascade_permissions`][glossary-apply_cascade_permissions]
@@ -1327,18 +1326,10 @@ ownership partition applies.
   rather than silently skipping it, and a prefetch cache the optimizer did
   not plan on a scoped accessor is re-read through the scoped path, never
   served (Decision 7).
-- **Predicate bound values pass the seal's admitted-bound-value rule.**
-  Every `graph.apply` output crossing the sealed boundary is canonically
-  reconstructed, and each bound `Q` value reaches
-  `utils/querysets.py::_normalized_bound_value`: plain data and its
-  subclasses (`TextChoices` members, `Decimal` / `UUID` / date subclasses)
-  normalize to framework-owned exact inert values; trusted schema is
-  retained by reference — including a bound `models.Model` instance, so
-  `Q(borrower=request.user)` survives; every other payload is refused
-  closed as a typed `untrusted` defect. A consumer object, dataclass, or
-  namedtuple bound as a `direct` / `related` / `same_related_row` /
-  edge-factory predicate value is therefore a documented refusal, not a
-  supported payload — bind its scalar fields instead.
+- **Predicate bound values are Django's to bind.** Every `graph.apply`
+  output crosses the sealed boundary as a clone, and each bound `Q` value
+  reaches Django as given, so `Q(borrower=request.user)` binds the user's
+  key and a value Django cannot bind raises Django's own error.
 - **Consumer duplicates are preserved:** predicate application never
   collapses a consumer's intentional multiset (no injected `DISTINCT`) and
   never multiplies it (correlated `EXISTS` terms only).

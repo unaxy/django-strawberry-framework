@@ -74,7 +74,6 @@ from django_strawberry_framework.resource_policy import (
 from django_strawberry_framework.schema import DjangoSchema
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
-    set_queryset_deferred_filter,
     set_queryset_hints,
 )
 from django_strawberry_framework.utils.context import get_context_value
@@ -2576,10 +2575,9 @@ def test_shipped_branches_offset_refuses_an_order_compiling_to_sql_it_cannot_rea
 
 
 #: The annotated twins of the project-class rows above. ``annotate`` resolves the
-#: project class into the query graph, so the post-``OrderSet`` seal refuses the
-#: queryset as untrusted before the offset guard reads it. ``(id, ordering,
-#: registrations)``.
-_SEAL_REFUSED_ORDERINGS: tuple[
+#: project class into the query graph at once, so the guard reads it as a node of
+#: the returned query rather than as a spelling. ``(id, ordering, registrations)``.
+_ANNOTATED_REFUSED_ORDERINGS: tuple[
     tuple[str, _BranchOrdering, tuple[_LookupRegistration, ...]],
     ...,
 ] = (
@@ -2648,34 +2646,27 @@ _SEAL_REFUSED_ORDERINGS: tuple[
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("ordering", "registrations"),
-    [row[1:] for row in _SEAL_REFUSED_ORDERINGS],
-    ids=[row[0] for row in _SEAL_REFUSED_ORDERINGS],
+    [row[1:] for row in _ANNOTATED_REFUSED_ORDERINGS],
+    ids=[row[0] for row in _ANNOTATED_REFUSED_ORDERINGS],
 )
-def test_shipped_branches_offset_annotated_project_sql_is_refused_by_the_seal_first(
+def test_shipped_branches_offset_refuses_an_annotated_project_sql_order(
     monkeypatch: pytest.MonkeyPatch,
     ordering: _BranchOrdering,
     registrations: tuple[_LookupRegistration, ...],
 ) -> None:
-    """An annotation resolving a project class carries it into the graph the seal walks.
+    """An annotation resolving a project class is refused by the offset guard too.
 
-    The direct spellings above reach the offset guard because Django resolves an
-    ordering only when it compiles; ``annotate`` resolves at once, so the same
-    project class is a node of the returned query and the post-``OrderSet``
-    seal names it untrusted. The request fails there, before any branch
-    statement, and the guard is never asked.
+    ``annotate`` resolves at once, so the project class is a node of the returned
+    query, which the guard reads by exact class and refuses before any branch
+    statement runs.
     """
     _seed_three_branches()
 
-    payload, branch_sql = _branch_offset_page_under(
-        monkeypatch,
-        ordering,
-        registrations,
-        extra_settings=_ERROR_POLICY_PASS_THROUGH,
-    )
+    payload, branch_sql = _branch_offset_page_under(monkeypatch, ordering, registrations)
 
-    assert payload["data"] is None
-    message = json_str(payload, "errors", 0, "message")
-    assert message.startswith(_BRANCH_ORDER_SHAPE_PREFIX + "untrusted defect"), message
+    err = json_object(payload, "errors", 0)
+    assert json_at(err, "extensions", "reason") == "order_required"
+    assert json_at(err, "extensions", "argument") == "offset"
     assert branch_sql == []
 
 
@@ -3037,7 +3028,7 @@ def test_holder_branches_an_evaluated_resolver_queryset_is_read_again(
     """The visibility seal drops a returned queryset's cache, so a window reads it again.
 
     A ``DjangoListField`` resolver's queryset passes ``get_queryset`` and the
-    visibility seal (spec-045 Decision 3), which rebuilds it without its result
+    visibility seal (spec-045 Decision 3), whose clone drops its result
     cache, so a positive-width window executes it once more after the
     resolver's own read. A list is windowed from the rows it holds, and a
     zero-width window issues no row query of its own. The counts are this
@@ -3133,7 +3124,7 @@ def _prefetched_shelves(
 def test_holder_shelves_a_warm_prefetch_returned_by_a_resolver_is_read_again_per_parent(
     parents: int,
 ) -> None:
-    """``root.<relation>.all()`` from a warm prefetch is a cached queryset the seal rebuilds.
+    """``root.<relation>.all()`` from a warm prefetch is a cached queryset the seal clones.
 
     ``Manager.all`` hands back the prefetched queryset with its cache filled, and
     a ``DjangoListField`` resolver's queryset is sealed like any other, so each
@@ -3856,7 +3847,7 @@ def test_holder_branches_serve_a_combined_source_and_result_as_their_primary_key
 ) -> None:
     """A union source and a union ``OrderSet`` result are windowed as the rows they select.
 
-    Under an active list argument the source seal rebuilds the union as its
+    Under an active list argument the source seal rewrites the union as its
     primary-key set before ``BranchType.get_queryset`` narrows it, and the
     post-``OrderSet`` seal does the same to the override's return, so the
     window is taken on a query Django can narrow and slice.
@@ -4019,60 +4010,9 @@ def test_holder_genres_a_combined_connection_runs_unplanned_with_the_optimizer_i
     assert [json_at(edge, "node", "name") for edge in edges] == ["A", "B", "C"]
 
 
-class _ConsumerUpper(models.Func):
-    function = "UPPER"
-
-
-@pytest.mark.django_db
-def test_holder_genres_a_hook_carrying_a_consumer_expression_names_the_state_on_the_wire(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ``get_queryset`` annotating with a project ``Func`` is refused with the seal's causes."""
-    library_models.Genre.objects.create(name="A")
-
-    def _annotating_get_queryset(
-        _cls: type[library_schema.GenreType],
-        queryset: models.QuerySet[library_models.Genre],
-        _info: strawberry.Info[object, object],
-        **_kwargs: object,
-    ) -> models.QuerySet[library_models.Genre]:
-        return queryset.annotate(u=_ConsumerUpper(models.F("name")))
-
-    monkeypatch.setattr(
-        library_schema.GenreType,
-        "get_queryset",
-        classmethod(_annotating_get_queryset),
-    )
-
-    @strawberry.type
-    class _AnnotatedQuery:
-        genres: list[library_schema.GenreType] = DjangoListField(library_schema.GenreType)
-
-    payload = _post_sync(
-        DjangoSchema(query=_AnnotatedQuery, config=strawberry_config()),
-        "{ genres { name } }",
-        extra_settings=_ERROR_POLICY_PASS_THROUGH,
-    )
-
-    assert payload["data"] is None
-    message = json_str(payload, "errors", 0, "message")
-    assert "a consumer-defined expression, lookup" in message
-    assert "Build the queryset with Django's own" in message
-
-
 _BRANCH_ORDER_SHAPE_PREFIX = (
     "BranchOrder.apply_sync must return an unevaluated, unsliced QuerySet of Branch rows; got "
 )
-
-
-class _DeferredFilterQuerySet(models.QuerySet[library_models.Branch]):
-    """A project queryset class, used here to carry a deferred filter Django never writes.
-
-    A PENDING predicate is ordinary: Django's related-manager machinery leaves
-    one on every relation queryset whatever class built it, and the seal bakes
-    it. What cannot be faithfully rebuilt is a deferred-filter STATE outside the
-    exact shape Django writes, which is what this class is planted with.
-    """
 
 
 async def _awaitable_queryset(
@@ -4110,20 +4050,6 @@ def _override_evaluated_annotated(
     annotated = queryset.annotate(rows=models.Count("pk"))
     list(annotated)
     return annotated
-
-
-def _override_untrusted(
-    _cls: type[BranchOrder],
-    _order_input: object,
-    _queryset: models.QuerySet[library_models.Branch],
-    _info: object,
-) -> _DeferredFilterQuerySet:
-    candidate = _DeferredFilterQuerySet(model=library_models.Branch)
-    # ``negate`` decides whether the predicate is inverted and is truth-tested to
-    # do it, so Django's exact ``bool`` is the only shape the bake accepts there.
-    # basedpyright: plants a non-``bool`` negate, a deferred-filter shape Django never writes
-    set_queryset_deferred_filter(candidate, (1, (), {"name": "A"}))  # pyright: ignore[reportArgumentType]
-    return candidate
 
 
 #: One row per defect class the post-``OrderSet`` seal can name live, the evaluated class
@@ -4207,13 +4133,6 @@ _MALFORMED_APPLY_SYNC_ROWS: tuple[
         _override_in_place_routing,
         "BranchOrder.apply_sync changed database routing intent",
         ("expected db=None, hints={}", "got db=None, hints={'tenant': 2}"),
-        0,
-    ),
-    (
-        "malformed-deferred-filter",
-        _override_untrusted,
-        _BRANCH_ORDER_SHAPE_PREFIX + "untrusted defect",
-        ("deferred filter negate is a int",),
         0,
     ),
 )
@@ -5713,50 +5632,6 @@ def test_holder_sync_http_rejects_an_async_generator_resolver() -> None:
     )
 
 
-class _HostileBranchQuerySet(models.QuerySet[library_models.Branch]):
-    """A predicate-erasing subclass: ``__iter__`` yields the raw table.
-
-    Hand-copied into ``test_list_field_async_api.py``, which seals the same
-    adversary through the async view. The copy is deliberate: each live suite
-    stands alone at its own HTTP boundary and mounts nothing the other owns. It
-    is also the pair's only shared body, so a change to the adversary - another
-    terminal hooked, another column erased - is a change to BOTH files.
-    """
-
-    @override
-    def filter(self, *args: object, **kwargs: object) -> models.QuerySet[library_models.Branch]:
-        return library_models.Branch.objects.all()
-
-    @override
-    def order_by(
-        self,
-        *args: str | Combinable,
-        **kwargs: object,
-    ) -> models.QuerySet[library_models.Branch]:
-        return library_models.Branch.objects.all()
-
-    @override
-    def __iter__(self) -> Iterator[library_models.Branch]:
-        return iter(library_models.Branch.objects.all().order_by("pk"))
-
-    @override
-    def __aiter__(self) -> AsyncIterator[library_models.Branch]:
-        return library_models.Branch.objects.all().order_by("pk").__aiter__()
-
-
-def _hostile_branch_hook(
-    _cls: type[library_schema.BranchType],
-    _queryset: models.QuerySet[library_models.Branch],
-    _info: strawberry.Info[object, object],
-    **_kwargs: object,
-) -> models.QuerySet[library_models.Branch]:
-    """Apply the visibility predicate through unbound ``QuerySet.filter``."""
-    return models.QuerySet[library_models.Branch].filter(
-        _HostileBranchQuerySet(model=library_models.Branch),
-        city="Boston",
-    )
-
-
 def _degrading_branch_manager() -> models.Manager[library_models.Branch]:
     def _all(_self: models.Manager[library_models.Branch]) -> list[str]:
         return ["secret"]
@@ -5765,41 +5640,6 @@ def _degrading_branch_manager() -> models.Manager[library_models.Branch]:
     manager.model = library_models.Branch
     manager._db = None
     return manager
-
-
-def _alias_drift_branch_manager() -> models.Manager[library_models.Branch]:
-    class _DriftManager(models.Manager[library_models.Branch]):
-        @override
-        def get_queryset(self) -> models.QuerySet[library_models.Branch]:
-            return library_models.Branch.objects.using("elsewhere")
-
-    manager = _DriftManager()
-    manager.model = library_models.Branch
-    manager._db = "other"
-    return manager
-
-
-@pytest.mark.django_db
-def test_shipped_branches_hostile_queryset_subclass_cannot_leak_restricted_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A hostile ``QuerySet`` subclass cannot widen ``allLibraryBranchesViaListField``."""
-    library_models.Branch.objects.create(name="Alpha", city="Boston")
-    library_models.Branch.objects.create(name="Hidden", city="restricted")
-    monkeypatch.setattr(
-        library_schema.BranchType,
-        "get_queryset",
-        classmethod(_hostile_branch_hook),
-    )
-
-    payload = graphql_payload("{ allLibraryBranchesViaListField { name } }")
-
-    assert "errors" not in payload, payload
-    names = [
-        json_at(row, "name")
-        for row in json_list(payload, "data", "allLibraryBranchesViaListField")
-    ]
-    assert names == ["Alpha"]
 
 
 @pytest.mark.django_db
@@ -5820,26 +5660,6 @@ def test_holder_manager_that_degrades_to_a_list_is_rejected() -> None:
     )
     assert payload["data"] is None
     assert "must produce a QuerySet" in json_str(payload, "errors", 0, "message")
-
-
-@pytest.mark.django_db
-def test_holder_manager_that_drifts_alias_is_rejected() -> None:
-    """A manager pinned to one alias cannot ``.all()`` onto another."""
-
-    @strawberry.type
-    class _DriftQuery:
-        branches: list[library_schema.BranchType] = DjangoListField(
-            library_schema.BranchType,
-            resolver=_list_resolver(lambda _root, _info: _alias_drift_branch_manager()),
-        )
-
-    payload = _post_sync(
-        DjangoSchema(query=_DriftQuery, config=strawberry_config()),
-        "{ branches { name } }",
-        extra_settings=_ERROR_POLICY_PASS_THROUGH,
-    )
-    assert payload["data"] is None
-    assert "preserve the manager's explicit routing" in json_str(payload, "errors", 0, "message")
 
 
 @pytest.mark.django_db

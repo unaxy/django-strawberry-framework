@@ -445,11 +445,8 @@ def _lookups_for_field(
     A lookup class that is not Django's own (``utils/querysets.py::_type_is_genuinely_django``:
     one a project or a third-party app registers, ``django_mysql``'s ``case_exact`` and
     ``sounds_like`` on text columns, a subclass of a Django lookup) is EXCLUDED too, on
-    every set whether a connection serves it or not, so the generated surface never depends
-    on how the set is wired: a ``DjangoConnectionField`` runs its ``filter:`` argument inside
-    the visibility boundary, which refuses such a class on every request. Named in
-    ``Meta.fields`` it is published, and refused at schema build when a connection serves
-    the set (``filters/inputs.py::_refuse_unsealable_served_leaves``).
+    every set, so the generated surface never depends on which apps happen to be
+    installed. Named in ``Meta.fields`` it is published and served like any other lookup.
 
     The set is read on every call from the registry Django's query resolves the
     column's lookups on (``utils/relations.py::lookup_registry``): ``Field.get_lookups()`` on that

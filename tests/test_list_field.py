@@ -139,8 +139,6 @@ from django_strawberry_framework.utils._queryset_private import (
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import (
     SyncMisuseError,
-    _routing_hints_equal,
-    _routing_repr,
     _snapshot_routing_intent,
     _validate_post_orderset_result,
     require_orderset_class,
@@ -1524,12 +1522,7 @@ def test_list_field_deadline_check_position(
 
 
 def test_list_field_seal_axis_subclass_and_routing_intent() -> None:
-    """A sealable subclass is normalized to a plain QuerySet, and routing intent is enforced.
-
-    The ``untrusted`` verdict this seam can also produce is proved over real HTTP
-    on both public overrides (the live malformed-result matrices), so it is not
-    duplicated here.
-    """
+    """A subclass result keeps its class as a fresh clone, and routing intent is enforced."""
 
     class CustomQuerySetSubclass(models.QuerySet[Item]):
         pass
@@ -1542,14 +1535,15 @@ def test_list_field_seal_axis_subclass_and_routing_intent() -> None:
     base_qs = Item.objects.all()
     sub_qs = CustomQuerySetSubclass(model=Item)
 
-    # 1. Sealable subclass is normalized to plain QuerySet
+    # 1. A subclass result comes back as a clone of its own class
     sealed = _validate_post_orderset_result(
         ItemSealType,
         _snapshot_routing_intent(base_qs, "Custom.apply"),
         sub_qs,
         "Custom.apply",
     )
-    assert type(sealed) is models.QuerySet
+    assert type(sealed) is CustomQuerySetSubclass
+    assert sealed is not sub_qs
 
     # 2. Routing intent: _db is None accepted when _hints match, rejected when _hints differ
     qs_match = Item.objects.all()
@@ -2081,59 +2075,6 @@ def test_list_field_constructor_validation_precedence() -> None:
         match=r"DjangoListField requires a DjangoType subclass; got object\.",
     ):
         DjangoListField(object, max_rows=10)
-
-
-def test_list_field_post_orderset_validator_zero_consumer_dispatch() -> None:
-    """_validate_post_orderset_result extracts routing intent without consumer dispatch."""
-
-    class CatDispatchType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    class PoisonAttr:
-        @override
-        def __eq__(self, other: object) -> bool:
-            raise RuntimeError("PoisonAttr __eq__ called")
-
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("PoisonAttr __repr__ called")
-
-        # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-        __hash__ = None  # pyright: ignore[reportAssignmentType]
-
-    # Safe routing equal avoids consumer __eq__
-    poison = PoisonAttr()
-    assert _routing_hints_equal({"key": poison}, {"key": poison}) is True
-    assert _routing_hints_equal({"key": poison}, {"key": PoisonAttr()}) is False
-
-    # A hint value renders by its real class and identity, never its own __repr__
-    repr_str = _routing_repr({"key": poison})
-    assert "PoisonAttr at" in repr_str
-
-    # None vs {} distinction preserved
-    assert _routing_hints_equal(None, {}) is False
-    assert _routing_hints_equal({}, None) is False
-    assert _routing_hints_equal(None, None) is True
-    assert _routing_hints_equal({}, {}) is True
-
-    # Rejection of routing changes without calling consumer __getattribute__
-    class PoisonGetattributeQS(models.QuerySet[Category]):
-        @override
-        def __getattribute__(self, name: str) -> object:
-            if name in ("_db", "_hints"):
-                raise RuntimeError(f"consumer __getattribute__ called for {name}")
-            return object_result(super().__getattribute__, name)
-
-    poison_qs = PoisonGetattributeQS(model=Category)
-    sealed = _validate_post_orderset_result(
-        CatDispatchType,
-        _snapshot_routing_intent(poison_qs, "Poison.apply_sync"),
-        poison_qs,
-        "Poison.apply_sync",
-    )
-    assert sealed is not None
 
 
 def test_list_arguments_immutability() -> None:

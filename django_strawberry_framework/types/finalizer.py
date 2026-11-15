@@ -2006,11 +2006,6 @@ def _audit_filterset_subpass_2_5(wired: list[type[FilterSet]]) -> None:
     3. ``_audit_globalid_filter_strategies`` -- no ``GlobalIDFilter`` /
        ``GlobalIDMultipleChoiceFilter`` a wired set serves, its own or a reached set's,
        may decode against an encode-only (``callable`` / ``custom``) strategy.
-    4. ``filters/inputs.py::_refuse_unsealable_served_leaves`` -- no leaf of a set a
-       connection serves (``_connection_served_filtersets``, recorded by
-       ``connection.py::_synthesized_signature`` for a root connection and every nested
-       ``<relation>Connection``), or of a set it reaches through a ``RelatedFilter``,
-       resolves to a class the visibility seal refuses.
 
     The copy audit runs first, so a filter no request can copy is refused before any
     audit asks it anything. The related-target audit runs before the GlobalID audit:
@@ -2018,19 +2013,9 @@ def _audit_filterset_subpass_2_5(wired: list[type[FilterSet]]) -> None:
     it first keeps the GlobalID audit's target resolution operating on a validated
     relation graph.
     """
-    from django_strawberry_framework.filters import _connection_served_filtersets  # noqa: PLC0415 - binds only a subsystem the consumer imported
-    from django_strawberry_framework.filters.inputs import _refuse_unsealable_served_leaves  # noqa: PLC0415 - binds only a subsystem the consumer imported
-
     _audit_filter_copies(wired)
     _audit_unregistered_related_filter_targets(wired)
     _audit_globalid_filter_strategies(wired)
-    _refuse_unsealable_served_leaves(
-        [
-            filterset_cls
-            for filterset_cls in wired
-            if filterset_cls in _connection_served_filtersets
-        ],
-    )
 
 
 def _bind_filtersets() -> None:

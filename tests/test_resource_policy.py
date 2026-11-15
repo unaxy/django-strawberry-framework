@@ -75,8 +75,7 @@ import strawberry
 from apps.products.models import Category, Item
 from apps.products.services import seed_data
 from asgiref.sync import sync_to_async
-from django.db.models import F, Func, Manager, Model, QuerySet
-from django.db.models.sql import Query
+from django.db.models import Manager, Model, QuerySet
 from graphql import (
     DirectiveNode,
     GraphQLDirective,
@@ -142,17 +141,15 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.context import stash_on_context
-from django_strawberry_framework.utils.querysets import materialized_rows, normalized_row_source
+from django_strawberry_framework.utils.querysets import materialized_rows
 from django_strawberry_framework.utils.typing import object_result
 from tests._django_private import has_apply_rel_filters
 from tests._execution import make_execution_context
 from tests._idioms import (
-    FETCH_MODES,
     ClaimsClassBase,
     ClassReadRaises,
     is_object_list,
     pickle_roundtrip,
-    requires_fetch_modes,
     saved_pk,
 )
 
@@ -2127,26 +2124,8 @@ def test_bounded_rows_shared_policy_seams_spy(
 # ---------------------------------------------------------------------------
 # The row source the bound is applied to
 #
-# Live sibling: the hostile-relation rows on ``/rp-hostile-relation/`` and
-# ``/rp-hostile-relation-async/``.
+# Live sibling: the relation rows on ``/rp-hostile-relation/``.
 # ---------------------------------------------------------------------------
-
-
-class _EscapingQuerySet(QuerySet[Category]):
-    """A ``QuerySet`` subclass whose slice answers with every row it was asked to drop.
-
-    The shape a raw-list ceiling has to survive: ``result[:limit]`` is the whole
-    bound, and on a subclass that expression is consumer code.
-    """
-
-    @override
-    # basedpyright: deliberately answers a slice with a list, the shape the ceiling must not trust
-    def __getitem__(self, key: int | slice) -> list[Category]:  # pyright: ignore[reportIncompatibleMethodOverride]
-        return list(Category.objects.all())
-
-
-class _UnsealableQuerySet(QuerySet[Category]):
-    """A ``QuerySet`` subclass carrying a query the seal cannot faithfully rebuild."""
 
 
 class _ClaimsToBeAQuerySet(ClaimsClassBase):
@@ -2162,70 +2141,16 @@ class _ClaimsToBeAQuerySet(ClaimsClassBase):
 
 
 @pytest.mark.django_db
-def test_a_queryset_subclass_cannot_answer_its_own_row_bound(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """The ceiling is a slice, so a subclass owning that slice owns the ceiling.
-
-    ``isinstance(value, QuerySet)`` admitted every subclass to the SQL-slice
-    arm, which then called the subclass's own ``__getitem__``. A subclass is not
-    package-owned merely because ``isinstance`` returns true: the source is
-    rebuilt into a plain framework-owned queryset first, and the slice runs
-    there.
-    """
-    seed_data(6)
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
-    hostile = _EscapingQuerySet(model=Category)
-    rows = bounded_rows(hostile, info)
-    assert type(rows) is QuerySet
-    assert len(list(rows)) == 2
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_a_queryset_subclass_cannot_answer_its_own_row_bound_when_awaited(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """The awaited helper reaches the same seam, so it carries the same ceiling."""
-    await sync_to_async(seed_data)(6)
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
-    hostile = _EscapingQuerySet(model=Category)
-    rows = await bounded_rows_async(hostile, info)
-    assert type(rows) is QuerySet
-    assert len([row async for row in rows]) == 2
-
-
-@pytest.mark.django_db
-def test_a_windowed_queryset_subclass_is_windowed_on_the_rebuilt_queryset(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """The coordinate window is taken on the rebuild, not on the source's subscript."""
-    seed_data(6)
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=4))
-    hostile = _EscapingQuerySet(model=Category)
-    rows = _windowed_rows(hostile, info, offset=1, requested_limit=2)
-    assert type(rows) is QuerySet
-    assert rows.query.low_mark == 1
-    assert rows.query.high_mark == 3
-    assert len(list(rows)) == 2
-
-
-@pytest.mark.django_db
 def test_a_zero_width_window_on_a_queryset_subclass_returns_no_rows(
     arm_resource_budget: Callable[[object, ResourcePolicy], None],
 ) -> None:
-    """A zero-width window is a subscript the source must not be asked to answer."""
+    """A zero-width window on a project queryset class is an empty slice of it."""
     seed_data(6)
     context: dict[str, object] = {}
     info = SimpleNamespace(context=context)
     arm_resource_budget(context, ResourcePolicy(max_list_rows=4))
-    hostile = _EscapingQuerySet(model=Category)
-    rows = _windowed_rows(hostile, info, offset=1, requested_limit=0)
+    source = _ProjectQuerySet[Category](model=Category)
+    rows = _windowed_rows(source, info, offset=1, requested_limit=0)
     assert list(rows) == []
 
 
@@ -2238,8 +2163,8 @@ async def test_a_zero_width_window_on_a_queryset_subclass_returns_no_rows_when_a
     context: dict[str, object] = {}
     info = SimpleNamespace(context=context)
     arm_resource_budget(context, ResourcePolicy(max_list_rows=4))
-    hostile = _EscapingQuerySet(model=Category)
-    rows = await _windowed_rows_async(hostile, info, offset=1, requested_limit=0)
+    source = _ProjectQuerySet[Category](model=Category)
+    rows = await _windowed_rows_async(source, info, offset=1, requested_limit=0)
     assert list(rows) == []
 
 
@@ -2260,100 +2185,26 @@ def test_an_exact_queryset_still_carries_the_row_bound_into_sql(
 
 
 @pytest.mark.django_db
-def test_a_sealable_queryset_subclass_keeps_the_row_bound_in_sql(
+def test_a_project_queryset_class_keeps_the_row_bound_in_sql(
     arm_resource_budget: Callable[[object, ResourcePolicy], None],
 ) -> None:
-    """A rebuilt subclass is still a queryset, so the bound stays a ``LIMIT``.
+    """A project queryset class is sliced as itself, so the bound stays a ``LIMIT``.
 
-    Counting a sealable subclass into a Python list would restore the row
-    ceiling and lose the database one, which is the guarantee this seam is for.
+    Counting it into a Python list would restore the row ceiling and lose the
+    database one, which is the guarantee this seam is for.
     """
     seed_data(6)
     context: dict[str, object] = {}
     info = SimpleNamespace(context=context)
     arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
 
-    class _ProjectQuerySet(QuerySet[Category]):
-        """A project's own queryset class, faithfully rebuildable."""
+    class _CategoryQuerySet(QuerySet[Category]):
+        """A project's own queryset class for ``Category``."""
 
-    rows = bounded_rows(_ProjectQuerySet(model=Category), info)
-    assert type(rows) is QuerySet
+    rows = bounded_rows(_CategoryQuerySet(model=Category), info)
+    assert type(rows) is _CategoryQuerySet
     assert rows.query.high_mark == 2
     assert len(list(rows)) == 2
-
-
-@requires_fetch_modes
-@pytest.mark.django_db
-def test_a_queryset_subclass_with_a_project_fetch_mode_is_refused_not_sliced(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """A row source whose fetch mode is not one of Django's own is refused, never sliced."""
-    seed_data(2)
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
-    source = _UnsealableQuerySet(model=Category).fetch_mode(FETCH_MODES["project"])
-    with pytest.raises(ConfigurationError) as excinfo:
-        bounded_rows(source, info)
-    assert str(excinfo.value) == (
-        "A collection resolver returned a _UnsealableQuerySet that cannot be "
-        "sealed into a framework-owned execution queryset (_UnsealableQuerySet._fetch_mode "
-        "is a _ProjectFetchPeers), so the raw-list row bound has nothing it owns the slice "
-        "of. Slicing the subclass itself would let the object being bounded decide how many "
-        "rows the bound returns. The seal rebuilds only state made of Django's own objects, "
-        "so it refuses a Query subclass; a consumer-defined expression, lookup, where-node "
-        "or join class; a method assigned onto a query or node instance; a non-builtin "
-        "value where Django stores a builtin; a foreign row iterable; a fetch mode other "
-        "than Django's FETCH_ONE, FETCH_PEERS or FETCH_RAISE; a Prefetch it cannot rebuild; "
-        "or deferred-filter state Django never writes. Build the queryset with Django's own "
-        "query, expression and lookup classes, and do not assign to its internals. The "
-        "raw-list bound also refuses a result cache that is not an exact list."
-    )
-
-
-@pytest.mark.django_db
-def test_a_queryset_subclass_that_cannot_be_sealed_is_refused_not_sliced(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """An unrebuildable source fails closed; it never falls back to its own slice."""
-    seed_data(2)
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
-
-    class _ForeignQuery(Query):
-        """A ``Query`` subclass, which the seal cannot rebuild."""
-
-    source = _UnsealableQuerySet(model=Category, query=_ForeignQuery(Category))
-    with pytest.raises(ConfigurationError) as excinfo:
-        bounded_rows(source, info)
-    assert "cannot be sealed" in str(excinfo.value)
-
-
-@pytest.mark.django_db
-def test_a_queryset_subclass_carrying_a_consumer_expression_names_what_the_bound_can_rebuild(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """The raw-list refusal names the seal's full cause list and its own result-cache rule."""
-    seed_data(1)
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
-
-    class _ConsumerUpper(Func):
-        function = "UPPER"
-
-    class _ProjectQuerySet(QuerySet[Category]):
-        """A project's own queryset class."""
-
-    source = _ProjectQuerySet(model=Category).annotate(u=_ConsumerUpper(F("name")))
-    with pytest.raises(ConfigurationError) as excinfo:
-        bounded_rows(source, info)
-    message = str(excinfo.value)
-    assert message.startswith("A collection resolver returned a _ProjectQuerySet ")
-    assert "a consumer-defined expression, lookup" in message
-    assert "Build the queryset with Django's own" in message
-    assert "a result cache that is not an exact list" in message
 
 
 def test_a_value_that_only_claims_to_be_a_queryset_cannot_reach_the_slice(
@@ -2373,26 +2224,6 @@ def test_a_value_that_only_claims_to_be_a_queryset_cannot_reach_the_slice(
     assert bounded_rows(claimant, info) == [0, 1]
 
 
-def test_a_queryset_subclass_without_a_model_class_is_refused(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """The model a source declares is a slot, and the rebuild needs a real class there.
-
-    A raw-list source is validated against no registered type, so the model it
-    declares is the only one the rebuild has. Reaching ``model._meta`` on
-    whatever that slot holds would be the untyped raise the boundary exists to
-    replace.
-    """
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
-    source = _EscapingQuerySet(model=Category)
-    object.__getattribute__(source, "__dict__")["model"] = object()
-    with pytest.raises(ConfigurationError) as excinfo:
-        bounded_rows(source, info)
-    assert "without a model class" in str(excinfo.value)
-
-
 @pytest.mark.django_db
 def test_rows_a_source_already_fetched_are_read_from_the_frameworks_own_slot() -> None:
     """A prefetch cache's rows come out of Django's slot on an exact queryset."""
@@ -2400,22 +2231,6 @@ def test_rows_a_source_already_fetched_are_read_from_the_frameworks_own_slot() -
     warm = Category.objects.all()
     list(warm)
     assert materialized_rows(warm) == list(warm)
-
-
-@pytest.mark.django_db
-def test_a_queryset_subclass_is_never_asked_what_it_has_already_fetched() -> None:
-    """The read is Django's own slot on an exact queryset, so a subclass answers nothing.
-
-    Reading ``_result_cache`` off the relation cache with ``getattr`` is a
-    consumer dispatch point on exactly the value the bound is about to be
-    applied to. The rows a subclass holds are not lost by the rule: they reach a
-    caller through the rebuild, which carries them onto a queryset this package
-    owns.
-    """
-    seed_data(3)
-    hostile = _EscapingQuerySet(model=Category)
-    hostile._result_cache = list(Category.objects.all())
-    assert materialized_rows(hostile) is None
 
 
 def _relation_source(manager: Manager[Item], queryset: _QuerySetT) -> _QuerySetT:
@@ -2435,16 +2250,6 @@ class _ProjectQuerySet(QuerySet[_M]):
     """
 
 
-class _LyingResultCache:
-    """A populated result cache that is not a list and answers every subscript with everything."""
-
-    def __getitem__(self, key: object) -> list[Category]:
-        return list(Category.objects.all())
-
-    def __len__(self) -> int:
-        return 50
-
-
 def _evaluated(queryset_cls: type[QuerySet[Category]]) -> QuerySet[Category]:
     """A source of ``queryset_cls`` that has already fetched its rows."""
     source = queryset_cls(model=Category)
@@ -2453,7 +2258,7 @@ def _evaluated(queryset_cls: type[QuerySet[Category]]) -> QuerySet[Category]:
 
 
 def _held_rows(source: QuerySet[Category]) -> list[object]:
-    """The list a source holds, read the way the seal reads it."""
+    """The list a source holds, read from its instance state."""
     held = truth.instance_state(source)["_result_cache"]
     assert is_object_list(held), held
     return held
@@ -2485,11 +2290,10 @@ def test_an_evaluated_project_queryset_class_is_windowed_from_the_rows_it_holds(
     django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
     arm_resource_budget: Callable[[object, ResourcePolicy], None],
 ) -> None:
-    """The rebuild carries the fetched rows, so a project queryset class costs no query.
+    """A project queryset class that already fetched its rows is windowed from them.
 
-    The subclass is rebuilt - that is what makes the window an operation this
-    package owns - and the rows it had already fetched travel onto the rebuild,
-    so the window reads them instead of asking the database a second time.
+    ``QuerySet.__getitem__`` reads a populated ``_result_cache``, so the window
+    costs no second query.
     """
     seed_data(6)
     context: dict[str, object] = {}
@@ -2499,11 +2303,9 @@ def test_an_evaluated_project_queryset_class_is_windowed_from_the_rows_it_holds(
     held = _held_rows(source)
 
     with django_assert_num_queries(0):
-        rebuilt = normalized_row_source(source)
         rows = bounded_rows(source, info)
 
-    assert type(rebuilt) is QuerySet
-    assert materialized_rows(rebuilt) is held
+    assert materialized_rows(source) is held
     assert type(rows) is list
     assert list(rows) == held[:2]
     assert [row is held[index] for index, row in enumerate(rows)] == [True, True]
@@ -2514,7 +2316,7 @@ def test_a_coordinate_window_over_an_evaluated_project_queryset_class_reads_carr
     django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
     arm_resource_budget: Callable[[object, ResourcePolicy], None],
 ) -> None:
-    """The offset window is taken over the carried rows, so it too costs nothing."""
+    """The offset window is taken over the held rows, so it too costs nothing."""
     seed_data(6)
     context: dict[str, object] = {}
     info = SimpleNamespace(context=context)
@@ -2562,7 +2364,7 @@ async def test_an_evaluated_exact_queryset_is_windowed_from_its_own_rows_when_aw
 async def test_an_evaluated_project_queryset_class_is_windowed_from_its_own_rows_when_awaited(
     arm_resource_budget: Callable[[object, ResourcePolicy], None],
 ) -> None:
-    """The awaited seam takes the rebuilt source's carried rows rather than a second fetch."""
+    """The awaited seam takes the source's held rows rather than a second fetch."""
     await sync_to_async(seed_data)(6)
     context: dict[str, object] = {}
     info = SimpleNamespace(context=context)
@@ -2578,61 +2380,14 @@ async def test_an_evaluated_project_queryset_class_is_windowed_from_its_own_rows
 
 
 @pytest.mark.django_db
-def test_a_result_cache_that_is_not_a_list_is_refused_rather_than_carried(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """A cache Django did not build answers the window with its own subscript, so it is refused.
-
-    The carried rows are windowed by subscripting them. An exact ``list`` is the
-    interpreter's own subscript; anything else brings its own, which would put
-    the ceiling back inside the object being bounded.
-    """
-    seed_data(6)
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
-    source = _ProjectQuerySet[Category](model=Category)
-    # basedpyright: the planted lying result cache is the hostile input under test; django-stubs
-    # types the slot as a row list
-    source._result_cache = _LyingResultCache()  # pyright: ignore[reportAttributeAccessIssue]
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        bounded_rows(source, info)
-
-    assert "_ProjectQuerySet._result_cache is a _LyingResultCache" in str(excinfo.value)
-    assert "cannot be sealed" in str(excinfo.value)
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_a_result_cache_that_is_not_a_list_is_refused_when_awaited(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """The awaited seam refuses the same cache, so neither color carries one."""
-    await sync_to_async(seed_data)(6)
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
-    source = _ProjectQuerySet[Category](model=Category)
-    # basedpyright: the planted lying result cache is the hostile input under test; django-stubs
-    # types the slot as a row list
-    source._result_cache = _LyingResultCache()  # pyright: ignore[reportAttributeAccessIssue]
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        await bounded_rows_async(source, info)
-
-    assert "_ProjectQuerySet._result_cache is a _LyingResultCache" in str(excinfo.value)
-
-
-@pytest.mark.django_db
 def test_a_relation_source_from_a_project_queryset_class_keeps_its_relation_predicate(
     arm_resource_budget: Callable[[object, ResourcePolicy], None],
 ) -> None:
-    """A relation's pending predicate is baked onto the rebuild, whatever class carries it.
+    """A relation's pending predicate reaches the window's SQL, whatever class carries it.
 
     Django's own ``_apply_rel_filters`` builds the source, so the pending state
-    is what Django writes rather than a hand-planted tuple. The rebuild resolves
-    it, so the window is the relation's own rows and the predicate is in the SQL
-    the sealed queryset compiles.
+    is what Django writes rather than a hand-planted tuple. Django's ``query``
+    getter bakes it, so the window is the relation's own rows.
     """
     seed_data(3)
     context: dict[str, object] = {}
@@ -2644,9 +2399,7 @@ def test_a_relation_source_from_a_project_queryset_class_keeps_its_relation_pred
     assert type(source) is _ProjectQuerySet
     assert object.__getattribute__(source, "__dict__")["_deferred_filter"] is not None
 
-    rebuilt = normalized_row_source(source)
-    assert type(rebuilt) is QuerySet
-    compiler = object_result(rebuilt.query.get_compiler, using="default")
+    compiler = object_result(source.query.get_compiler, using="default")
     compiled = call_method(compiler, "as_sql")
     assert is_exact_pair(compiled), compiled
     sql_str, params = compiled

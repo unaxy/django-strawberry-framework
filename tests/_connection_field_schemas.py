@@ -36,7 +36,6 @@ from django_strawberry_framework.utils._narrowing import (
     require,
 )
 from django_strawberry_framework.utils._queryset_private import (
-    set_queryset_deferred_filter,
     set_queryset_hints,
 )
 from tests._catalog_data import categories_from_seed
@@ -254,16 +253,6 @@ _CATEGORY_ORDER_SHAPE_PREFIX = (
 )
 
 
-class _DeferredFilterQuerySet(models.QuerySet[Category]):
-    """A project queryset class, used here to carry a deferred filter Django never writes.
-
-    A PENDING predicate is ordinary: Django's related-manager machinery leaves
-    one on every relation queryset whatever class built it, and the seal bakes
-    it. What cannot be faithfully rebuilt is a deferred-filter STATE outside the
-    exact shape Django writes, which is what this class is planted with.
-    """
-
-
 async def _awaitable_queryset(queryset: object) -> object:
     return queryset
 
@@ -276,20 +265,6 @@ def _order_override_evaluated(
 ) -> models.QuerySet[Category]:
     list(queryset)
     return queryset
-
-
-def _order_override_untrusted(
-    _cls: type[_CategoryOrder],
-    _order_input: object,
-    _queryset: models.QuerySet[Category],
-    _info: object,
-) -> _DeferredFilterQuerySet:
-    candidate = _DeferredFilterQuerySet(model=Category)
-    # ``negate`` decides whether the predicate is inverted and is truth-tested to
-    # do it, so Django's exact ``bool`` is the only shape the bake accepts there.
-    # basedpyright: plants a non-``bool`` negate, a deferred-filter shape Django never writes
-    set_queryset_deferred_filter(candidate, (1, (), {"name": "A"}))  # pyright: ignore[reportArgumentType]
-    return candidate
 
 
 def _order_override_in_place_routing(
@@ -382,12 +357,6 @@ _CONNECTION_MALFORMED_ORDER_ROWS: tuple[_OrderRow, ...] = (
         _order_override_in_place_routing,
         "_CategoryOrder.apply_sync changed database routing intent",
         ("expected db=None, hints={}", "got db=None, hints={'tenant': 2}"),
-    ),
-    (
-        "malformed-deferred-filter",
-        _order_override_untrusted,
-        _CATEGORY_ORDER_SHAPE_PREFIX + "untrusted defect",
-        ("deferred filter negate is a int",),
     ),
 )
 
@@ -517,47 +486,6 @@ def _make_cascading_item_node(name: str) -> type[DjangoType]:
     )
 
 
-class _HostileConnQuerySet(models.QuerySet[Category]):
-    """A predicate-erasing / synthetic-count ``QuerySet`` subclass.
-
-    Every override would widen the result if the framework dispatched through the
-    consumer object: ``.filter()`` / ``.order_by()`` drop all narrowing, slicing
-    returns the unfiltered rows, and ``.count()`` / ``.acount()`` report the raw
-    table count. The seal rebuilds a plain ``QuerySet`` from the validated query
-    state, so none of these run.
-    """
-
-    @override
-    def filter(self, *args: object, **kwargs: object) -> models.QuerySet[Category]:
-        return Category.objects.all()
-
-    @override
-    def order_by(self, *args: object, **kwargs: object) -> models.QuerySet[Category]:
-        return Category.objects.all()
-
-    @override
-    # basedpyright: deliberately answers a slice with a list, the shape the seal must neutralize
-    def __getitem__(self, item: int | slice) -> Category | list[Category]:  # pyright: ignore[reportIncompatibleMethodOverride]
-        return list(Category.objects.all().order_by("pk"))[item]
-
-    @override
-    def count(self) -> int:
-        return Category.objects.count()
-
-    @override
-    async def acount(self) -> int:
-        return await Category.objects.acount()
-
-
-def _hostile_visibility_hook(
-    _cls: type[DjangoType],
-    _qs: models.QuerySet[Category],
-    _info: object,
-) -> models.QuerySet[Category]:
-    """Return the hostile subclass carrying a genuine ``is_private=False`` predicate."""
-    return models.QuerySet[Category].filter(_HostileConnQuerySet(model=Category), is_private=False)
-
-
 def _seed_public_private_categories() -> list[str]:
     """Create two public + one private ``Category``; return the ordered public names."""
     public_a, public_b, _private = categories_from_seed(
@@ -582,22 +510,6 @@ def _degrading_manager() -> models.Manager[Category]:
     manager = _ListManager()
     manager.model = Category
     manager._db = None
-    return manager
-
-
-class _DriftManager(models.Manager[Category]):
-    """A Manager pinned to one alias whose ``.all()`` silently routes to another."""
-
-    @override
-    def get_queryset(self) -> models.QuerySet[Category]:
-        return Category.objects.using("elsewhere")
-
-
-def _alias_drift_manager() -> models.Manager[Category]:
-    """A ``_DriftManager`` pinned to ``other`` whose ``.all()`` drifts to ``elsewhere``."""
-    manager = _DriftManager()
-    manager.model = Category
-    manager._db = "other"
     return manager
 
 

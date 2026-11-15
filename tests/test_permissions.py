@@ -90,8 +90,8 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection as db_connection
-from django.db import models, transaction
-from django.db.models import Manager, Prefetch, sql
+from django.db import models
+from django.db.models import Manager
 from django.db.models.expressions import Combinable
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject, lazy
@@ -129,21 +129,11 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
-    queryset_fetch_mode,
-    queryset_fields,
-    queryset_hints,
-    queryset_prefetch_lookups,
-    set_queryset_hints,
-    set_queryset_query,
-    set_queryset_sticky_filter,
 )
 from django_strawberry_framework.utils.typing import object_result
-from tests._django_private import has_values_method
 from tests._idioms import (
-    FETCH_MODES,
     comparing_metaclass,
     is_object_dict,
-    requires_fetch_modes,
     saved_pk,
 )
 from tests._relation_fixtures import RpGenericTag
@@ -428,31 +418,6 @@ def test_longer_cycle_renders_full_path() -> None:
         apply_cascade_permissions(ring_a, RingA.objects.all(), _INFO)
     assert "RingAType.b -> RingBType.c -> RingCType.a -> RingAType" in str(excinfo.value)
     assert _cascade_state.get() is None
-
-
-@pytest.mark.django_db(transaction=True)
-def test_root_queryset_filter_override_is_neutralized_by_sealing() -> None:
-    """A hostile root ``filter`` override cannot erase a cascade predicate."""
-
-    class FilterEraser(models.QuerySet[_CtParent]):
-        @override
-        def filter(self, *args: object, **kwargs: object) -> models.QuerySet[_CtParent]:
-            return _CtParent.objects.all()
-
-    with _tables(_CtTarget, _CtParent):
-        parent_type = _register_ct_pair(
-            lambda _cls, qs, _info: qs.exclude(name="hidden"),
-        )
-        visible = _CtTarget.objects.create(name="visible")
-        hidden = _CtTarget.objects.create(name="hidden")
-        _CtParent.objects.create(name="keeps", target=visible)
-        _CtParent.objects.create(name="drops", target=hidden)
-
-        hostile_root = FilterEraser(model=_CtParent, using="default")
-        result = apply_cascade_permissions(parent_type, hostile_root, _INFO)
-
-        assert sorted(result.values_list("name", flat=True)) == ["keeps"]
-        assert _cascade_state.get() is None
 
 
 def test_cyclic_diamond_fails_closed() -> None:
@@ -1205,14 +1170,6 @@ class _CtParentQuerySet(models.QuerySet[_CtParent]):
         return self.filter(name=name)
 
 
-class _CtFilterEraser(models.QuerySet[_CtParent]):
-    """A project queryset class whose ``filter`` drops every predicate it is given."""
-
-    @override
-    def filter(self, *args: object, **kwargs: object) -> models.QuerySet[_CtParent]:
-        return _CtParent.objects.all()
-
-
 def _cascade_sync(
     parent_type: type[DjangoType],
     source: models.QuerySet[_CtParent, object],
@@ -1241,7 +1198,6 @@ def _cascade_async(
             id="project-class-values",
         ),
         pytest.param(lambda: models.QuerySet[_CtParent](model=_CtParent), id="plain"),
-        pytest.param(lambda: _CtFilterEraser(model=_CtParent), id="filter-eraser"),
     ],
 )
 def test_cascade_returns_the_sources_queryset_class(
@@ -1253,11 +1209,10 @@ def test_cascade_returns_the_sources_queryset_class(
 ) -> None:
     """The cascade's return is a fresh instance of the source's own class, narrowed.
 
-    The source is sealed and narrowed as a plain rebuild, then restated as its class,
-    so a project method chains after the cascade (a plain source stays plain), a
-    ``.values()`` source keeps its projection and routing, and a class whose
-    ``filter`` erases predicates still comes back narrowed, since its ``filter`` never
-    ran on the cascade predicate. The sync walk and its async twin agree.
+    The source is cloned and narrowed through its own class's ``filter``, so a
+    project method chains after the cascade (a plain source stays plain) and a
+    ``.values()`` source keeps its projection and routing. The sync walk and its
+    async twin agree.
     """
     with _tables(_CtTarget, _CtParent):
         parent_type = _register_ct_pair(lambda _cls, qs, _info: qs.exclude(name="hidden"))
@@ -1276,7 +1231,7 @@ def test_cascade_returns_the_sources_queryset_class(
         assert list(root.values_list("name", flat=True).order_by("name")) == ["drops", "keeps"]
         if truth.class_of(root) is _CtParentQuerySet:
             assert list(require_instance(result, _CtParentQuerySet).named("keeps")) != []
-        if queryset_fields(root) is not None:
+        if root.query.values_select:
             assert list(result) == [{"name": "keeps"}]
 
 
@@ -1379,84 +1334,6 @@ def test_cascade_edge_hook_reads_every_target_row_in_the_default_manager_class(
 
         assert sorted(result.values_list("title", flat=True)) == ["B-HID", "B-PUB"]
     assert seen == [(queryset_class, ("aa-ok", "zz-hidden"))]
-
-
-def _restatement_state(queryset: models.QuerySet[_CtParent, object]) -> dict[str, object]:
-    """The query and ``QuerySet`` state a restatement must carry, read as plain data."""
-    state = truth.instance_state(queryset)
-    # A ``select_for_update()`` query compiles only inside a transaction where the backend locks.
-    with transaction.atomic():
-        sql = str(queryset.query)
-    return {
-        "sql": sql,
-        "db": queryset_db(queryset),
-        "hints": queryset_hints(queryset),
-        "for_write": state.get("_for_write"),
-        "sticky_filter": state.get("_sticky_filter"),
-        "fields": queryset_fields(queryset),
-        "iterable": queryset._iterable_class,
-        "prefetch": [
-            (
-                truth.class_of(lookup),
-                lookup.prefetch_to if isinstance(lookup, Prefetch) else lookup,
-            )
-            for lookup in queryset_prefetch_lookups(queryset)
-        ],
-        "fetch_mode": queryset_fetch_mode(queryset),
-    }
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    "fields",
-    [pytest.param(None, id="every-edge"), pytest.param([], id="no-edge")],
-)
-def test_cascade_restatement_carries_the_plain_outputs_state(fields: list[str] | None) -> None:
-    """The project-class output carries exactly the state the plain output does.
-
-    A plain source's output is the walked rebuild itself, so it is the exact oracle for
-    what the restatement must carry onto the project class: the query, routing, hints,
-    ``select_for_update``'s write routing, the next-filter stickiness (which only the
-    zero-edge scope leaves standing, since the walk's own ``filter`` consumes it), the
-    projection, the row iterable, the prefetch lookups as exact ``Prefetch`` objects, and
-    the fetch mode where Django has one. The oracle's own values are pinned too, so a
-    slot the seal itself dropped could not pass by both sides losing it.
-    """
-    # Only the zero-edge scope keeps a sticky source sticky: a walked edge's filter consumes it.
-    sticky = fields is not None
-
-    def source(
-        queryset_class: type[models.QuerySet[_CtParent, object]],
-    ) -> models.QuerySet[_CtParent, object]:
-        queryset = (
-            queryset_class(model=_CtParent)
-            .using("default")
-            .select_for_update()
-            .prefetch_related(Prefetch("target", queryset=_CtTarget.objects.all()))
-        )
-        if FETCH_MODES:
-            queryset = queryset.fetch_mode(FETCH_MODES["FETCH_PEERS"])
-        set_queryset_hints(queryset, {"tenant": 2})
-        if sticky:
-            set_queryset_sticky_filter(queryset, sticky=True)
-        return queryset
-
-    with _tables(_CtTarget, _CtParent):
-        parent_type = _register_ct_pair(lambda _cls, qs, _info: qs.exclude(name="hidden"))
-
-        plain = apply_cascade_permissions(parent_type, source(models.QuerySet), _INFO, fields)
-        project = apply_cascade_permissions(parent_type, source(_CtParentQuerySet), _INFO, fields)
-
-        assert truth.class_of(plain) is models.QuerySet
-        assert truth.class_of(project) is _CtParentQuerySet
-        oracle = _restatement_state(plain)
-        assert _restatement_state(project) == oracle
-        assert oracle["db"] == "default"
-        assert oracle["hints"] == {"tenant": 2}
-        assert oracle["for_write"] is True
-        assert oracle["sticky_filter"] is sticky
-        assert oracle["prefetch"] == [(Prefetch, "target")]
-        assert oracle["fetch_mode"] is (FETCH_MODES["FETCH_PEERS"] if FETCH_MODES else None)
 
 
 def _values_projection(
@@ -1744,147 +1621,6 @@ def test_unpinned_hook_return_is_repinned_to_root_alias() -> None:
     assert _cascade_state.get() is None
 
 
-def test_hostile_hook_clone_override_is_neutralized_by_sealing_in_cascade() -> None:
-    """A hostile queryset subclass overriding ``.all()`` is neutralized by sealing.
-
-    The boundary seals the hook return into a fresh plain ``QuerySet`` rebuilt
-    from its query state, so the overridden ``.all()`` never runs; the cascade
-    then re-projects that sealed queryset with a genuine ``.values(...)``. The
-    visibility predicate survives, and the composed ``__in`` subquery carries it.
-    """
-
-    class _StickyQuerySet(models.QuerySet[_CtTarget]):
-        @override
-        def all(
-            self,
-        ) -> models.QuerySet[_CtTarget]:  # a predicate-dropping clone if ever dispatched
-            return _CtTarget.objects.all()
-
-    def _hostile_hook(
-        _cls: type[DjangoType],
-        _qs: models.QuerySet[models.Model],
-        _info: object,
-    ) -> models.QuerySet[_CtTarget]:
-        return models.QuerySet[_CtTarget].filter(
-            _StickyQuerySet(model=_CtTarget),
-            name="visible",
-        )
-
-    registry.clear()
-    parent_type = _register_ct_pair(_hostile_hook)
-    result = apply_cascade_permissions(parent_type, _CtParent.objects.all(), _INFO)
-    assert "visible" in str(result.query)  # the sealed target predicate reached the subquery
-    assert _cascade_state.get() is None
-
-
-@pytest.mark.django_db(transaction=True)
-def test_hostile_values_override_end_to_end_is_neutralized_by_sealing() -> None:
-    """A target hook overriding ``_values`` cannot keep a parent whose target is hidden.
-
-    ``QuerySet.values()`` delegates to ``self._values(...)``; the cascade re-projects
-    the sealed target queryset to the FK's target column via ``.values(attname)``. A
-    hook returning a subclass whose ``_values`` re-projects the FULL unfiltered target
-    set would (if dispatched) compose ``target_id IN (SELECT <all ids>)`` and keep the
-    hidden-target parent. The seal rebuilds a plain ``QuerySet`` from the validated
-    query state, so the override never runs: the parent pointing at the hidden target
-    is filtered out end-to-end. Real visible/hidden rows make the assertion non-vacuous.
-    """
-
-    class _ValuesEraser(models.QuerySet[_CtTarget]):
-        def _values(
-            self,
-            *fields: str,
-            **expressions: object,
-        ) -> object:  # re-projects the UNFILTERED set
-            unfiltered = _CtTarget.objects.all()
-            assert has_values_method(unfiltered)
-            return unfiltered._values(*fields, **expressions)
-
-    def _hostile_hook(
-        _cls: type[DjangoType],
-        _qs: models.QuerySet[models.Model],
-        _info: object,
-    ) -> models.QuerySet[_CtTarget]:
-        return models.QuerySet[_CtTarget].filter(
-            _ValuesEraser(model=_CtTarget),
-            name="visible",
-        )
-
-    with _tables(_CtTarget, _CtParent):
-        parent_type = _register_ct_pair(_hostile_hook)
-
-        visible = _CtTarget.objects.create(name="visible")
-        hidden = _CtTarget.objects.create(name="hidden")
-        keeps = _CtParent.objects.create(name="keeps", target=visible)
-        _CtParent.objects.create(name="drops", target=hidden)
-
-        result = apply_cascade_permissions(parent_type, _CtParent.objects.all(), _INFO)
-        # The sealed re-projection binds only the visible target id; the hidden-target
-        # parent drops. A dispatched ``_values`` override would have kept it.
-        assert sorted(result.values_list("name", flat=True)) == ["keeps"]
-        assert keeps in result
-        assert _cascade_state.get() is None
-
-
-def test_unsealable_hook_query_class_fails_closed_with_cascade_prose() -> None:
-    """A hook returning a foreign ``Query`` class fails closed with path-rich cascade prose.
-
-    Where sealing is impossible (a foreign ``Query`` subclass cannot be
-    faithfully rebuilt into a framework-owned execution queryset) the cascade
-    fails closed with the ``untrusted`` defect, routed through the per-edge
-    renderer so the prose stays path-rich.
-    """
-
-    class _ForeignQuery(sql.Query):
-        pass
-
-    def _hostile_hook(
-        _cls: type[DjangoType],
-        qs: models.QuerySet[models.Model],
-        _info: object,
-    ) -> models.QuerySet[_CtTarget]:
-        target = _CtTarget.objects.filter(name="visible").using(qs.db)
-        set_queryset_query(target, _ForeignQuery(_CtTarget))
-        return target
-
-    registry.clear()
-    parent_type = _register_ct_pair(_hostile_hook)
-    with pytest.raises(
-        ConfigurationError,
-        match=r"cannot be sealed into a framework-owned execution queryset.*for the cascade subquery",
-    ):
-        apply_cascade_permissions(parent_type, _CtParent.objects.all(), _INFO)
-    assert _cascade_state.get() is None
-
-
-class _ConsumerUpper(models.Func):
-    """A project's own ``Func`` subclass: ordinary Django usage the seal cannot rebuild."""
-
-    function = "UPPER"
-
-
-def test_a_hook_carrying_a_consumer_expression_names_what_the_cascade_can_rebuild() -> None:
-    """An edge hook refused as ``untrusted`` names the full cause list and the advice."""
-
-    def _hook(
-        _cls: type[DjangoType],
-        qs: models.QuerySet[models.Model],
-        _info: object,
-    ) -> models.QuerySet[_CtTarget]:
-        return _CtTarget.objects.using(qs.db).annotate(u=_ConsumerUpper(models.F("name")))
-
-    registry.clear()
-    parent_type = _register_ct_pair(_hook)
-    with pytest.raises(ConfigurationError) as excinfo:
-        apply_cascade_permissions(parent_type, _CtParent.objects.all(), _INFO)
-    message = str(excinfo.value)
-    assert "for the cascade subquery" in message
-    assert "a consumer-defined expression, lookup" in message
-    assert "Build the queryset with Django's own" in message
-    assert "Return plain rows" not in message
-    assert _cascade_state.get() is None
-
-
 @pytest.mark.django_db(transaction=True)
 def test_annotation_alias_shadow_cannot_bypass_visibility() -> None:
     """A hook annotating the target column to a constant cannot smuggle a hidden pk.
@@ -2114,96 +1850,6 @@ def test_root_queryset_shape_rejections(root_factory: Callable[[], object], matc
         # basedpyright: each malformed root is the hostile input under test;
         # apply_cascade_permissions types the parameter as QuerySet
         apply_cascade_permissions(parent_type, root_factory(), _INFO)  # pyright: ignore[reportArgumentType]
-    assert _cascade_state.get() is None
-
-
-@requires_fetch_modes
-def test_a_root_with_a_project_fetch_mode_fails_closed_with_cascade_prose() -> None:
-    """A root whose fetch mode is not one of Django's own fails closed, attributed to the cascade."""
-    parent_type = _register_ct_pair(None)
-    hostile_root = _CtParent.objects.all().fetch_mode(FETCH_MODES["project"])
-    with pytest.raises(ConfigurationError) as excinfo:
-        apply_cascade_permissions(parent_type, hostile_root, _INFO)
-    assert str(excinfo.value) == (
-        "apply_cascade_permissions for CtParentType got a root queryset that "
-        "cannot be sealed into a framework-owned execution queryset (QuerySet._fetch_mode "
-        "is a _ProjectFetchPeers); the cascade narrows a rebuilt queryset rather than the "
-        "caller's object, and the seal rebuilds only state made of Django's own objects, so "
-        "it refuses a Query subclass; a consumer-defined expression, lookup, where-node or "
-        "join class; a method assigned onto a query or node instance; a non-builtin value "
-        "where Django stores a builtin; a foreign row iterable; a fetch mode other than "
-        "Django's FETCH_ONE, FETCH_PEERS or FETCH_RAISE; a Prefetch it cannot rebuild; or "
-        "deferred-filter state Django never writes. Build the queryset with Django's own "
-        "query, expression and lookup classes, and do not assign to its internals."
-    )
-    assert _cascade_state.get() is None
-
-
-@requires_fetch_modes
-def test_a_hook_with_a_project_fetch_mode_fails_closed_with_edge_prose() -> None:
-    """A target hook returning a project fetch mode fails the cascade edge closed."""
-
-    def _hostile_hook(
-        _cls: type[DjangoType],
-        qs: models.QuerySet[models.Model],
-        _info: object,
-    ) -> models.QuerySet[_CtTarget]:
-        return _CtTarget.objects.using(qs.db).fetch_mode(FETCH_MODES["project"])
-
-    parent_type = _register_ct_pair(_hostile_hook)
-    with pytest.raises(ConfigurationError) as excinfo:
-        apply_cascade_permissions(parent_type, _CtParent.objects.all(), _INFO)
-    assert str(excinfo.value) == (
-        "CtTargetType.get_queryset returned a queryset that cannot be sealed "
-        "into a framework-owned execution queryset (QuerySet._fetch_mode is a "
-        "_ProjectFetchPeers) for the cascade subquery on _CtParent.target; the cascade "
-        "re-projects the sealed queryset to the edge's target column, and the seal rebuilds "
-        "only state made of Django's own objects, so it refuses a Query subclass; a "
-        "consumer-defined expression, lookup, where-node or join class; a method assigned "
-        "onto a query or node instance; a non-builtin value where Django stores a builtin; "
-        "a foreign row iterable; a fetch mode other than Django's FETCH_ONE, FETCH_PEERS or "
-        "FETCH_RAISE; a Prefetch it cannot rebuild; or deferred-filter state Django never "
-        "writes. Build the queryset with Django's own query, expression and lookup classes, "
-        "and do not assign to its internals."
-    )
-    assert _cascade_state.get() is None
-
-
-def test_unsealable_root_query_class_fails_closed_with_cascade_prose() -> None:
-    """A root carrying a foreign ``Query`` class fails closed, attributed to the cascade.
-
-    The root is sealed before the walk narrows it, and a foreign ``Query``
-    subclass cannot be faithfully rebuilt into a framework-owned execution
-    queryset. The boundary's ``untrusted`` defect is the cascade's to explain:
-    the consumer passed this object to ``apply_cascade_permissions``.
-    """
-
-    class _ForeignRootQuery(sql.Query):
-        pass
-
-    parent_type = _register_ct_pair(None)
-    hostile_root = _CtParent.objects.all()
-    set_queryset_query(hostile_root, _ForeignRootQuery(_CtParent))
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"apply_cascade_permissions.*cannot be sealed into a framework-owned",
-    ):
-        apply_cascade_permissions(parent_type, hostile_root, _INFO)
-    assert _cascade_state.get() is None
-
-
-def test_a_root_carrying_a_consumer_expression_names_what_the_cascade_can_rebuild() -> None:
-    """A root refused as ``untrusted`` names the full cause list and the advice."""
-    parent_type = _register_ct_pair(None)
-    root = _CtParent.objects.annotate(u=_ConsumerUpper(models.F("name")))
-    with pytest.raises(ConfigurationError) as excinfo:
-        apply_cascade_permissions(parent_type, root, _INFO)
-    message = str(excinfo.value)
-    assert message.startswith("apply_cascade_permissions for ")
-    assert "a consumer-defined expression, lookup" in message
-    assert "Build the queryset with Django's own" in message
-    assert "Pass plain query state" not in message
     assert _cascade_state.get() is None
 
 

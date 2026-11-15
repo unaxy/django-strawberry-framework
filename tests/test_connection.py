@@ -968,17 +968,6 @@ def test_pipeline_async_coerces_manager_source_and_finalizes() -> None:
     assert qs.query.order_by == (Category._meta.pk.attname,)
 
 
-# --- Post-OrderSet seal on the connection field -------------------------------
-
-
-#: One row per defect shape the post-``OrderSet`` seal names at the CONNECTION
-#: field; ``materialized-list`` and ``none`` share the ``type`` branch.
-#: ``(id, override, expected message start, required substrings)``. The
-#: connection takes the Relay window on whatever ordering returned, so an
-#: unsealed result is a wrong page or a foreign row rather than a loud error -
-#: each row proves the seal rejects instead.
-
-
 def test_clear_connection_type_cache_empties_the_cache() -> None:
     """``clear_connection_type_cache`` drops the generated-connection-class cache."""
     node_type = _make_node_type("CacheClearDirectNode", total_count=True)
@@ -1045,17 +1034,6 @@ def test_registry_clear_also_clears_offset_cursor_prefix_memo() -> None:
 # =============================================================================
 # Connection <-> cascade composition pin (spec-034). The connection pipeline applies
 # get_queryset (where the cascade lives) before filter / order / slice (Decision 12).
-# =============================================================================
-
-
-# =============================================================================
-# Sealed-execution boundary at the connection surface
-# (docs/SPECS/spec-045-visibility_boundary-0_0_14.md #"## Architectural decisions").
-# A hostile hook-return SUBCLASS whose overrides would erase the visibility
-# predicate or synthesize rows is neutralized by sealing: edges carry only the
-# visible rows and totalCount counts only the visible rows, sync AND async. Each
-# test asserts WHICH ROWS SURVIVE, and the seeding makes visible != raw so the
-# assertions are not vacuous.
 # =============================================================================
 
 

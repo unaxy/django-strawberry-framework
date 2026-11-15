@@ -19,7 +19,6 @@ from apps.products import services
 from apps.products.models import Category, Item
 from asgiref.sync import sync_to_async
 from django.db import connection, models
-from django.db.models.sql import Query
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
@@ -57,7 +56,6 @@ from tests._connection_field_schemas import (
     _CONSUMER_WALK_PAGES,
     _FILTERED_CONNECTION_QUERY,
     _a_or_b_category_names,
-    _alias_drift_manager,
     _CategoryFilter,
     _CategoryOrder,
     _combined_get_queryset,
@@ -65,7 +63,6 @@ from tests._connection_field_schemas import (
     _degrading_manager,
     _edge_names,
     _field_schema,
-    _hostile_visibility_hook,
     _item_node_type,
     _make_cascading_item_node,
     _make_node_type,
@@ -75,7 +72,6 @@ from tests._connection_field_schemas import (
     _order_override_passthrough,
     _page_query,
     _schema_for,
-    _seed_public_private_categories,
     _swap_prefix,
     _walk_pages,
 )
@@ -1220,121 +1216,6 @@ def test_consumer_resolver_pre_sliced_queryset_raises_clear_error() -> None:
 
 
 @pytest.mark.django_db
-def test_connection_hostile_hook_narrows_edges_and_total_count_sync() -> None:
-    """A hostile-subclass hook through ``DjangoConnectionField`` narrows edges + totalCount (sync)."""
-    services.seed_data(0)
-    public_names = _seed_public_private_categories()
-    node_type = _make_sidecar_node_type(
-        "HostileConnNode",
-        total_count=True,
-        filterset=None,
-        orderset=None,
-        get_queryset=_hostile_visibility_hook,
-    )
-    schema = _field_schema(node_type)
-    result = _post(schema, "{ items { edges { node { name } } totalCount } }")
-    assert result.errors is None
-    assert result.data is not None
-    conn = json_object(result.data, "items")
-    assert _edge_names(conn) == public_names
-    assert conn["totalCount"] == len(public_names)  # only the visible rows, not the raw 3
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_connection_hostile_hook_narrows_edges_and_total_count_async() -> None:
-    """Async twin: the hostile ``.acount()`` / slicing overrides are sealed away too."""
-    await sync_to_async(services.seed_data)(0)
-    public_names = await sync_to_async(_seed_public_private_categories)()
-    node_type = _make_sidecar_node_type(
-        "AsyncHostileConnNode",
-        total_count=True,
-        filterset=None,
-        orderset=None,
-        get_queryset=_hostile_visibility_hook,
-    )
-    schema = await sync_to_async(_field_schema)(node_type)
-    result = await _post_async(schema, "{ items { edges { node { name } } totalCount } }")
-    assert result.errors is None
-    assert result.data is not None
-    conn = json_object(result.data, "items")
-    assert _edge_names(conn) == public_names
-    assert conn["totalCount"] == len(public_names)
-
-
-@pytest.mark.django_db
-def test_connection_instance_shadowed_all_hook_is_sealed() -> None:
-    """A hook returning a PLAIN queryset with an instance-shadowed ``.all()`` is sealed.
-
-    The seal reads the queryset's state from ``__dict__`` via
-    ``object.__getattribute__``, never through attribute access, so an instance
-    attribute ``all`` shadowing the method (which would drop the predicate if the
-    framework called ``.all()``) cannot lie or run: only the visible rows are served.
-    """
-    services.seed_data(0)
-    public_names = _seed_public_private_categories()
-
-    def _shadowed_all_hook(
-        _cls: type[DjangoType],
-        _qs: models.QuerySet[Category],
-        _info: object,
-    ) -> models.QuerySet[Category]:
-        source = Category.objects.filter(is_private=False)
-        source.all = Category.objects.all  # instance shadow (predicate-dropping)
-        return source
-
-    node_type = _make_sidecar_node_type(
-        "ShadowAllConnNode",
-        filterset=None,
-        orderset=None,
-        get_queryset=_shadowed_all_hook,
-    )
-    schema = _field_schema(node_type)
-    result = _post(schema, "{ items { edges { node { name } } } }")
-    assert result.errors is None
-    assert result.data is not None
-    assert _edge_names(json_at(result.data, "items")) == public_names
-
-
-@pytest.mark.django_db
-def test_connection_query_chain_shadow_hook_is_sealed() -> None:
-    """A hook whose ``query.chain`` is instance-replaced FAILS CLOSED (spec-045 Decision 2).
-
-    ``sql.Query.clone`` shallow-copies the source ``Query.__dict__``, so an
-    instance ``chain`` shadow would ride into the sealed query and dispatch on the
-    connection's first post-seal transform (ordering / slicing), erasing the
-    predicate. The structural no-shadow check rejects the query at the boundary, so
-    the connection surface raises the typed error rather than serving widened rows.
-    """
-    services.seed_data(0)
-    _seed_public_private_categories()
-
-    def _shadowed_chain_hook(
-        _cls: type[DjangoType],
-        _qs: models.QuerySet[Category],
-        _info: object,
-    ) -> models.QuerySet[Category]:
-        source = Category.objects.filter(is_private=False)
-        unfiltered = Category.objects.all().query
-
-        def _unfiltered_chain(*_args: object, **_kwargs: object) -> Query:
-            return unfiltered
-
-        source.query.chain = _unfiltered_chain  # instance shadow
-        return source
-
-    node_type = _make_sidecar_node_type(
-        "ChainShadowConnNode",
-        filterset=None,
-        orderset=None,
-        get_queryset=_shadowed_chain_hook,
-    )
-    schema = _field_schema(node_type)
-    result = _post(schema, "{ items { edges { node { name } } } }")
-    assert result.errors is not None
-    assert "cannot be sealed" in json_str(result.errors[0], "message")
-
-
-@pytest.mark.django_db
 def test_connection_resolver_manager_degrading_to_list_fails_closed() -> None:
     """A consumer resolver returning a Manager that degrades to a list fails closed (sync)."""
 
@@ -1348,25 +1229,6 @@ def test_connection_resolver_manager_degrading_to_list_fails_closed() -> None:
     result = _post(schema, "{ items { edges { node { id } } } }")
     assert result.errors is not None
     assert any("must produce a QuerySet" in str(json_str(err, "message")) for err in result.errors)
-
-
-@pytest.mark.django_db
-def test_connection_resolver_manager_alias_drift_fails_closed() -> None:
-    """A consumer resolver returning a Manager whose ``.all()`` drifts alias fails closed (sync)."""
-
-    def resolver(_root: object, _info: object) -> models.Manager[Category]:
-        return _alias_drift_manager()
-
-    schema = _field_schema(
-        _make_sidecar_node_type("MgrDriftConnNode", filterset=None, orderset=None),
-        resolver=resolver,
-    )
-    result = _post(schema, "{ items { edges { node { id } } } }")
-    assert result.errors is not None
-    assert any(
-        "preserve the manager's explicit routing" in str(json_str(err, "message"))
-        for err in result.errors
-    )
 
 
 @pytest.mark.django_db(transaction=True)
