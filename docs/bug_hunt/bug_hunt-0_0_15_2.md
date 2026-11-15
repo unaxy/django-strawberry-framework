@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 531 done, 111 to do. The CHANGELOG entries filed here moved to
+Progress: 533 done, 112 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3238,6 +3238,26 @@ Progress: 531 done, 111 to do. The CHANGELOG entries filed here moved to
   `PatchBase.left`, `LandPlan.left`). Pinned by
   `tests/test_work.py::test_from_start_names_a_landed_new_file_the_copy_deleted_since`,
   `::test_from_start_names_nothing_for_a_copy_still_holding_its_landing`. START.md "Concurrent sessions"
+- [x] 964. fixed: a storable `DateTimeField` value whose `unique_for_date` / `unique_for_year` year the active time
+  zone cannot bound (year 9999 west of UTC, year 1 east) is the date field's `invalid` error "Enter a date whose whole
+  year the current time zone can represent." on the model and ModelForm flavors (keyed to the validated field when an
+  update omits the date field), sync and async, nothing written, where it was a masked `OverflowError`: each Django date
+  check runs under `guard_query` (moved to `utils/query_bind.py`), only a refusal naming the date field mapped, and
+  only over an audited `Model._perform_date_checks` body (`utils/query_bind.py::date_checks_guarded`,
+  `_GuardedDateCheck`, `_AUDITED_DATE_CHECKS`, `_date_check_refusal`, `utils/errors.py::UNBOUNDED_YEAR_IN_ZONE_MESSAGE`,
+  `mutations/resolvers.py::_full_clean_or_field_errors`, `forms/resolvers.py::_unstorable_values_kept_from_checks`).
+  `LICENSE.drf` is no longer shipped (no adapted DRF code remains). Pinned by
+  `examples/fakeshop/test_query/test_dated_entry_writes_api.py` (year-bound, omitted-date, month, active-zone,
+  duplicate and async rows over the new scalars `DatedEntrySpecimen`), `tests/utils/test_query_bind.py`,
+  `tests/mutations/test_resolvers.py::test_date_field_date_check_in_year_9999_west_of_utc_is_written`,
+  `::test_consumer_validate_unique_overflow_is_not_the_date_checks_error`. spec-036, spec-038, spec-039, README,
+  GLOSSARY `fielderror-envelope`. Filed 968; CHANGELOG 966
+- [x] 965. fixed: on the model flavor, text a text-mapped `DurationField` cannot parse into a `timedelta` is the
+  field's `overflow` error from Django's `forms.DurationField` at decode, as on the form and serializer flavors, where
+  it was a masked `OverflowError` from `clean_fields` (`mutations/resolvers.py::_duration_overflow_error`). Pinned by
+  `test_dated_entry_writes_api.py::test_span_text_no_timedelta_holds_is_the_field_error`,
+  `::test_span_at_the_64_bit_edge`, `::test_span_null_is_written`, `::test_async_write_answers_the_same_errors`.
+  spec-036, README. CHANGELOG 967
 
 ## To do: found along the way
 
@@ -3390,9 +3410,14 @@ Progress: 531 done, 111 to do. The CHANGELOG entries filed here moved to
 - [ ] 956. A GlobalID decoded on the write side or in a filter may disagree with `node(id:)` on an id matched only
   through the key column's collation: `get(pk=...)` and `_resolve_real_pk`'s `.filter(...).first()` find the row
   through the collation, `_resolve_real_pks_batched` compares in Python and does not, and `node` / `nodes` answer null
-  (traced, not run). Found verifying 953- [ ] 963. (robustness) `work.py gc` and `list` still read the `landed` marker where `land` and `own_landing_paths`
+  (traced, not run). Found verifying 953
+- [ ] 963. (robustness) `work.py gc` and `list` still read the `landed` marker where `land` and `own_landing_paths`
   read the attributed pins (`landing_recorded`): a home promoted without the marker is kept by `gc` (the safe side).
   Found verifying 959
+
+- [ ] 968. The serializer flavor answers a `unique_for_date` / `unique_for_year` year the active time zone cannot
+  bound with "Enter a value the database can represent." where the model and ModelForm flavors (964) say "Enter a date
+  whose whole year the current time zone can represent."; share the message. Found verifying 964
 
 
 ## To do: holes found re-checking the fixes

@@ -46,6 +46,10 @@ stored as that string, never as the JSON value its text spells.
 columns are each under a uniqueness rule the form's ``validate_unique()`` /
 ``validate_constraints()`` binds in a query inside ``is_valid()``: a value the database cannot
 store is refused as the field's error before that query runs.
+
+``DatedEntrySpecimenForm`` writes ``DatedEntrySpecimen``, whose text columns are each under one
+of Django's date checks against ``published_at``, which the form's ``validate_unique()`` runs
+inside ``is_valid()``, and whose ``span`` text Django's ``forms.DurationField`` parses.
 """
 
 from __future__ import annotations
@@ -265,4 +269,23 @@ class UniqueScalarSpecimenForm(forms.ModelForm[models.UniqueScalarSpecimen]):
             "opened_at",
             "amount",
             "active",
+        )
+
+
+class DatedEntrySpecimenForm(forms.ModelForm[models.DatedEntrySpecimen]):
+    """A ``DatedEntrySpecimen`` ``ModelForm`` over every column.
+
+    ``validate_unique()`` runs the ``slug`` / ``edition`` / ``issue`` date checks against
+    ``published_at`` inside ``is_valid()``; ``span`` is cleaned by ``forms.DurationField``,
+    which refuses text past ``timedelta``'s range with its ``overflow`` error.
+    """
+
+    class Meta:
+        model = models.DatedEntrySpecimen
+        fields = (
+            "slug",
+            "edition",
+            "issue",
+            "published_at",
+            "span",
         )

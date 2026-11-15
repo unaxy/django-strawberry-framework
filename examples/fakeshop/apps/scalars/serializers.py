@@ -13,6 +13,8 @@ holding no digits, with an explicit two-field DRF uniqueness validator after its
 ``TagWithUniqueSpecimensSerializer`` writes a ``ScalarSpecimenTag`` and a bundle of
 specimens, a nested writable ``specimens`` list of ``UniqueScalarSpecimenSerializer`` items,
 which its own ``create()`` writes; the specimens hold no key to the tag.
+``DatedEntrySpecimenSerializer`` writes ``DatedEntrySpecimen``, whose date checks DRF runs as
+``UniqueForDateValidator`` / ``UniqueForYearValidator`` / ``UniqueForMonthValidator``.
 """
 
 import datetime
@@ -24,7 +26,12 @@ from rest_framework import serializers
 from rest_framework.validators import UniqueTogetherValidator
 from typing_extensions import NotRequired, override
 
-from .models import ScalarSpecimen, ScalarSpecimenTag, UniqueScalarSpecimen
+from .models import (
+    DatedEntrySpecimen,
+    ScalarSpecimen,
+    ScalarSpecimenTag,
+    UniqueScalarSpecimen,
+)
 
 #: The shop's fixed wall-clock offset, one hour behind UTC.
 SHOP_TIME = datetime.timezone(datetime.timedelta(hours=-1), "shop time")
@@ -196,3 +203,22 @@ class TagWithReadOnlyLabelSpecimensSerializer(ModelSerializerBase[ScalarSpecimen
                 },
             )
         return tag
+
+
+class DatedEntrySpecimenSerializer(ModelSerializerBase[DatedEntrySpecimen]):
+    """``ModelSerializer`` over ``DatedEntrySpecimen``: DRF's date-check validators and ``span`` text.
+
+    DRF builds a ``UniqueForDateValidator`` for ``slug``, a ``UniqueForYearValidator`` for
+    ``edition`` and a ``UniqueForMonthValidator`` for ``issue``, each against
+    ``published_at``; its ``DurationField`` parses ``span``.
+    """
+
+    class Meta:
+        model = DatedEntrySpecimen
+        fields = (
+            "slug",
+            "edition",
+            "issue",
+            "published_at",
+            "span",
+        )

@@ -69,6 +69,13 @@ nested ``specimens`` list of those serializer items, through
 value an item's uniqueness validator cannot bind in its query is that item field's error at
 its nested path.
 
+``SCALAR_MAP[models.TextDurationField] = str`` maps ``DatedEntrySpecimen.span`` to text. The
+``DatedEntrySpecimen`` create / update pairs write through each flavor (``DjangoMutation``,
+``DjangoModelFormMutation`` over ``forms.DatedEntrySpecimenForm``, ``SerializerMutation`` over
+``serializers.DatedEntrySpecimenSerializer``): a ``published_at`` whose year the current time
+zone cannot bound for a ``unique_for_date`` / ``unique_for_year`` check is the field's
+``invalid`` error, and ``span`` text past ``timedelta``'s range is its ``overflow`` error.
+
 ``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
 ``FilteredRelation("parent")`` alias named ``par`` and two annotations, ``parent_lag`` (the
 duration from the parent's ``occurred_at``) and ``child_count``, filtered by
@@ -108,6 +115,10 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.filters import FilterInput
 from django_strawberry_framework.orders import OrderInput
+from django_strawberry_framework.types.converters import SCALAR_MAP
+
+# The converter table's hook for a consumer field class: the column's input and output are text.
+SCALAR_MAP[models.TextDurationField] = str
 
 
 class ScalarSpecimenTagType(DjangoType):
@@ -312,6 +323,24 @@ class UniqueScalarSpecimenType(DjangoType):
             "opened_at",
             "amount",
             "active",
+        )
+
+
+class DatedEntrySpecimenType(DjangoType):
+    """``DjangoType`` over ``DatedEntrySpecimen``: its three write flavors' payload.
+
+    ``span`` is written, never read back: its text scalar presents a ``str``, not the
+    ``timedelta`` the column loads.
+    """
+
+    class Meta:
+        model = models.DatedEntrySpecimen
+        fields = (
+            "id",
+            "slug",
+            "edition",
+            "issue",
+            "published_at",
         )
 
 
@@ -946,6 +975,60 @@ class CreateUniqueScalarSpecimenViaUnboundedAmountSerializer(SerializerMutation)
         permission_classes = []
 
 
+class CreateDatedEntrySpecimen(DjangoMutation):
+    """Create a ``DatedEntrySpecimen`` through the model flavor."""
+
+    class Meta:
+        model = models.DatedEntrySpecimen
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateDatedEntrySpecimen(DjangoMutation):
+    """Update a ``DatedEntrySpecimen`` through the model flavor, located by its raw pk ``id:``."""
+
+    class Meta:
+        model = models.DatedEntrySpecimen
+        operation = "update"
+        permission_classes = []
+
+
+class CreateDatedEntrySpecimenViaForm(DjangoModelFormMutation):
+    """Create a ``DatedEntrySpecimen`` through ``DatedEntrySpecimenForm``."""
+
+    class Meta:
+        form_class = forms.DatedEntrySpecimenForm
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateDatedEntrySpecimenViaForm(DjangoModelFormMutation):
+    """Update a ``DatedEntrySpecimen`` through ``DatedEntrySpecimenForm``."""
+
+    class Meta:
+        form_class = forms.DatedEntrySpecimenForm
+        operation = "update"
+        permission_classes = []
+
+
+class CreateDatedEntrySpecimenViaSerializer(SerializerMutation):
+    """Create a ``DatedEntrySpecimen`` through ``DatedEntrySpecimenSerializer``."""
+
+    class Meta:
+        serializer_class = serializers.DatedEntrySpecimenSerializer
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateDatedEntrySpecimenViaSerializer(SerializerMutation):
+    """Update a ``DatedEntrySpecimen`` through ``DatedEntrySpecimenSerializer``."""
+
+    class Meta:
+        serializer_class = serializers.DatedEntrySpecimenSerializer
+        operation = "update"
+        permission_classes = []
+
+
 @strawberry.type
 class Mutation:
     """Scalars coverage write surface: the live ``Upload`` path (spec-037) and temporal writes.
@@ -959,7 +1042,8 @@ class Mutation:
     and ``score`` through a ``CharField``, the ``ViaJsonTextForm`` pair writes ``payload``
     as JSON text and the ``ViaJsonForm`` pair through its own ``forms.JSONField``; the
     ``UniqueScalarSpecimen`` pairs write columns under uniqueness rules through a ``ModelForm``
-    and a serializer.
+    and a serializer; the ``DatedEntrySpecimen`` pairs write columns under Django's date checks
+    and a text-mapped duration through each flavor.
     """
 
     create_media_specimen = DjangoMutationField(CreateMediaSpecimen)
@@ -1044,6 +1128,16 @@ class Mutation:
     )
     create_unique_scalar_specimen_via_unbounded_amount_serializer = DjangoMutationField(
         CreateUniqueScalarSpecimenViaUnboundedAmountSerializer,
+    )
+    create_dated_entry_specimen = DjangoMutationField(CreateDatedEntrySpecimen)
+    update_dated_entry_specimen = DjangoMutationField(UpdateDatedEntrySpecimen)
+    create_dated_entry_specimen_via_form = DjangoMutationField(CreateDatedEntrySpecimenViaForm)
+    update_dated_entry_specimen_via_form = DjangoMutationField(UpdateDatedEntrySpecimenViaForm)
+    create_dated_entry_specimen_via_serializer = DjangoMutationField(
+        CreateDatedEntrySpecimenViaSerializer,
+    )
+    update_dated_entry_specimen_via_serializer = DjangoMutationField(
+        UpdateDatedEntrySpecimenViaSerializer,
     )
 
 

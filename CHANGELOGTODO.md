@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 242 to do.
+Progress: 0 done, 244 to do.
 
 ## From dry-0_0_15_3
 
@@ -1178,6 +1178,13 @@ Progress: 0 done, 242 to do.
   planned window unservable" and `data: null` under `strictness="raise"`, per-parent or deferred-column queries
   otherwise): the plan cache keys each plan by the executing schema and the operation's connection cap, so two schemas
   never share a cached plan, even with identical settings
+- [ ] 966. CHANGELOG entry for item 964: model and ModelForm mutations answer a `unique_for_date` /
+  `unique_for_year` check whose year the active time zone cannot bound (year 9999 west of UTC, year 1 east, on
+  backends that store naive datetimes) as the date field's `invalid` error "Enter a date whose whole year the current
+  time zone can represent." instead of a masked server error; the bundled `LICENSE.drf` is no longer shipped
+- [ ] 967. CHANGELOG entry for item 965: model mutations over a `DurationField` mapped to a text scalar answer text
+  past `timedelta`'s range with Django's `overflow` field error, as the form and serializer flavors do, instead of a
+  masked server error
 
 ## From dry-upstream-0_0_15
 

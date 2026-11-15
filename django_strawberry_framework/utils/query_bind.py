@@ -1,38 +1,61 @@
-"""Guard the one ORM compilation a DRF uniqueness validator actually performs."""
+"""Guard the one ORM compilation a uniqueness check actually performs.
+
+``guard_query`` follows one query through Django's own lookup construction and
+compilation, refusing a value the database cannot bind under the source it was written
+for. A DRF uniqueness validator's queryset carries it on the serializer flavor
+(``rest_framework/validator_guard.py::guard_uniqueness_validator``); a model's
+``unique_for_date`` / ``unique_for_year`` date checks carry it on the model and
+``ModelForm`` flavors (``date_checks_guarded``).
+"""
 
 from __future__ import annotations
 
+import ast
+import functools
+import hashlib
+import inspect
+import textwrap
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
-from django.core.exceptions import EmptyResultSet, FullResultSet
+from django.core.exceptions import EmptyResultSet, FullResultSet, ValidationError
 from django.db import connections, models
 from django.db.models.sql.where import WhereNode
 
+from django_strawberry_framework._completion import _syntax_shape
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._array_field import array_leaf_field
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    dict_items,
     is_dict,
     is_list,
     is_list_or_tuple,
     is_lookup,
+    is_str,
     is_tuple,
+    list_iter,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.errors import (
+    FIELD_ERROR_CODE_INVALID,
+    UNBOUNDED_YEAR_IN_ZONE_MESSAGE,
     _binds_client_side,
     binds_integer,
     refuses_integer_range,
     refuses_numeric_format,
     refuses_utc_offset,
 )
+from django_strawberry_framework.utils.relations import is_model_class
 from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Container, Generator, Mapping
 
     from django.db.backends.base.base import BaseDatabaseWrapper
+    from django.db.models import QuerySet
     from django.db.models.sql.query import Query
     from typing_extensions import TypeIs
 
@@ -324,3 +347,189 @@ def _driver_array_cast_refuses(connection: BaseDatabaseWrapper, param: object) -
 def _is_exception_class(value: object) -> TypeIs[type[Exception]]:
     """Whether ``value`` is an ``Exception`` class, as a DB-API driver's ``DataError`` is."""
     return isinstance(value, type) and issubclass(value, Exception)
+
+
+#: The ``Model`` method ``validate_unique()`` runs the date checks through.
+_DATE_CHECKS = "_perform_date_checks"
+
+# ``date_checks_guarded`` depends on WHICH ``Model._perform_date_checks`` body runs: it hands
+# each check a stand-in model whose only attribute is ``_default_manager.filter``, the one
+# read every audited body makes of ``model_class``. The audited bodies, by the sha256 of their
+# docstring-free syntax (``_completion.py::_syntax_shape``), and the releases carrying them:
+#
+# ======================================  ==================================================
+# Django release                          ``_perform_date_checks`` body (comments may differ)
+# ======================================  ==================================================
+# 5.2.16, 5.2.19, 6.0.10, 6.1.2, 6.1.3    one body: ``ebf8e5b4...``, the row excluded on
+#                                         ``self._is_pk_set()``
+# ======================================  ==================================================
+#
+# Any other body (an unseen release, a model's own override, a body without source) is not
+# shadowed: Django runs it unguarded.
+_AUDITED_DATE_CHECKS = frozenset(
+    {
+        "ebf8e5b472064be054dd7b4dc8e59ddc6ee975945b3f4467176b9fe901190f00",
+    },
+)
+
+
+class _YearUnboundedError(Exception):
+    """A date check's year bound the current time zone cannot represent; never surfaced."""
+
+
+@contextmanager
+def date_checks_guarded(
+    instance: models.Model,
+    *,
+    provided: Container[str],
+    alias: str,
+    answer: Callable[[str, ValidationError], Mapping[str, list[ValidationError]]],
+) -> Generator[None]:
+    """Run each ``unique_for_date`` / ``unique_for_year`` date check of ``instance`` guarded.
+
+    For the length of the block ``Model._perform_date_checks`` (the method
+    ``validate_unique()`` runs a model's date checks through) is shadowed on ``instance``
+    when the body ``instance``'s class resolves is one ``_AUDITED_DATE_CHECKS`` holds;
+    any other body is left to run unguarded. Django calls the shadow once with every
+    check (``validate_unique()`` with none still calls it with an empty list); the shadow
+    calls the original once per check, with that one check, its model's default manager
+    handing Django's own body a queryset whose query carries ``guard_query`` with the
+    check's date field as its one source. Django bounds a ``__year`` lookup's year in the
+    current time zone (``timezone.activate`` decides, not ``TIME_ZONE``) and projects each
+    bound onto the connection's time zone, where year 9999 west of UTC, or year 1 east of
+    it, overflows: that refusal, and only one compiling a lookup on the date field, is the
+    check's ``invalid``
+    ``UNBOUNDED_YEAR_IN_ZONE_MESSAGE`` error, keyed to the date field when ``provided``
+    names it, else to the field the check validates. ``answer`` takes that key and error
+    and returns the errors the check reports (the model flavor reports it, the
+    ``ModelForm`` flavor adds it to the form itself); a key refused once is answered once.
+    Any other error, a ``unique_for_month`` check's included, is Django's own, and the
+    other checks still run; a parameter the guard refuses on another lookup (the validated
+    value, the row's own ``pk`` exclude, a manager's filter) is an ``OverflowError``, the
+    query's own error. The shadow is removed after the block.
+    """
+    if _date_checks_digest(read_attr(type(instance), _DATE_CHECKS)) not in _AUDITED_DATE_CHECKS:
+        yield
+        return
+    namespace = truth.instance_state(instance)
+    perform = require(read_attr(instance, _DATE_CHECKS), callable)
+
+    def checked(date_checks: object) -> dict[str, list[ValidationError]]:
+        errors: dict[str, list[ValidationError]] = {}
+        refused: set[str] = set()
+        for check in list_iter(require(date_checks, is_list)):
+            model_class, lookup_type, field, unique_for = require(check, is_tuple)
+            date_field = require(unique_for, is_str)
+            key = date_field if date_field in provided else require(field, is_str)
+            guarded = _GuardedDateCheck(
+                require(model_class, is_model_class),
+                alias=alias,
+                sources={key: date_field},
+            )
+            try:
+                found = require(
+                    object_result(
+                        perform,
+                        [
+                            (
+                                guarded,
+                                lookup_type,
+                                field,
+                                unique_for,
+                            ),
+                        ],
+                    ),
+                    is_dict,
+                )
+            except _YearUnboundedError:
+                if key not in refused:
+                    refused.add(key)
+                    error = ValidationError(
+                        UNBOUNDED_YEAR_IN_ZONE_MESSAGE,
+                        code=FIELD_ERROR_CODE_INVALID,
+                    )
+                    for name, messages in answer(key, error).items():
+                        errors.setdefault(name, []).extend(messages)
+                continue
+            for name, messages in dict_items(found):
+                errors.setdefault(require(name, is_str), []).extend(
+                    require_instance(message, ValidationError)
+                    for message in list_iter(require(messages, is_list))
+                )
+        return errors
+
+    namespace[_DATE_CHECKS] = checked
+    try:
+        yield
+    finally:
+        del namespace[_DATE_CHECKS]
+
+
+class _GuardedDateCheck:
+    """One date check's model as ``Model._perform_date_checks`` reads it: its default manager.
+
+    Django's body reads only ``model_class._default_manager.filter(**lookup_kwargs)``;
+    the queryset returned is the manager's own (its ``get_queryset`` rows), its query
+    carrying ``guard_query`` before Django adds the check's lookups, so the guard sees
+    each lookup's construction and compilation.
+    """
+
+    def __init__(
+        self,
+        model_class: type[models.Model],
+        *,
+        alias: str,
+        sources: Mapping[str, str],
+    ) -> None:
+        self.model_class: type[models.Model] = model_class
+        self.alias: str = alias
+        self.sources: Mapping[str, str] = sources
+
+    @property
+    def _default_manager(self) -> _GuardedDateCheck:
+        """The stand-in itself, whose ``filter`` is the manager's."""
+        return self
+
+    def filter(self, *args: object, **kwargs: object) -> QuerySet[models.Model]:
+        """Return the default manager's ``filter(*args, **kwargs)``, its query guarded."""
+        queryset = self.model_class._default_manager.all()
+        _ = guard_query(
+            queryset.query,
+            alias=self.alias,
+            sources=self.sources,
+            refusal=_date_check_refusal,
+            provenance=[],
+        )
+        return queryset.filter(*args, **kwargs)
+
+
+def _date_check_refusal(name: str | None) -> Exception:
+    """Refuse a date check's parameter: a year bound on its date field, else the query's own."""
+    if name is None:
+        return OverflowError("the database cannot bind a parameter of a date check's query")
+    return _YearUnboundedError()
+
+
+@functools.cache
+def _date_checks_digest(method: object) -> str | None:
+    """Hash ``method``'s docstring-free syntax (sha256); ``None`` when it has no source.
+
+    Cached per function object, so each body is read and hashed once per process.
+    """
+    try:
+        source = textwrap.dedent(inspect.getsource(require(method, inspect.isfunction)))
+    except (OSError, TypeError):
+        return None
+    return _date_checks_source_digest(source)
+
+
+def _date_checks_source_digest(source: str) -> str:
+    """Hash the docstring-free syntax (sha256) of the one function ``source`` defines."""
+    function = ast.parse(source).body[0]
+    for node in ast.walk(function):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and ast.get_docstring(node) is not None
+        ):
+            del node.body[0]
+    return hashlib.sha256(repr(_syntax_shape(function)).encode()).hexdigest()

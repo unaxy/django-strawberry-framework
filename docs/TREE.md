@@ -279,7 +279,6 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 │   ├── accessors.py              # Typed reads of the DRF attributes djangorestframework-stubs declares with bare generics.
 │   ├── hook_context.py           # The frozen serializer-hook context + upload metadata.
 │   ├── inputs.py                 # DRF-serializer-derived ``@strawberry.input`` generation substrate.
-│   ├── query_bind.py             # Guard the one ORM compilation a DRF uniqueness validator actually performs.
 │   ├── resolvers.py              # The sync + async serializer-mutation resolver pipeline.
 │   ├── serializer_converter.py   # DRF serializer-field -> Strawberry input conversion + the per-input-field reverse map.
 │   ├── sets.py                   # ``SerializerMutation`` base + ``Meta`` validation + the input seams the phase-2.5 bind calls.
@@ -318,6 +317,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── permissions.py            # Shared permission traversal and Django/Channels request-context decoding.
     ├── policies.py               # Shared schema-construction policy normalization.
     ├── private_state.py          # State an object owns, that consumer code can neither read out nor forge.
+    ├── query_bind.py             # Guard the one ORM compilation a uniqueness check actually performs.
     ├── querysets.py              # Shared query-source, field-coercion, sync/async hook, and visibility contracts.
     ├── relations.py              # Relation-shape helpers shared by converters, resolvers, the optimizer, and input selectors.
     ├── sessions.py               # The session-engine resolver and the connection actor lease, shared across the opt-in boundary.
@@ -427,7 +427,6 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 │   ├── accessors.py              # Typed reads of the DRF attributes djangorestframework-stubs declares with bare generics.
 │   ├── hook_context.py           # The frozen serializer-hook context + upload metadata.
 │   ├── inputs.py                 # DRF-serializer-derived ``@strawberry.input`` generation substrate.
-│   ├── query_bind.py             # Guard the one ORM compilation a DRF uniqueness validator actually performs.
 │   ├── resolvers.py              # The sync + async serializer-mutation resolver pipeline.
 │   ├── serializer_converter.py   # DRF serializer-field -> Strawberry input conversion + the per-input-field reverse map.
 │   ├── sets.py                   # ``SerializerMutation`` base + ``Meta`` validation + the input seams the phase-2.5 bind calls.
@@ -467,6 +466,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── policies.py               # Shared schema-construction policy normalization.
     ├── predicates.py             # planned by TODO-BETA-060-0.1.1 - Graph substrate: shared graph policy and dependency planning.
     ├── private_state.py          # State an object owns, that consumer code can neither read out nor forge.
+    ├── query_bind.py             # Guard the one ORM compilation a uniqueness check actually performs.
     ├── querysets.py              # Shared query-source, field-coercion, sync/async hook, and visibility contracts.
     ├── relations.py              # Relation-shape helpers shared by converters, resolvers, the optimizer, and input selectors.
     ├── sessions.py               # The session-engine resolver and the connection actor lease, shared across the opt-in boundary.
@@ -662,7 +662,6 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_converter.py         # Converter tests for the DRF serializer-field -> Strawberry annotation registry.
 │   ├── test_dry_import_ratchet.py  # The serializer flavor IMPORTS its shared substrate; it never redefines it.
 │   ├── test_inputs.py            # Serializer-derived input tests for the generated ``<Serializer>Input`` / ``PartialInput``.
-│   ├── test_query_bind.py        # The PostgreSQL integer bind rules a DRF uniqueness validator's guarded query applies.
 │   ├── test_resolvers.py         # Serializer-mutation resolver internals a live products `/graphql/` cannot drive.
 │   ├── test_sets.py              # ``SerializerMutation`` base, ``Meta`` validation, and the phase-2.5 bind.
 │   └── test_soft_dependency.py   # The DRF soft-dependency import guard.
@@ -702,6 +701,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_narrowing.py         # Tests for ``django_strawberry_framework/utils/_narrowing.py``'s checked narrowings.
     ├── test_permissions.py       # Tests for input permissions, relation-path gates, and Django/Channels request decoding.
     ├── test_policies.py          # ``utils/policies.py::resolve_policy`` - the shared schema-construction resolver.
+    ├── test_query_bind.py        # The PostgreSQL integer bind rules a DRF uniqueness validator's guarded query applies.
     ├── test_querysets.py         # Tests for the shared query-source / visibility substrate (``utils/querysets.py``).
     ├── test_related_declaration_keys.py  # The permission walk's related-declaration read holds a collection to attribute-name keys.
     ├── test_relations.py         # Relation utility tests for kinds, many-side detection, instance accessors, and package re-exports.
@@ -777,6 +777,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_connection_pagination_api.py  # Live /graphql pagination error containment and ``totalCount`` gating for connections.
 ├── test_converter_outputs_api.py # Native HTTP converter verdicts requiring consumer scalar or column declarations.
 ├── test_crossing_lookup_filters_api.py  # A declared filter whose ``lookup_expr`` crosses a relation answers as its joined spelling.
+├── test_dated_entry_writes_api.py  # Live GraphQL HTTP tests for Django's date checks and a text-mapped duration on every write flavor.
 ├── test_debug_extension_api.py   # Live GraphQL HTTP tests for the ``DjangoDebugExtension`` request-visible contract.
 ├── test_debug_toolbar_api.py     # Live HTTP tests for ``DebugToolbarMiddleware`` across GraphQL, panel, and pass-through routes.
 ├── test_decimal_column_name_readback_api.py  # Live model, ModelForm and serializer writes through SQLite column-name conversion.
@@ -1067,7 +1068,6 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_converter.py         # Converter tests for the DRF serializer-field -> Strawberry annotation registry.
 │   ├── test_dry_import_ratchet.py  # The serializer flavor IMPORTS its shared substrate; it never redefines it.
 │   ├── test_inputs.py            # Serializer-derived input tests for the generated ``<Serializer>Input`` / ``PartialInput``.
-│   ├── test_query_bind.py        # The PostgreSQL integer bind rules a DRF uniqueness validator's guarded query applies.
 │   ├── test_resolvers.py         # Serializer-mutation resolver internals a live products `/graphql/` cannot drive.
 │   ├── test_sets.py              # ``SerializerMutation`` base, ``Meta`` validation, and the phase-2.5 bind.
 │   └── test_soft_dependency.py   # The DRF soft-dependency import guard.
@@ -1107,6 +1107,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_narrowing.py         # Tests for ``django_strawberry_framework/utils/_narrowing.py``'s checked narrowings.
     ├── test_permissions.py       # Tests for input permissions, relation-path gates, and Django/Channels request decoding.
     ├── test_policies.py          # ``utils/policies.py::resolve_policy`` - the shared schema-construction resolver.
+    ├── test_query_bind.py        # The PostgreSQL integer bind rules a DRF uniqueness validator's guarded query applies.
     ├── test_querysets.py         # Tests for the shared query-source / visibility substrate (``utils/querysets.py``).
     ├── test_related_declaration_keys.py  # The permission walk's related-declaration read holds a collection to attribute-name keys.
     ├── test_relations.py         # Relation utility tests for kinds, many-side detection, instance accessors, and package re-exports.

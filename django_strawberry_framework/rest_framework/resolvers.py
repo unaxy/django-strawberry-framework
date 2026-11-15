@@ -89,7 +89,7 @@ The serializer-specific invariants this module owns:
   level, a nested serializer's included, runs on a copied pinned queryset whose actual
   ORM lookup construction and one compilation are guarded. An unbindable value is the
   field's ``invalid`` error at its nested path, never a raw error or an aborted
-  transaction (``rest_framework/query_bind.py::guard_query``); a nested value no such
+  transaction (``utils/query_bind.py::guard_query``); a nested value no such
   validator binds is the consumer ``create()`` / ``update()``'s to write. DRF's own ``overflow``
   answer comes first, and a datetime DRF cannot place in a time zone, which it raises as
   a raw ``OverflowError``, fails its ``DateTimeField`` with that same ``overflow`` error

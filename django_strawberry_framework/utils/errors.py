@@ -31,6 +31,9 @@ write flavors):
 - ``UNREPRESENTABLE_IN_ZONE_MESSAGE`` - the message a datetime the current time zone
   cannot present answers where a form widget splits it into that zone's wall clock
   (``utils/widgets.py::_decompressed``);
+- ``UNBOUNDED_YEAR_IN_ZONE_MESSAGE`` - the message a ``unique_for_date`` /
+  ``unique_for_year`` date check answers when the current time zone cannot bound the
+  datetime's year (``utils/query_bind.py::date_checks_guarded``);
 - ``unbindable_temporal`` - whether PostgreSQL refuses a datetime or time bound into a
   ``DateTimeField`` / ``TimeField`` column for its UTC offset (``refuses_utc_offset``),
   past the adapter Django's own ``Field.get_db_prep_value`` asks; the identity decode's
@@ -61,8 +64,10 @@ write flavors):
 - ``unstorable_value`` - the one write-side storability rule, ``unstorable_temporal`` or
   ``unstorable_decimal``, applied by every write flavor before the save
   (``utils/write_values.py::unstorable_value_error`` on the model flavor);
-- ``rest_framework/query_bind.py::guard_query`` guards the actual ORM compilation of a
-  DRF uniqueness check, retaining the validator's own decisions and recoverable failures;
+- ``utils/query_bind.py::guard_query`` guards the actual ORM compilation of a
+  uniqueness query (a DRF uniqueness validator's, a model's ``unique_for_date`` /
+  ``unique_for_year`` date check), retaining the check's own decisions and recoverable
+  failures;
 - ``binds_integer`` - whether a backend binds an integer as a value of a column, held
   to the range it stores for the column's internal type (none where the backend states
   no range for that type); shared with the filter bind ask
@@ -149,6 +154,7 @@ __all__ = [
     "NON_FIELD_ERROR_KEY",
     "PAGINATION_INVALID_ERROR_CODE",
     "UNBINDABLE_TEMPORAL_MESSAGE",
+    "UNBOUNDED_YEAR_IN_ZONE_MESSAGE",
     "UNREPRESENTABLE_IN_ZONE_MESSAGE",
     "FieldError",
     "UnstorableText",
@@ -770,6 +776,14 @@ UNBINDABLE_TEMPORAL_MESSAGE = "Enter a value the database can represent."
 #: whose date there leaves years 1..9999 (``utils/widgets.py::_decompressed``), a value
 #: the database may still store.
 UNREPRESENTABLE_IN_ZONE_MESSAGE = "Enter a value the current time zone can represent."
+
+#: The message a ``unique_for_date`` / ``unique_for_year`` date check answers when the
+#: current time zone cannot bound the datetime's year: Django bounds the year in that zone
+#: and projects each bound onto the connection's time zone, where year 9999 west of UTC, or
+#: year 1 east of it, leaves years 1..9999 (``utils/query_bind.py::date_checks_guarded``).
+UNBOUNDED_YEAR_IN_ZONE_MESSAGE = (
+    "Enter a date whose whole year the current time zone can represent."
+)
 
 
 def unbindable_temporal(

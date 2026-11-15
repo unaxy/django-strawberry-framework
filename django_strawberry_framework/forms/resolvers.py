@@ -263,6 +263,7 @@ from django_strawberry_framework.utils.errors import (
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.inputs import published_input_specs
+from django_strawberry_framework.utils.query_bind import date_checks_guarded
 from django_strawberry_framework.utils.querysets import sync_pipeline_recourse, to_python_value
 from django_strawberry_framework.utils.relations import (
     choice_key_field,
@@ -1556,8 +1557,11 @@ def _unstorable_values_kept_from_checks(
     ``is_valid()`` by ``_keep_omitted_columns`` and held again after it) joins ``exclude``
     without an error, and so does a column the form declares no field for (a form
     ``clean()`` setting it, checked by a ``validate_unique()`` called with no ``exclude``),
-    which the check after ``is_valid()`` answers. The instance's own attributes are put back
-    after ``is_valid()``.
+    which the check after ``is_valid()`` answers. Each ``unique_for_date`` /
+    ``unique_for_year`` date check runs under ``utils/query_bind.py::date_checks_guarded``:
+    a year the current time zone cannot bound is added as the date field's ``invalid``
+    error (the validated field's, when the input omits the date field), never the query's
+    ``OverflowError``. The instance's own attributes are put back after ``is_valid()``.
     """
     instance = form.instance
     namespace = truth.instance_state(instance)
@@ -1576,8 +1580,19 @@ def _unstorable_values_kept_from_checks(
         refused,
         instance.validate_constraints,
     )
+
+    def answer(key: str, error: ValidationError) -> dict[str, list[ValidationError]]:
+        form.add_error(key, error)
+        return {}
+
     try:
-        yield
+        with date_checks_guarded(
+            instance,
+            provided={name for name in form.fields if name not in kept},
+            alias=pinned_write_alias(),
+            answer=answer,
+        ):
+            yield
     finally:
         for name in _BINDING_CHECKS:
             del namespace[name]

@@ -2077,7 +2077,7 @@ The pipeline steps:
      `UniqueTogetherValidator` (including `condition_fields`) and `UniqueForDateValidator`
      and kin run in their original order at the root and in every nested serializer.
      Their copied, write-alias-pinned querysets carry a per-instance Django `Query`
-     guard (`django_strawberry_framework/rest_framework/query_bind.py::guard_query`).
+     guard (`django_strawberry_framework/utils/query_bind.py::guard_query`).
      Django's own `build_filter` owns source resolution and eager lookup preparation;
      the real compiler owns transforms, annotations, iterable RHS preparation and
      final SQL parameters. An `OverflowError` during eager preparation or compilation
@@ -3263,7 +3263,7 @@ same transport, different app.
     DRF queries for a changed condition-only field;
     `::test_serializer_unique_for_date_value_is_held_only_with_its_date` keeps DRF's
     `required` error for a missing `date_field`;
-    `django_strawberry_framework/rest_framework/query_bind.py::guard_query` holds only
+    `django_strawberry_framework/utils/query_bind.py::guard_query` holds only
     parameters that survive the validator's actual ORM compilation. Live, a nested
     `UniqueScalarSpecimen`
     item's `validate_opened_at` instant past year 9999 in UTC
@@ -3278,7 +3278,7 @@ same transport, different app.
     variants through live HTTP. Its sharded sibling
     `examples/fakeshop/test_query/test_serializer_validator_bind_sharded_api.py`
     proves conditional create, update and nested validation use the pinned alias.
-    `tests/rest_framework/test_query_bind.py` holds the PostgreSQL integer rules on a
+    `tests/utils/test_query_bind.py` holds the PostgreSQL integer rules on a
     stand-in alias: a server-bound typed integer to its wrapper's signed width, an
     integer array's explicit cast to its element's signed cast type, and a list parameter
     to the array type psycopg's dumper selects.

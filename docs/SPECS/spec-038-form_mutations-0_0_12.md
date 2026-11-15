@@ -402,7 +402,8 @@ package-internal; Slice 4 is the live consumer surface.
     column cannot read back) answers that field's `invalid` error before the save,
     with nothing written; inside `is_valid()` such a column is that error before model
     validation converts it or a uniqueness or constraint check binds it in a query,
-    beside the form's other errors
+    beside the form's other errors; a `unique_for_date` / `unique_for_year` date check
+    whose year the current time zone cannot bound is the date field's `invalid` error
     ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
   - [ ] Package coverage: [`tests/forms/test_resolvers.py`][test-forms] — create /
     update happy paths, the `form.errors` → envelope (incl. a `NON_FIELD_ERRORS`
@@ -1932,7 +1933,17 @@ write flavor rides.
    the rule refuses is added as the form field's `invalid` error (`form.add_error`), and
    every column refused so far joins the `exclude` the original runs with, so Django never
    converts or binds it; the instance's own attributes are put back after `is_valid()`
-   ([`forms/resolvers.py`][forms-resolvers]`::_unstorable_values_kept_from_checks`). An
+   ([`forms/resolvers.py`][forms-resolvers]`::_unstorable_values_kept_from_checks`). The
+   instance's `unique_for_date` / `unique_for_year` date checks run there under
+   `django_strawberry_framework/utils/query_bind.py::date_checks_guarded` (on an audited
+   `Model._perform_date_checks` body; any other runs unguarded), the per-query
+   `guard_query` the serializer flavor's validators carry: Django bounds a `__year`
+   lookup's year in the current time zone (`timezone.activate`, not `TIME_ZONE`) and SQLite,
+   MySQL and Oracle project each bound onto the connection's time zone, so a storable
+   datetime in year 9999 west of UTC or year 1 east of it is added as the date field's
+   `invalid` error `"Enter a date whose whole year the current time zone can represent."`
+   (`form.add_error`; the validated field's when the input omits the date field, which the
+   whole-row form then answers for each such check), never the query's `OverflowError`. An
    omitted or disabled column an update keeps, and a column the form declares no field for
    (a form `clean()` setting it, checked by a `validate_unique()` called with no `exclude`),
    joins the `exclude` without an error: the kept column's stored value is held again after
@@ -2698,6 +2709,17 @@ Rationale companion: [Decision 14][rationale-d14].
   `UniqueConstraint`, a conditional one reading PostgreSQL's `DataError` as a violation);
   the column is the same `invalid` error first, beside the form's other errors. A form
   `clean()` raising its own `OverflowError`, or a plain form's, propagates.
+- **A date check whose year the current time zone cannot bound.** A `unique_for_date` /
+  `unique_for_year` check bounds its `__year` lookup in the current time zone, which SQLite,
+  MySQL and Oracle project onto the connection's: a storable datetime in year 9999 west of
+  UTC, or year 1 east of it, overflows building the query inside `is_valid()`. That refusal
+  alone is the date field's `invalid` error (the validated field's on an update omitting the
+  date field), once per field, with nothing written; a `unique_for_month` check binds no
+  year bound
+  ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
+- **Duration text past `timedelta`'s range.** Django's `forms.DurationField` answers it with
+  its own `overflow` error ("The number of days must be between -999999999 and
+  999999999."), which the form flavor keeps; the model flavor answers the same.
 - **No `DjangoType` `Meta` key added.** [`DEFERRED_META_KEYS`][types-base] /
   `ALLOWED_META_KEYS` carry no form key
   ([Decision 13](#decision-13--finalization-seam-reuse-the-mutation-phase-25-bind-no-deferred_meta_keys-change)).
@@ -3209,7 +3231,14 @@ behavior reachable through `/graphql/`, package tests own internals.
     unique columns of `UniqueScalarSpecimen`, an `amount` SQLite would store past its
     digits included
     (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_value_a_uniqueness_check_would_bind_is_the_field_error`,
-    `::test_form_decimal_postgresql_numeric_endpoint_under_a_conditional_constraint`); and
+    `::test_form_decimal_postgresql_numeric_endpoint_under_a_conditional_constraint`); a
+    date check whose year the activated zone cannot bound answered as the date field's
+    `invalid` error, the validated fields' on an update omitting it, and duration text past
+    `timedelta`'s range as `forms.DurationField`'s `overflow` error, live, sync and async
+    (`examples/fakeshop/test_query/test_dated_entry_writes_api.py::test_year_the_current_time_zone_cannot_bound_is_the_field_error`,
+    `::test_update_omitting_a_stored_unbounded_year_is_the_validated_fields_error`,
+    `::test_span_text_no_timedelta_holds_is_the_field_error`,
+    `::test_async_write_answers_the_same_errors`); and
     a form `clean()`'s own `OverflowError`, any other exception and a plain form's
     propagating (`tests/forms/test_resolvers.py::test_an_exception_naming_no_unstorable_column_propagates_from_is_valid`,
     `::test_an_overflow_inside_a_plain_form_s_is_valid_propagates`);
@@ -3450,7 +3479,8 @@ The completion contract.
    value a bounded column cannot read back included, answers the field's `invalid` error
    before the save, with nothing written, and inside `is_valid()`
    before model validation converts it or a uniqueness or constraint check binds it in a
-   query, beside the form's other errors
+   query, beside the form's other errors; a date check whose year the current time zone
+   cannot bound is the date field's `invalid` error
    ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
 
 **Slice 4 — products live form surface**

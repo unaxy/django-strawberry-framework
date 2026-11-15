@@ -1,6 +1,6 @@
 """The PostgreSQL integer bind rules a DRF uniqueness validator's guarded query applies.
 
-System-under-test is ``rest_framework/query_bind.py``, only the residue a SQLite run of
+System-under-test is ``utils/query_bind.py``, only the residue a SQLite run of
 the live tier cannot reach: the rules that read PostgreSQL's binding (real-server rows,
 marked ``pg``, are in ``examples/fakeshop/test_query/test_serializer_validator_bind_api.py``).
 An alias that reads as PostgreSQL (``tests/_postgresql_stand_in.py``) carries each
@@ -11,6 +11,9 @@ its column types are PostgreSQL's for the positive integer fields.
 - a typed server-bound scalar held to its wrapper's signed width, through the guard's
   own compilation of a validator-shaped query: refused under its source name, a fitting
   value, a raw ``int`` a custom lookup binds and a client-bound literal kept;
+- the model and form flavors' date-check guard: the installed ``Model._perform_date_checks``
+  body is an audited one, an unaudited or sourceless body is never shadowed, and a refused
+  parameter on a lookup the guard does not source stays the query's ``OverflowError``;
 - an ``ArrayField`` (the ``FakeArrayField`` double) of integers: an explicit
   ``::type[]`` cast held to the signed type of the element's cast (a positive element's
   ``-1`` kept, a custom element type holding nothing), and a list parameter held to the
@@ -20,20 +23,34 @@ its column types are PostgreSQL's for the positive integer fields.
 
 from __future__ import annotations
 
+import datetime
 from contextlib import contextmanager
-from types import ModuleType, SimpleNamespace
+from types import FunctionType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 from apps.scalars.models import OverrideSpecimen, ScalarSpecimen
+from django.core.exceptions import ValidationError
 from django.db import connections, models
 from django.db.backends.base.operations import BaseDatabaseOperations
+from django.db.models.expressions import Combinable
 from django.db.models.lookups import BuiltinLookup
 from django.test.utils import register_lookup
 from typing_extensions import override
 
-from django_strawberry_framework.rest_framework.query_bind import _refused_params, guard_query
-from django_strawberry_framework.utils._narrowing import call_method, is_list
+from django_strawberry_framework.utils import query_bind, truth
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_list,
+    read_attr,
+)
+from django_strawberry_framework.utils.query_bind import (
+    _AUDITED_DATE_CHECKS,
+    _date_checks_digest,
+    _refused_params,
+    date_checks_guarded,
+    guard_query,
+)
 from django_strawberry_framework.utils.typing import object_result
 from tests._postgres_fields import FakeArrayField, patch_array_field
 from tests._postgresql_stand_in import BINDING_MODES, StoringOperations, postgresql_stand_in
@@ -410,3 +427,97 @@ def test_psycopg2_list_parameter_selects_no_array_type(monkeypatch: pytest.Monke
             [[_Int4(2**35)]],
             lookup_sql=_PLAIN,
         )
+
+
+class _DatedSequence(models.Model):
+    """``seq`` is unique per ``pub`` date; never saved or queried."""
+
+    seq: models.IntegerField[float | int | str | Combinable, int] = models.IntegerField(
+        unique_for_date="pub",
+    )
+    pub: models.DateTimeField[
+        str | datetime.datetime | datetime.date | Combinable,
+        datetime.datetime,
+    ] = models.DateTimeField()
+
+    class Meta:
+        app_label = "products"
+        managed = False
+
+
+def test_installed_date_checks_body_is_an_audited_one() -> None:
+    """The installed Django's ``Model._perform_date_checks`` is a body the guard audited."""
+    assert (
+        _date_checks_digest(read_attr(models.Model, "_perform_date_checks"))
+        in _AUDITED_DATE_CHECKS
+    )
+
+
+#: A function whose code names no file, so ``inspect.getsource`` finds no source.
+def _date_checks_template(self: object, date_checks: object) -> object:
+    return {"row": [self, date_checks]}
+
+
+_SOURCELESS = FunctionType(
+    _date_checks_template.__code__.replace(co_filename="<generated>"),
+    {},
+)
+
+
+def _answer(key: str, error: ValidationError) -> dict[str, list[ValidationError]]:
+    return {key: [error]}
+
+
+@pytest.mark.parametrize(
+    ("method", "audited"),
+    [
+        pytest.param(read_attr(models.Model, "_perform_date_checks"), False, id="unseen-digest"),
+        pytest.param(_SOURCELESS, None, id="no-source"),
+        pytest.param(len, None, id="no-function"),
+    ],
+)
+def test_unaudited_date_checks_body_is_never_shadowed(
+    monkeypatch: pytest.MonkeyPatch,
+    method: object,
+    *,
+    audited: bool | None,
+) -> None:
+    """A body the guard did not audit, or cannot read, runs unguarded: no shadow on the row."""
+    monkeypatch.setattr(query_bind, "_AUDITED_DATE_CHECKS", frozenset[str]())
+    if audited is None:
+        assert _date_checks_digest(method) is None
+    row = _DatedSequence(seq=1, pub=datetime.datetime(2021, 1, 1, tzinfo=datetime.timezone.utc))
+    with date_checks_guarded(row, provided={"seq", "pub"}, alias="default", answer=_answer):
+        assert "_perform_date_checks" not in truth.instance_state(row)
+
+
+def test_date_checks_body_is_hashed_once_per_function(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second guarded write over the same body reads the cached digest, never re-hashing."""
+    calls: list[str] = []
+    digest = query_bind._date_checks_source_digest
+
+    def counted(source: str) -> str:
+        calls.append(source)
+        return digest(source)
+
+    monkeypatch.setattr(query_bind, "_date_checks_source_digest", counted)
+    query_bind._date_checks_digest.cache_clear()
+    row = _DatedSequence(seq=1, pub=datetime.datetime(2021, 1, 1, tzinfo=datetime.timezone.utc))
+    for _ in range(2):
+        with date_checks_guarded(row, provided={"seq", "pub"}, alias="default", answer=_answer):
+            assert "_perform_date_checks" in truth.instance_state(row)
+    query_bind._date_checks_digest.cache_clear()
+
+    assert len(calls) == 1
+
+
+def test_refusal_off_the_date_field_is_the_query_s_overflow() -> None:
+    """The guard's refusal of a parameter no source names is the query's ``OverflowError``.
+
+    The date-check guard sources only the date field, so a refusal it names is the year
+    bound's signal, while one it names nothing (another lookup's value, a manager's own
+    filter) is never the date field's time-zone message. SQLite answers an integer past the
+    column's range without a query, so no SQLite date check reaches this refusal.
+    """
+    assert isinstance(query_bind._date_check_refusal(None), OverflowError)
+    assert isinstance(query_bind._date_check_refusal("pub"), query_bind._YearUnboundedError)

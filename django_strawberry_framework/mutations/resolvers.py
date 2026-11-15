@@ -113,12 +113,14 @@ from django.core.exceptions import NON_FIELD_ERRORS, ObjectDoesNotExist, Validat
 from django.db import IntegrityError, transaction
 from django.db.models import (
     BaseConstraint,
+    DurationField,
     GeneratedField,
     Model,
     ProtectedError,
     RestrictedError,
 )
 from django.db.models.constants import LOOKUP_SEP
+from django.forms import Field as FormField
 from django.utils import timezone
 from graphql import GraphQLError
 
@@ -167,6 +169,7 @@ from django_strawberry_framework.utils.inputs import (
     published_input_specs,
 )
 from django_strawberry_framework.utils.permissions import auth_aliases_for_permission_classes
+from django_strawberry_framework.utils.query_bind import date_checks_guarded
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_sync,
     initial_queryset,
@@ -697,6 +700,13 @@ def _decode_relations(
         decoded, text_error = decode_scalar_leaf(graphql_name, value)
         if text_error is not None:
             return None, text_error
+        overflow_error = _duration_overflow_error(
+            graphql_name,
+            model_fields[spec.input_attr],
+            decoded,
+        )
+        if overflow_error is not None:
+            return None, overflow_error
         stored = _make_aware_if_naive(decoded)
         storability_error = unstorable_value_error(
             graphql_name,
@@ -777,6 +787,36 @@ def _explicit_null_error(
     if django_field.null:
         return None
     return null_field_error(field_name, require(django_field, is_concrete_field))
+
+
+def _duration_overflow_error(
+    graphql_name: str,
+    django_field: ModelField,
+    value: object,
+) -> FieldError | None:
+    """Answer text a ``DurationField`` column cannot parse into a ``timedelta`` as its error.
+
+    A project mapping a ``DurationField`` to a text scalar (a ``SCALAR_MAP`` entry) has
+    ``Model.clean_fields`` parse the text through the column's ``to_python``, which lets
+    ``parse_duration``'s ``OverflowError`` out for a span past ``timedelta``'s range. The
+    form field the column builds (``Field.formfield``, a ``forms.DurationField``) answers
+    that text with its ``overflow`` ``ValidationError``, the error the ``ModelForm`` and
+    serializer flavors give it: that error, Django's own message and code, keyed to the
+    input. Any other text is left to ``clean_fields``, whose ``invalid`` error stands.
+    """
+    if not (isinstance(django_field, DurationField) and isinstance(value, str)):
+        return None
+    form_field = require_instance(django_field.formfield(), FormField)
+    try:
+        _ = form_field.to_python(value)
+    except ValidationError as exc:
+        if exc.code == _DURATION_OVERFLOW_CODE:
+            return field_error(graphql_name, exc.messages, codes=[exc.code])
+    return None
+
+
+#: The code Django's ``forms.DurationField`` refuses a span past ``timedelta``'s range with.
+_DURATION_OVERFLOW_CODE = "overflow"
 
 
 def _make_aware_if_naive(value: object) -> object:
@@ -1828,9 +1868,13 @@ def _full_clean_or_field_errors(
     ``validate_unique()`` and ``validate_constraints()`` run with ``exclude.checks``
     plus every field an earlier step failed, exactly as ``Model.full_clean`` adds them,
     and the errors merge through ``ValidationError.update_error_dict`` in the order
-    ``full_clean`` merges them. So a check a provided field joins is validated against
-    the row while an unprovided co-member's own value is never field-validated (a
-    column ``save()`` fills, or a stored value outside the field's current choices).
+    ``full_clean`` merges them. Each ``unique_for_date`` / ``unique_for_year`` date check
+    runs under ``utils/query_bind.py::date_checks_guarded``: a year the current time zone
+    cannot bound is the date field's ``invalid`` error (the validated field's, when the
+    input omits the date field), never the query's ``OverflowError``. So a check a
+    provided field joins is validated against the row while an unprovided co-member's
+    own value is never field-validated (a column ``save()`` fills, or a stored value
+    outside the field's current choices).
     A ``UniqueConstraint`` duplicate or failed ``CheckConstraint`` is therefore caught
     here as a ``ValidationError`` BEFORE ``save()``; its field-keyed messages populate
     the envelope (multi-field constraint -> ``"__all__"`` sentinel), each model field
@@ -1842,22 +1886,30 @@ def _full_clean_or_field_errors(
     skeleton) so the payload build stays single-sited in ``run_write_pipeline_sync``.
     """
     errors: dict[str, list[ValidationError]] = {}
-    try:
-        instance.full_clean(
-            exclude=exclude.fields,
-            validate_unique=False,
-            validate_constraints=False,
-        )
-    except ValidationError as exc:
-        errors = exc.update_error_dict(errors)
-    errors |= _unstorable_cleaned_errors(instance, exclude.fields, errors)
-    checks = set(exclude.checks)
-    for validate in (instance.validate_unique, instance.validate_constraints):
-        checks |= {name for name in errors if name != NON_FIELD_ERRORS}
+    unprovided = set(exclude.fields)
+    provided = {field.name for field in instance._meta.concrete_fields} - unprovided
+    with date_checks_guarded(
+        instance,
+        provided=provided,
+        alias=pinned_write_alias(),
+        answer=lambda key, error: {key: [error]},
+    ):
         try:
-            validate(exclude=checks)
+            instance.full_clean(
+                exclude=exclude.fields,
+                validate_unique=False,
+                validate_constraints=False,
+            )
         except ValidationError as exc:
             errors = exc.update_error_dict(errors)
+        errors |= _unstorable_cleaned_errors(instance, exclude.fields, errors)
+        checks = set(exclude.checks)
+        for validate in (instance.validate_unique, instance.validate_constraints):
+            checks |= {name for name in errors if name != NON_FIELD_ERRORS}
+            try:
+                validate(exclude=checks)
+            except ValidationError as exc:
+                errors = exc.update_error_dict(errors)
     if errors:
         return validation_error_to_field_errors(ValidationError(errors), error_key_map())
     return None

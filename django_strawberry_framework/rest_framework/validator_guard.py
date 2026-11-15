@@ -24,8 +24,7 @@ from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
     UNBINDABLE_TEMPORAL_MESSAGE,
 )
-
-from .query_bind import guard_query
+from django_strawberry_framework.utils.query_bind import guard_query
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

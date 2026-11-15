@@ -38,7 +38,7 @@ import logging
 import threading
 import time
 import zoneinfo
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from types import SimpleNamespace
@@ -1291,11 +1291,13 @@ def _write_row(
     *,
     pk: object = None,
     fields: tuple[str, ...] = ("a", "b", "c"),
+    raised: bool = False,
 ) -> object:
     """Run one model-flavor ``writeRow`` of ``fields``; answer its payload.
 
     An update (``pk`` set, partial input) or a create (``pk`` unset). ``data`` is written
-    inline, so the query need not spell the generated input's name.
+    inline, so the query need not spell the generated input's name. ``raised`` answers the
+    top-level error messages instead, for a write expected to raise.
     """
     type(
         f"{model.__name__}T",
@@ -1326,6 +1328,9 @@ def _write_row(
         query = f"mutation($id: ID!) {{ writeRow(id: $id, data: {{ {literal} }}) {selection} }}"
         variables = {"id": str(pk)}
     res = _schema(Mutation).execute_sync(query, variable_values=variables)
+    if raised:
+        assert res.errors is not None
+        return [error.message for error in res.errors]
     assert res.errors is None, res.errors
     return _json_at(res.data, "writeRow")
 
@@ -4280,3 +4285,62 @@ def test_text_scalar_duration_parsed_past_the_backend_integer_is_the_field_error
     assert result.errors is None, result.errors
     assert _json_at(result.data, "createCleanedStamp", "errors") == errors
     assert written == stored
+
+
+class DayStampedSlug(_UnmanagedProductsModel):
+    """``slug`` is unique per ``day``, a ``DateField``: Django's year lookup binds dates."""
+
+    slug: _Text = models.TextField(unique_for_date="day")
+    day: models.DateField[str | datetime.date | Combinable, datetime.date] = models.DateField()
+
+
+class CheckedStampedSlug(_UnmanagedProductsModel):
+    """``slug`` is unique per ``pub`` date; ``validate_unique`` overflows on its own for ``boom``."""
+
+    slug: _Text = models.TextField(unique_for_date="pub")
+    pub: models.DateTimeField[
+        str | datetime.datetime | datetime.date | Combinable,
+        datetime.datetime,
+    ] = models.DateTimeField()
+
+    @override
+    def validate_unique(self, exclude: Collection[str] | None = None) -> None:
+        super().validate_unique(exclude)
+        if self.slug == "boom":
+            _ = datetime.date.max + datetime.timedelta(days=1)
+
+
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite projects the bound onto UTC")
+@pytest.mark.django_db(transaction=True)
+def test_date_field_date_check_in_year_9999_west_of_utc_is_written() -> None:
+    """A ``DateField``'s date check bounds the year in dates, which no zone moves: stored."""
+    with override_settings(TIME_ZONE="America/New_York"), _tables(DayStampedSlug):
+        payload = _write_row(
+            DayStampedSlug,
+            {"slug": "s", "day": "9999-12-31"},
+            fields=("slug", "day"),
+        )
+        stored = list(DayStampedSlug._base_manager.values_list("day", flat=True))
+
+    assert _json_at(payload, "errors") == []
+    assert stored == [datetime.date(9999, 12, 31)]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_consumer_validate_unique_overflow_is_not_the_date_checks_error() -> None:
+    """An ``OverflowError`` a model's own ``validate_unique`` raises stays the application's.
+
+    The guard answers only a refusal compiling the date check's year lookup, so the
+    override's arithmetic is the masked top-level error with nothing written.
+    """
+    with _tables(CheckedStampedSlug):
+        payload = _write_row(
+            CheckedStampedSlug,
+            {"slug": "boom", "pub": "2021-01-01T00:00:00+00:00"},
+            fields=("slug", "pub"),
+            raised=True,
+        )
+        stored = CheckedStampedSlug._base_manager.count()
+
+    assert payload == ["An unexpected error occurred."]
+    assert stored == 0

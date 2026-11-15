@@ -65,10 +65,20 @@ and DRF's uniqueness validators bind each such value in a query inside ``is_vali
 value the database cannot store (an aware time on SQLite, an aware datetime under
 ``USE_TZ = False``, a decimal past PostgreSQL ``numeric``'s format) is refused live as the
 field's error before any of them runs.
+
+``DatedEntrySpecimen`` holds a text column under each of Django's date checks against one
+``DateTimeField``: ``slug`` is ``unique_for_date``, ``edition`` ``unique_for_year`` and
+``issue`` ``unique_for_month`` of ``published_at``. Django bounds the ``unique_for_date`` /
+``unique_for_year`` year in the current time zone and projects each bound onto the
+connection's, so a stored instant in year 9999 west of UTC (or year 1 east of it) is a year
+SQLite cannot bound. Its ``span`` is a ``TextDurationField``, a ``DurationField`` the scalars
+schema maps to a text scalar through a ``SCALAR_MAP`` entry, so text past ``timedelta``'s
+range reaches every write flavor's own parse.
 """
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, TypeAlias, TypeVar
 
@@ -433,3 +443,34 @@ class UniqueScalarSpecimen(models.Model):
     @override
     def __str__(self) -> str:
         return self.label
+
+
+class TextDurationField(models.DurationField[object, timedelta | None]):
+    """A ``DurationField`` whose input the scalars schema maps to text.
+
+    ``apps/scalars/schema.py`` registers ``SCALAR_MAP[TextDurationField] = str``, the
+    converter table's documented hook for a consumer field class, so every write flavor
+    reads the column's value as the text ``parse_duration`` spells (``"3 04:05:06"``).
+    """
+
+
+class DatedEntrySpecimen(models.Model):
+    """Text columns under each of Django's date checks against ``published_at``.
+
+    ``slug`` is unique per date, ``edition`` per year and ``issue`` per month of
+    ``published_at``, so each write's ``validate_unique()`` runs three date checks; ``span``
+    is a nullable ``TextDurationField``.
+    """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
+    slug: _Text = models.TextField(unique_for_date="published_at")
+    edition: _Text = models.TextField(unique_for_year="published_at")
+    issue: _Text = models.TextField(unique_for_month="published_at")
+    published_at: _DateTime = models.DateTimeField()
+    span = TextDurationField(null=True, blank=True)
+
+    @override
+    def __str__(self) -> str:
+        return self.slug
