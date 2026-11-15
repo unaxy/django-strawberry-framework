@@ -142,7 +142,6 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.context import stash_on_context
-from django_strawberry_framework.utils.operation_lease import OperationLease
 from django_strawberry_framework.utils.querysets import materialized_rows, normalized_row_source
 from django_strawberry_framework.utils.typing import object_result
 from tests._django_private import has_apply_rel_filters
@@ -4412,10 +4411,15 @@ def test_disarming_with_a_token_from_another_variable_is_not_swallowed() -> None
     context: dict[str, object] = {}
     scope = begin_resource_budget(context, ResourcePolicy(max_list_rows=2))
     try:
-        foreign: contextvars.ContextVar[OperationLease[_RequestBudget] | None] = (
-            contextvars.ContextVar("foreign_budget", default=None)
+        foreign: contextvars.ContextVar[_RequestBudget | None] = contextvars.ContextVar(
+            "foreign_budget",
+            default=None,
         )
-        mismatched = _BudgetScope(policy=scope.policy, lease=scope.lease, token=foreign.set(None))
+        mismatched = _BudgetScope(
+            policy=scope.policy,
+            budget=scope.budget,
+            token=foreign.set(None),
+        )
 
         with pytest.raises(ValueError, match="different ContextVar"):
             end_resource_budget(mismatched)
@@ -4440,116 +4444,3 @@ def test_a_mirror_holding_a_policy_subclass_reads_back_as_the_package_default() 
     info = SimpleNamespace(context={DST_RESOURCE_POLICY: _LiesAfterValidating()})
 
     assert policy_from_info(info) == DEFAULT_RESOURCE_POLICY
-
-
-# ---------------------------------------------------------------------------
-# A copied context is not an armed one
-#
-# Live sibling:
-# ``test_a_worker_that_outlived_a_request_is_bounded_and_published_for_itself``
-# on ``/iso-survivor/`` (``test_extension_isolation_api.py``): a background task
-# reads its own context, not the budget of the request it outlived.
-# ---------------------------------------------------------------------------
-
-
-def _read_budget_in_a_copied_context(context: object, policy: ResourcePolicy) -> dict[str, object]:
-    """Arm a budget, copy the context as a task would, then end the operation.
-
-    The copy is taken exactly where a resolver's ``asyncio.create_task`` takes
-    one - while the budget is armed - and read after the operation that armed it
-    has ended, which is what such a task does when it outlives its request.
-    """
-    read: dict[str, object] = {}
-    with _armed(context, policy):
-        copied = contextvars.copy_context()
-        record_admission_rejection(
-            ResourceLimitExceeded(
-                bound="max_aliases",
-                limit=1,
-                charged=2,
-                detail="the document carries more aliases than the policy allows",
-            ),
-        )
-
-    def _read() -> None:
-        read["armed"] = armed_resource_policy()
-        read["rejection"] = admission_rejection()
-        read["from_info"] = policy_from_info(SimpleNamespace(context={}))
-        read["deadline_raised"] = False
-        try:
-            check_deadline(SimpleNamespace(context={}))
-        except ResourceLimitExceeded:
-            read["deadline_raised"] = True
-
-    copied.run(_read)
-    return read
-
-
-def test_a_context_copied_from_an_armed_operation_reads_no_budget_once_it_ends() -> None:
-    """Token reset repairs the context that armed; it cannot reach a copy of it.
-
-    A resolver's background task holds a copy of the context the operation armed
-    in, and outlives the request. Every answer that copy gives has to be the one
-    a context with no budget gives - the policy, the admission verdict and the
-    deadline alike - because the request those belonged to is over and the work
-    the task is doing now was never admitted under it.
-    """
-    read = _read_budget_in_a_copied_context(
-        {},
-        ResourcePolicy(max_list_rows=1, execution_deadline_seconds=0.000001),
-    )
-
-    assert read["armed"] is None
-    assert read["rejection"] is None
-    assert read["from_info"] == DEFAULT_RESOURCE_POLICY
-    assert read["deadline_raised"] is False
-
-
-def test_a_copied_context_answers_policy_from_info_with_the_context_it_is_handed() -> None:
-    """The fallback is the point: outside an operation, ``info`` is the authority.
-
-    A task reading a completed request's ceiling is not merely stale - it
-    outranks the context actually passed to the helper, so a caller that
-    publishes its own policy is answered with someone else's. Once the operation
-    ends, the published mirror on the context in hand answers again.
-    """
-    read: dict[str, object] = {}
-    with _armed({}, ResourcePolicy(max_list_rows=1)):
-        copied = contextvars.copy_context()
-
-    def _read() -> None:
-        read["rows"] = policy_from_info(
-            SimpleNamespace(context={DST_RESOURCE_POLICY: ResourcePolicy(max_list_rows=7)}),
-        ).max_list_rows
-
-    copied.run(_read)
-
-    assert read["rows"] == 7
-
-
-def test_an_expired_deadline_stops_expiring_once_its_operation_is_over() -> None:
-    """A deadline is one request's, and a copied context keeps answering with it.
-
-    The armed instant belongs to the operation that derived it from the policy
-    it was admitted under. Left readable, it rejects every later call made in a
-    task that copied the context - work with no budget at all, refused on the
-    strength of a request that has already returned.
-    """
-    read: dict[str, object] = {}
-    policy = ResourcePolicy(execution_deadline_seconds=0.000001)
-    with _armed({}, policy):
-        copied = contextvars.copy_context()
-        time.sleep(0.01)
-        with pytest.raises(ResourceLimitExceeded):
-            check_deadline(SimpleNamespace(context={}))
-
-    def _read() -> None:
-        read["raised"] = False
-        try:
-            check_deadline(SimpleNamespace(context={}))
-        except ResourceLimitExceeded:
-            read["raised"] = True
-
-    copied.run(_read)
-
-    assert read["raised"] is False

@@ -15,13 +15,10 @@ global ``registry`` is cleared on entry and exit.
 
 import asyncio
 import contextlib
-import contextvars
 import datetime
 import decimal
-import gc
 import uuid
 import warnings
-import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Coroutine, Iterable, Iterator, Mapping
 from types import MappingProxyType, SimpleNamespace
@@ -55,8 +52,6 @@ from graphql import (
 )
 from strawberry import relay
 from strawberry.extensions.base_extension import SchemaExtension
-from strawberry.types import ExecutionResult
-from strawberry.types.nodes import SelectedField
 from typing_extensions import override
 
 import django_strawberry_framework.optimizer._context as ctx_mod
@@ -81,23 +76,18 @@ from django_strawberry_framework.optimizer._context import (
     DST_OPTIMIZER_PLAN,
     DST_OPTIMIZER_PLANNED,
     DST_OPTIMIZER_STRICTNESS,
-    active_optimizer,
     active_strictness,
     begin_execution_frame,
-    cache_key_parts_memo,
     clear_optimizer_context,
-    converted_selections_memo,
     end_execution_frame,
     execution_plan_memo,
     fk_id_elision_keys,
     get_context_value,
-    optimizer_value,
     planned_resolver_keys,
     planned_window,
     publish_planned_windows,
     publish_scoped_relations,
     relation_is_optimizer_scoped,
-    stash_for_optimizer,
     stash_on_context,
     stashed_strictness,
 )
@@ -3827,8 +3817,7 @@ def test_planned_windows_publish_read_and_clear_with_the_frame() -> None:
     assert planned_window("Root.kids@roots.kids") is None
 
     scope = begin_execution_frame({}, nested=False)
-    frame = scope.lease.held()
-    assert frame is not None
+    frame = scope.frame
     try:
         publish_planned_windows({"Root.kids@roots.kids": declared})
         publish_planned_windows({"Kid.kids@roots.kids.edges.node.kids": other})
@@ -5680,187 +5669,6 @@ def test_optimizer_preserves_async_adapter_optimized_tail() -> None:
     assert isinstance(optimized_res, _AsyncQuerySetRows)
     assert optimized_res._queryset is not qs_valid
     assert optimized_res._queryset.query.deferred_loading == (frozenset({"name"}), False)
-
-
-# ---------------------------------------------------------------------------
-# The execution frame ends with its execution
-# ---------------------------------------------------------------------------
-
-
-class _FrameSentinel:
-    """A weak-referenceable value, so what a frame holds can be asked about."""
-
-
-def _read_optimizer_state_in_a_copied_context(copied: contextvars.Context) -> dict[str, object]:
-    """Everything a task that copied an execution's context could read back."""
-    read: dict[str, object] = {}
-
-    def _read() -> None:
-        read["optimizer"] = active_optimizer()
-        read["strictness"] = active_strictness()
-        read["stash"] = optimizer_value(None, "probe")
-        read["plans"] = execution_plan_memo()
-        read["key_parts"] = cache_key_parts_memo()
-        read["converted"] = converted_selections_memo()
-        read["scoped"] = relation_is_optimizer_scoped("probe@Type")
-
-    copied.run(_read)
-    return read
-
-
-def test_an_execution_frame_a_task_copied_answers_nothing_once_the_execution_ends() -> None:
-    """Every per-execution store ends with the execution, in every context at once.
-
-    ``asyncio.create_task`` copies the whole context, and a token reset rewrites
-    only the context that created it - so a resolver's background task went on
-    reading the completed operation's stashes, plan memo, converted selections
-    and cache-key parts, and held the querysets and plans inside them for as
-    long as it ran. The frame is reached through a lease the execution closes,
-    so the copy answers exactly as a context with no optimizer running does, and
-    every sentinel the frame held is collectable.
-    """
-    extension = DjangoOptimizerExtension()
-    # Real memo entries of each memo's declared type; the weak-referenceable part of each is
-    # what the references below watch (a tuple or a list is not itself weak-referenceable).
-    stash = _FrameSentinel()
-    plan = OptimizationPlan()
-    frozen_variables = frozenset({("probe", ("probe", 0, None))})
-    node = SelectedField(name="probe", directives={}, arguments={}, selections=[])
-    sentinels: dict[str, object] = {
-        "stash": stash,
-        "plans": plan,
-        "key_parts": frozen_variables,
-        "converted": node,
-    }
-    references = {name: weakref.ref(value) for name, value in sentinels.items()}
-
-    frame = begin_execution_frame(
-        {},
-        nested=False,
-        optimizer=extension,
-        strictness="warn",
-    )
-    try:
-        stash_for_optimizer(None, "probe", stash)
-        plans_memo = execution_plan_memo()
-        assert plans_memo is not None
-        plan_key: PlanCacheKey = (
-            "probe",
-            frozenset(),
-            Category,
-            (),
-            None,
-            100,
-            object(),
-        )
-        plans_memo[plan_key] = plan
-        key_parts_memo = cache_key_parts_memo()
-        assert key_parts_memo is not None
-        key_parts_memo[1] = (
-            "probe",
-            frozen_variables,
-            100,
-            object(),
-        )
-        selections_memo = converted_selections_memo()
-        assert selections_memo is not None
-        selections_memo[1] = [node]
-        publish_scoped_relations({"probe@Type"})
-        copied = contextvars.copy_context()
-        inside = _read_optimizer_state_in_a_copied_context(copied)
-    finally:
-        end_execution_frame(frame)
-
-    assert inside["optimizer"] is extension
-    assert inside["stash"] is sentinels["stash"]
-    assert inside["scoped"] is True
-
-    after = _read_optimizer_state_in_a_copied_context(copied)
-
-    assert after["optimizer"] is None
-    assert after["strictness"] is None
-    assert after["stash"] is None
-    assert after["plans"] is None
-    assert after["key_parts"] is None
-    assert after["converted"] is None
-    assert after["scoped"] is False
-
-    sentinels.clear()
-    del inside, after, stash, plan, frozen_variables, node
-    gc.collect()
-    assert {name: reference() for name, reference in references.items()} == dict.fromkeys(
-        references,
-        None,
-    )
-
-
-@pytest.mark.django_db
-def test_an_operation_in_a_context_that_outlived_a_request_publishes_as_its_own() -> None:
-    """The second operation is top-level, clears its own context, and restores to none.
-
-    A task that copied an execution's context and outlived the request is not
-    inside anything by the time it runs its own operation. Classified as nested
-    it would publish nothing to the context object it was handed - leaving a
-    consumer reading their own request's plan with the values of a request that
-    has already returned - and what it read back would be the earlier
-    operation's stashes rather than its own.
-    """
-    services.seed_data(1)
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    assert registry.get(Category) is CategoryType
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
-
-    seen: dict[str, object] = {}
-
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            """Copy this operation's context, as a resolver starting a task does."""
-            seen.setdefault("copied", contextvars.copy_context())
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
-
-    def _second_operation() -> None:
-        """Run a whole operation from the copied context, after the first has ended."""
-        context = SimpleNamespace()
-        seen["result"] = schema.execute_sync(
-            "{ allItems { name category { id name } } }",
-            context_value=context,
-        )
-        seen["published"] = _published_optimizer_keys(context)
-        seen["after"] = optimizer_value(None, DST_OPTIMIZER_PLAN)
-
-    finalize_django_types()
-    extension = DjangoOptimizerExtension()
-    schema = DjangoSchema(query=Query, extensions=[lambda: extension])
-
-    first = schema.execute_sync("{ allItems { name } }", context_value=SimpleNamespace())
-    assert first.errors is None, first.errors
-
-    assert isinstance(seen["copied"], contextvars.Context)
-    seen["copied"].run(_second_operation)
-
-    assert isinstance(seen["result"], ExecutionResult)
-    assert seen["result"].errors is None, seen["result"].errors
-    assert seen["result"].data is not None
-    assert seen["result"].data["allItems"][0]["category"]["name"]
-    published = seen["published"]
-    assert isinstance(published, dict)
-    assert published[DST_OPTIMIZER_PLAN] is not None
-    assert seen["after"] is None
 
 
 # =============================================================================

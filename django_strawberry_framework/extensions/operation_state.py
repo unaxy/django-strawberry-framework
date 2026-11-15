@@ -51,19 +51,11 @@ attribute a resolver can replace or a second ``__init__`` can recreate: one
 variable strongly because a ``ContextVar`` points back at nothing; the extension
 itself it holds only weakly.
 
-**What a carrier holds is a LEASE on a weak reference to the state, and the
-runner is the state's one strong owner.** Resetting a token repairs the task
-that bound it and nothing else: a task created while a binding is in force gets
-a COPY of that context, which no later reset rewrites, so a resolver's
-background task outliving the request would otherwise go on reading the
-completed operation's context, variables and result, and hold them alive for as
-long as it ran. Every scope here therefore binds a lease
-(``utils/operation_lease.py::OperationLease``) and closes it on the way out, so
-a copied binding stops answering at the instant the scope ends - which is not
-the instant the runner dies, the runner deliberately outliving its own operation
-scope to collect results. The weak reference inside the lease is the other half
-of the same statement: the state lives exactly as long as the runner that built
-it.
+**What a carrier holds is a weak reference to the state, and the runner is the
+state's one strong owner,** so the state lives exactly as long as the runner
+that built it. Every scope here resets its bindings on the way out, in the task
+that made them; a task created while a binding is in force gets a copy of that
+context, which no later reset rewrites.
 
 A runner also publishes the scope it is active in, because "nested" is a fact
 about runners rather than about hook ordering: an operation started anywhere
@@ -73,8 +65,7 @@ and :func:`operation_is_nested` is how the optimizer knows not to treat the
 outer request's context object as its own to clear and publish to. It is settled
 at that first binding rather than at construction, because what a runner is
 inside is decided where it starts running: a stream built inside one operation
-and driven after it is inside nothing by then, and the closed lease its copied
-context holds is what says so.
+and driven after that operation's scope was reset is inside nothing by then.
 
 The runner also binds the operation's EXECUTOR MODE, for the same reason and
 with the opposite timing. Which executor is driving is settled by the entry
@@ -135,18 +126,21 @@ from typing_extensions import override
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils.execution_mode import OperationMode, bind_operation_mode
-from django_strawberry_framework.utils.operation_lease import OperationLease
 from django_strawberry_framework.utils.private_state import PrivateAuthority
 from django_strawberry_framework.utils.typing import call_forwarded
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Generator, Iterable
     from types import TracebackType
+    from typing import TypeAlias
 
     from strawberry.extensions.context import ExtensionContextManagerBase
     from strawberry.types import ExecutionContext
     from strawberry.types.execution import StreamExecutionResult
     from typing_extensions import TypeIs
+
+    #: The reset that undoes one binding a scope made.
+    _Binding: TypeAlias = Callable[[], None]
 
 #: The value type of whichever context variable a binding sets and resets.
 _ValueT = TypeVar("_ValueT")
@@ -189,9 +183,8 @@ class OperationState:
         For the task-local state an extension arms for the WHOLE operation
         rather than for one hook - the resource budget is the one the package
         arms - because a streamed operation's later frames run in whatever task
-        drives them and inherit none of it. The value registered is expected to
-        be a lease its arming scope still owns: the runner re-binds it, and the
-        scope that armed it is what ends it.
+        drives them and inherit none of it. The runner re-binds the value, and
+        the scope that armed it is what ends it.
 
         Registered on the state rather than on the runner, because the state is
         what an extension has a handle on, and because a registration is then
@@ -240,12 +233,10 @@ class _RunnerScope(NamedTuple):
     """The scope one runner binds around everything it owns.
 
     ``nested`` is settled when the runner opens its FIRST binding, from whether
-    a live outer scope was bound in that task. It is a property of the RUNNER
+    an outer scope was bound in that task. It is a property of the RUNNER
     rather than of the hook asking, so an operation started from a resolver,
     from a consumer extension's teardown and from result collection all answer
-    the same way; and it is read from a live lease rather than from a bound
-    value, so a runner started in a task that merely COPIED an outer operation's
-    context is top-level, which is what it is.
+    the same way.
 
     ``mode`` is the opposite kind of fact and is settled at construction: which
     executor is driving this operation is decided by the entry point the caller
@@ -266,11 +257,10 @@ class _RunnerScope(NamedTuple):
 
 #: One binding carrier per operation-bound extension, settled at construction.
 #:
-#: The variable holds a lease on a weak reference to the state bound for the
-#: operation this extension is answering IN THIS TASK, and nothing else: it is
-#: set by the package runner, closed and reset by it, so two operations on one
-#: extension never see each other's state and a task that copied the binding
-#: sees neither.
+#: The variable holds a weak reference to the state bound for the operation this
+#: extension is answering IN THIS TASK, and nothing else: it is set by the
+#: package runner and reset by it, so two operations on one extension never see
+#: each other's state.
 #:
 #: Held here rather than in an attribute because the carrier decides what
 #: ``execution_context`` answers with, and an attribute holding it is one a
@@ -279,9 +269,7 @@ class _RunnerScope(NamedTuple):
 #: A ``ContextVar`` points back at nothing, so holding one strongly retains
 #: nothing but the variable; the extension it belongs to is held weakly, and its
 #: entry is dropped when the extension dies.
-_OPERATION_CARRIERS: PrivateAuthority[ContextVar[OperationLease[ref[OperationState]] | None]] = (
-    PrivateAuthority()
-)
+_OPERATION_CARRIERS: PrivateAuthority[ContextVar[ref[OperationState] | None]] = PrivateAuthority()
 
 #: Every extension a ``DjangoSchema`` has managed, and nothing else.
 #:
@@ -304,8 +292,8 @@ _PACKAGE_MANAGED: PrivateAuthority[bool] = PrivateAuthority()
 #:
 #: One variable for every runner rather than one per runner, because the
 #: question it answers is about the innermost one: an operation runs nested when
-#: a live scope was already bound as its runner opened its first binding.
-_RUNNER_SCOPES: ContextVar[OperationLease[_RunnerScope] | None] = ContextVar(
+#: a scope was already bound as its runner opened its first binding.
+_RUNNER_SCOPES: ContextVar[_RunnerScope | None] = ContextVar(
     "django_strawberry_framework_runner_scope",
     default=None,
 )
@@ -336,7 +324,7 @@ def _register_resumed_binding(variable: ContextVar[_ValueT], token: Token[_Value
     registrar = _RESUME_REGISTRARS.get()
     if registrar is None:
         return False
-    registrar.append(_binding(variable, token, None, adopted=True))
+    registrar.append(_binding(variable, token, adopted=True))
     return True
 
 
@@ -376,30 +364,18 @@ def _declared_operation_mode(extensions: Iterable[SchemaExtension]) -> Operation
     return None
 
 
-def _live_scope() -> _RunnerScope | None:
-    """Return the scope bound and still open here, or ``None``.
-
-    ``None`` covers both "no runner bound one" and "the runner that bound one
-    has finished with it", which are the same answer to every caller: a context
-    that merely COPIED a binding is not inside the operation that made it.
-    """
-    lease = _RUNNER_SCOPES.get()
-    return None if lease is None else lease.held()
-
-
 def operation_is_nested() -> bool:
     """Whether the operation running here belongs to a runner inside another one.
 
     ``False`` outside every package runner, which is what a direct call into a
     resolver and a plain ``strawberry.Schema`` operation both are: neither has a
-    runner, so neither is inside one. ``False`` again in a task that copied a
-    binding and outlived it, for the same reason the state itself is gone there.
+    runner, so neither is inside one.
     """
-    scope = _live_scope()
+    scope = _RUNNER_SCOPES.get()
     return scope is not None and scope.nested
 
 
-def _carrier(extension: object) -> ContextVar[OperationLease[ref[OperationState]] | None]:
+def _carrier(extension: object) -> ContextVar[ref[OperationState] | None]:
     """Return the binding carrier settled for ``extension`` at construction.
 
     Absent for one case only: a subclass whose ``__init__`` never reached
@@ -421,15 +397,9 @@ def _carrier(extension: object) -> ContextVar[OperationLease[ref[OperationState]
 def _bound_state(extension: _OperationBoundExtension[_StateT_co]) -> _StateT_co | None:
     """Return the state bound to ``extension`` here, or ``None`` outside that binding.
 
-    Two conditions, one answer. The lease is closed when the scope that bound it
-    ends, so a context that copied the binding earlier reads nothing even while
-    the runner still owns the state for result collection; and the reference
-    inside a live lease stops resolving when the runner itself is gone.
+    The reference stops resolving when the runner itself is gone.
     """
-    lease = _carrier(extension).get()
-    if lease is None:
-        return None
-    binding = lease.held()
+    binding = _carrier(extension).get()
     # An extension's carrier is only ever set to a reference to the state its own
     # ``_new_operation_state`` built (``_bind`` over ``_operation_states``).
     return None if binding is None else cast("_StateT_co | None", binding())
@@ -591,9 +561,7 @@ class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
     def _operation_state(self) -> _StateT_co | None:
         """Return the state this extension may write this operation's scratch on.
 
-        ``None`` outside an operation, and ``None`` again in a task that copied
-        a binding and outlived the scope that made it: the state a completed
-        operation wrote is not state a later reader may still answer from.
+        ``None`` outside an operation.
 
         The compatibility state answers only for an extension the package has
         never managed. For one it has, the runner's binding is the whole answer,
@@ -632,39 +600,27 @@ def _operation_states(
     )
 
 
-class _Binding(NamedTuple):
-    """One variable this scope set, and what it has to undo on the way out.
-
-    ``lease`` is the one the scope minted and is therefore the one it closes;
-    ``None`` marks a value the scope only re-bound, whose lease belongs to the
-    scope that armed it and outlives this one.
-
-    ``reset`` undoes the binding. For a binding some other scope made inside
-    this one and handed over (:func:`_register_resumed_binding`, built with
-    ``adopted=True``) it is the same statement - the token is reset in the task
-    that made it, which is this one - but the scope that armed it may have reset
-    it already, and that is not this scope's bookkeeping gone wrong.
-    """
-
-    reset: Callable[[], None]
-    lease: OperationLease[object] | None
-
-
 def _binding(
     variable: ContextVar[_ValueT],
     token: Token[_ValueT],
-    lease: OperationLease[object] | None,
     *,
     adopted: bool = False,
 ) -> _Binding:
-    """Record one binding with the reset that undoes it."""
+    """Record one binding as the reset that undoes it.
+
+    For a binding some other scope made inside this one and handed over
+    (:func:`_register_resumed_binding`, built with ``adopted=True``) it is the
+    same statement - the token is reset in the task that made it, which is this
+    one - but the scope that armed it may have reset it already, and that is not
+    this scope's bookkeeping gone wrong.
+    """
     reset = _reset_adopted_binding if adopted else _reset_binding
-    return _Binding(functools.partial(reset, variable, token), lease)
+    return functools.partial(reset, variable, token)
 
 
 def _bind_resumed(variable: ContextVar[_ValueT], value: _ValueT) -> _Binding:
     """Bind ``variable`` to ``value`` again for one resume."""
-    return _binding(variable, variable.set(value), None)
+    return _binding(variable, variable.set(value))
 
 
 def _bind(
@@ -692,19 +648,15 @@ def _bind(
         return []
     bindings: list[_Binding] = []
     try:
-        lease = OperationLease(scope)
-        bindings.append(_binding(_RUNNER_SCOPES, _RUNNER_SCOPES.set(lease), lease))
+        bindings.append(_binding(_RUNNER_SCOPES, _RUNNER_SCOPES.set(scope)))
         if scope.mode is not None:
             bindings.append(_binding(*bind_operation_mode(scope.mode)))
         for extension, state in states:
             carrier = _carrier(extension)
-            binding = OperationLease(ref(state))
-            bindings.append(_binding(carrier, carrier.set(binding), binding))
+            bindings.append(_binding(carrier, carrier.set(ref(state))))
             bindings.extend(rebind() for rebind in state.resumed_bindings())
         if registrar:
-            bindings.append(
-                _binding(_RESUME_REGISTRARS, _RESUME_REGISTRARS.set(bindings), None),
-            )
+            bindings.append(_binding(_RESUME_REGISTRARS, _RESUME_REGISTRARS.set(bindings)))
     except BaseException:
         _unbind(bindings)
         raise
@@ -717,8 +669,7 @@ def _already_bound(scope: _RunnerScope) -> bool:
     Identity, not equality: one runner has one scope object, so this is true
     only for a scope the same runner already has in force here.
     """
-    lease = _RUNNER_SCOPES.get()
-    return lease is not None and lease.held() is scope
+    return _RUNNER_SCOPES.get() is scope
 
 
 def _reset_binding(variable: ContextVar[_ValueT], token: Token[_ValueT]) -> None:
@@ -735,23 +686,17 @@ def _reset_binding(variable: ContextVar[_ValueT], token: Token[_ValueT]) -> None
 
 
 def _unbind(bindings: list[_Binding]) -> None:
-    """Close every lease this scope minted and reset every binding it made.
+    """Reset every binding this scope made.
 
-    Closing comes first and happens for every binding, because that is the half
-    a context copied from this one can observe: the task that copied it never
-    sees the reset, and must stop reading the moment the scope ends rather than
-    when the owner is eventually collected. The reset is what gives THIS context
-    its enclosing operation back, and each one is attempted independently so a
-    token this context cannot reset does not strand the ones after it; the
-    first reset failure is raised once every reset has been attempted.
+    The reset is what gives THIS context its enclosing operation back, and each
+    one is attempted independently so a token this context cannot reset does not
+    strand the ones after it; the first reset failure is raised once every reset
+    has been attempted.
     """
-    for binding in reversed(bindings):
-        if binding.lease is not None:
-            binding.lease.close()
     failure: ValueError | RuntimeError | None = None
-    for binding in reversed(bindings):
+    for reset in reversed(bindings):
         try:
-            binding.reset()
+            reset()
         except (ValueError, RuntimeError) as error:  # noqa: PERF203 - one attempt per reset
             failure = failure or error
     if failure is not None:
@@ -939,7 +884,7 @@ class DjangoExtensionsRunner(SchemaExtensionsRunner):
     lets one implementation cover a class entry, an accepted instance and a
     singleton-returning factory alike. It is also the one object that knows the
     operation's full lifetime, so the states it builds live exactly as long as
-    it does and every binding is a lease on a weak reference to one of them.
+    it does and every carrier binding is a weak reference to one of them.
 
     Every scope the engine can read an extension's state through is bound here:
     the operation, which covers parsing, validation, execution, resolver
@@ -972,13 +917,12 @@ class DjangoExtensionsRunner(SchemaExtensionsRunner):
         Not at construction. Upstream builds the runner before the operation
         begins and a streamed one is driven long afterwards, so construction is
         neither where the operation starts nor, for a stream, in the task that
-        will run it. The first binding is both, and what it reads is a live
-        outer lease: a runner whose task merely inherited a copy of an ended
-        operation's context is inside nothing.
+        will run it. The first binding is both, and what it reads is the outer
+        scope bound in that task.
         """
         if self._runner_scope is None:
             self._runner_scope = _RunnerScope(
-                nested=_live_scope() is not None,
+                nested=_RUNNER_SCOPES.get() is not None,
                 mode=self._operation_mode,
             )
         return self._runner_scope

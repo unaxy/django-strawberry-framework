@@ -112,9 +112,7 @@ Terms this spec relies on (statuses per [`docs/GLOSSARY.md`][glossary]):
   `optimizer/extension.py::DjangoOptimizerExtension.on_execute`
   (install once in the caller's context and close in `finally`, mutate the
   dict — never `.set()` per entry, per the optimizer's own per-execution
-  frame, `optimizer/_context.py::begin_execution_frame`, which sits behind a
-  `utils/operation_lease.py::OperationLease` so a copied context observes
-  the close; the close is ordered so the graph store outlives the
+  frame, `optimizer/_context.py::begin_execution_frame`; the close is ordered so the graph store outlives the
   optimizer's own frame — a consumer `get_queryset` hook reached through
   `resolve` reads the memo, and no optimizer memo reads the graph store)
   **and** a new shipped
@@ -325,10 +323,7 @@ of the first foundation card.
   per-execution frame (`optimizer/_context.py::begin_execution_frame` /
   `end_execution_frame`), opened in `on_execute` — a sync generator hook, so
   the install lands in the caller's context and reaches resolvers on both
-  execution colors — and closed in its `finally`. The frame sits behind a
-  `utils/operation_lease.py::OperationLease`, because resetting a
-  `ContextVar` token rewrites only the context that set it, while a task
-  copied from it would keep reading the completed operation's state. The
+  execution colors — and closed in its `finally`. The
   optimizer extension is **optional**: `optimizer/_context.py::active_optimizer`
   answers `None` outside an optimizer-run execution, and most package-test
   schemas build without it.
@@ -670,10 +665,7 @@ caller's context to reach resolvers on both execution colors, and an
 `async def` hook or an `on_operation` bracket does not. The container is
 installed once in the caller's context and dict-mutated thereafter — never
 `.set()` per entry, which would race across the `sync_to_async`
-thread-sensitive bridge — and, like the optimizer's execution frame, its
-close must be observable from contexts copied before it (an
-`OperationLease`), so a resolver's background task never reads a completed
-operation's audience. Entering `operation_scope()` allocates a dict and
+thread-sensitive bridge. Entering `operation_scope()` allocates a dict and
 binds it — no request access, no `info` read, no I/O — so it cannot raise,
 and installers may enter it outside their `try`. The memo is never instance
 state on an extension: the documented singleton-factory install form shares

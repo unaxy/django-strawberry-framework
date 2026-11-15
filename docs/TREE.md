@@ -311,7 +311,6 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── input_values.py           # Set-input traversal substrate shared by the FilterSet and OrderSet families.
     ├── inputs.py                 # Generated-input construction and lifecycle primitives shared by set and write families.
     ├── lazy.py                   # Django lazy-proxy unwrapping: the object a ``LazyObject`` stands for, before a type check.
-    ├── operation_lease.py        # Revocable access to state that belongs to one operation.
     ├── permissions.py            # Shared permission traversal and Django/Channels request-context decoding.
     ├── policies.py               # Shared schema-construction policy normalization.
     ├── private_state.py          # State an object owns, that consumer code can neither read out nor forge.
@@ -457,7 +456,6 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── input_values.py           # Set-input traversal substrate shared by the FilterSet and OrderSet families.
     ├── inputs.py                 # Generated-input construction and lifecycle primitives shared by set and write families.
     ├── lazy.py                   # Django lazy-proxy unwrapping: the object a ``LazyObject`` stands for, before a type check.
-    ├── operation_lease.py        # Revocable access to state that belongs to one operation.
     ├── permissions.py            # Shared permission traversal and Django/Channels request-context decoding.
     ├── policies.py               # Shared schema-construction policy normalization.
     ├── predicates.py             # planned by TODO-BETA-060-0.1.1 - Graph substrate: shared graph policy and dependency planning.
@@ -528,7 +526,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_type_suppressions.py  # Script tests for the ``check-type-suppressions`` gate in ``scripts/check_type_suppressions.py``.
 ├── test_ci_governance.py         # Governance tests for CI workflows, Dependabot, install floors and first-party source.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
-├── test_completion.py            # Completion source audits and revocable ownership that a wire response cannot inspect.
+├── test_completion.py            # Completion source audits and window ownership that a wire response cannot inspect.
 ├── test_connection.py            # DjangoConnection construction, window internals, exception identity and optimizer short-circuit tests.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
@@ -927,7 +925,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_type_suppressions.py  # Script tests for the ``check-type-suppressions`` gate in ``scripts/check_type_suppressions.py``.
 ├── test_ci_governance.py         # Governance tests for CI workflows, Dependabot, install floors and first-party source.
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
-├── test_completion.py            # Completion source audits and revocable ownership that a wire response cannot inspect.
+├── test_completion.py            # Completion source audits and window ownership that a wire response cannot inspect.
 ├── test_connection.py            # DjangoConnection construction, window internals, exception identity and optimizer short-circuit tests.
 ├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.

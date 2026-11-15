@@ -78,7 +78,6 @@ from .utils import truth
 from .utils._narrowing import iter_of, read_attr
 from .utils.context import get_context_value, stash_on_context
 from .utils.errors import coded_error_extensions
-from .utils.operation_lease import OperationLease
 from .utils.policies import canonical_policy, resolve_policy
 from .utils.querysets import is_async_only_iterable, normalized_row_source
 
@@ -600,37 +599,23 @@ class _RequestBudget:
 #: same reason: a per-execution answer a context stash cannot be trusted to
 #: give.
 #:
-#: What the variable holds is a LEASE, never the budget
-#: (``utils/operation_lease.py::OperationLease``). Propagation is the same
-#: mechanism as leakage: a resolver's background task gets a copy of this
-#: context and keeps it for as long as it runs, and no token reset can reach
-#: that copy. Closing the lease at the end of the operation is what does reach
-#: it, so a seam running in such a task reads no armed budget - falling back
-#: exactly as it does where none was ever armed - instead of enforcing a
-#: completed request's ceiling on a new one, and the policy, deadline and
-#: verdict stop being reachable at that instant rather than when the task
-#: finally ends.
-#:
 #: The published keys keep the shape spec-047 specifies, as a mirror a
 #: consumer can read; they are also the fallback wherever no budget is armed (a
 #: plain ``strawberry.Schema`` with no extension, whose consumer may publish a
 #: policy under the key, or a task the operation's binding does not reach),
 #: which is a context no resolver of this package's is running inside.
-_active_budget: ContextVar[OperationLease[_RequestBudget] | None] = ContextVar(
+_active_budget: ContextVar[_RequestBudget | None] = ContextVar(
     "django_strawberry_framework_resource_budget",
     default=None,
 )
 
 
 class _BudgetScope:
-    """One armed budget's policy and lease, the token restoring the enclosing one, and its owner.
+    """One armed budget's policy and budget, the token restoring the enclosing one, and its owner.
 
-    The first two answer different questions. The lease is what every context
-    holding it - this one and every copy taken from it - reads through, so
-    closing it ends the budget everywhere at once. The token is what gives THIS
-    context back whatever an enclosing operation had armed, and only this
-    context: a task that closes a streamed operation from elsewhere has nothing
-    of its own to restore.
+    The token is what gives THIS context back whatever an enclosing operation
+    had armed, and only this context: a task that closes a streamed operation
+    from elsewhere has nothing of its own to restore.
 
     ``adopted`` records that something else took the token over. A streamed
     operation arms its budget inside its first frame, and the resume driving
@@ -639,7 +624,7 @@ class _BudgetScope:
     come. Once that has happened this scope no longer has a binding of its own
     to end, and ending it again would be a used token rather than a restore.
 
-    ``policy`` is the private snapshot the lease's budget holds, kept here so
+    ``policy`` is the private snapshot the budget holds, kept here so
     the arming caller charges the operation's own policy without a second read
     of the variable it has just set.
 
@@ -649,7 +634,7 @@ class _BudgetScope:
 
     __slots__: tuple[str, ...] = (
         "adopted",
-        "lease",
+        "budget",
         "policy",
         "token",
     )
@@ -657,25 +642,21 @@ class _BudgetScope:
     def __init__(
         self,
         policy: ResourcePolicy,
-        lease: OperationLease[_RequestBudget],
-        token: Token[OperationLease[_RequestBudget] | None],
+        budget: _RequestBudget,
+        token: Token[_RequestBudget | None],
     ) -> None:
         self.policy: ResourcePolicy = policy
-        self.lease: OperationLease[_RequestBudget] = lease
-        self.token: Token[OperationLease[_RequestBudget] | None] = token
+        self.budget: _RequestBudget = budget
+        self.token: Token[_RequestBudget | None] = token
         self.adopted: bool = False
 
 
 def _armed_budget() -> _RequestBudget | None:
-    """Return the budget armed and still open here, or ``None``.
+    """Return the budget armed here, or ``None``.
 
-    The one read every seam in this module goes through, so "no budget" and "a
-    budget whose operation has ended" cannot be told apart by any of them - the
-    second being a context copied out of a request that is over, which is
-    entitled to exactly as much as the first.
+    The one read every seam in this module goes through.
     """
-    lease = _active_budget.get()
-    return None if lease is None else lease.held()
+    return _active_budget.get()
 
 
 def _absolute_deadline(policy: ResourcePolicy) -> float | None:
@@ -731,44 +712,39 @@ def begin_resource_budget(context: object, policy: ResourcePolicy) -> _BudgetSco
     published mirror, so the authority and the mirror cannot disagree about when
     the operation's budget ends. :func:`end_resource_budget` closes the scope,
     restoring whatever budget an enclosing operation had armed.
-
-    What comes back is the whole scope rather than a token, because ending one
-    is two statements: the lease is closed, which every context that copied this
-    one observes, and the binding is reset, which only this context sees.
     """
     armed = _operation_policy(policy)
     deadline = _absolute_deadline(armed)
     _publish_budget_mirror(context, armed, deadline)
-    lease = OperationLease(_RequestBudget(armed, deadline, _AdmissionVerdict()))
-    return _BudgetScope(armed, lease, _active_budget.set(lease))
+    budget = _RequestBudget(armed, deadline, _AdmissionVerdict())
+    return _BudgetScope(armed, budget, _active_budget.set(budget))
 
 
 def budget_resume_binding(
     scope: _BudgetScope,
 ) -> tuple[
-    ContextVar[OperationLease[_RequestBudget] | None],
-    OperationLease[_RequestBudget],
-    Token[OperationLease[_RequestBudget] | None],
+    ContextVar[_RequestBudget | None],
+    _RequestBudget,
+    Token[_RequestBudget | None],
 ]:
     """Return what a streamed operation has to bind again on resume, and what armed it here.
 
     An operation's budget is armed once, in the task that started it, and a
     streamed operation's later frames run in whatever task drives them. The
-    runner re-binds the variable and the lease around every resumption
+    runner re-binds the variable and the budget around every resumption
     (``extensions/operation_state.py::OperationState.rebind_on_resume``), so a
     frame produced in a second task is bounded by the policy the request was
-    admitted under rather than by the fallback. It is the same lease, so the
-    close that ends the operation ends it for every task that ever bound it.
+    admitted under rather than by the fallback.
 
     The token goes with them because the arming happens INSIDE the first frame:
     the resume driving that frame has no binding of its own to take back, so
     without this the budget would stay armed in the driving task after the frame
     was handed over - an unrelated call in that task would then be answered by a
-    paused operation's ceiling rather than by its own context. The lease is the
-    operation's lifetime and the token is one task's binding of it; the resume
-    ends the second without touching the first.
+    paused operation's ceiling rather than by its own context. The token is one
+    task's binding of the budget; the resume ends that binding without touching
+    the budget.
     """
-    return _active_budget, scope.lease, scope.token
+    return _active_budget, scope.budget, scope.token
 
 
 def adopt_budget_binding(scope: _BudgetScope) -> None:
@@ -809,9 +785,7 @@ def record_admission_rejection(rejection: ResourceLimitExceeded) -> None:
 
     Does nothing when no budget is armed, which is the plain
     ``strawberry.Schema`` case a caller reaches by invoking a hook outside an
-    operation scope: there is no operation for a verdict to belong to. An ended
-    operation is the same case: a verdict recorded into it would be read by
-    nothing.
+    operation scope: there is no operation for a verdict to belong to.
     """
     budget = _armed_budget()
     if budget is not None:
@@ -833,11 +807,7 @@ def admission_rejection() -> ResourceLimitExceeded | None:
 def end_resource_budget(scope: _BudgetScope) -> None:
     """Disarm the budget armed by :func:`begin_resource_budget`.
 
-    Closing comes first and is unconditional, because it is the half that works
-    from anywhere: it ends the budget in the task that armed it, in every task
-    that copied that context, and in whichever task is running this teardown.
-
-    The reset is the local half. A cancelled subscription closes the generator
+    A cancelled subscription closes the generator
     driving it from a context that is not the one the operation armed in, and a
     token is resettable only where it was created; the copy that context holds
     is discarded with it, so there is nothing to restore - and raising here
@@ -848,11 +818,10 @@ def end_resource_budget(scope: _BudgetScope) -> None:
     than a fact about where teardown ran, so it is re-raised; a reused token is
     ``RuntimeError`` and is not caught at all.
 
-    An adopted scope has no local half left to do: the resume that took the
+    An adopted scope has nothing left to reset: the resume that took the
     binding over ended it when it handed its frame back
-    (:func:`adopt_budget_binding`), and the close is the whole of what remains.
+    (:func:`adopt_budget_binding`).
     """
-    scope.lease.close()
     if scope.adopted:
         return
     try:

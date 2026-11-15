@@ -21,9 +21,8 @@ is handed the authoritative ``sync`` flag for every operation and puts it in the
 chain; the runner binds it for the operation's whole lifetime
 (``extensions/operation_state.py::DjangoExtensionsRunner``), around result
 collection, around every streamed frame and around every stream resume. The
-binding is a lease, so a task that merely COPIED the context stops reading the
-mode when the operation ends rather than when its owner is collected; and it is
-a token, so a nested operation restores its caller's mode on the way out.
+binding is a token, so a nested operation restores its caller's mode on the way
+out.
 
 Two questions are asked of that one fact, and they are different questions:
 
@@ -49,7 +48,6 @@ from enum import Enum
 
 from strawberry.utils.inspect import in_async_context
 
-from .operation_lease import OperationLease
 from .querysets import SyncMisuseError
 
 __all__ = (
@@ -75,12 +73,7 @@ class OperationMode(Enum):
 
 #: The mode bound for the operation running in this task, or ``None`` outside
 #: every package runner.
-#:
-#: A lease rather than the mode itself, so the answer a copied context gives is
-#: "nothing" the instant the operation ends. Reading a stale mode out of a
-#: background task would be the same defect the ambient loop already has, only
-#: harder to see.
-_OPERATION_MODES: ContextVar[OperationLease[OperationMode] | None] = ContextVar(
+_OPERATION_MODES: ContextVar[OperationMode | None] = ContextVar(
     "django_strawberry_framework_operation_mode",
     default=None,
 )
@@ -88,31 +81,21 @@ _OPERATION_MODES: ContextVar[OperationLease[OperationMode] | None] = ContextVar(
 
 def bind_operation_mode(
     mode: OperationMode,
-) -> tuple[
-    ContextVar[OperationLease[OperationMode] | None],
-    Token[OperationLease[OperationMode] | None],
-    OperationLease[OperationMode],
-]:
-    """Bind ``mode`` here and hand the owner back everything that undoes it.
+) -> tuple[ContextVar[OperationMode | None], Token[OperationMode | None]]:
+    """Bind ``mode`` here and hand the owner back the variable and token that undo it.
 
-    The variable, the token and the lease, because the runner that owns the
-    operation owns all three: it resets the token in the task that made it and
-    closes the lease on every exit path. Nothing here decides when that is.
+    The runner that owns the operation resets the token in the task that made it.
+    Nothing here decides when that is.
     """
-    lease: OperationLease[OperationMode] = OperationLease(mode)
-    return _OPERATION_MODES, _OPERATION_MODES.set(lease), lease
+    return _OPERATION_MODES, _OPERATION_MODES.set(mode)
 
 
 def current_operation_mode() -> OperationMode | None:
     """Return the executor driving the operation here, or ``None`` when nothing bound one.
 
-    ``None`` covers both "no package runner is involved" and "the runner that
-    bound this context's mode has finished with it" - the same answer to every
-    caller, because a context that merely copied a binding is not inside the
-    operation that made it.
+    ``None`` means no package runner is involved.
     """
-    lease = _OPERATION_MODES.get()
-    return None if lease is None else lease.held()
+    return _OPERATION_MODES.get()
 
 
 def operation_is_async() -> bool:

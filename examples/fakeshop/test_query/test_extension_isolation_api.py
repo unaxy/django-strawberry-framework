@@ -26,25 +26,22 @@ this module owns is the consumer-visible outcome, because a resolver reaching
 has.
 """
 
-import asyncio
 import json
 import logging
 from collections.abc import Callable, Coroutine, Iterator
 from functools import partial, wraps
-from types import MethodType, SimpleNamespace
+from types import MethodType
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 import strawberry
 from apps.products import schema as products_schema
 from apps.products.services import seed_data
-from asgiref.sync import sync_to_async
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client
 from django.urls import include, path
 from django.utils.functional import SimpleLazyObject
-from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
     json_at,
@@ -72,12 +69,7 @@ from django_strawberry_framework.extensions import (
 )
 from django_strawberry_framework.optimizer._context import (
     DST_OPTIMIZER_KEYS,
-    DST_OPTIMIZER_PLAN,
     get_context_value,
-)
-from django_strawberry_framework.resource_policy import (
-    DEFAULT_RESOURCE_POLICY,
-    policy_from_info,
 )
 from django_strawberry_framework.schema import SCHEMA_CONFIGURATION_ERROR_CODE
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
@@ -90,7 +82,7 @@ if TYPE_CHECKING:
 async def _post_async(
     client: AsyncClient,
     document: str,
-    mount: str = "/iso-survivor/",
+    mount: str,
     operation_name: str | None = None,
 ) -> JSONObject:
     """Post one document to an async mount and return the decoded payload."""
@@ -454,37 +446,6 @@ _OPTIMIZER = DjangoOptimizerExtension()
 _NESTER = _Nester()
 
 
-class _SurvivorRecord:
-    """What the worker records between the request that started it and the one reading it back.
-
-    An attribute not yet recorded raises on read, so a stale run cannot answer for this one.
-    """
-
-    release: asyncio.Event
-    worker: asyncio.Future[None]
-    rows_bound: int
-    errors: list[GraphQLError] | None
-    plan_published: bool
-
-    def clear(self) -> None:
-        """Forget everything recorded, before a new request starts a worker."""
-        vars(self).clear()
-
-
-_SURVIVOR = _SurvivorRecord()
-
-#: The operation the worker runs for itself, on a context of its own.
-SURVIVOR_QUERY = "{ allItems(first: 1) { edges { node { name category { name } } } } }"
-
-
-@strawberry.type
-class _SurvivorReport:
-    """What a worker that outlived its request saw when it ran work of its own."""
-
-    rows_bound: int
-    plan_published: bool
-
-
 @strawberry.type
 class _ResourceMutation:
     """A mutation root, so a refused mutation document names a field that exists."""
@@ -515,68 +476,6 @@ def _ladder_schema(factory: Callable[[], object]) -> DjangoSchema:
     return DjangoSchema(query=_ResourceQuery, extensions=[factory])  # pyright: ignore[reportArgumentType]
 
 
-def _survivor_schema() -> DjangoSchema:
-    """The async mount: the project's own types, bounded, with the shipped optimizer."""
-
-    @strawberry.type
-    class SurvivorQuery(products_schema.Query):
-        @strawberry.field
-        async def spawn(self, info: strawberry.Info) -> str:
-            """Start a worker holding this operation's context, as a resolver may."""
-            release = asyncio.Event()
-            schema = info.schema
-            _SURVIVOR.clear()
-            _SURVIVOR.release = release
-
-            async def worker() -> None:
-                """Read a bound and run a whole operation, after this request ended."""
-                await release.wait()
-                _SURVIVOR.rows_bound = policy_from_info(
-                    SimpleNamespace(context={}),
-                ).max_list_rows
-                context: dict[str, object] = {}
-                result = await schema.execute(SURVIVOR_QUERY, context_value=context)
-                _SURVIVOR.errors = result.errors
-                _SURVIVOR.plan_published = (
-                    get_context_value(context, DST_OPTIMIZER_PLAN) is not None
-                )
-
-            _SURVIVOR.worker = asyncio.ensure_future(worker())
-            return "spawned"
-
-        @strawberry.field
-        async def survivor_report(self) -> _SurvivorReport:
-            """Let the worker run now that its request is over, and report what it saw."""
-            _SURVIVOR.release.set()
-            await _SURVIVOR.worker
-            assert _SURVIVOR.errors is None, _SURVIVOR.errors
-            return _SurvivorReport(
-                rows_bound=_SURVIVOR.rows_bound,
-                plan_published=_SURVIVOR.plan_published,
-            )
-
-    finalize_django_types()
-    return DjangoSchema(
-        query=SurvivorQuery,
-        config=strawberry_config(),
-        resource_policy=ResourcePolicy(max_list_rows=1),
-        extensions=[lambda: _OPTIMIZER],
-    )
-
-
-def _async_view(
-    build: Callable[[], DjangoSchema],
-) -> Callable[..., Coroutine[object, object, HttpResponseBase]]:
-    """Mount the package's asynchronous view over a schema built per request."""
-
-    @wraps(AsyncDjangoGraphQLView.as_view())
-    async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
-        built = AsyncDjangoGraphQLView.as_view(schema=build())
-        return await built(request, *args, **kwargs)
-
-    return view
-
-
 def _held_async_view(
     name: str,
     build: Callable[[], DjangoSchema],
@@ -600,7 +499,6 @@ urlpatterns = [
     path("iso-nesting/", _fresh_view(_nesting_schema)),
     path("iso-chain/", _view("chain", _ambiguous_schema)),
     path("iso-chain-async/", _held_async_view("chain", _ambiguous_schema)),
-    path("iso-survivor/", _async_view(_survivor_schema)),
     *(
         path(
             f"iso-ladder-{shape}/",
@@ -938,34 +836,6 @@ async def test_a_refused_schema_answers_the_async_view_the_same_way() -> None:
         mount="/iso-chain-async/",
     )
     assert json_at(rejected, "errors", 0, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_a_worker_that_outlived_a_request_is_bounded_and_published_for_itself() -> None:
-    """The work a background job does is not the request that happened to start it.
-
-    A resolver's task keeps a copy of the context its request ran in, and no
-    token reset reaches that copy. Left readable, the completed request's budget
-    answers the bound the job reads for work nobody admitted, and the job's own
-    operation counts itself as nested - so the plan, elisions and lookup paths
-    it publishes go nowhere, and the context it was handed comes back empty to
-    whoever passed it.
-    """
-    await sync_to_async(seed_data)(2)
-    client = AsyncClient()
-
-    spawned = await _post_async(client, "{ spawn }")
-    assert spawned["data"] == {"spawn": "spawned"}
-
-    reported = await _post_async(
-        client,
-        "{ survivorReport { rowsBound planPublished } }",
-    )
-
-    assert json_at(reported, "data", "survivorReport") == {
-        "rowsBound": DEFAULT_RESOURCE_POLICY.max_list_rows,
-        "planPublished": True,
-    }
 
 
 def test_a_refused_schema_answers_a_numeric_operation_name_over_http() -> None:

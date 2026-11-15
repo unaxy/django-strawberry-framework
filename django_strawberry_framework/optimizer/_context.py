@@ -32,7 +32,6 @@ from django_strawberry_framework.utils.context import (
     get_context_value,
     stash_on_context,
 )
-from django_strawberry_framework.utils.operation_lease import OperationLease
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -109,18 +108,8 @@ DST_OPTIMIZER_STRICTNESS = "dst_optimizer_strictness"
 #: The key set an absent or non-set elision stash reads as.
 _NO_KEYS: frozenset[object] = frozenset()
 
-#: One managed execution's scratch, and the lease every reader reaches it through.
-#:
-#: The per-execution values are not ``ContextVar`` entries set at ``on_execute``
-#: entry and reset on the way out. Reset is the wrong instrument for every one
-#: of them: ``asyncio.create_task`` copies the whole context, a token rewrites
-#: only the context that created it, and so a resolver's background task would
-#: keep reading - and keeping alive - a completed operation's plans, converted
-#: selections, cache keys and stashes for as long as it ran. One frame behind one lease
-#: (``utils/operation_lease.py::OperationLease``) is the same state with an end:
-#: closing it at the end of the execution is observable from every context
-#: copied before, so a stale copy answers exactly as a context with no optimizer
-#: running does.
+#: One managed execution's scratch, bound in one ``ContextVar`` for the
+#: execution's lifetime and cleared at its end.
 #:
 #: The frame carries what one execution publishes to itself:
 #:
@@ -128,8 +117,7 @@ _NO_KEYS: frozenset[object] = frozenset()
 #:   ``apply_connection_optimization`` discovers so a connection field shares
 #:   the instance-bound plan cache (spec-030 Decision 11). Its presence is also
 #:   the sole "an optimizer is running here" signal, which is why it belongs to
-#:   the frame rather than beside it: an instance read out of a copied context
-#:   would answer that question with a dead operation's yes.
+#:   the frame rather than beside it.
 #: - ``strategy`` is that instance's nested-connection fetch strategy, published
 #:   for the walker, which cannot import the extension module (the dependency
 #:   points the other way; see ``nested_fetch.py::active_strategy``).
@@ -239,11 +227,9 @@ class _ExecutionFrame:
     def clear(self) -> None:
         """Empty every store this frame owns, at the end of the execution.
 
-        The lease is what stops a copied context reaching the frame at all, so
-        this is for the containers themselves: a memo handed to a caller that
-        kept it - the walker's converted selections, a built plan - is emptied
-        rather than left holding a request's querysets for as long as that
-        caller lives.
+        A memo handed to a caller that kept it - the walker's converted
+        selections, a built plan - is emptied rather than left holding a
+        request's querysets for as long as that caller lives.
 
         ``stashes`` is not emptied. It belongs to the extension's operation
         state, which the runner owns for the whole request and which result
@@ -257,13 +243,13 @@ class _ExecutionFrame:
 
 
 class _FrameScope(NamedTuple):
-    """One execution frame's lease and the token that restores the enclosing one."""
+    """One execution frame and the token that restores the enclosing one."""
 
-    lease: OperationLease[_ExecutionFrame]
-    token: Token[OperationLease[_ExecutionFrame] | None]
+    frame: _ExecutionFrame
+    token: Token[_ExecutionFrame | None]
 
 
-_execution_frames: ContextVar[OperationLease[_ExecutionFrame] | None] = ContextVar(
+_execution_frames: ContextVar[_ExecutionFrame | None] = ContextVar(
     "django_strawberry_framework_optimizer_execution_frame",
     default=None,
 )
@@ -273,13 +259,9 @@ def _active_frame() -> _ExecutionFrame | None:
     """Return the frame of the execution running here, or ``None``.
 
     ``None`` for a caller outside every managed execution - a direct call into a
-    generated resolver, a test invoking a helper on its own - and ``None`` again
-    in a task that copied a frame binding and outlived the execution that made
-    it. Every reader in this module goes through here, so no accessor can infer
-    that an optimizer is running from a value a copied context still holds.
+    generated resolver, a test invoking a helper on its own.
     """
-    lease = _execution_frames.get()
-    return None if lease is None else lease.held()
+    return _execution_frames.get()
 
 
 def begin_execution_frame(
@@ -303,23 +285,18 @@ def begin_execution_frame(
         strategy=strategy,
         strictness=strictness,
     )
-    lease = OperationLease(frame)
-    return _FrameScope(lease, _execution_frames.set(lease))
+    return _FrameScope(frame, _execution_frames.set(frame))
 
 
 def end_execution_frame(scope: _FrameScope) -> None:
     """Close the frame opened by :func:`begin_execution_frame`.
 
-    Closing first, and unconditionally: it is what every context copied from
-    this one observes, and it is the half that works from whichever task is
-    running this teardown. The reset is the local half, restoring an enclosing
-    execution's frame to this context alone, and a token created in another
-    context has nothing here to restore.
+    Clearing first, and unconditionally: it works from whichever task is
+    running this teardown. The reset restores an enclosing execution's frame to
+    this context alone, and a token created in another context has nothing here
+    to restore.
     """
-    frame = scope.lease.held()
-    scope.lease.close()
-    if frame is not None:
-        frame.clear()
+    scope.frame.clear()
     with contextlib.suppress(ValueError):  # token created in a different Context
         _execution_frames.reset(scope.token)
 

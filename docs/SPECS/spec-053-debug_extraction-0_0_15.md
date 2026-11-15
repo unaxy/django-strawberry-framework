@@ -353,8 +353,8 @@ assertion retargets to the vendored class, and its six logger-identity
 assertions (`record.name == "django_strawberry_framework"` — four
 package-tier, two live-tier) retarget to the new namespace. The third
 coupling, `PrivateAuthority` plus `OperationState` /
-`_OperationBoundExtension` (which in turn import `utils/execution_mode.py`,
-`utils/operation_lease.py` and `utils/private_state.py`), is the
+`_OperationBoundExtension` (which in turn import `utils/execution_mode.py`
+and `utils/private_state.py`), is the
 per-operation isolation every framework extension shares; how the new
 package carries it is open ([Risks](#risks-and-open-questions)).
 

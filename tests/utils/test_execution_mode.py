@@ -11,7 +11,7 @@ holds the operation.
 What the readers are worth to a field is ``tests/test_list_field.py``'s
 three-state matrix, and live in
 ``examples/fakeshop/test_query/test_list_field_async_api.py``. How long the
-binding lives - across nesting, streamed frames, copied contexts and teardown -
+binding lives - across nesting, streamed frames and teardown -
 is ``tests/extensions/test_operation_state.py``.
 """
 

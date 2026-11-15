@@ -58,7 +58,6 @@ from django_strawberry_framework.extensions import (
 )
 from django_strawberry_framework.extensions.operation_state import (
     _OPERATION_CARRIERS,
-    _RUNNER_SCOPES,
     DjangoExtensionsRunner,
     OperationState,
     _binding,
@@ -67,7 +66,7 @@ from django_strawberry_framework.extensions.operation_state import (
     operation_is_nested,
 )
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
-from django_strawberry_framework.optimizer._context import active_optimizer, optimizer_value
+from django_strawberry_framework.optimizer._context import optimizer_value
 from django_strawberry_framework.resource_policy import (
     ResourcePolicy,
     armed_resource_policy,
@@ -77,7 +76,6 @@ from django_strawberry_framework.utils.execution_mode import (
     OperationMode,
     current_operation_mode,
 )
-from django_strawberry_framework.utils.operation_lease import OperationLease
 from tests._execution import make_execution_context
 
 if TYPE_CHECKING:
@@ -385,25 +383,23 @@ def test_a_hook_that_raises_while_setting_up_still_resets_every_binding() -> Non
     assert shared._operation_state() is None
 
 
-def test_a_reset_that_fails_strands_no_lease_and_no_other_binding() -> None:
-    """One reset raising still closes every lease and attempts every other reset.
+def test_a_reset_that_fails_strands_no_other_binding() -> None:
+    """One reset raising still attempts every other reset.
 
     A token this context cannot reset is a bookkeeping defect, raised as Python's own
-    error, but only once the rest of the scope is unwound: a copied context stops
-    reading through every lease, and this context gets every other variable back.
+    error, but only once the rest of the scope is unwound: this context gets every
+    other variable back.
     """
     first: contextvars.ContextVar[str | None] = contextvars.ContextVar("first", default=None)
     second: contextvars.ContextVar[str | None] = contextvars.ContextVar("second", default=None)
-    lease = OperationLease("first")
     second_token = second.set("bound")
-    bindings = [_binding(first, first.set("bound"), lease), _binding(second, second_token, None)]
+    bindings = [_binding(first, first.set("bound")), _binding(second, second_token)]
     # Used up here, so the unwind's own reset of it raises RuntimeError.
     second.reset(second_token)
 
     with pytest.raises(RuntimeError):
         _unbind(bindings)
 
-    assert lease.held() is None
     assert first.get() is None
 
 
@@ -772,243 +768,11 @@ def test_a_state_constructor_that_raises_retains_neither_the_context_nor_a_parti
     assert reference() is None
 
 
-# ---------------------------------------------------------------------------
-# A task that copied a binding and outlived the runner that made it.
-# ---------------------------------------------------------------------------
-
-
-async def _aclose_stream(stream: object) -> None:
-    """Close a popped ``schema.stream`` source, holding no reference past the call."""
-    assert isinstance(stream, AsyncGenerator)
-    await stream.aclose()
-
-
 async def _await_spawned_task(seen: dict[str, object]) -> None:
     """Wait for the child task a resolver stored under ``seen["task"]``."""
     task = seen["task"]
     assert isinstance(task, asyncio.Future)
     await task
-
-
-def _spawning_schema(
-    shared: _SilentProbe,
-    seen: dict[str, object],
-    release: asyncio.Event,
-) -> DjangoSchema:
-    """A schema whose resolver starts a task that reads the extension now and later.
-
-    The child's first read happens while the operation is still bound and is
-    recorded as a fact, not as the state itself, so the instrument holds nothing
-    the retention rows are waiting to see collected. Without it, "never bound"
-    and "unbound when the scope ended" would produce the same ``None``.
-    """
-
-    @strawberry.type
-    class SpawningQuery:
-        @strawberry.field
-        async def spawn(self) -> str:
-            async def child() -> None:
-                seen["bound_during"] = shared._operation_state() is not None
-                await release.wait()
-                seen["state"] = shared._operation_state()
-                seen["context"] = shared.execution_context
-
-            seen["task"] = asyncio.ensure_future(child())
-            # Yield once so the child takes its first read inside the operation.
-            await asyncio.sleep(0)
-            return "spawned"
-
-    return DjangoSchema(query=SpawningQuery, extensions=[lambda: shared])
-
-
-@pytest.mark.asyncio
-async def test_a_task_started_inside_the_operation_reads_nothing_once_it_ends() -> None:
-    """Resetting a token repairs the task that bound it, and only that task.
-
-    A task created while a binding is in force gets a COPY of the context, which
-    the reset at teardown does not rewrite. A background job outliving its
-    request would therefore keep reading the completed operation's context - and
-    keep that request's context value, variables and result alive for as long as
-    it ran. The binding is a weak reference to state the runner owns, so the
-    copy answers with nothing once the operation is over.
-    """
-    shared = _SilentProbe()
-    seen: dict[str, object] = {}
-    release = asyncio.Event()
-    schema = _spawning_schema(shared, seen, release)
-    sentinel = _RequestContext()
-    reference = weakref.ref(sentinel)
-
-    result = await schema.execute("{ spawn }", context_value=sentinel)
-    assert result.errors is None, result.errors
-
-    del sentinel, result
-    release.set()
-    await _await_spawned_task(seen)
-
-    assert seen["bound_during"] is True
-    assert seen["state"] is None
-    assert seen["context"] is None
-    gc.collect()
-    assert reference() is None
-
-
-@pytest.mark.asyncio
-async def test_a_surviving_task_that_starts_its_own_operation_ends_with_nothing_bound() -> None:
-    """The copied binding is not an outer scope for the task's own operation.
-
-    Restoring a token in that task must return it to no state rather than to the
-    first request's - a stale binding would otherwise reappear the moment the
-    task's own operation finished. The nesting answer is the same statement
-    about the same copy: the task inherited a scope that has since ended, so its
-    own operation is top-level, publishes its own optimizer state, and leaves
-    the task inside nothing when it finishes.
-    """
-    shared = _SilentProbe()
-    seen: dict[str, object] = {}
-    release = asyncio.Event()
-
-    @strawberry.type
-    class SpawningQuery:
-        @strawberry.field
-        async def spawn(self, info: strawberry.Info) -> str:
-            async def child() -> None:
-                await release.wait()
-                seen["before"] = operation_is_nested()
-                inner = await info.schema.execute("{ spawnHello }")
-                seen["inner"] = inner
-                seen["after"] = shared.execution_context
-                seen["nested_after"] = operation_is_nested()
-
-            seen["task"] = asyncio.ensure_future(child())
-            return "spawned"
-
-        @strawberry.field
-        def spawn_hello(self) -> str:
-            rows = seen.get("nested_rows", [])
-            assert _is_list(rows)
-            seen["nested_rows"] = [*rows, operation_is_nested()]
-            return "hi"
-
-    schema = DjangoSchema(query=SpawningQuery, extensions=[lambda: shared])
-    result = await schema.execute("{ spawn }")
-    assert result.errors is None, result.errors
-
-    release.set()
-    await _await_spawned_task(seen)
-
-    assert isinstance(seen["inner"], ExecutionResult)
-    assert seen["inner"].data == {"spawnHello": "hi"}
-    assert seen["after"] is None
-    assert seen["before"] is False
-    assert seen["nested_rows"] == [False]
-    assert seen["nested_after"] is False
-
-
-@pytest.mark.asyncio
-async def test_a_child_released_during_result_collection_reads_a_closed_binding() -> None:
-    """The runner still owns the state; the copy taken inside the operation does not.
-
-    Upstream collects an async operation's extension results after the operation
-    scope has unwound, and the runner rebinds for that - so "the runner still
-    holds every state" and "this context is inside the operation" are two
-    different questions here. A weak reference alone answers the first and gets
-    the second wrong, because the state it points at is deliberately alive for
-    the collection. The lease closed at the end of the operation scope is what
-    answers the second.
-    """
-    shared = _SilentProbe()
-    seen: dict[str, object] = {}
-    release = asyncio.Event()
-
-    class _Collecting(SchemaExtension):
-        """Pauses result collection long enough for the resolver's child to run."""
-
-        @override
-        async def get_results(self) -> dict[str, object]:
-            """Release the child, wait for it, and record what the runner still owns."""
-            if "during" in seen:
-                return {}
-            release.set()
-            await _await_spawned_task(seen)
-            seen["during"] = shared._operation_state()
-            return {}
-
-    @strawberry.type
-    class SpawningQuery:
-        @strawberry.field
-        async def spawn(self) -> str:
-            async def child() -> None:
-                await release.wait()
-                seen["child_state"] = shared._operation_state()
-                seen["child_nested"] = operation_is_nested()
-
-            seen["task"] = asyncio.ensure_future(child())
-            return "spawned"
-
-    schema = DjangoSchema(query=SpawningQuery, extensions=[_Collecting, lambda: shared])
-    result = await schema.execute("{ spawn }")
-
-    assert result.errors is None, result.errors
-    assert seen["during"] is not None
-    assert seen["child_state"] is None
-    assert seen["child_nested"] is False
-
-
-@pytest.mark.asyncio
-async def test_a_task_outliving_a_cancelled_stream_reads_nothing_either() -> None:
-    """A dropped subscription cancels the task driving it, and its children remain.
-
-    A streamed operation is bound around each frame, in the task that pulls it
-    (``django_strawberry_framework/extensions/operation_state.py::_ResumedStream``),
-    and that binding's lease closes when the frame is yielded. A task the
-    resolver started while the frame was produced holds a copy of that binding
-    and is neither the task being cancelled nor the one closing the stream:
-    what it reads afterwards is nothing, and the request it was started for is
-    released once the stream is closed.
-    """
-    shared = _SilentProbe()
-    seen: dict[str, object] = {}
-    release = asyncio.Event()
-    started = asyncio.Event()
-    schema = _spawning_schema(shared, seen, release)
-    request: dict[str, object] = {"context": _RequestContext()}
-    reference = weakref.ref(request["context"])
-
-    async def _drive() -> None:
-        request["stream"] = await schema.stream(
-            "{ spawn }",
-            context_value=request["context"],
-        )
-        async for _frame in request["stream"]:
-            started.set()
-            await asyncio.sleep(3600)
-
-    task = asyncio.create_task(_drive())
-    await asyncio.wait_for(started.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    # Cancelling the consumer leaves the generator suspended and still holding
-    # the request; that task going away is what lets the request be released at
-    # all. The child's reads below are settled already - the frame's lease
-    # closed when it was yielded - but the request is freed only when the
-    # generator finishes, which is what closing it does
-    # (``django_strawberry_framework/consumers.py::_stop_aware_results`` closes
-    # the source at revocation); left to the asyncgen finalizer, ``reference()``
-    # would answer on the interpreter's timing.
-    await _aclose_stream(request.pop("stream"))
-    request.clear()
-    del task
-    release.set()
-    await _await_spawned_task(seen)
-
-    assert seen["bound_during"] is True
-    assert seen["state"] is None
-    assert seen["context"] is None
-    gc.collect()
-    assert reference() is None
 
 
 @pytest.mark.asyncio
@@ -1129,7 +893,6 @@ def _ticking_schema(
                             optimizer_value(None, "probe") is None,
                         ),
                     )
-                    seen.setdefault("copied", contextvars.copy_context())
                     yield f"tick-{index}"
             finally:
                 seen["closed"] = True
@@ -1140,21 +903,6 @@ def _ticking_schema(
         extensions=list(extensions),
         resource_policy=None if rows is None else ResourcePolicy(max_list_rows=rows),
     )
-
-
-def _read_in_the_copied_context(seen: dict[str, object]) -> dict[str, object]:
-    """What a context copied while a frame was produced answers afterwards."""
-    read: dict[str, object] = {}
-
-    def _read() -> None:
-        read["armed"] = armed_resource_policy()
-        read["nested_scope"] = _RUNNER_SCOPES.get()
-        read["optimizer"] = active_optimizer()
-
-    copied = seen["copied"]
-    assert isinstance(copied, contextvars.Context)
-    copied.run(_read)
-    return read
 
 
 async def _frame_in_its_own_task(stream: AsyncIterator[ExecutionResult]) -> ExecutionResult:
@@ -1232,15 +980,9 @@ async def test_a_stream_closed_from_another_task_leaves_every_scope_terminal() -
     await _frame_in_its_own_task(stream)
     await asyncio.ensure_future(stream.aclose())
 
-    read = _read_in_the_copied_context(seen)
-
     assert seen["closed"] is True
-    assert read["armed"] is None
-    assert isinstance(read["nested_scope"], OperationLease)
-    assert read["nested_scope"].held() is None
-    assert read["optimizer"] is None
     assert shared.execution_context is None
-    del stream, context, read
+    del stream, context
     seen.clear()
     gc.collect()
     assert reference() is None
@@ -1269,7 +1011,6 @@ async def test_a_stream_cancelled_in_one_task_is_closable_from_another() -> None
     await asyncio.ensure_future(stream.aclose())
 
     assert seen["closed"] is True
-    assert _read_in_the_copied_context(seen)["armed"] is None
 
 
 @pytest.mark.asyncio
@@ -1294,14 +1035,10 @@ async def test_a_stream_thrown_into_from_another_task_tears_down_its_own_operati
         return final
 
     final = await asyncio.ensure_future(_throw_and_close())
-    read = _read_in_the_copied_context(seen)
 
     assert final.errors is not None
     assert [error.message for error in final.errors] == ["dropped"]
     assert seen["closed"] is True
-    assert read["armed"] is None
-    assert isinstance(read["nested_scope"], OperationLease)
-    assert read["nested_scope"].held() is None
 
 
 def _armed_rows() -> int | None:
@@ -1583,7 +1320,6 @@ def _mode_schema(seen: dict[str, object]) -> tuple[DjangoSchema, type]:
             rows = seen.setdefault("rows", [])
             assert _is_list(rows)
             rows.append(current_operation_mode())
-            seen.setdefault("copied", contextvars.copy_context())
             return "read"
 
     return DjangoSchema(query=ModeQuery), ModeQuery
@@ -1637,28 +1373,6 @@ async def test_a_nested_operation_restores_the_outer_mode_on_the_way_out() -> No
     assert result.data == {"outer": "OperationMode.ASYNC->OperationMode.ASYNC"}
     assert seen["rows"] == [OperationMode.SYNC]
     assert current_operation_mode() is None
-
-
-@pytest.mark.asyncio
-async def test_a_task_that_copied_an_operations_context_reads_no_mode() -> None:
-    """The binding is a lease, so a copied context stops answering when the scope ends.
-
-    A token reset repairs the context that made it and nothing else, so a
-    resolver's background task would otherwise go on reading the mode of an
-    operation that finished - and answer a field factory with it.
-    """
-    seen: dict[str, object] = {}
-    schema, _ = _mode_schema(seen)
-
-    assert (await schema.execute("{ mode }")).errors is None
-    assert seen["rows"] == [OperationMode.ASYNC]
-
-    read: dict[str, OperationMode | None] = {}
-    copied = seen["copied"]
-    assert isinstance(copied, contextvars.Context)
-    copied.run(lambda: read.update(mode=current_operation_mode()))
-
-    assert read == {"mode": None}
 
 
 @pytest.mark.asyncio

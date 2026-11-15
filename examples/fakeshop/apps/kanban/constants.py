@@ -116,7 +116,6 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "django_strawberry_framework/utils/input_values.py",
     "django_strawberry_framework/utils/inputs.py",
     "django_strawberry_framework/utils/lazy.py",
-    "django_strawberry_framework/utils/operation_lease.py",
     "django_strawberry_framework/utils/permissions.py",
     "django_strawberry_framework/utils/policies.py",
     "django_strawberry_framework/utils/private_state.py",

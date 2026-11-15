@@ -16,7 +16,6 @@ from typing_extensions import override
 
 from .utils import truth
 from .utils._narrowing import is_list_or_tuple
-from .utils.operation_lease import OperationLease
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable
@@ -118,15 +117,14 @@ if TYPE_CHECKING:
         AwaitableOrValue[list[object]],
     ]
 
-#: The lease on the execution context whose generated-mutation window is open; read by
-#: identity only.
-_owner: ContextVar[OperationLease[object] | None] = ContextVar(
+#: The execution context whose generated-mutation window is open; read by identity only.
+_owner: ContextVar[object | None] = ContextVar(
     "completion_owner",
     default=None,
 )
 
-#: The lease on the open window's settle list.
-_settling: "ContextVar[OperationLease[_Settling] | None]" = ContextVar(
+#: The open window's settle list.
+_settling: "ContextVar[_Settling | None]" = ContextVar(
     "completion_settling",
     default=None,
 )
@@ -155,15 +153,11 @@ def owned_completion(context: object) -> "Generator[_Settling]":
     """
     _ = _completion_methods()
     settling: _Settling = []
-    lease = OperationLease(context)
-    settling_lease = OperationLease(settling)
-    token = _owner.set(lease)
-    settling_token = _settling.set(settling_lease)
+    token = _owner.set(context)
+    settling_token = _settling.set(settling)
     try:
         yield settling
     finally:
-        settling_lease.close()
-        lease.close()
         _settling.reset(settling_token)
         _owner.reset(token)
 
@@ -351,8 +345,7 @@ class CompletionExecutionContext(StrawberryGraphQLCoreExecutionContext):
     """Use the installed engine's completion with owned concurrent-child cleanup."""
 
     def _owns_completion(self) -> bool:
-        lease = _owner.get()
-        return lease is not None and lease.held() is self
+        return _owner.get() is self
 
     @override
     def execute_fields(
@@ -444,8 +437,7 @@ class CompletionExecutionContext(StrawberryGraphQLCoreExecutionContext):
     @override
     def settle_in_background(self, awaitables: "list[Awaitable[object]]") -> None:
         """Record what the owned window settles in the background, so the window awaits it."""
-        settling_lease = _settling.get() if self._owns_completion() else None
-        settling = None if settling_lease is None else settling_lease.held()
+        settling = _settling.get() if self._owns_completion() else None
         if settling is None:
             super().settle_in_background(awaitables)
             return

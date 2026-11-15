@@ -1159,8 +1159,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         One frame carries everything the execution publishes to itself - this
         instance, its nested-fetch strategy and strictness, the stash store, the
         planned-relation keys and the three per-execution memos - because all of
-        them end together and a copied context must be able to observe that end
-        (``_context.py::_ExecutionFrame``).
+        them end together (``_context.py::_ExecutionFrame``).
         """
         # ``execution_context.context`` is the same object resolvers see as
         # ``info.context`` (Strawberry wires both to ``context_value``), and it
@@ -1822,7 +1821,7 @@ def apply_connection_optimization(
     discovered from the execution frame ``on_execute`` opens
     (``_context.py::active_optimizer``) so the connection field shares the
     instance-bound plan cache. When no optimizer extension is running this
-    execution - no frame, or one a copied context outlived - the helper
+    execution - no frame - the helper
     short-circuits and returns the queryset unoptimized; the connection field
     does NOT fabricate a throwaway
     optimizer to self-optimize. This keeps the connection consistent with the

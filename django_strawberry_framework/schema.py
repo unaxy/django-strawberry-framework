@@ -50,7 +50,6 @@ Nullable errors preserve upstream surviving-sibling completion; queries, unmarke
 mutations and application-created jobs stay stock. The installed upstream methods
 are audited lazily when an async generated-mutation window opens, so a missing or
 changed source body refuses that window without preventing package import or queries.
-The revocable ownership lease identifies this execution context and this window.
 Optional upstream iterable patches do not control this mandatory transaction boundary.
 
 Both modes apply the same two failure rules. Any error added during the window

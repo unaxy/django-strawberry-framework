@@ -435,12 +435,6 @@ what a factory returns next is decided after the entry was accepted anyway.
 
 Spec: [Decision 15][spec-050-d15].
 
-*Rejected:* A plain `ContextVar` holding the state, with token reset as the whole protocol.
-`asyncio.create_task` copies the context at creation and a token reset rewrites only the
-context the token was made in, so a resolver's background task outliving the request goes on
-reading the finished operation's context, variables and result - and holds them alive. The lease
-is what a copied context observes instead.
-
 *Rejected:* Binding only around the operation scope. Upstream collects extension results AFTER
 the synchronous operation teardown has unwound, and drives a streamed operation's frames from
 whatever task holds the iterator, so both would read for no operation at all.
@@ -549,8 +543,8 @@ adversary it imagines steps around, and each one costs a real consumer a refusal
 
 *Rejected:* An architectural rewrite - one `ContextVar`, fresh adapters per operation, a
 separately shared optimizer cache, deletion of the membership and refusal machinery - judged by
-how much it deletes. The four operation-state modules (`extensions/operation_state.py`,
-`utils/private_state.py`, `utils/execution_mode.py`, `utils/operation_lease.py`) each carry a
+how much it deletes. The three operation-state modules (`extensions/operation_state.py`,
+`utils/private_state.py`, `utils/execution_mode.py`) each carry a
 guarantee ordinary code needs (nesting, concurrency, streaming resumption, masking the right
 operation), the regression suite holds those guarantees, and a rewrite would spend the suite to
 reach a shape that is smaller by assertion rather than by evidence. Consolidation follows

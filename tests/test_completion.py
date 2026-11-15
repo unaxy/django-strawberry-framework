@@ -1,8 +1,8 @@
-"""Completion source audits and revocable ownership that a wire response cannot inspect.
+"""Completion source audits and window ownership that a wire response cannot inspect.
 
 HTTP behavior belongs to examples/fakeshop/test_query/test_completion_lifecycle.py.
-Here source refusal, metadata preservation and copied-context non-retention are
-observable only through the private adapter and execution-context lease.
+Here source refusal, metadata preservation and owner non-retention are observable
+only through the private adapter and the owning execution context.
 """
 
 import ast
@@ -13,7 +13,6 @@ import inspect
 import textwrap
 import weakref
 from collections.abc import Iterator
-from contextvars import copy_context
 from types import FunctionType
 from unittest.mock import patch
 
@@ -44,26 +43,19 @@ def execution_context() -> StrawberryGraphQLCoreExecutionContext:
     return object.__new__(StrawberryGraphQLCoreExecutionContext)
 
 
-def test_owned_context_is_nested_revocable_and_not_retained() -> None:
+def test_owned_context_is_nested_and_not_retained() -> None:
     outer = execution_context()
     inner = execution_context()
     reference = weakref.ref(inner)
     assert completion._owner.get() is None
     with completion.owned_completion(outer):
-        outer_lease = completion._owner.get()
-        assert outer_lease is not None
-        assert outer_lease.held() is outer
+        assert completion._owner.get() is outer
         with completion.owned_completion(inner):
-            copied = copy_context()
-            inner_lease = copied.run(completion._owner.get)
-            assert inner_lease is not None
-            assert inner_lease.held() is inner
-        assert inner_lease.held() is None
-        assert completion._owner.get() is outer_lease
+            assert completion._owner.get() is inner
+        assert completion._owner.get() is outer
         del inner
         gc.collect()
         assert reference() is None
-    assert outer_lease.held() is None
     assert completion._owner.get() is None
 
 
@@ -190,7 +182,7 @@ def test_non_python_callable_refuses_adaptation() -> None:
         completion._completion_method(len)
 
 
-async def test_overlapping_owners_keep_distinct_leases() -> None:
+async def test_overlapping_owners_keep_distinct_owners() -> None:
     ready = asyncio.Event()
     release = asyncio.Event()
     first = execution_context()
@@ -198,24 +190,20 @@ async def test_overlapping_owners_keep_distinct_leases() -> None:
 
     async def other() -> None:
         with completion.owned_completion(second):
-            lease = completion._owner.get()
-            assert lease is not None
-            assert lease.held() is second
+            assert completion._owner.get() is second
             ready.set()
             await release.wait()
-            assert lease.held() is second
-        assert lease.held() is None
+            assert completion._owner.get() is second
+        assert completion._owner.get() is first
 
     with completion.owned_completion(first):
-        lease = completion._owner.get()
         task = asyncio.create_task(other())
         await ready.wait()
-        assert lease is not None
-        assert lease.held() is first
+        assert completion._owner.get() is first
         release.set()
         await task
-        assert completion._owner.get() is lease
-    assert lease.held() is None
+        assert completion._owner.get() is first
+    assert completion._owner.get() is None
 
 
 @pytest.mark.parametrize("populated", [False, True])

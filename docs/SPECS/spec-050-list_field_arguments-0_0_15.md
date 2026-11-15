@@ -1774,10 +1774,8 @@ rejected identity-deduplication, subclass-admission and construction-time factor
 One state object per (package-managed resolved extension, runner) - the package's own
 authorities, its optimizer, its debug extension - bound by the runner around the operation
 scope, around result collection, around the streaming-result hook, and around every resumption
-of a streamed operation. Each binding is a LEASE on a weak reference, so a task that merely
-copied the context stops reading at the instant the scope ends rather than when the owner is
-collected; each is also a token, so a nested operation restores its caller's answer on the way
-out. No token spans a `yield`: a stream is rebound in the task that drives it, because Python
+of a streamed operation. Each binding is a token, so a nested operation restores its caller's
+answer on the way out. No token spans a `yield`: a stream is rebound in the task that drives it, because Python
 resumes an async generator in the caller's context.
 
 A plain `strawberry.Schema` never creates that runner and is not promised what it cannot be
@@ -3403,8 +3401,8 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       (Decisions 16 and 17, [`tests/test_schema.py`][test-schema]).
 - [ ] Which GraphQL executor drives a resolver is carried from the entry point into the chain
       and bound by the runner for the operation, result collection, every streamed frame and
-      every stream resume, restoring the enclosing operation's answer on the way out and
-      answering nothing from a copied context after the lease closes. Every executor-dispatch
+      every stream resume, restoring the enclosing operation's answer on the way out. Every
+      executor-dispatch
       reader in the package reads the one canonical helper; `execute_sync` under a running
       event loop raises `SyncMisuseError` at the call that caused it rather than handing the
       synchronous executor a coroutine, and a plain `strawberry.Schema` is documented as

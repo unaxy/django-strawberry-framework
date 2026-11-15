@@ -176,7 +176,6 @@ SUBSCRIPTABLE: dict[str, bool | tuple[int, int]] = {
     "django_strawberry_framework.testing.client._GraphQLTestClientBase": True,
     "django_strawberry_framework.types.finalizer._SidecarBindingSpec": True,
     "django_strawberry_framework.utils.inputs.GeneratedInputArgumentsFactory": True,
-    "django_strawberry_framework.utils.operation_lease.OperationLease": True,
     "django_strawberry_framework.utils.private_state.PrivateAuthority": True,
     "django_strawberry_framework.utils.private_state.PrivateMembership": True,
     "django_strawberry_framework.utils.private_state._Entry": True,
