@@ -11,7 +11,7 @@ and
 
 import pytest
 from apps.library.models import Book, Branch, Genre, Loan, Shelf, TaggedItem
-from django.db import connection, router
+from django.db import NotSupportedError, connection, router
 from django.db.models import CompositePrimaryKey, Model, Q, QuerySet, Value
 from django.db.models.lookups import Lookup
 
@@ -153,12 +153,11 @@ def test_database_alias_preserved() -> None:
     assert correlated_inner_root(Book.objects.using("nonexistent")).db == "nonexistent"
 
 
-def test_combinator_guard_names_combinator() -> None:
+def test_combined_outer_is_refused_by_django() -> None:
     combined = Book.objects.filter(pk=1).union(Book.objects.filter(pk=2))
     inner = correlated_inner_root(Book.objects.all())
-    with pytest.raises(OptimizerError, match="union") as exc:
-        attach_exists(combined, inner)
-    assert "union" in str(exc.value)
+    with pytest.raises(NotSupportedError, match=r"alias\(\) after union\(\)"):
+        _ = attach_exists(combined, inner)
 
 
 def test_evaluated_outer_parity() -> None:

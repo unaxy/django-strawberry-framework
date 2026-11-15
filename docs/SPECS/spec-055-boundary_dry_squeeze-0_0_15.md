@@ -725,7 +725,7 @@ symbol before closing each item): `ActiveInputPermissionMixin`
 - **D2 test doubles**: tests pin the raw-field fallback shape
   (`SimpleNamespace` fields) — the FieldMeta-ized fallback map needs those
   doubles updated in the same change, and
-  `nested_planner._raw_relation_field`'s re-fetch path re-verified.
+  `nested_planner.plan_connection_relation`'s raw-field re-fetch re-verified.
 - **D1 sidecar + SKIP log behavior**: the single-window arm runs through
   `_divergent_key_windows`, so the sidecar gate runs after `hint_is_skip` /
   `resolver_identities_for` / `related_model is None`. Sidecar + SKIP on

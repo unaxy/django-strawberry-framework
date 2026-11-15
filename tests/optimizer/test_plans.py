@@ -31,7 +31,6 @@ from django_strawberry_framework.keyset import (
     order_fingerprint,
 )
 from django_strawberry_framework.optimizer.plans import (
-    _MAX_PATH_DEPTH,
     WINDOW_ROW_NUMBER,
     WINDOW_ROW_NUMBER_REVERSED,
     WINDOW_TOTAL_COUNT,
@@ -39,7 +38,6 @@ from django_strawberry_framework.optimizer.plans import (
     PlannedWindow,
     PrefetchSeal,
     _consumer_prefetch_lookups,
-    _consumer_projection,
     _flatten_select_related,
     _IndexedList,
     _loads,
@@ -69,6 +67,7 @@ from django_strawberry_framework.utils._queryset_private import (
 )
 from django_strawberry_framework.utils.connections import ConnectionWindowBounds
 from tests._definition import make_definition
+from tests._info import response_path
 from tests.optimizer._spelling_models import SpBadge, SpCard, SpParent
 
 
@@ -529,14 +528,10 @@ class TestFlattenSelectRelated:
 
 
 class TestConsumerPrefetchLookups:
-    """``_consumer_prefetch_lookups`` reads attached lookups leniently.
+    """``_consumer_prefetch_lookups`` returns a queryset's attached lookups as a list.
 
-    A real queryset contributes its ``prefetch_related`` lookups as a list;
-    anything else contributes nothing, so a consumer-controlled
-    ``Prefetch.queryset`` that is not a queryset reconciles to no lookups
-    instead of raising. The queryset arm reads through the shared
-    ``queryset_prefetch_lookups`` owner, which holds the one spelling of
-    the Django-private attribute.
+    It reads through the shared ``queryset_prefetch_lookups`` owner, which holds
+    the one spelling of the Django-private attribute.
     """
 
     def test_attached_lookups_come_back_as_a_list(self) -> None:
@@ -545,30 +540,6 @@ class TestConsumerPrefetchLookups:
 
     def test_queryset_without_prefetches_gives_an_empty_list(self) -> None:
         assert _consumer_prefetch_lookups(Item.objects.all()) == []
-
-    @pytest.mark.parametrize(
-        "candidate",
-        [
-            object(),
-            SimpleNamespace(),
-            SimpleNamespace(_prefetch_related_lookups=None),
-            SimpleNamespace(_prefetch_related_lookups=("entries",)),
-        ],
-        ids=[
-            "plain-object",
-            "bare-namespace",
-            "none-valued-attribute",
-            "populated-attribute-unread",
-        ],
-    )
-    def test_non_queryset_inputs_give_an_empty_list(self, candidate: object) -> None:
-        """Only a real queryset's lookups are returned.
-
-        An unrelated object carrying an attribute of the same name is not
-        a queryset, so its attribute stays unread and the input reconciles
-        to no lookups instead of raising.
-        """
-        assert _consumer_prefetch_lookups(candidate) == []
 
 
 class TestDiffPlanForQueryset:
@@ -967,35 +938,16 @@ class TestConsumerPrefetchSeal:
         )
 
 
-def _linked_path(*keys: str | int) -> SimpleNamespace | None:
-    """Build a graphql-core-style ``key``/``prev`` linked response path."""
-    node = None
-    for key in keys:
-        node = SimpleNamespace(key=key, prev=node)
-    return node
-
-
 class TestRuntimePathFromPath:
-    """``runtime_path_from_path`` walks ``prev`` under a fixed, fail-loud bound."""
-
-    def test_walks_a_deep_but_finite_path(self) -> None:
-        """A path of (ceiling - 1) nodes resolves fully - the boundary that just fits."""
-        # _linked_path builds root-first; the output is that same root-first order.
-        keys = tuple(f"f{i}" for i in range(_MAX_PATH_DEPTH - 1))
-        path = _linked_path(*keys)
-        assert runtime_path_from_path(path) == keys
+    """``runtime_path_from_path`` reads graphql-core's ``Path.as_list``."""
 
     def test_strips_list_indexes(self) -> None:
         """Integer (list-index) keys are skipped; string keys/aliases kept."""
-        path = _linked_path("allItems", 0, "cat")
-        assert runtime_path_from_path(path) == ("allItems", "cat")
+        assert runtime_path_from_path(response_path("allItems", 0, "cat")) == ("allItems", "cat")
 
-    def test_raises_on_cyclic_path(self) -> None:
-        """A self-referential ``prev`` chain hits the bound and fails loud."""
-        node = SimpleNamespace(key="loop", prev=None)
-        node.prev = node  # never bottoms out
-        with pytest.raises(RuntimeError, match="cyclic or corrupt"):
-            runtime_path_from_path(node)
+    def test_absent_path_is_empty(self) -> None:
+        """No path (an ``info`` carrying none) is the empty runtime path."""
+        assert runtime_path_from_path(None) == ()
 
 
 class TestApplyWindowPagination:
@@ -1633,23 +1585,6 @@ class TestReverseOrderBy:
         assert reversed_expression.descending is True
         assert reversed_expression.expression == Lower("title")
 
-    def test_unreversible_term_raises_instead_of_serving_the_wrong_end(self) -> None:
-        """A term that is neither an ``OrderBy`` nor ``desc()``-able fails loudly.
-
-        There is no correct reversal for such a term, and silently keeping it
-        forward is what produced a wrong ``last: N`` page. ``OptimizerError`` (not
-        ``ValueError`` / ``TypeError``) so the walker's leave-unplanned pagination
-        handler cannot swallow it.
-        """
-        unreversible = SimpleNamespace(name="not-an-expression")
-        with pytest.raises(
-            OptimizerError,
-            match=r"Cannot reverse connection order entry .*neither an 'OrderBy' nor carries",
-        ):
-            # basedpyright: the unreversible term is the hostile input under test;
-            # _reverse_order_by types the parameter as Sequence[OrderEntry]
-            _reverse_order_by([unreversible])  # pyright: ignore[reportArgumentType]
-
 
 class TestApplyOverAConsumerProjection:
     """``OptimizationPlan.apply`` over a queryset that already carries ``.only()`` / ``.defer()``.
@@ -1754,17 +1689,6 @@ def test_apply_projection_introduces_only_when_asked(
     applied = apply_projection(queryset_factory(), ["name", "category_id"], introduce=introduce)
 
     assert applied.query.deferred_loading == expected
-
-
-def test_consumer_projection_defensive_shapes() -> None:
-    """``_consumer_projection`` reports no projection for shapes no queryset produces.
-
-    A non-queryset input and a malformed ``deferred_loading`` shape both read as
-    "no projection", so ``apply_projection(..., introduce=False)`` leaves them alone.
-    """
-    assert _consumer_projection(SimpleNamespace()) is None
-    malformed = SimpleNamespace(query=SimpleNamespace(deferred_loading=("only-one",)))
-    assert _consumer_projection(malformed) is None
 
 
 @pytest.mark.parametrize(

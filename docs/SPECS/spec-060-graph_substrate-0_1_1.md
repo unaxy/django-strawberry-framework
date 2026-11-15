@@ -350,8 +350,9 @@ of the first foundation card.
     written against the outer model, inside that root.
     `optimizer/predicates.py::attach_exists` attaches the result as `Exists`
     under a reserved unselected `_dst_predicate_<n>` alias (`.alias()` is its
-    only outer mutation; inner/outer model, database alias, and combinator
-    are guarded with `OptimizerError`) and returns the `Q(alias=True)` branch
+    only outer mutation; inner/outer model and database alias are guarded
+    with `OptimizerError`, a combined outer is Django's own `.alias()`
+    refusal) and returns the `Q(alias=True)` branch
     for the caller to place. Reserved aliases are allocated against the
     *current* queryset's effective names (fields, attnames, `pk`,
     annotations, `extra`, `values_select`), and a duplicate `.alias()`

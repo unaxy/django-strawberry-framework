@@ -60,9 +60,8 @@ from . import logger
 from .join_taxonomy import LateralJoinShape
 from .lateral_fetch import (
     _deduplicate_parent_ids,
-    _is_window_qual,
-    _parent_in_values,
     _select_projection,
+    _split_parent_in,
     window_predicate_signature,
 )
 from .nested_fetch import (
@@ -74,7 +73,6 @@ from .plans import WINDOW_ROW_NUMBER
 
 if TYPE_CHECKING:
     from django.db import models
-    from django.db.models.sql.where import WhereNode
 
     from .plans import OrderEntry
 
@@ -195,39 +193,6 @@ class SingleParentWindowQuerySet(RecognizedFetchQuerySet):
         return _fetch_single_parent_rows(self)
 
 
-def _single_parent_where_ids(
-    where: WhereNode,
-    spec: SingleParentWindowSpec,
-) -> list[object] | None:
-    """Return the parent-id list if ``where`` is "window range + ONE parent IN", else ``None``.
-
-    The structural twin of ``lateral_fetch._recognize_lateral_fetch``'s WHERE
-    walk minus the keyset/visibility arms: the root must be a non-negated ``AND``,
-    each child is either a window-range qual (``_is_window_qual`` - skipped) or the
-    single prefetch ``__in`` lookup on the spec's parent link column
-    (``_parent_in_values``). At most one IN qual is accepted; a second
-    unrecognized child - an extra consumer/visibility filter, a second IN, an
-    expression rhs - fails closed to ``None`` (the windowed body runs).
-    """
-    if where.negated or where.connector != "AND":
-        return None
-    parent_ids: list[object] | None = None
-    for child in where.children:
-        if _is_window_qual(child):
-            continue
-        if parent_ids is None:
-            maybe_ids = _parent_in_values(
-                child,
-                column=spec.parent_link_column,
-                table=spec.parent_link_table,
-            )
-            if maybe_ids is not None:
-                parent_ids = maybe_ids
-                continue
-        return None
-    return parent_ids
-
-
 def _fetch_single_parent_rows(queryset: SingleParentWindowQuerySet) -> list[models.Model] | None:
     """Execute the plain page query for ``queryset`` if its state is recognized.
 
@@ -262,7 +227,7 @@ def _fetch_single_parent_rows(queryset: SingleParentWindowQuerySet) -> list[mode
     # The window quals must be EXACTLY the planned range (``window_predicate_
     # signature``), not merely "some ``Window`` lookup": the plain re-query below
     # applies ``spec.fetch_limit``, so a mutated / added / dropped row-number
-    # bound that ``_single_parent_where_ids`` would skip as a window qual must be
+    # bound that ``_split_parent_in`` would skip as a window qual must be
     # caught here or it would be silently ignored. A captured ``None`` (the
     # planned window did not normalize) or any divergence downgrades to the
     # windowed body.
@@ -281,8 +246,12 @@ def _fetch_single_parent_rows(queryset: SingleParentWindowQuerySet) -> list[mode
         return None
     if _select_projection(queryset) != spec.select_projection:
         return None
-    parent_ids = _single_parent_where_ids(query.where, spec)
-    if parent_ids is None:
+    parent_ids, residue = _split_parent_in(
+        query.where,
+        column=spec.parent_link_column,
+        table=spec.parent_link_table,
+    )
+    if parent_ids is None or residue:
         return None
     # ``_deduplicate_parent_ids`` (imported, single owner of the unhashable/NULL
     # semantics): zero parents falls through to the windowed body's trivially

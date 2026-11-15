@@ -1770,7 +1770,7 @@ compiler shape.
   correct:
   1. `django_strawberry_framework/exceptions.py::OptimizerError`'s
      docstring carries the row-preserving predicate-attachment raise site
-     (the three `attach_exists` caller-contract guards); verify only.
+     (the two `attach_exists` caller-contract guards); verify only.
   2. `docs/TREE.md` carries `optimizer/predicates.py` and
      `tests/optimizer/test_predicates.py`; the Slice 5 regen for
      `filters/search.py` re-renders them from the tree, so the check is

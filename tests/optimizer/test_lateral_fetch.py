@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import pytest
 from apps.library.models import Book, Genre, LendingDesk, Shelf
 from apps.scalars.models import ScalarSpecimen
+from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db import connections, models
 from django.db.models import F, Prefetch, Q, QuerySet, Value
 from django.db.models.functions import Lower
@@ -69,6 +70,7 @@ from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER,
     WINDOW_TOTAL_COUNT,
     OptimizationPlan,
+    _query_compiler,
     apply_window_pagination,
 )
 from django_strawberry_framework.utils._narrowing import read_attr
@@ -429,17 +431,17 @@ def test_spec_plans_lateral_for_shapes_django_compiles_onto_the_child_table(
     assert spec.order_columns == order_columns
 
 
-def test_order_columns_reject_unresolvable_names() -> None:
-    """The order mapper's defensive tail, pinned directly.
+def test_order_columns_reject_random_and_raise_on_unresolvable_names() -> None:
+    """A random term is not a column; a name Django cannot resolve raises Django's error.
 
-    ``"?"`` and names that resolve to nothing are not walker products
-    (``deterministic_order`` starts from a validated queryset ordering, and the
-    planner leaves a random order to the per-parent pipeline), so they are
-    pinned on the helper rather than through the strategy - the windowed
-    fallback could not ``order_by`` them either.
+    Neither is a walker product (``deterministic_order`` starts from a validated
+    queryset ordering, and the planner leaves a random order to the per-parent
+    pipeline), so they are pinned on the helper rather than through the
+    strategy - the windowed fallback could not ``order_by`` the name either.
     """
-    assert _order_columns(("no_such_field",), Book.objects.all()) is None
     assert _order_columns(("?",), Book.objects.all()) is None
+    with pytest.raises(FieldError, match="no_such_field"):
+        _ = _order_columns(("no_such_field",), Book.objects.all())
 
 
 def test_order_columns_reject_an_empty_order() -> None:
@@ -538,14 +540,12 @@ def test_select_projection_keys_an_inherited_child_by_table() -> None:
     )
 
 
-def test_select_projection_downgrades_a_projection_django_refuses() -> None:
-    """An unknown ``.defer()`` name fingerprints ``None``; the windowed body raises Django's error."""
-    assert _select_projection(Book.objects.defer("no_such_field")) is None
-
-
-def test_select_columns_downgrades_a_projection_django_refuses() -> None:
-    """An unknown ``.only()`` name downgrades; the windowed body raises Django's own error."""
-    assert _select_columns(Book.objects.only("no_such_field")) is None
+def test_projection_readers_raise_djangos_refusal() -> None:
+    """An unknown ``.only()`` / ``.defer()`` name raises Django's own error."""
+    with pytest.raises(FieldDoesNotExist, match="no_such_field"):
+        _ = _select_projection(Book.objects.defer("no_such_field"))
+    with pytest.raises(FieldDoesNotExist, match="no_such_field"):
+        _ = _select_columns(Book.objects.only("no_such_field"))
 
 
 # ---------------------------------------------------------------------------
@@ -1374,7 +1374,7 @@ def test_lateral_raw_rows_run_through_django_field_converters() -> None:
                 1,
             ),
         ],
-        connections["default"],
+        _query_compiler(ScalarSpecimen.objects.all().query, "default"),
     )
     assert converted == [
         (

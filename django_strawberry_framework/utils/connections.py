@@ -586,8 +586,8 @@ def assert_window_fetch_mode(range_plan: WindowRangePlan, *, with_total_count: b
     ``lateral_fetch.py::LateralWindowSpec`` at construction). Raises the loud
     ``OptimizerError`` - never silently normalizes one flag - so a planner or
     strategy bug surfaces at its origin instead of corrupting a page. It is not a
-    ``ValueError`` / ``TypeError``, so the walker's leave-unplanned pagination
-    handler cannot swallow it.
+    ``ValueError`` / ``TypeError``, so the planner's leave-unplanned pagination
+    handlers (``optimizer/nested_planner.py``) cannot swallow it.
     """
     if with_total_count and range_plan.next_page_probe:
         raise OptimizerError(

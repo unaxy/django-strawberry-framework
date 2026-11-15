@@ -99,10 +99,10 @@ from django_strawberry_framework.optimizer.nested_planner import (
     _INDEX_UNKNOWN,
     _advise_composite_index,
     _concrete_order_terms,
+    _emit_index_advisory,
     _index_coverage,
     _index_leading_terms,
     _plain_field_terms,
-    clear_index_advisory_dedup,
 )
 from django_strawberry_framework.utils._narrowing import list_of, require, require_instance
 from django_strawberry_framework.utils.imports import import_attr_if_importable
@@ -116,15 +116,15 @@ from ._link_models import LnkParent, LnkTag
 def _reset_index_advisory_dedup() -> Iterator[None]:
     """Clear the advisory dedup around every test in this module.
 
-    The bounded ``_index_advisory_seen`` LRU makes one plan shape warn at most
+    The bounded ``_emit_index_advisory`` LRU makes one plan shape warn at most
     once process-wide; without a per-test reset, a shape recorded by an earlier
     test (or an earlier DEBUG-toggle of the SAME shape) would silence a later
     test that asserts the warning. Mirrors the registry / connection-type cache
     reset fixtures in ``tests/conftest.py``.
     """
-    clear_index_advisory_dedup()
+    _emit_index_advisory.cache_clear()
     yield
-    clear_index_advisory_dedup()
+    _emit_index_advisory.cache_clear()
 
 
 def test_btree_index_soft_import_uses_shared_optional_import_owner() -> None:
@@ -1554,38 +1554,26 @@ class TestAdviseCompositeIndex:
         assert len(self._warnings(caplog)) == 2
 
     @override_settings(DEBUG=True)
-    def test_clear_dedup_re_enables_warning(self, caplog: pytest.LogCaptureFixture) -> None:
-        """The reset seam lets one shape warn again (mirrors module-cache clears)."""
-        caplog.set_level("WARNING", logger=optimizer_logger.name)
-        _advise_composite_index(_IdxChildBare, self._join("parent_id"), ["title", "id"])
-        clear_index_advisory_dedup()
-        _advise_composite_index(_IdxChildBare, self._join("parent_id"), ["title", "id"])
-        assert len(self._warnings(caplog)) == 2
-
     def test_bounded_dedup_evicts_least_recently_used_past_cap(
         self,
-        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """The dedup LRU is BOUNDED: a shape past the cap evicts the least-recently-used.
 
-        Exercises ``_index_advisory_already_emitted`` directly under a tiny cap so
-        a long-lived process with a pathological variety of plan shapes cannot
-        grow memory without limit; eviction only lets a long-cold advisory
-        re-warn, never a wrong one.
+        Eviction only lets a long-cold advisory re-warn, never a wrong one, so a
+        long-lived process with a pathological variety of plan shapes cannot
+        grow memory without limit.
         """
-        monkeypatch.setattr(nested_planner, "_MAX_INDEX_ADVISORY_KEYS", 2)
-        emitted = nested_planner._index_advisory_already_emitted
-        a = ("tests.A", ("p_id",), (("x", False),))
-        b = ("tests.B", ("p_id",), (("x", False),))
-        c = ("tests.C", ("p_id",), (("x", False),))
-        assert emitted(a) is False  # first sight of A -> record, emit
-        assert emitted(b) is False  # first sight of B -> record, emit
-        assert emitted(a) is True  # A already present -> suppressed AND promoted (LRU recency)
-        assert emitted(c) is False  # C overflows cap 2 -> B (the least-recently-used) evicted
-        assert emitted(a) is True  # A survived: promotion protected it from the eviction
-        assert (
-            emitted(b) is False
-        )  # B was the evicted LRU -> re-emits (bounded, not silent forever)
+        caplog.set_level("WARNING", logger=optimizer_logger.name)
+        maxsize = _emit_index_advisory.cache_parameters()["maxsize"]
+        assert maxsize == 512
+        for shape in range(maxsize + 1):
+            _emit_index_advisory("tests", f"M{shape}", ("p_id",), (("x", False),))
+        info = _emit_index_advisory.cache_info()
+        assert (info.currsize, info.misses, info.hits) == (maxsize, maxsize + 1, 0)
+        _emit_index_advisory("tests", f"M{maxsize}", ("p_id",), (("x", False),))
+        _emit_index_advisory("tests", "M0", ("p_id",), (("x", False),))
+        assert len(self._warnings(caplog)) == maxsize + 2
 
     @override_settings(DEBUG=True)
     def test_unresolvable_partition_expr_is_silent(self, caplog: pytest.LogCaptureFixture) -> None:

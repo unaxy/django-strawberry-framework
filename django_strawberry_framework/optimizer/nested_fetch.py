@@ -242,7 +242,7 @@ class NestedConnectionRequest:
 
     Built only AFTER every strategy-independent refusal arm has been ruled out:
     ``django_field`` is the RAW Django relation field/rel (the planner's
-    ``_raw_relation_field``, not a ``FieldMeta`` - strategies may need
+    ``_meta.get_field`` read, not a ``FieldMeta`` - strategies may need
     ``remote_field`` / through metadata only the raw descriptor carries),
     ``child_queryset`` already carries the child plan (``only`` /
     ``select_related`` / nested prefetches / visibility hook), ``join`` is

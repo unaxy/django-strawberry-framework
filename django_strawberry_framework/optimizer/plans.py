@@ -53,6 +53,7 @@ from django.db.models.expressions import BaseExpression
 from django.db.models.functions import Random, RowNumber
 from django.db.models.query_utils import select_related_descend
 from django.db.models.sql.where import WhereNode
+from graphql.pyutils import Path
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import OptimizerError
@@ -68,8 +69,8 @@ from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_dict,
     is_options,
-    is_str,
     list_of,
+    optional_instance,
     read_attr,
     require,
 )
@@ -620,56 +621,23 @@ def runtime_path_from_info(info: object) -> tuple[str, ...]:
     """Return the runtime path tuple from a GraphQL ``info`` (or ``()`` when absent).
 
     Thin wrapper that pulls ``info.path`` and delegates to
-    ``runtime_path_from_path``; ``info=None`` short-circuits to the
-    empty tuple so resolver-key construction stays branch-free at the
+    ``runtime_path_from_path``; an ``info`` of ``None`` (or one carrying no path)
+    yields the empty tuple so resolver-key construction stays branch-free at the
     call site.
     """
-    if info is None:
-        return ()
-    return runtime_path_from_path(getattr(info, "path", None))
+    return runtime_path_from_path(optional_instance(read_attr(info, "path", None), Path))
 
 
-# A GraphQL ``path`` linked-list is exactly the *static* selection-set nesting of
-# the query document (result-set size and data-tree depth do NOT deepen it - list
-# items are sibling paths at depth+1, not nested levels). graphql-core's executor
-# also recurses one Python frame per level, so a query deep enough to approach
-# this would hit Python's recursion limit first. This ceiling therefore sits far
-# above any real query; exceeding it means the ``prev`` chain is cyclic or corrupt.
-# The cap's only job is to catch such a cycle, which terminates in N iterations
-# regardless of N - so it is set generously (1024) to make a false positive on a
-# legitimate query effectively impossible while still turning a would-be infinite
-# hang into a loud failure with a fixed, statically-checkable upper bound (NASA
-# Power-of-Ten Rule 2).
-_MAX_PATH_DEPTH = 1024
+def runtime_path_from_path(path: Path | None) -> tuple[str, ...]:
+    """Return a GraphQL response ``path``'s keys root-first, list indexes stripped.
 
-
-def runtime_path_from_path(path: object) -> tuple[str, ...]:
-    """Walk a GraphQL ``path`` linked-list and return its keys, list indexes stripped.
-
-    Iterates ``path.prev`` from the deepest selection back to the root,
-    skipping integer keys (graphql-core's list-index entries) so the
-    resulting tuple is a stable structural identity for cache-key and
-    resolver-key purposes.
-
-    The walk is bounded by ``_MAX_PATH_DEPTH`` rather than looping
-    unconditionally: a ``prev`` chain is exactly the resolver nesting depth,
-    which graphql-core bounds by the validated query depth, so a chain longer
-    than that ceiling can only be cyclic or corrupt and raises ``RuntimeError``
-    instead of spinning forever.
+    graphql-core's ``Path.as_list`` walks the ``prev`` chain; dropping its
+    integer keys (list-index entries) leaves a stable structural identity for
+    cache-key and resolver-key purposes.
     """
-    keys: list[str] = []
-    node = path
-    for _ in range(_MAX_PATH_DEPTH):
-        if node is None:
-            return tuple(reversed(keys))
-        key: object = getattr(node, "key", None)
-        if not isinstance(key, int) and key is not None:
-            keys.append(str(key))
-        node = getattr(node, "prev", None)
-    raise RuntimeError(
-        f"runtime_path_from_path: GraphQL path exceeded {_MAX_PATH_DEPTH} levels; "
-        "the `prev` chain is likely cyclic or corrupt.",
-    )
+    if path is None:
+        return ()
+    return tuple(key for key in path.as_list() if isinstance(key, str))
 
 
 def _release_select_related_to_prefetches(
@@ -806,22 +774,16 @@ def append_prefetch_unique(values: Sequence[PrefetchLookup], prefetch: PrefetchL
     _append_to_mutable(values, prefetch)
 
 
-def _consumer_prefetch_lookups(queryset: object) -> list[PrefetchLookup]:
-    """Return the ``prefetch_related`` lookups already attached to ``queryset``.
+def _consumer_prefetch_lookups(queryset: QuerySet[models.Model, object]) -> list[PrefetchLookup]:
+    """Return the ``prefetch_related`` lookups already attached to ``queryset``, as a list.
 
-    Lenient adapter over ``utils/_queryset_private.py::queryset_prefetch_lookups``,
-    which owns the ``QuerySet._prefetch_related_lookups`` spelling: a real
-    queryset contributes its lookups as a list, anything else contributes
-    nothing. Total over ``object`` because one call site reads a
-    consumer-controlled ``Prefetch.queryset``, which a consumer can set to
-    anything at runtime; such an input contributes no lookups to reconcile.
+    Reads through ``utils/_queryset_private.py::queryset_prefetch_lookups``, which
+    owns the ``QuerySet._prefetch_related_lookups`` spelling.
     """
-    if not isinstance(queryset, QuerySet):
-        return []
     return list(queryset_prefetch_lookups(queryset))
 
 
-def deferred_loading_of(queryset: object) -> tuple[frozenset[str], bool] | None:
+def deferred_loading_of(queryset: QuerySet[models.Model, object]) -> tuple[frozenset[str], bool]:
     """Return a queryset's raw ``(names, defer_flag)`` deferred-loading state.
 
     THE single reader of the brittle Django-private contract for
@@ -830,20 +792,9 @@ def deferred_loading_of(queryset: object) -> tuple[frozenset[str], bool] | None:
     "load only this set" mode) and ``defer_flag is True`` is the default
     ``.defer()``-or-nothing mode. Every consumer builds on this one unpack
     so a future Django rename has one fix.
-
-    Returns ``None`` when the state is unreadable: the attribute is missing
-    (a non-QuerySet input, e.g. a test double), the tuple shape is
-    malformed, or a name in the field set is not a string.
     """
-    query = read_attr(queryset, "query", None)
-    deferred_loading = read_attr(query, "deferred_loading", None)
-    if deferred_loading is None:
-        return None
-    try:
-        field_set, defer_flag = list_of(deferred_loading)
-        return frozenset(require(name, is_str) for name in list_of(field_set)), bool(defer_flag)
-    except (TypeError, ValueError):
-        return None
+    field_set, defer_flag = queryset.query.deferred_loading
+    return frozenset(field_set), defer_flag
 
 
 def _extend_only_projection(
@@ -862,10 +813,7 @@ def _extend_only_projection(
     Otherwise cursor minting lazy-loads once per edge in sync execution and
     raises ``SynchronousOnlyOperation`` in async execution.
     """
-    loading = deferred_loading_of(child_queryset)
-    if loading is None:
-        return child_queryset
-    names, defer_flag = loading
+    names, defer_flag = deferred_loading_of(child_queryset)
     if defer_flag:
         remaining = sorted(set(names) - set(attnames))
         if len(remaining) == len(names):
@@ -946,19 +894,17 @@ def merged_projection(queryset: QuerySet[_M], names: Sequence[str]) -> tuple[lis
     return [entry for entry in sorted(existing) if not _loads(read, entry, model)], True
 
 
-def _consumer_projection(queryset: object) -> tuple[frozenset[str], bool] | None:
+def _consumer_projection(
+    queryset: QuerySet[models.Model, object],
+) -> tuple[frozenset[str], bool] | None:
     """Return the consumer's deferred-loading projection as ``(names, defer_mode)``.
 
     ``None`` when the consumer restricted nothing (the default
-    ``(frozenset(), True)`` state, or an unreadable deferred-loading state -
-    see ``deferred_loading_of``). Both modes count: ``defer("category")``
+    ``(frozenset(), True)`` state). Both modes count: ``defer("category")``
     blocks ``select_related`` traversal exactly like an omitting ``.only(...)``
     does.
     """
-    loading = deferred_loading_of(queryset)
-    if loading is None:
-        return None
-    names, defer_flag = loading
+    names, defer_flag = deferred_loading_of(queryset)
     if not names:
         return None
     return names, defer_flag
@@ -1837,25 +1783,18 @@ def apply_window_pagination(
         # seek), and the plain row number below runs over post-seek rows
         # only - page-relative 1..N by construction.
         queryset = queryset.filter(keyset_seek.q())
-    annotations = {
-        WINDOW_ROW_NUMBER: Window(
-            RowNumber(),
-            partition_by=partition_by,
-            order_by=order_by,
-        ),
-    }
+    annotations = {WINDOW_ROW_NUMBER: _row_number_window(partition_by, order_by)}
     if with_total_count:
-        annotations[WINDOW_TOTAL_COUNT] = Window(Count(Value(1)), partition_by=partition_by)
+        annotations[WINDOW_TOTAL_COUNT] = _total_count_window(partition_by)
     queryset = queryset.annotate(**annotations)
     if range_plan.reverse:
         if range_plan.lower_bound is not None:
             queryset = queryset.filter(**{f"{WINDOW_ROW_NUMBER}__gt": range_plan.lower_bound})
         queryset = queryset.annotate(
             **{
-                WINDOW_ROW_NUMBER_REVERSED: Window(
-                    RowNumber(),
-                    partition_by=partition_by,
-                    order_by=_reverse_order_by(order_by),
+                WINDOW_ROW_NUMBER_REVERSED: _row_number_window(
+                    partition_by,
+                    _reverse_order_by(order_by),
                 ),
             },
         )
@@ -1895,6 +1834,16 @@ def apply_window_pagination(
     return queryset
 
 
+def _row_number_window(partition_by: str, order_by: Sequence[OrderEntry]) -> Window:
+    """``ROW_NUMBER() OVER (PARTITION BY partition_by ORDER BY order_by)``."""
+    return Window(RowNumber(), partition_by=partition_by, order_by=order_by)
+
+
+def _total_count_window(partition_by: str) -> Window:
+    """``COUNT(1) OVER (PARTITION BY partition_by)``: the whole partition's row count."""
+    return Window(Count(Value(1)), partition_by=partition_by)
+
+
 def _apply_keyset_counted_window(
     queryset: QuerySet[_M],
     *,
@@ -1919,15 +1868,11 @@ def _apply_keyset_counted_window(
             partition_by=partition_by,
             order_by=order_by,
         ),
-        WINDOW_TOTAL_COUNT: Window(Count(Value(1)), partition_by=partition_by),
+        WINDOW_TOTAL_COUNT: _total_count_window(partition_by),
         WINDOW_KEYSET_SEEK_COUNT: Window(Count("pk", filter=seek_q), partition_by=partition_by),
     }
     if range_plan.add_marker_rows:
-        annotations[WINDOW_ROW_NUMBER_ABS] = Window(
-            RowNumber(),
-            partition_by=partition_by,
-            order_by=order_by,
-        )
+        annotations[WINDOW_ROW_NUMBER_ABS] = _row_number_window(partition_by, order_by)
     queryset = queryset.annotate(**annotations)
     # ``lower_bound`` is the keyset floor 0 (drop the rn-0 pre-seek rows);
     # the upper bound is the page bound (no probe composes with a count).
@@ -1970,14 +1915,6 @@ def _reverse_order_by(order_by: Sequence[OrderEntry]) -> list[OrderEntry]:
       this function carried before) left ``_dst_row_number_reversed`` ordered
       forward on that column, so a ``last: N`` window returned the partition's
       FIRST page under any expression ordering.
-
-    Raises ``OptimizerError`` for an entry that is neither an ``OrderBy`` nor
-    carries a callable ``desc()``: such a term cannot be reversed, and an
-    unreversible window must fail loudly rather than silently serve the wrong
-    end of the partition. ``OptimizerError`` is deliberately not a
-    ``ValueError`` / ``TypeError``, so the walker's leave-unplanned pagination
-    handler cannot swallow it (the same posture as the keyset-plus-``reverse``
-    guard in ``apply_window_pagination``).
     """
     reversed_order: list[OrderEntry] = []
     for entry in order_by:
@@ -1996,16 +1933,7 @@ def _reverse_order_by(order_by: Sequence[OrderEntry]) -> list[OrderEntry]:
             _ = clone.reverse_ordering()
             reversed_order.append(clone)
             continue
-        # ``F.desc`` and ``Expression.desc`` both return an ``OrderBy``; the probe's
-        # ``None`` covers an entry that carries no ``desc`` at all.
-        desc: Callable[[], OrderBy] | None = getattr(entry, "desc", None)
-        if not callable(desc):
-            raise OptimizerError(
-                f"Cannot reverse connection order entry {entry!r}: it is neither an "
-                "'OrderBy' nor carries a callable 'desc()', so a backward (last-only) "
-                "window cannot be expressed for it.",
-            )
-        reversed_order.append(desc())
+        reversed_order.append(entry.desc())
     return reversed_order
 
 
@@ -2168,7 +2096,10 @@ def diff_plan_for_queryset(
     )
 
 
-def seals_consumer_prefetch(plan: OptimizationPlan, queryset: object) -> bool:
+def seals_consumer_prefetch(
+    plan: OptimizationPlan,
+    queryset: QuerySet[models.Model, object],
+) -> bool:
     """Whether reconciling ``plan`` against ``queryset`` may run a target type's hook.
 
     True when a consumer prefetch lookup on ``queryset`` lies on a path the plan
@@ -2411,12 +2342,10 @@ def _lookup_paths_from_parts(
 def _prefetch_lookup_paths(entries: Iterable[PrefetchLookup], prefix: str = "") -> set[str]:
     """Recursively flatten prefetch strings and nested ``Prefetch`` objects.
 
-    Unlike ``runtime_path_from_path`` the recursion carries no depth cap. The
-    tree is the walker's own nested ``Prefetch`` chain, one level per selected
+    The tree is the walker's own nested ``Prefetch`` chain, one level per selected
     relation, plus the lookups a consumer ``get_queryset`` attached: acyclic by
     construction and no deeper than the selection the walker already recursed
-    through. The sibling's cap exists only to turn a cyclic or corrupt ``prev``
-    chain into a loud failure.
+    through.
     """
     paths: set[str] = set()
     for entry in entries:
@@ -2429,7 +2358,7 @@ def _prefetch_lookup_paths(entries: Iterable[PrefetchLookup], prefix: str = "") 
             continue
         path = f"{prefix}__{prefetch_to}" if prefix else prefetch_to
         paths.add(path)
-        inner: object = getattr(entry, "queryset", None)
+        inner = entry.queryset
         inner_lookups = _consumer_prefetch_lookups(inner) if inner is not None else []
         if inner_lookups:
             paths.update(_prefetch_lookup_paths(inner_lookups, path))

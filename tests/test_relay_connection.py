@@ -71,7 +71,7 @@ from django_strawberry_framework.utils.connections import (
 from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
 from tests._definition import make_definition
 from tests._idioms import json_at, json_list
-from tests._info import make_info, raw_info_of
+from tests._info import make_info, raw_info_of, response_path
 from tests._relation_connection_schemas import (
     _genres_filterable_book_schema,
     _genres_list_schema,
@@ -101,14 +101,6 @@ def _window_rows(*row_numbers: int) -> list[djmodels.Model]:
 def _synthesized_field() -> StrawberryField:
     """A resolver-backed Strawberry field, as connection synthesis plants one."""
     return strawberry.field(lambda: None)
-
-
-def _path(*keys: str | int) -> object:
-    """Build a graphql-core-style linked response path (integer keys are list indexes)."""
-    path = None
-    for key in keys:
-        path = type("Path", (), {"key": key, "prev": path})()
-    return path
 
 
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
@@ -890,7 +882,7 @@ def test_strictness_silent_when_planned() -> None:
             },
             "dst_optimizer_strictness": "raise",
         },
-        path=_path("objs", 0, "booksConnection"),
+        path=response_path("objs", 0, "booksConnection"),
     )
     # No window served, yet planned -> silent. The call mirrors the
     # connection.py consultation exactly.
@@ -907,7 +899,7 @@ def test_strictness_silent_when_planned() -> None:
     # silence above is the planned-key match, not an inert no-op.
     info_unplanned = SimpleNamespace(
         context={"dst_optimizer_planned": set(), "dst_optimizer_strictness": "raise"},
-        path=_path("objs", 0, "booksConnection"),
+        path=response_path("objs", 0, "booksConnection"),
     )
     with pytest.raises(OptimizerError, match=r"Unplanned N\+1: books \("):
         _check_n1(

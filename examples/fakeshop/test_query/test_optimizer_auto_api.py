@@ -54,7 +54,7 @@ from django_strawberry_framework.optimizer.nested_fetch import (
     NestedConnectionRequest,
     StrategySelection,
 )
-from django_strawberry_framework.optimizer.nested_planner import clear_index_advisory_dedup
+from django_strawberry_framework.optimizer.nested_planner import _emit_index_advisory
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import TestClient
@@ -599,7 +599,7 @@ class TestAdvisoryDeferredUntilWindowAccepted:
     def _reset_type_caches() -> None:
         registry.clear()
         _connection_type_cache.clear()
-        clear_index_advisory_dedup()
+        _emit_index_advisory.cache_clear()
 
     @pytest.fixture(autouse=True)
     def _isolate_registry(self) -> Iterator[None]:

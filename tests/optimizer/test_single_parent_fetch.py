@@ -121,9 +121,9 @@ def test_spec_rejects_a_keyset_seek() -> None:
     """A keyset ``after:`` seek is refused at plan time (not a plain filtered LIMIT).
 
     Kept package-side on purpose: the seek is guarded twice in series. If this
-    plan-time refusal were removed, ``_single_parent_where_ids`` would still fail
-    closed on the seek's extra WHERE qual and the emitted SQL would not change,
-    so no live row can observe this half alone. The wire consequence of the pair
+    plan-time refusal were removed, the fetch would still fail closed on the
+    seek's extra WHERE residue (``lateral_fetch.py::_split_parent_in``) and the
+    emitted SQL would not change, so no live row can observe this half alone. The wire consequence of the pair
     is pinned by
     ``examples/fakeshop/test_query/test_single_parent_fastpath_api.py::test_single_parent_keyset_seek_page_keeps_window_over_http``.
     """
@@ -190,7 +190,7 @@ def test_fetch_returns_none_for_unrecognized_shapes(
 
     Includes the shared window-predicate-signature guard: the plain re-query
     applies ``spec.fetch_limit``, so an altered row-number bound that
-    ``_single_parent_where_ids`` would skip as a window qual must be caught by the
+    ``_split_parent_in`` would skip as a window qual must be caught by the
     signature comparison, or the fast path would silently ignore it and serve the
     originally-planned page.
     """

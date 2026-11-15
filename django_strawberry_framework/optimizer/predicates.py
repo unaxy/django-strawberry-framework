@@ -311,11 +311,9 @@ def attach_exists(
 
     - ``inner_queryset.model`` must be ``queryset.model``.
     - ``inner_queryset.db`` must equal ``queryset.db`` (same database alias).
-    - ``queryset.query.combinator`` (union / intersection / difference) must be
-      unset - attaching aliases to a combined queryset is runtime misuse. This
-      guard runs only when attachment is actually required, because there is no
-      empty / no-op input to this function; identity short-circuits live in
-      callers.
+
+    A combined OUTER queryset (union / intersection / difference) is refused by
+    Django's own ``.alias()`` (``NotSupportedError``).
 
     An evaluated OUTER queryset is valid input (see module docstring). The INNER
     queryset must never execute independently (module invariant).
@@ -332,8 +330,7 @@ def attach_exists(
     # snapshots: ``.db`` re-resolves through the router on every read of a
     # hint-less queryset, so re-reading inside the f-string would report aliases
     # that were never compared (a stateful router can make the message claim a
-    # mismatch between two identical aliases). Mirrors the combinator arm below,
-    # which already snapshots before it formats.
+    # mismatch between two identical aliases).
     inner_db = inner_queryset.db
     outer_db = queryset.db
     if inner_db != outer_db:
@@ -341,13 +338,6 @@ def attach_exists(
             f"attach_exists database-alias mismatch: inner {inner_db!r} "
             f"vs outer {outer_db!r}; both querysets must resolve to the same "
             f"database alias.",
-        )
-    combinator = queryset.query.combinator
-    if combinator:
-        raise OptimizerError(
-            f"attach_exists cannot attach a reserved alias to a combined queryset "
-            f"(combinator {combinator!r}); attach existence predicates before "
-            f"union / intersection / difference.",
         )
     alias = _next_reserved_alias(queryset)
     new_queryset = queryset.alias(**{alias: Exists(inner_queryset)})

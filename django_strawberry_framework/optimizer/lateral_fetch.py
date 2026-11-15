@@ -76,7 +76,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
-from django.core.exceptions import EmptyResultSet, FieldDoesNotExist, FieldError, FullResultSet
+from django.core.exceptions import EmptyResultSet, FullResultSet
 from django.db import connections
 from django.db.models import QuerySet
 from django.db.models.expressions import Col, OrderBy, Window
@@ -121,7 +121,8 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from django.db import models
-    from django.db.backends.base.base import BaseDatabaseWrapper
+    from django.db.models.expressions import Expression
+    from django.db.models.sql.compiler import SQLCompiler
     from django.db.models.sql.query import Query
     from django.utils.tree import _NodeChildren
 
@@ -579,7 +580,11 @@ def _fetch_lateral_rows(queryset: LateralQuerySet) -> list[models.Model] | None:
         cursor.execute(sql, params)  # pyright: ignore[reportArgumentType]
         # DB-API ``fetchall`` returns the result rows as sequences of column values.
         raw_rows = call_method(cursor, "fetchall")
-        fetched = _apply_lateral_converters(spec, require(raw_rows, is_iterable), connection)
+        fetched = _apply_lateral_converters(
+            spec,
+            require(raw_rows, is_iterable),
+            _query_compiler(queryset.query, queryset.db),
+        )
     return [_instantiate_row(spec, row, queryset.db) for row in fetched]
 
 
@@ -598,31 +603,17 @@ def _deduplicate_parent_ids(parent_ids: list[object]) -> list[object]:
 def _apply_lateral_converters(
     spec: LateralWindowSpec,
     rows: Iterable[object],
-    connection: BaseDatabaseWrapper,
+    compiler: SQLCompiler,
 ) -> list[tuple[object, ...]]:
     """Apply Django's backend + field converter chain to raw cursor rows."""
-    expressions = [
+    expressions: list[Expression] = [
         spec.parent_link_field.target_field.get_col(spec.parent_link_table),
         *(field.get_col(spec.db_table) for field in spec.select_fields),
     ]
-    # A converter is called ``(value, expression, connection)`` and returns the value.
-    converters: dict[int, tuple[list[Callable[..., object]], Col]] = {}
-    for position, expression in enumerate(expressions):
-        chain: list[Callable[..., object]] = connection.ops.get_db_converters(
-            expression,
-        ) + expression.get_db_converters(connection)
-        if chain:
-            converters[position] = (chain, expression)
-    converted: list[tuple[object, ...]] = []
-    for raw_row in rows:
-        row = list_of(raw_row)
-        for position, (chain, expression) in converters.items():
-            value = row[position]
-            for converter in chain:
-                value = converter(value, expression, connection)
-            row[position] = value
-        converted.append(tuple(row))
-    return converted
+    converters = compiler.get_converters(expressions)
+    return [
+        tuple(row) for row in compiler.apply_converters((list_of(row) for row in rows), converters)
+    ]
 
 
 def _recognize_lateral_fetch(
@@ -676,24 +667,11 @@ def _recognize_lateral_fetch(
     planned_signature = queryset._dst_window_signature
     if planned_signature is None or window_predicate_signature(query) != planned_signature:
         return None
-    where = query.where
-    if where.negated or where.connector != "AND":
-        return None
-    parent_ids: list[object] | None = None
-    unrecognized: _NodeChildren = []
-    for child in where.children:
-        if _is_window_qual(child):
-            continue
-        if parent_ids is None:
-            maybe_ids = _parent_in_values(
-                child,
-                column=spec.parent_link_column,
-                table=spec.parent_link_table,
-            )
-            if maybe_ids is not None:
-                parent_ids = maybe_ids
-                continue
-        unrecognized.append(child)
+    parent_ids, unrecognized = _split_parent_in(
+        query.where,
+        column=spec.parent_link_column,
+        table=spec.parent_link_table,
+    )
     if parent_ids is None:
         return None
     visibility_where_sql: CompiledSQL | None = None
@@ -722,6 +700,36 @@ def _recognize_lateral_fetch(
         parent_ids=parent_ids,
         visibility_where_sql=visibility_where_sql,
     )
+
+
+def _split_parent_in(
+    where: WhereNode,
+    *,
+    column: str,
+    table: str,
+) -> tuple[list[object] | None, _NodeChildren]:
+    """Split a fetch-time WHERE into ``(parent ids, residue)`` around the window quals.
+
+    The root must be a non-negated ``AND``; each child is a window-range qual
+    (``_is_window_qual``, skipped), the first prefetch ``__in`` lookup on the
+    parent link ``column`` / ``table`` (``_parent_in_values``), or residue - an
+    extra consumer, visibility or keyset filter, a second IN, an expression rhs.
+    Returns ``(None, [])`` for any other root and ``None`` ids when no IN
+    matched; each nested-connection fetch recognizer judges the residue.
+    """
+    if where.negated or where.connector != "AND":
+        return None, []
+    parent_ids: list[object] | None = None
+    residue: _NodeChildren = []
+    for child in where.children:
+        if _is_window_qual(child):
+            continue
+        if parent_ids is None:
+            parent_ids = _parent_in_values(child, column=column, table=table)
+            if parent_ids is not None:
+                continue
+        residue.append(child)
+    return parent_ids, residue
 
 
 def _is_window_qual(node: object) -> bool:
@@ -1070,7 +1078,7 @@ def _build_lateral_spec(request: NestedConnectionRequest) -> LateralWindowSpec |
       relation name the compiler orders by its model's ``Meta.ordering``
       included: it arrives expanded into those terms
       (``utils/querysets.py::expand_relation_order``);
-    - a projection Django selects from a multi-table parent table or refuses
+    - a projection Django selects from a multi-table parent table
       (``_select_columns``), or a composite/columnless primary key.
     """
     if request.keyset_seek is not None and request.with_total_count:
@@ -1217,20 +1225,15 @@ def _order_columns(
     ``OVER (ORDER BY )`` (or an ``ORDER BY  LIMIT`` page), while the windowed
     body it mirrors renders a valid orderless window for the same request. A
     relation name arrives as the planner expanded it
-    (``utils/querysets.py::expand_relation_order``). An order the compiler
-    refuses (``FieldError``, or the ``AttributeError`` of a term with no
-    direction method, as ``plans.py::has_random_term`` reads them) downgrades,
-    and the windowed body raises Django's own error at execution. A random
-    order never arrives: the planner leaves it to the per-parent pipeline
+    (``utils/querysets.py::expand_relation_order``); an order the compiler
+    refuses raises Django's own error here. A random order never arrives: the
+    planner leaves it to the per-parent pipeline
     (``optimizer/plans.py::has_random_term``).
     """
     probe = queryset.query.clone()
     probe.clear_ordering(force=True)
     probe.order_by = order_by
-    try:
-        compiled = _query_compiler(probe, queryset.db).get_order_by()
-    except (FieldError, AttributeError):
-        return None
+    compiled = _query_compiler(probe, queryset.db).get_order_by()
     base_alias = probe.get_initial_alias()
     columns: list[tuple[str, bool]] = []
     for term, _sql in compiled:
@@ -1251,20 +1254,14 @@ def _selected_cols(queryset: QuerySet[models.Model]) -> tuple[Query, list[Col]] 
     ``.defer()`` state and ``SQLCompiler.get_default_columns`` turns the mask
     into the model's selected ``Col``s in concrete-field order (the pk included
     whatever the mask names), joining each multi-table inheritance parent the
-    mask reaches into the returned query's ``alias_map``. ``None`` when Django
-    refuses the projection (an unknown ``.only()`` / ``.defer()`` name), so the
-    windowed body runs and raises Django's own error, or when a selected
-    expression is not a plain ``Col``.
+    mask reaches into the returned query's ``alias_map``. ``None`` when a
+    selected expression is not a plain ``Col``; Django's own error propagates
+    for a projection it refuses (an unknown ``.only()`` / ``.defer()`` name).
     """
     query = queryset.query.clone()
-    try:
-        select_mask = query.get_select_mask()
-        selected = _query_compiler(query, queryset.db).get_default_columns(select_mask)
-    except (FieldDoesNotExist, FieldError):
-        selected = None
-    cols = [column for column in selected or () if isinstance(column, Col)]
-    # A refused projection, or a selected expression that is not a plain ``Col``.
-    if selected is None or len(cols) != len(selected):
+    selected = _query_compiler(query, queryset.db).get_default_columns(query.get_select_mask())
+    cols = [column for column in selected if isinstance(column, Col)]
+    if len(cols) != len(selected):
         return None
     return query, cols
 
@@ -1273,7 +1270,7 @@ def _select_columns(queryset: QuerySet[models.Model]) -> tuple[tuple[str, str], 
     """Return the loaded ``(attname, column)`` projection in concrete-field order, or ``None``.
 
     The columns are ``_selected_cols``'s, the ones the windowed body selects for
-    the same queryset. ``None`` when Django refuses the projection or when a
+    the same queryset. ``None`` when ``_selected_cols`` is or when a
     selected column lives on a multi-table inheritance parent (its ``Col``
     carries the parent-link join's alias, which the lateral branch does not
     join).

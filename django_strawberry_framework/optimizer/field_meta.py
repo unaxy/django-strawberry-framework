@@ -25,7 +25,12 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from django_strawberry_framework.exceptions import OptimizerError
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils._narrowing import (
+    is_str,
+    optional_instance,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.relations import (
     RelationLink,
     has_composite_pk,
@@ -251,13 +256,11 @@ class FieldMeta:
                 f"FieldMeta.from_django_field expected a Django field descriptor "
                 f"exposing 'name' and 'is_relation'; got {truth.kind(field)}.",
             )
-        # ``field`` is a public parameter, and a descriptor can answer ``name`` with any object
-        if not truth.is_instance(field_name, str):
-            raise OptimizerError(
-                f"FieldMeta.from_django_field expected a string field name; "
-                f"got {truth.kind(field_name)}.",
-            )
-        return cls._from_field_shape(field, is_relation=bool(is_relation), field_name=field_name)
+        return cls._from_field_shape(
+            field,
+            is_relation=bool(is_relation),
+            field_name=require(field_name, is_str),
+        )
 
     @classmethod
     def _from_field_shape(
@@ -298,22 +301,12 @@ class FieldMeta:
         # ``_target_pk_name`` reads defensively).
         related_model = cast("type[models.Model] | None", read_attr(field, "related_model", None))
         target_pk_name = _target_pk_name(related_model)
-        target_field_name = (
-            read_attr(target_field, "name", None) if target_field is not None else None
-        )
-        if target_field_name is not None and not truth.is_instance(target_field_name, str):
-            target_field_name = None
-        target_field_attname = (
-            read_attr(target_field, "attname", None) if target_field is not None else None
-        )
-        if target_field_attname is not None and not truth.is_instance(target_field_attname, str):
-            target_field_attname = None
+        target_field_name = optional_instance(read_attr(target_field, "name", None), str)
+        target_field_attname = optional_instance(read_attr(target_field, "attname", None), str)
         is_m2m = relation_bool(field, "many_to_many")
         is_o2m = relation_bool(field, "one_to_many")
         is_o2o = relation_bool(field, "one_to_one")
-        attname = read_attr(field, "attname", None)
-        if attname is not None and not truth.is_instance(attname, str):
-            attname = None
+        attname = optional_instance(read_attr(field, "attname", None), str)
         auto_created = relation_bool(field, "auto_created")
         concrete = relation_bool(field, "concrete")
         # Django stamps ``attname`` with the RELATION NAME on fields that store

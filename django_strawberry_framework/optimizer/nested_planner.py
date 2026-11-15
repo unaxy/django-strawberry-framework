@@ -10,9 +10,8 @@ cannot leak partial directives into the walker's parent plan.
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from contextlib import suppress
 from dataclasses import dataclass
+from functools import lru_cache
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -105,7 +104,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.keyset import CursorColumn
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
-    from django_strawberry_framework.utils.typing import ConcreteField, ModelField
+    from django_strawberry_framework.utils.typing import ConcreteField
 
     from .field_meta import FieldMeta
     from .hints import OptimizerHint
@@ -525,16 +524,16 @@ def _model_index_shapes(meta: _OptionsAny) -> tuple[list[list[tuple[str, bool]]]
             saw_uninspectable = True
         else:
             shapes.append(terms)
-    for constraint in meta.constraints:
-        if not isinstance(constraint, models.UniqueConstraint):
-            continue  # CheckConstraint / ExclusionConstraint: not a coverage shape.
-        if (
-            constraint.condition is not None
-            or getattr(constraint, "contains_expressions", False)
-            or getattr(constraint, "opclasses", None)
-            or not constraint.fields
-        ):
-            # Conditional / expression / non-default-opclass unique: unprovable.
+    total_unique = meta.total_unique_constraints
+    # A conditional or expression ``UniqueConstraint`` is absent from Django's
+    # total list; its index still exists, so it leaves absence unprovable.
+    # ``CheckConstraint`` / ``ExclusionConstraint`` are not coverage shapes.
+    if sum(
+        isinstance(constraint, models.UniqueConstraint) for constraint in meta.constraints
+    ) > len(total_unique):
+        saw_uninspectable = True
+    for constraint in total_unique:
+        if getattr(constraint, "opclasses", None):
             # A non-default opclass (``varchar_pattern_ops`` etc.) is chosen for a
             # lookup semantics that need not provide the window's ordinary
             # ordering, exactly as ``_index_leading_terms`` rejects an ``Index``
@@ -610,54 +609,37 @@ def _describe_index_columns(
     return columns
 
 
-# Bounded dedup so ONE plan shape warns at most once even when its plan is
-# rebuilt on every request. Plans carrying a custom ``get_queryset`` (a common
-# visibility-scoped nested connection) are intentionally excluded from the
-# extension's cross-request plan cache, so ``plan_connection_relation`` re-runs
-# this advisory per request; without the guard the same DEBUG warning repeats
-# every request and buries genuinely new plan shapes in the noise, breaking the
-# README / module "one advisory per plan shape" promise. The key is strategy-
-# AND request-INDEPENDENT: ``(table-owning model label, equality-prefix columns,
-# order terms)`` is the entire input that determines the recommended index, so two
-# rebuilds of one shape collapse (a proxy and its concrete model are one table, one
-# shape) while genuinely different shapes (a different table, partition column,
-# morph prefix, or order) each still warn once - the
-# strategy is deliberately excluded so switching strategies never re-emits.
-# Bounded LRU (cap ``_MAX_INDEX_ADVISORY_KEYS``) so a pathological variety of
-# plan shapes cannot grow the process's memory without limit; eviction only
-# re-emits a long-cold advisory, never a wrong one. Reset between tests via
-# ``clear_index_advisory_dedup`` - the same module-cache reset seam the suite
-# uses for the registry / connection-type caches (this is DEBUG-toggle sensitive
-# under ``override_settings``, so advisory tests must clear it per test).
-_MAX_INDEX_ADVISORY_KEYS = 512
-_IndexAdvisoryKey = tuple[str, tuple[str, ...], tuple[tuple[str, bool], ...]]
-_index_advisory_seen: OrderedDict[_IndexAdvisoryKey, None] = OrderedDict()
-
-
-def clear_index_advisory_dedup() -> None:
-    """Reset the composite-index advisory dedup (module-cache test-isolation seam)."""
-    _index_advisory_seen.clear()
-
-
-def _index_advisory_already_emitted(key: _IndexAdvisoryKey) -> bool:
-    """Record ``key`` in the bounded LRU; return whether it was ALREADY present.
-
-    A hit promotes the key (LRU recency) and suppresses a repeat emission; a
-    miss inserts it and evicts the least-recently-emitted key past the cap. The
-    ``KeyError`` suppression guards the (benign) concurrent-eviction race one
-    process-wide dedup shared across extension instances and threads can hit -
-    a dropped or double record only changes whether a cold shape re-warns, never
-    correctness, exactly like the extension's cross-request LRUs.
-    """
-    if key in _index_advisory_seen:
-        with suppress(KeyError):
-            _index_advisory_seen.move_to_end(key)
-        return True
-    _index_advisory_seen[key] = None
-    if len(_index_advisory_seen) > _MAX_INDEX_ADVISORY_KEYS:
-        with suppress(KeyError):
-            _ = _index_advisory_seen.popitem(last=False)
-    return False
+# One plan shape warns at most once even when its plan is rebuilt on every
+# request: plans carrying a custom ``get_queryset`` stay out of the extension's
+# cross-request plan cache, so ``plan_connection_relation`` re-runs this advisory
+# per request. The cache key is strategy- AND request-independent: the
+# table-owning model, the equality-prefix columns and the effective order terms
+# are the entire input that determines the recommended index, so rebuilds of one
+# shape collapse (a proxy and its concrete model are one table) while different
+# shapes each still warn once. The LRU bound keeps a pathological variety of
+# shapes from growing memory; eviction only re-emits a long-cold advisory. The
+# log level is chosen on the first emission, so tests toggling ``DEBUG`` call
+# ``_emit_index_advisory.cache_clear()``.
+@lru_cache(maxsize=512)
+def _emit_index_advisory(
+    app_label: str,
+    object_name: str,
+    equality: tuple[str, ...],
+    effective_order: tuple[tuple[str, bool], ...],
+) -> None:
+    """Log the composite-index recommendation for one plan shape (once per shape)."""
+    columns = _describe_index_columns(equality, effective_order)
+    log = logger.warning if django_setting("DEBUG") else logger.debug
+    log(
+        "Optimizer: nested connection on %s.%s has no represented index covering the "
+        "window's leading columns %s; a composite index on (%s) would let the database "
+        "serve each page from the index instead of sorting per partition. Advisory only "
+        "(an index absent from Django model metadata is not visible here).",
+        app_label,
+        object_name,
+        columns,
+        ", ".join(columns),
+    )
 
 
 def _advise_composite_index(
@@ -719,7 +701,7 @@ def _advise_composite_index(
     Called once per plan shape from ``plan_connection_relation`` AFTER the first
     window a strategy accepts (a strategy that refuses every window plans no
     window, so it must advise no window index); cross-request plan caching
-    handles the cached shapes, and the bounded ``_index_advisory_seen`` dedup
+    handles the cached shapes, and the bounded ``_emit_index_advisory`` cache
     handles the request-scoped shapes a custom ``get_queryset`` keeps OUT of that
     cache, so a given ``(model, equality prefix, order terms)`` shape warns at
     most once.
@@ -761,21 +743,11 @@ def _advise_composite_index(
     effective_order = [term for term in order_terms if term[0] not in equality_columns]
     if _index_coverage(table_model, equality, effective_order) != _INDEX_ABSENT:
         return
-    if _index_advisory_already_emitted(
-        (table_model._meta.label, tuple(equality), tuple(effective_order)),
-    ):
-        return
-    columns = _describe_index_columns(equality, effective_order)
-    log = logger.warning if django_setting("DEBUG") else logger.debug
-    log(
-        "Optimizer: nested connection on %s.%s has no represented index covering the "
-        "window's leading columns %s; a composite index on (%s) would let the database "
-        "serve each page from the index instead of sorting per partition. Advisory only "
-        "(an index absent from Django model metadata is not visible here).",
+    _emit_index_advisory(
         table_model._meta.app_label,
         table_model._meta.object_name,
-        columns,
-        ", ".join(columns),
+        tuple(equality),
+        tuple(effective_order),
     )
 
 
@@ -815,23 +787,6 @@ def _project_scalar_only_window(
     for column in _concrete_order_columns(order_by, related_model):
         append_unique(fields, column)
     return apply_projection(child_queryset, fields, introduce=introduce_projection)
-
-
-def _connection_node_selections(
-    sel: FieldSelection,
-    runtime_paths: tuple[tuple[str, ...], ...],
-) -> list[SimpleNamespace]:
-    """Unwrap a nested connection's ``edges { node { ... } }`` child selections.
-
-    Thin adapter over ``selections.connection_node_children`` (Decision 9) so the
-    nested-connection unwrap shares one edges->node composition with the root
-    apply seam. Returns the node-level child selections carrying the
-    connection-aware runtime prefixes; an empty list for a scalar-only
-    (page-info / total-count) selection with no ``edges { node }`` - those
-    are still PLANNED with a connector/ordering-only projection (Decision 6),
-    not a fallback.
-    """
-    return connection_node_children(sel, runtime_prefixes=runtime_paths)
 
 
 def _int_argument(arguments: Mapping[str, object], name: str) -> int | None:
@@ -1150,17 +1105,6 @@ def _record_accounted_keys(
     )
 
 
-def _raw_relation_field(model: type[models.Model], relation_field_name: str) -> ModelField:
-    """Return the raw Django relation field for ``relation_field_name`` on ``model``.
-
-    The window partition derivation needs the raw descriptor's
-    ``remote_field`` (the forward-M2M reverse query name lives only there and is
-    not carried on ``FieldMeta``); ``field_map`` holds ``FieldMeta``, so resolve
-    the live field from ``_meta`` (spec-033 Decision 4 partition derivation).
-    """
-    return model._meta.get_field(relation_field_name)
-
-
 def plan_connection_relation(
     sel: FieldSelection,
     definition: DjangoTypeDefinition | None,
@@ -1202,8 +1146,7 @@ def plan_connection_relation(
     selection UNPLANNED (no ``Prefetch``, no ``planned_resolver_keys`` entry) for
     each spec-033 Decision 6 refusal arm so the strictness contract still sees
     the per-parent access. Delegates child-queryset construction to the same
-    helpers the list path uses (``_build_prefetch_child_queryset`` /
-    ``_build_child_queryset``, reached here through
+    helper the list path uses (``_build_child_queryset``, reached here through
     ``_build_connection_child_queryset`` so the child's visibility seal spends the
     slice licence this path's own gate below answers for); the only addition is
     the window applied after ``child_plan.apply``.
@@ -1353,10 +1296,12 @@ def plan_connection_relation(
     # (g, partition) pure; classify the join before the child build so an
     # unsupported relation kind (single-valued forward, or a shape with no
     # resolvable parent partition) falls back without leaking child metadata.
-    # The RAW field (not the ``FieldMeta``) also rides the strategy request:
-    # the lateral backend reads ``remote_field`` / through metadata that only
-    # the raw descriptor carries.
-    raw_relation_field = _raw_relation_field(model, relation_field_name)
+    # The partition derivation reads the RAW field from ``_meta`` (spec-033
+    # Decision 4): the forward-M2M reverse query name lives only on its
+    # ``remote_field``, which ``FieldMeta`` does not carry. The raw field also
+    # rides the strategy request: the lateral backend reads ``remote_field`` /
+    # through metadata that only the raw descriptor carries.
+    raw_relation_field = model._meta.get_field(relation_field_name)
     join = classify_relation_join(raw_relation_field)
     if not join.windowable:
         if keyset_context is not None:
@@ -1373,7 +1318,7 @@ def plan_connection_relation(
     # unwrap and both count observers below match the connection's own fields by
     # Python name (``selections.py::selection_python_name``), whatever wire names
     # the schema's ``NameConverter`` publishes them under.
-    node_selections = _connection_node_selections(sel, runtime_paths)
+    node_selections = connection_node_children(sel, runtime_prefixes=runtime_paths)
     scalar_only = not node_selections
     node_sel = SimpleNamespace(selections=node_selections)
 

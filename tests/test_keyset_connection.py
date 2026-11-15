@@ -657,11 +657,6 @@ def test_extend_only_projection_passthrough_arms() -> None:
     (optimizer ``only()``) and
     ``test_async_keyset_deferred_cursor_column_is_loaded`` (async ``defer()``).
     """
-    sentinel = object()
-    # basedpyright: the non-queryset sentinel is the input under test (passed through
-    # untouched); _extend_only_projection types the parameter as QuerySet
-    assert _extend_only_projection(sentinel, ("number",)) is sentinel  # pyright: ignore[reportArgumentType]
-
     plain = Issue.objects.all()
     assert _extend_only_projection(plain, ("number",)) is plain
     only_empty = Issue.objects.only()
@@ -670,17 +665,13 @@ def test_extend_only_projection_passthrough_arms() -> None:
     assert _extend_only_projection(deferred, ("number",)) is deferred
     masked_deferred = Issue.objects.defer("number", "title")
     extended_deferred = _extend_only_projection(masked_deferred, ("number",))
-    loading = deferred_loading_of(extended_deferred)
-    assert loading is not None
-    names, defer_flag = loading
+    names, defer_flag = deferred_loading_of(extended_deferred)
     assert defer_flag is True
     assert names == frozenset({"title"})
     covered = Issue.objects.only("number", "id")
     assert _extend_only_projection(covered, ("number",)) is covered
     only_qs = Issue.objects.only("title")
     extended_only = _extend_only_projection(only_qs, ("number",))
-    loading = deferred_loading_of(extended_only)
-    assert loading is not None
-    names, defer_flag = loading
+    names, defer_flag = deferred_loading_of(extended_only)
     assert defer_flag is False
     assert names == frozenset({"number", "title"})

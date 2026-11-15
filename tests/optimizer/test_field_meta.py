@@ -371,9 +371,9 @@ def test_target_pk_name_resolves_or_answers_none() -> None:
 
 
 def test_from_django_field_rejects_non_string_field_name() -> None:
-    """Non-string field names are rejected with OptimizerError at stamp time."""
+    """A non-string field name fails the typed read at stamp time."""
     non_str_field = SimpleNamespace(name=123, is_relation=False)
-    with pytest.raises(OptimizerError, match="expected a string field name"):
+    with pytest.raises(TypeError, match="got int"):
         # basedpyright: the non-str field name is the hostile input under test;
         # FieldMeta.from_django_field types the parameter as a Django field
         FieldMeta.from_django_field(non_str_field)  # pyright: ignore[reportArgumentType]
@@ -746,38 +746,6 @@ def test_mti_child_type_renders_parent_link_non_null() -> None:
     sdl = str(strawberry.Schema(query=Query))
 
     assert "venuePtr: VenueNode!" in sdl
-
-
-def test_from_django_field_non_string_attributes() -> None:
-    """FieldMeta.from_django_field safely coerces non-string attributes and rejects non-string field_name."""
-    # Non-string field_name raises OptimizerError
-    non_str_name = SimpleNamespace(name=123, is_relation=False)
-    with pytest.raises(OptimizerError, match="expected a string field name"):
-        # basedpyright: the non-str field name is the hostile input under test;
-        # FieldMeta.from_django_field types the parameter as a Django field
-        FieldMeta.from_django_field(non_str_name)  # pyright: ignore[reportArgumentType]
-
-    # Non-string target_field name/attname and field attname
-    fake_target = SimpleNamespace(name=123, attname=456)
-    fake_rel = SimpleNamespace(attname=789)
-    fake_field = SimpleNamespace(
-        name="test_field",
-        is_relation=True,
-        target_field=fake_target,
-        attname=999,
-        field=fake_rel,
-        many_to_many=False,
-        one_to_many=False,
-        one_to_one=False,
-        null=True,
-    )
-    fm = FieldMeta.from_django_field(_as_field(fake_field))
-    assert fm.name == "test_field"
-    assert fm.target_field_name is None
-    assert fm.target_field_attname is None
-    assert fm.attname is None
-    assert fm.link_carrier_attnames == ()
-    assert fm.source_target_attnames == ()
 
 
 def test_from_django_field_many_side_nullability_short_circuits() -> None:

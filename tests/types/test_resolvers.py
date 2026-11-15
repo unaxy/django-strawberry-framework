@@ -1607,7 +1607,7 @@ def test_sync_forward_and_many_resolver_visibility() -> None:
 def test_resolver_helpers_edge_cases() -> None:
     # kind == "connection_to_attr" never re-probes root: its caller reached the
     # per-parent branch, so a window attribute present on root still queries.
-    info = SimpleNamespace(path=SimpleNamespace(key="items", prev=None), context={})
+    info = SimpleNamespace(path=response_path("items"), context={})
     root_with_attr = SimpleNamespace(_dst_items_connection=["item1"])
     with pytest.raises(OptimizerError, match="Unplanned N\\+1: items"):
         _check_n1(
