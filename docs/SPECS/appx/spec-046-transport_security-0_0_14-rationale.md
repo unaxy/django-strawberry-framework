@@ -192,9 +192,9 @@ Spec: [Decision 7][s65-d7].
   edits the request to make Django's own later read succeed, concealing a malformed header
   the deployment should see, and bounds nothing that the counted check does not already
   bound.
-- **Rejecting inside `_patched_parse_json`.** Rejected: the patch modules exist to fix
-  *upstream defects*; a package size policy is not a defect fix, it would fire on GET
-  query-param parses, and it would be unreachable for a multipart request.
+- **Rejecting inside `parse_json`.** Rejected: a size policy is a boundary check, not a
+  parse; it would fire on GET query-param parses, and it would be unreachable for a
+  multipart request.
 - **Letting an unguarded capability call fall through as a `500`.** The probe's
   `seekable()`, `tell()` and `seek()` calls are made into a stream the package did not
   construct (an ASGI server's, or a consumer middleware's). Rejected: an unrelated `500` is
@@ -222,13 +222,13 @@ Spec: [Decision 8][s65-d8].
 
 Spec: [Decision 9][s65-d9].
 
-**Why the decode belongs on the view rather than in the patch module.** Three reasons, and
-the first is decisive. (a) A permanent security policy must not share a temporary patch's
-lifecycle: an upstream shape change that forces a consumer to disable the patch would
+**Why the decode belongs on the view rather than in a patch of upstream's `parse_json`.**
+Three reasons, and the first is decisive. (a) A permanent security policy must not share a
+gated patch's lifecycle: an upstream shape change that forces a consumer to disable the patch would
 otherwise reopen the parser differential S9 exists to close, silently. That argument
 governs the body source identically, which is why the view owns that too — a switchable
 body source is a switchable decode. (b) The mixin is one seam covering both transports —
-`super()` delegates to upstream's `parse_json`, patched or not, so nothing is reimplemented
+`super()` delegates to upstream's `parse_json`, so nothing is reimplemented
 and the two views cannot diverge, which is the same single-siting rule
 [`request_from_info`][glossary-request_from_info] establishes for request decoding. (c) It
 is the same boundary as the body cap: the cap decides which bytes reach the parse, and the
@@ -237,9 +237,9 @@ body.
 
 **Alternatives rejected.**
 
-- **Decode inside `_patched_parse_json`.** The wire contract *is* a property of
-  GraphQL-over-HTTP request parsing, and the patch module owns that parse for both
-  transports, so putting the decode there costs the fewest lines and covers
+- **Decode inside a patched `BaseView.parse_json`.** The wire contract *is* a property of
+  GraphQL-over-HTTP request parsing, and a patch of `BaseView.parse_json` reaches that parse
+  on both transports, so putting the decode there costs the fewest lines and covers
   upstream-mounted consumers too. Rejected on ownership: it makes a permanent package
   security policy share the lifecycle — and the `APPLY_UPSTREAM_PATCHES` kill switch — of
   temporary workarounds for upstream bugs. A consumer disabling those workarounds, or a
@@ -249,7 +249,7 @@ body.
   claim.
 - **Patch upstream's sync adapter `body` property process-wide to hand raw bytes to every
   mount.** The package view would need no adapter of its own and the decode would be
-  reached for free. Rejected for the *same* reason the decode is not in the patch module:
+  reached for free. Rejected for the *same* reason the decode is not in a patch:
   a patch is gated, so the sync half of the wire contract would ride
   `APPLY_UPSTREAM_PATCHES` while the other half did not. With the gate off,
   upstream's sync property decodes first and `parse_json` is never entered with bytes, so a
@@ -257,8 +257,7 @@ body.
   the contracted `400`. A decode the bytes never reach is not an enforcement.
 - **Override `decode_json` instead of `parse_json`.** Rejected: a `UnicodeDecodeError`
   raised there lands in upstream's `except json.JSONDecodeError`, which does not catch it,
-  so the `400` translation would depend on the Strawberry patch being installed — exactly
-  the coupling this decision removes.
+  so `parse_json` would need its own translation for it anyway.
 - **Reject non-UTF-8 by sniffing leading bytes** (a BOM / NUL-pattern check). Rejected: a
   bespoke encoding sniffer is a parser, and adding a second parser to close a parser
   differential is self-defeating. `bytes.decode("utf-8")` is the contract.
@@ -274,14 +273,6 @@ body.
   a security policy a consumer can switch off is the finding this decision answers, not the
   fix — and [`AGENTS.md`][agents] forbids adding a settings key speculatively. The opt-out
   that does exist is deliberate and explicit: mount upstream's own view.
-- **Calling the captured upstream `parse_json` rather than `super()` from the mixin.** The
-  mixin's `super().parse_json(data)` resolves to the attribute
-  `_strawberry_patches.py::apply` assigns, so the body-envelope guard rides
-  `APPLY_UPSTREAM_PATCHES` on a package mount too. Bypassing the patch would give the guard
-  the same ungated ownership the wire contract has. Rejected: the guard is a workaround for
-  a specific upstream defect (#3398), so it *should* stay opt-out-able — this decision's own
-  lifecycle rule applied in the other direction. What does not ride the gate on either mount
-  is the strict decode and the body source, which are view-owned code.
 
 **The declared `charset`.** The strict decode governs the bytes; the declared `charset` is
 refused separately (`views.py::_RequestBodyBoundaryMixin._enforce_body_charset_declaration`),

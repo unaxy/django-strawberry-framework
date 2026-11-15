@@ -70,6 +70,7 @@ from asgiref.sync import markcoroutinefunction
 from cross_web import (
     AsyncDjangoHTTPRequestAdapter,
     DjangoHTTPRequestAdapter,
+    FormData,
     HTTPException,
 )
 from django.contrib.auth.models import AnonymousUser
@@ -97,7 +98,6 @@ from strawberry.http.base import BaseView
 from typing_extensions import override
 
 import django_strawberry_framework
-from django_strawberry_framework import _strawberry_patches as patches
 from django_strawberry_framework import views as views_module
 from django_strawberry_framework._boundary_ordering import (
     _BOUNDARY_ENFORCED,
@@ -127,6 +127,7 @@ from django_strawberry_framework.utils.typing import (
 from django_strawberry_framework.views import (
     _BODY_LIMIT_REASON,
     _JSON_PARSE_REASON,
+    _MULTIPART_PARSE_REASON,
     AsyncDjangoGraphQLView,
     DjangoGraphQLView,
     _declared_content_length,
@@ -2104,9 +2105,8 @@ def test_the_cap_defers_on_a_request_that_carries_no_stream_at_all() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The strict UTF-8 wire contract is the package VIEW's, so it
-# does not share the ``APPLY_UPSTREAM_PATCHES`` lifecycle of the upstream-bug
-# workarounds. The wire outcomes are live in fakeshop; what only this tier can
+# The strict UTF-8 wire contract is the package VIEW's. The wire outcomes are
+# live in fakeshop; what only this tier can
 # state is WHICH mechanism refused which byte shape, because all nine rejected
 # shapes carry the identical status and message by design.
 # ---------------------------------------------------------------------------
@@ -2122,30 +2122,6 @@ _WIRE_SHAPES = (
     pytest.param('{"a": 1}'.encode("utf-32-be"), json.JSONDecodeError, id="utf-32-be-no-bom"),
     pytest.param(b"\xef\xbb\xbf" + b'{"a": 1}', json.JSONDecodeError, id="utf-8-bom"),
 )
-
-
-@contextlib.contextmanager
-def _strawberry_patch_opted_out() -> Generator[None, None, None]:
-    """The runtime state ``APPLY_UPSTREAM_PATCHES = {"strawberry": False}`` produces.
-
-    The patch installs from ``AppConfig.ready()``, so flipping the setting inside
-    a test cannot un-install it; the honest simulation restores upstream's own two
-    methods *and* sets the setting, so a stray ``apply()`` stays a no-op for the
-    duration. The two multipart delegates stay installed: no row in
-    this block posts multipart, so they are unreachable here, and what the rows
-    observe is exactly what an opted-out consumer observes on the JSON-body path.
-    """
-    override = override_settings(
-        DJANGO_STRAWBERRY_FRAMEWORK={"APPLY_UPSTREAM_PATCHES": {"strawberry": False}},
-    )
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(BaseView, "parse_json", patches._original_parse_json)
-        patch.setattr(BaseView, "parse_query_params", patches._original_parse_query_params)
-        assert patches._patch_is_installed() is False
-        assert BaseView.__dict__["parse_json"] is patches._original_parse_json
-        assert BaseView.__dict__["parse_query_params"] is patches._original_parse_query_params
-        with override:
-            yield
 
 
 @pytest.mark.parametrize(("body", "cause"), _WIRE_SHAPES)
@@ -2178,37 +2154,6 @@ def test_the_package_view_rejects_every_non_utf8_wire_shape(
     view = view_class(schema=SCHEMA)
 
     with pytest.raises(HTTPException) as excinfo:
-        view.parse_json(body)
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.reason == _JSON_PARSE_REASON
-    assert type(excinfo.value.__cause__) is cause
-
-
-@pytest.mark.parametrize(("body", "cause"), _WIRE_SHAPES)
-@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
-def test_the_wire_contract_holds_with_the_upstream_patches_opted_out(
-    view_class: _ViewClass,
-    body: bytes,
-    cause: type[Exception],
-) -> None:
-    """The identical nine rows with ``{"strawberry": False}`` in effect.
-
-    A strict decode inside ``_patched_parse_json`` would let a consumer who
-    disabled the package's *upstream bug workarounds* also disable a permanent
-    security policy and silently get UTF-16 / UTF-32 acceptance back. With the
-    policy on the view, the whole matrix
-    - including ``__cause__``, i.e. by which mechanism - is unchanged with the
-    patch pair un-installed: the ``UnicodeDecodeError`` rows are the view's own
-    decode, and the ``json.JSONDecodeError`` rows are upstream's own ``except``,
-    which needs no patch to raise the same ``400``.
-
-    The mounted, over-the-wire version of this row is live in
-    ``examples/fakeshop/test_query/test_transport_api.py``.
-    """
-    view = view_class(schema=SCHEMA)
-
-    with _strawberry_patch_opted_out(), pytest.raises(HTTPException) as excinfo:
         view.parse_json(body)
 
     assert excinfo.value.status_code == 400
@@ -2271,19 +2216,86 @@ def test_the_wire_reason_is_upstreams_own_parse_json_literal() -> None:
     Identity with upstream's message is the contract (spec-046 Decision 9): a body
     the package's strict decode refused and a body upstream's ``json.loads``
     refused must be indistinguishable on the wire, so ``__cause__`` stays the only
-    discriminator. Two named constants reproduce that literal - the view's and the
-    patch module's, which stay separate so neither module has to import the other
-    - and both are checked here against upstream's live raise, so an upstream
-    message change fails loudly instead of quietly splitting one contract into
-    two.
+    discriminator. Checked against upstream's live raise, so an upstream message
+    change fails loudly instead of quietly splitting one contract into two.
     """
-    original_parse_json = patches._original_parse_json
-    assert original_parse_json is not None
     with pytest.raises(HTTPException) as excinfo:
-        original_parse_json(BaseView(), "{not valid json")
+        BaseView().parse_json("{not valid json")
 
     assert excinfo.value.reason == _JSON_PARSE_REASON
-    assert patches._UPSTREAM_JSON_PARSE_REASON == _JSON_PARSE_REASON
+
+
+class _UnformableRequest(AsyncDjangoHTTPRequestAdapter):
+    """An adapter whose form-data read fails the way a broken multipart body does."""
+
+    def __init__(self) -> None:
+        super().__init__(RequestFactory().post("/graphql/", data={"operations": "{}"}))
+
+    @override
+    async def get_form_data(self) -> FormData:
+        raise ValueError("malformed multipart body")
+
+
+async def test_the_multipart_reason_is_upstreams_own_native_literal() -> None:
+    """The malformed-``map`` 400 reason stays byte-identical to Strawberry's own.
+
+    ``_MULTIPART_PARSE_REASON`` reproduces the native multipart-400 reason the async
+    parser raises for a failing ``get_form_data()``, so a malformed ``map`` is
+    indistinguishable on the wire from upstream's own multipart rejections. The
+    live malformed-map rows read the view's output off the wire; only a pin against
+    the native raise catches an upstream rewording.
+    """
+    view = AsyncDjangoGraphQLView(schema=SCHEMA)
+    with pytest.raises(HTTPException) as excinfo:
+        await AsyncGraphQLView.parse_multipart(view, _UnformableRequest())
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.reason == _MULTIPART_PARSE_REASON
+
+
+@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
+def test_the_package_view_hands_a_well_typed_batch_to_upstream(view_class: _ViewClass) -> None:
+    """A JSON array of objects passes, so upstream's batch validation owns enablement and size."""
+    view = view_class(schema=SCHEMA)
+
+    assert view.parse_json('[{"query": "{ x }"}]') == [{"query": "{ x }"}]
+    assert view.parse_json("[]") == []
+
+
+@pytest.mark.parametrize("view_class", _VIEW_CLASSES)
+def test_a_pathologically_nested_body_is_upstreams_parse_400(
+    view_class: _ViewClass,
+    pathological_json_text: str,
+) -> None:
+    """A document nested past the parser's C stack is the parse ``400``, ``RecursionError`` its cause."""
+    with pytest.raises(HTTPException) as excinfo:
+        view_class(schema=SCHEMA).parse_json(pathological_json_text)
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.reason == _JSON_PARSE_REASON
+    assert type(excinfo.value.__cause__) is RecursionError
+
+
+@pytest.mark.parametrize("param", ["variables", "extensions"])
+def test_a_pathologically_nested_get_param_is_upstreams_parse_400(
+    param: str,
+    pathological_json_text: str,
+) -> None:
+    """The GET parse keeps the ``RecursionError`` translation with the envelope check off."""
+    view = DjangoGraphQLView(schema=SCHEMA)
+    with pytest.raises(HTTPException) as excinfo:
+        view.parse_query_params({"query": "{ __typename }", param: pathological_json_text})
+
+    assert excinfo.value.reason == _JSON_PARSE_REASON
+    assert type(excinfo.value.__cause__) is RecursionError
+    assert view._parsing_query_params is False
+
+
+def test_the_get_parse_leaves_an_empty_param_unparsed() -> None:
+    """An empty-string param is left alone by upstream's own falsy skip."""
+    result = DjangoGraphQLView(schema=SCHEMA).parse_query_params({"variables": ""})
+
+    assert result["variables"] == ""
 
 
 @pytest.mark.parametrize("view_class", [DjangoGraphQLView, AsyncDjangoGraphQLView])

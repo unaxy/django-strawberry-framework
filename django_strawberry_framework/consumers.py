@@ -291,10 +291,11 @@ where upstream spends no invalid-message close at all. Any other escape is a
 server-side bug that unwound the loop, and gets ``1011`` / "Internal error"
 instead, with the traceback logged server-side and nothing about it on the wire:
 a server defect reported as a parse failure would blame the client for it.
-Cancellation propagates untouched. ``_strawberry_patches.py``'s ``RecursionError``
-translation does not reach this path - it wraps ``BaseView.parse_json`` on the
-HTTP tier, and the WebSocket decodes through ``view.decode_json`` inside the
-message loop - which is why the containment is here. That ``decode_json`` is the
+Cancellation propagates untouched. The HTTP views' ``RecursionError``
+translation does not reach this path - it lives in
+``views.py::_RequestBodyBoundaryMixin.parse_json``, and the WebSocket decodes
+through ``view.decode_json`` inside the message loop - which is why the
+containment is here. That ``decode_json`` is the
 package consumer's own override: an integer literal past the interpreter's digit
 limit raises a plain ``ValueError`` from ``json.loads``, which would otherwise reach
 the containment as a server-side failure, so the override re-raises it as the
@@ -1397,9 +1398,9 @@ async def _contain_message_loop_failure(
     exception propagates, for the same reason the guard itself catches only
     ``Exception``: a teardown unwinding through this frame must still unwind.
 
-    Why this is not ``_strawberry_patches.py``'s job: that patch translates the
-    ``RecursionError``/``UnicodeDecodeError`` that upstream's ``except
-    json.JSONDecodeError`` misses on the HTTP tier, at ``BaseView.parse_json``.
+    Why this is not the HTTP views' job: ``views.py::_RequestBodyBoundaryMixin.parse_json``
+    translates the ``RecursionError`` that upstream's ``except
+    json.JSONDecodeError`` misses on the HTTP tier.
     The WebSocket never enters ``parse_json`` - upstream's Channels adapter
     iterates ``view.decode_json`` directly - so a pathologically nested frame
     overflows the interpreter's stack INSIDE the ``async for`` over

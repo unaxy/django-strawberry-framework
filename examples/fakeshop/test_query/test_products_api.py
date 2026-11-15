@@ -4396,15 +4396,12 @@ def test_cascade_composes_with_filter_and_order_live() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Malformed request bodies and the strict UTF-8 wire contract. Two owners, both
-# on this route. The framework's upstream patch for Strawberry
-# (`BaseView.parse_json`) is applied at app load and fixes an upstream *defect*:
-# without it an over-nested body escapes upstream's `except` as an unhandled 500.
-# The sync view's own request adapter (`views.py::_RawBodyRequestAdapter`) keeps
-# upstream's `UnicodeDecodeError` out of the body property. The package's own strict UTF-8 wire
-# contract (spec-046 Decision 9) is *not* that patch - it lives on the
-# mounted view, in `views.py::_RequestBodyBoundaryMixin.parse_json`, so it holds
-# whatever `APPLY_UPSTREAM_PATCHES` says. The sync adapter hands the raw bytes to
+# Malformed request bodies and the strict UTF-8 wire contract, all owned by the
+# mounted view's `views.py::_RequestBodyBoundaryMixin.parse_json`. It answers an
+# over-nested body, a scalar body and a non-object batch element with a 400 where
+# upstream escapes as an unhandled 500. The sync view's own request adapter
+# (`views.py::_RawBodyRequestAdapter`) keeps upstream's `UnicodeDecodeError` out of
+# the body property. The sync adapter hands the raw bytes to
 # that view method, which decodes them once with strict UTF-8: the success set is
 # UTF-8, and UTF-8 only. UTF-16 and UTF-32 (BOM or BOM-less) and a leading UTF-8
 # BOM are all a controlled 400 - the BOM'd multi-byte forms fail at that decode,
@@ -4412,10 +4409,9 @@ def test_cascade_composes_with_filter_and_order_live() -> None:
 # by upstream's own `json.loads` (spec-046 Decision 10 chose rejection over
 # stripping). No dedicated rejection branch exists for any of them. Both
 # transports answer identically because both views inherit the one mixin method;
-# the async colour of these rows and the patch-opted-out rows live in
-# `test_transport_api.py`, and the which-mechanism-fired matrix lives in
-# `tests/test_views.py`. The GET tests pin the Strawberry patch's
-# `parse_query_params` shield: the scalar-body guard must never fire on
+# the async colour of these rows lives in `test_transport_api.py`, and the
+# which-mechanism-fired matrix lives in `tests/test_views.py`. The GET tests pin
+# the view's `parse_query_params` shield: the scalar-body guard must never fire on
 # upstream's GET `variables` / `extensions` parses, which have their own precise
 # upstream handling downstream in `parse_http_body`.
 # ---------------------------------------------------------------------------
@@ -4588,8 +4584,8 @@ def test_post_non_object_json_body_returns_400_not_500(body: bytes) -> None:
 
     Strawberry's `parse_http_body` handles a JSON object (a single operation) and
     a JSON array of objects (a batch), but lets a bare scalar fall through to
-    `data.get("query")`, raising a raw `AttributeError` -> 500. The framework's
-    Strawberry patch rejects a parsed body that is neither a JSON object nor a
+    `data.get("query")`, raising a raw `AttributeError` -> 500. The package
+    view rejects a parsed body that is neither a JSON object nor a
     well-typed batch array as a 400.
     """
     response = _post_graphql_raw(body)
@@ -4614,7 +4610,7 @@ def test_post_batch_with_non_object_elements_returns_400_not_500(body: bytes) ->
     `item.get("query")` on every element. With batching enabled that is an
     unhandled `AttributeError` -> 500; with batching off upstream answers the
     same bodies 400 "Batching is not enabled" *before* `.get`, which hides the
-    hole. The Strawberry patch rejects non-object batch elements at
+    hole. The package view rejects non-object batch elements at
     `parse_json` so both configurations stay on a controlled 400. A
     well-typed batch array (every element an object) is deliberately
     excluded - that remains upstream's batch path.
@@ -4633,7 +4629,7 @@ def test_get_query_with_null_param_executes_like_upstream(param: str) -> None:
 
     `null` is valid per upstream's own contract (`variables` / `extensions`
     "must be an object or null, if provided") and upstream executes the
-    request. Pins the patch's `parse_query_params` shield: the scalar-body
+    request. Pins the view's `parse_query_params` shield: the scalar-body
     guard must not intercept the nested GET parses, so this request executes
     with ``200`` and no "request body" message on a bodyless GET.
     """
@@ -4673,7 +4669,7 @@ def test_get_query_with_malformed_variables_param_is_the_upstream_parse_400() ->
     """GET `?variables={not json` -> upstream's own malformed-JSON 400, byte for byte.
 
     The shield adds no envelope guard of its own: the failure is raised inside
-    upstream's original `parse_json`, reached through the patched one, so an
+    upstream's own `parse_json`, reached through the view's, so an
     unparseable GET param answers with the same body an unparseable POST body does.
     A shield that swallowed or reworded the parse failure would change that one wire
     meaning.
@@ -4714,7 +4710,7 @@ def test_get_query_with_scalar_variables_keeps_upstream_message() -> None:
     A scalar param is invalid, but the 400 must be upstream's own
     (`parse_http_body`'s "The GraphQL operation's `variables` must be an
     object or null, if provided."), raised after the shielded
-    `parse_query_params` hands the parsed scalar through - not the patch's
+    `parse_query_params` hands the parsed scalar through - not the view's
     generic request-body message raised before upstream's check can run.
     """
     client = Client()
@@ -4734,8 +4730,7 @@ def test_post_pathologically_nested_body_returns_400_not_500(
 
     Upstream's ``parse_json`` catches only ``json.JSONDecodeError``; a
     pathologically nested document makes it raise ``RecursionError``, which
-    escaped both upstream's ``except`` and the patch's original
-    ``UnicodeDecodeError``-only widening as an unhandled ``500``. The
+    escapes upstream's ``except`` as an unhandled ``500``. The
     translated rejection is byte-identical to upstream's own malformed-JSON
     answer, so one unparseable body has one wire meaning.
     """

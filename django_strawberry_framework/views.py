@@ -88,6 +88,7 @@ from cross_web import DjangoHTTPRequestAdapter, HTTPException
 from django.utils.decorators import classonlymethod
 from django.views.decorators.csrf import csrf_protect
 from strawberry.django.views import AsyncGraphQLView, GraphQLView
+from strawberry.file_uploads.utils import replace_placeholders_with_files
 from strawberry.http.typevars import Context, RootValue
 from typing_extensions import override
 
@@ -104,7 +105,14 @@ from django_strawberry_framework._request_body import body_exceeds_limit
 from django_strawberry_framework.conf import django_setting, max_request_body_bytes_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_awaitable, is_str, read_attr, require
+from django_strawberry_framework.utils._narrowing import (
+    is_awaitable,
+    is_dict,
+    is_list,
+    is_str,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
 from django_strawberry_framework.utils.typing import is_marked_coroutine_function, object_result
 
@@ -113,13 +121,14 @@ if TYPE_CHECKING:
 
     from cross_web import AsyncHTTPRequestAdapter, SyncHTTPRequestAdapter
     from django.http import HttpRequest, HttpResponseBase
+    from strawberry.http.types import QueryParams
 
-    # The two upstream members the boundary mixin extends (``parse_json`` and
-    # ``decode_json`` delegate to Strawberry's ``BaseView``); at run time the mixin's
-    # base stays ``object`` so it adds nothing to either view's MRO. Declared without a
-    # constructor so each view below inherits exactly one.
+    # The three upstream members the boundary mixin extends (each delegates to
+    # Strawberry's ``BaseView``); at run time the mixin's base stays ``object`` so it
+    # adds nothing to either view's MRO. Declared without a constructor so each view
+    # below inherits exactly one.
     class _BoundaryMixinBase:
-        """The two upstream members the boundary mixin extends."""
+        """The three upstream members the boundary mixin extends."""
 
         def parse_json(self, data: str | bytes) -> object:
             """Return upstream's parse of ``data``."""
@@ -128,6 +137,10 @@ if TYPE_CHECKING:
         def decode_json(self, data: str | bytes) -> object:
             """Return upstream's decode of ``data``."""
             return data
+
+        def parse_query_params(self, params: QueryParams) -> dict[str, object]:
+            """Return upstream's parse of the GET query parameters."""
+            return dict(params)
 else:
     _BoundaryMixinBase = object
 
@@ -152,12 +165,36 @@ _CSRF_EXEMPT = "csrf_exempt"
 #: rejected by upstream's ``json.loads`` must be indistinguishable on the wire,
 #: so one byte sequence has one interpretation at every hop and no caller can
 #: attribute a rejection by message (spec-046 Decision 9). ``__cause__`` is the
-#: only discriminator. ``_strawberry_patches.py`` reproduces the same literal for
-#: its own upstream-bug translation, and
+#: only discriminator.
 #: ``tests/test_views.py::test_the_wire_reason_is_upstreams_own_parse_json_literal``
 #: pins this constant against what upstream actually raises, so a message change
 #: on either side fails loudly instead of splitting the contract.
 _JSON_PARSE_REASON = "Unable to parse request body as JSON"
+
+#: The wire reason for a parsed body that is not a GraphQL-over-HTTP envelope: a
+#: JSON scalar, or an array holding a non-object.
+_ENVELOPE_REASON = (
+    "The GraphQL request body must be a JSON object "
+    "(or an array of operations for a batch request)."
+)
+
+#: Strawberry's own reason for a multipart body its parser cannot read (the async
+#: view raises it when the form data cannot be read), reused for a malformed
+#: ``operations`` / ``map`` document so the two are indistinguishable on the wire.
+_MULTIPART_PARSE_REASON = "Unable to parse the multipart body"
+
+#: What ``replace_placeholders_with_files`` raises on a malformed ``operations`` /
+#: ``map`` pair: ``.items()`` on a non-mapping, ``.split(".")`` on a non-string path,
+#: ``int(key)`` on a non-numeric list index, an out-of-range list index, and its
+#: ``copy.deepcopy`` of a document nested past the recursion limit. Upstream
+#: catches only ``KeyError`` around that call.
+_MULTIPART_TRAVERSAL_ERRORS = (
+    AttributeError,
+    IndexError,
+    RecursionError,
+    TypeError,
+    ValueError,
+)
 
 #: Django's own spelling for a multipart request, as ``HttpRequest.content_type``
 #: reports it (the bare media type, with ``boundary=...`` split off into
@@ -388,10 +425,8 @@ class _RawBodyRequestAdapter(DjangoHTTPRequestAdapter):
 
     This class is the package view's own body source, scoped to the package
     view: a consumer who mounts *Strawberry's own* view keeps upstream's adapter,
-    which answers ``500`` for a BOM'd UTF-16 / UTF-32 body. The wire contract
-    holds on a package mount in every state of ``APPLY_UPSTREAM_PATCHES``, because
-    nothing here is gated by it: permanent package policy must not be reachable
-    only through a switchable workaround.
+    which answers ``500`` for a BOM'd UTF-16 / UTF-32 body. Nothing here is gated
+    by ``APPLY_UPSTREAM_PATCHES``.
 
     Subclassing rather than copying keeps every other adapter member upstream's.
 
@@ -499,6 +534,28 @@ def _boundary_view(upstream_view: Callable[..., object]) -> Callable[..., object
     return view
 
 
+def _is_operation_batch(parsed: object) -> bool:
+    """Whether ``parsed`` is a JSON array whose every element is an object."""
+    return is_list(parsed) and all(is_dict(item) for item in parsed)
+
+
+def _raised_inside_the_upload_utility(exc: BaseException) -> bool:
+    """Whether ``exc``'s traceback passes through ``replace_placeholders_with_files``.
+
+    ``parse_multipart`` covers more than that traversal - the request adapter's
+    form handling, the view's ``parse_json`` - and a server-side bug in either
+    can share the traversal's exception types. Scoping by the utility's own frame
+    keeps such a bug the ``500`` it is instead of a client ``400``.
+    """
+    code = replace_placeholders_with_files.__code__
+    traceback = exc.__traceback__
+    while traceback is not None:
+        if traceback.tb_frame.f_code is code:
+            return True
+        traceback = traceback.tb_next
+    return False
+
+
 class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
     """The package's raw-request-body boundary, shared by both package views.
 
@@ -518,12 +575,17 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
        ``json.JSONDecodeError`` - an integer literal past the interpreter's
        digit limit - through upstream's own ``400``.
 
+    The same ``parse_json`` also answers the parse failures upstream leaves as a
+    ``500``: a document nested past the parser's C stack, and a body that parses
+    but is not a GraphQL-over-HTTP envelope (see ``parse_json``); the two
+    ``parse_multipart`` overrides answer a malformed multipart ``map`` with
+    Strawberry's own :data:`_MULTIPART_PARSE_REASON` ``400``, scoped by
+    :func:`_raised_inside_the_upload_utility`.
+
     They belong together because they are the same boundary read twice: the cap
     decides which bytes reach the parse, and the parse decides how those exact
-    bytes are decoded. Both are permanent package policy that a consumer opts
-    into by mounting a package view, and neither depends on an upstream defect
-    or on ``APPLY_UPSTREAM_PATCHES`` (see ``parse_json`` for why that ownership
-    is load-bearing rather than tidy).
+    bytes are decoded. Both are package policy that a consumer opts into by
+    mounting a package view, and none of it is gated by ``APPLY_UPSTREAM_PATCHES``.
 
     Sits first in each view's bases so this mixin's attribute and its methods take
     precedence over any same-named attribute or method upstream may later add:
@@ -585,9 +647,8 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
     returns early, and a stray ``multipart/form-data`` ``Content-Type`` on a GET
     is not a form Django decodes either, so the encoding guard returns too (see
     :func:`_is_multipart_form_post`). The ``variables`` / ``extensions``
-    query-param size is a separate concern, and
-    ``_strawberry_patches.py::_patched_parse_query_params`` already shields
-    those parses.
+    query-param size is a separate concern, and :meth:`parse_query_params` keeps
+    the body-envelope check off those parses.
 
     **The honest boundary** (spec-046 Decisions 7 and 8). What this guarantees
     is that the application never parses, allocates a document from, or executes
@@ -628,6 +689,11 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
     #: rather than on each view so Django's ``as_view`` keyword guard admits it
     #: on both (``hasattr``, so an inherited attribute satisfies the guard).
     max_request_body_bytes: int | None = None
+
+    #: True while :meth:`parse_query_params` runs upstream's GET parse, so
+    #: :meth:`parse_json` leaves the body-envelope check to upstream's per-param
+    #: handling there. An instance attribute: Django builds one view per request.
+    _parsing_query_params: bool = False
 
     def _enforce_request_boundary(self, request: HttpRequest) -> None:
         """Run the whole pre-CSRF, pre-parse boundary, in the one order that is safe.
@@ -833,28 +899,26 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
         ``request.encoding``, not a body, and upstream's ``json.loads`` is their
         only parser here.
 
-        **Why the policy lives here and not in the patch module.** In
-        ``_strawberry_patches.py::_patched_parse_json`` a permanent package
-        security contract would share the lifecycle - and the
-        ``APPLY_UPSTREAM_PATCHES`` kill switch - of temporary workarounds for
-        upstream bugs, so a consumer disabling those workarounds (or a change
-        deleting them once upstream fixes them) would silently restore
-        multi-encoding request bodies. Ownership follows lifecycle: the patch
-        module translates the ``UnicodeDecodeError`` upstream's own
-        ``except json.JSONDecodeError`` misses, which is a bug fix and stays
-        opt-out-able, while the narrowing of the success set is enforced here, for
-        every consumer who mounts a package view, whatever that switch says. A
-        consumer who deliberately mounts Strawberry's own view keeps Strawberry's
-        own semantics - that is their choice to make, and no unrelated setting
-        makes it for them.
+        A consumer who deliberately mounts Strawberry's own view keeps Strawberry's
+        own semantics. The decode needs a second owner to be true on the sync
+        transport: upstream's sync request adapter decodes inside a *property*
+        before this method is entered, so the view supplies its own body source
+        (:class:`_RawBodyRequestAdapter`) and ``bytes`` arrive here on both
+        transports - see that class for the ``500`` upstream's eager decode
+        answers without it.
 
-        That claim needs a second owner to be true on the sync transport, and it
-        has one: a decode the bytes never reach is not an enforcement, and
-        upstream's sync request adapter decodes inside a *property* before this
-        method is entered. The view supplies its own body source instead
-        (:class:`_RawBodyRequestAdapter`), so ``bytes`` arrive here on both
-        transports in every patch state - see that class for the ``500``
-        upstream's eager decode answers without it.
+        Two parse outcomes upstream leaves as a ``500`` are answered here too. A
+        document nested past the parser's C stack raises ``RecursionError``, which
+        upstream's ``except json.JSONDecodeError`` misses; it gets the same
+        :data:`_JSON_PARSE_REASON` ``400``, ``__cause__`` the only discriminator. A
+        body that parses to a JSON scalar, or to an array holding a non-object,
+        reaches ``data.get("query")`` / ``item.get("query")`` in upstream's
+        ``parse_http_body`` as an ``AttributeError``; it is refused with
+        :data:`_ENVELOPE_REASON`. A well-typed array (``[]`` included) passes, so
+        upstream's batch validation keeps enablement and size limits. The envelope
+        check applies to the body and the multipart ``operations`` / ``map``
+        fields, and not to the GET ``variables`` / ``extensions`` parses
+        (:meth:`parse_query_params`), whose per-param handling upstream owns.
 
         Both package views inherit this one method, so sync and async cannot
         diverge; ``super()`` keeps delegating to upstream's ``parse_json`` rather
@@ -866,7 +930,27 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
                 data = data.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise HTTPException(400, _JSON_PARSE_REASON) from exc
-        return object_result(super().parse_json, data)
+        try:
+            parsed = object_result(super().parse_json, data)
+        except RecursionError as exc:
+            raise HTTPException(400, _JSON_PARSE_REASON) from exc
+        if self._parsing_query_params or is_dict(parsed) or _is_operation_batch(parsed):
+            return parsed
+        raise HTTPException(400, _ENVELOPE_REASON)
+
+    @override
+    def parse_query_params(self, params: QueryParams) -> dict[str, object]:
+        """Run upstream's GET parse with :meth:`parse_json`'s envelope check off.
+
+        Upstream parses ``variables`` / ``extensions`` through ``self.parse_json``
+        and handles their shape downstream: ``null`` executes, a scalar gets its
+        own per-param ``400``. The ``RecursionError`` translation still applies.
+        """
+        self._parsing_query_params = True
+        try:
+            return super().parse_query_params(params)
+        finally:
+            self._parsing_query_params = False
 
     @override
     def decode_json(self, data: str | bytes) -> object:
@@ -879,7 +963,7 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
         conversion limit raises a plain ``ValueError`` there instead;
         ``_json_decode.py::decode_json`` re-raises exactly that refusal as the
         ``JSONDecodeError`` upstream's ``parse_json`` turns into its own ``400`` and
-        literal, on both views and in every ``APPLY_UPSTREAM_PATCHES`` state. See that
+        literal, on both views. See that
         module for the type and provenance scope that keeps a consumer override's own
         ``ValueError`` a ``500``.
         """
@@ -1134,6 +1218,11 @@ class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValu
     def parse_multipart(self, request: SyncHTTPRequestAdapter) -> dict[str, str]:
         """Refuse lossily-decoded control documents, then delegate upstream.
 
+        A malformed ``map`` (an array, a non-string path, a bad list index) or an
+        ``operations`` document nested past the recursion limit fails inside
+        upstream's ``replace_placeholders_with_files``, which upstream guards for
+        ``KeyError`` alone; that failure is Strawberry's own multipart ``400``.
+
         The narrowest possible seam for the check: it runs only when Strawberry is
         actually about to parse ``operations`` / ``map``, reads the form Django has
         already cached, and hands the same adapter to upstream so upstream stays
@@ -1143,7 +1232,12 @@ class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValu
         ``_RequestBodyBoundaryMixin``.
         """
         self._reject_lossy_multipart_control_fields(request.post_data)
-        return super().parse_multipart(request)
+        try:
+            return super().parse_multipart(request)
+        except _MULTIPART_TRAVERSAL_ERRORS as exc:
+            if not _raised_inside_the_upload_utility(exc):
+                raise
+            raise HTTPException(400, _MULTIPART_PARSE_REASON) from exc
 
 
 class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context, RootValue]):
@@ -1230,4 +1324,9 @@ class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context
         """
         form_data = await request.get_form_data()
         self._reject_lossy_multipart_control_fields(form_data.form)
-        return await super().parse_multipart(request)
+        try:
+            return await super().parse_multipart(request)
+        except _MULTIPART_TRAVERSAL_ERRORS as exc:
+            if not _raised_inside_the_upload_utility(exc):
+                raise
+            raise HTTPException(400, _MULTIPART_PARSE_REASON) from exc

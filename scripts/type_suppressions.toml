@@ -4,12 +4,6 @@
 
 "django_strawberry_framework/__init__.py::__getattr__" = { reportAny = 1, reportExplicitAny = 1 }
 "django_strawberry_framework/_request_body.py::_measured_by_bounded_read" = { reportAttributeAccessIssue = 1 }
-"django_strawberry_framework/_strawberry_patches.py::_original_async_parse_multipart" = { cast = 1 }
-"django_strawberry_framework/_strawberry_patches.py::_original_parse_json" = { cast = 1 }
-"django_strawberry_framework/_strawberry_patches.py::_original_parse_query_params" = { cast = 1 }
-"django_strawberry_framework/_strawberry_patches.py::_original_sync_parse_multipart" = { cast = 1 }
-"django_strawberry_framework/_strawberry_patches.py::_patched_list_connection_resolve_connection" = { cast = 2 }
-"django_strawberry_framework/_strawberry_patches.py::_patched_list_connection_resolve_connection.resolver" = { cast = 1 }
 "django_strawberry_framework/auth/mutations.py::_authenticated_actor_or_none" = { cast = 1 }
 "django_strawberry_framework/auth/mutations.py::_channels_http_login_establish" = { reportArgumentType = 1 }
 "django_strawberry_framework/auth/mutations.py::_channels_logout" = { reportArgumentType = 1 }

@@ -7146,7 +7146,7 @@ async def test_a_stack_overflowing_document_is_refused_and_the_connection_ends(
     interpreter's C stack, so ``json.loads`` raises ``RecursionError`` from
     INSIDE the ``async for`` over ``iter_json`` - upstream's loop has no per-
     message seam there, and the HTTP tier's ``parse_json`` translation
-    (``_strawberry_patches.py``) is never entered over WebSocket. The contained
+    (``views.py::_RequestBodyBoundaryMixin.parse_json``) is never entered over WebSocket. The contained
     close arrives on both protocols, and the teardown completes.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP

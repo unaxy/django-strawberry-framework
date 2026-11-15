@@ -69,16 +69,10 @@ APPLY_UPSTREAM_PATCHES_KEY = "APPLY_UPSTREAM_PATCHES"
 
 # Canonical ``APPLY_UPSTREAM_PATCHES`` mapping keys - one name per patch
 # module, matching the package's one-module-per-dependency organizing rule.
-# ``strawberry`` owns the malformed-body ``400`` hardening of both transports'
-# body parse. A package view keeps its strict UTF-8 decode in every state of
-# this setting - it owns both that decode and its own body source
-# (``views.py::_RawBodyRequestAdapter``) - but it rides the gate for the
-# body-envelope guard: with ``strawberry`` off, a scalar or non-object-batch
-# body is an unhandled ``500`` on a package mount too. ``strawberry`` also owns
-# the Relay connection-page and async row-elision workarounds. Disabling it at
-# startup restores upstream's empty renamed pages on package offset connections
-# (the keyset page decides itself) and unnecessary async offset row fetches for
-# count-only/typename-only requests.
+# ``strawberry`` owns the Relay connection-page rebind. Disabling it at startup
+# restores upstream's empty renamed pages on package offset connections (the
+# keyset page decides itself). The package views' request-body refusals are not
+# gated by this setting.
 UPSTREAM_PATCH_DEPENDENCIES = frozenset(
     {"strawberry"},
 )
@@ -423,13 +417,10 @@ def upstream_patches_enabled(dependency: str) -> bool:
     - ``Mapping[str, bool]`` keyed by ``UPSTREAM_PATCH_DEPENDENCIES``
       names - per-dependency opt-out: ``{"strawberry": False}`` disables
       the Strawberry patches. Missing names default to ``True`` (the
-      opt-out stance holds per dependency). ``strawberry`` owns the
-      malformed-body hardening - see the ``UPSTREAM_PATCH_DEPENDENCIES``
-      comment. It also owns the Relay
-      connection-page and async row-elision fixes on both native and package
-      connections. With it disabled at startup, renamed ``edges`` / ``pageInfo``
-      can return empty offset pages (the keyset page decides itself), and async
-      offset count-only or typename-only selections may fetch node rows. Disabling an
+      opt-out stance holds per dependency). ``strawberry`` owns the Relay
+      connection-page rebind - see the ``UPSTREAM_PATCH_DEPENDENCIES``
+      comment. With it disabled at startup, renamed ``edges`` / ``pageInfo``
+      can return empty offset pages (the keyset page decides itself). Disabling an
       applier does not uninstall patches already installed in the running process.
 
     Any other shape raises ``ConfigurationError`` (the

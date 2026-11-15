@@ -369,13 +369,13 @@ gated by its own `APPLY_UPSTREAM_PATCHES` dependency key.
 
 *Why:* The patched callable, upstream release cadence, retirement signal, and consumer opt-out
 of such a workaround all belong to graphql-core. Strawberry happens to invoke that executor, but
-its HTTP-view patch has a different owner and a different retirement condition. One module and
+its connection-page patch has a different owner and a different retirement condition. One module and
 gate per patched dependency keeps disabling or retiring either workaround from silently changing
 the other.
 
 *Rejected:* Keeping a graphql-core executor wrapper in `_strawberry_patches.py` because
 graphql-core is a transitive Strawberry dependency. That makes dependency topology decide
-lifecycle ownership, couples unrelated escape hatches, and lets an HTTP-view opt-out restore an
+lifecycle ownership, couples unrelated escape hatches, and lets a Relay opt-out restore an
 executor bug.
 
 *Why upstream completion owns a queryset a resolver returns:* the completion order is

@@ -199,7 +199,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── _logger.py                    # The package logger, in a leaf module so the package ``__init__`` imports it like any name.
 ├── _multipart.py                 # GraphQL multipart request wire vocabulary, owned once for both transports.
 ├── _request_body.py              # The one place the package touches Django's private request-body internals.
-├── _strawberry_patches.py        # Defensive patches for upstream Strawberry bugs, applied at app load.
+├── _strawberry_patches.py        # Rebind Strawberry's Relay connection-page check, applied at app load.
 ├── apps.py                       # Django ``AppConfig`` - registers the package and applies its Strawberry patches at app load.
 ├── conf.py                       # Package settings, read from the host project's ``DJANGO_STRAWBERRY_FRAMEWORK`` dict.
 ├── connection.py                 # ``DjangoConnection[T]`` + ``DjangoConnectionField`` - the Relay cursor-pagination surface.
@@ -339,7 +339,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── _logger.py                    # The package logger, in a leaf module so the package ``__init__`` imports it like any name.
 ├── _multipart.py                 # GraphQL multipart request wire vocabulary, owned once for both transports.
 ├── _request_body.py              # The one place the package touches Django's private request-body internals.
-├── _strawberry_patches.py        # Defensive patches for upstream Strawberry bugs, applied at app load.
+├── _strawberry_patches.py        # Rebind Strawberry's Relay connection-page check, applied at app load.
 ├── apps.py                       # Django ``AppConfig`` - registers the package and applies its Strawberry patches at app load.
 ├── conf.py                       # Package settings, read from the host project's ``DJANGO_STRAWBERRY_FRAMEWORK`` dict.
 ├── connection.py                 # ``DjangoConnection[T]`` + ``DjangoConnectionField`` - the Relay cursor-pagination surface.
@@ -572,7 +572,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_sets_mixins.py           # Pins for set-family mixins shared by ``FilterSet`` and ``OrderSet``.
 ├── test_shared_checkout_guard.py # Tests for ``scripts/shared_checkout_guard.py``: the Claude edit hook and the pytest guard.
 ├── test_sqlite_rows.py           # Script tests for ``scripts/_sqlite_rows.py``, the row-level merge ``work.py land`` runs.
-├── test_strawberry_patches.py    # Tests for the Strawberry request-body and Relay patches.
+├── test_strawberry_patches.py    # Tests for the Strawberry connection-page rebind.
 ├── test_typing_delta.py          # Script tests for the typing-change report in ``scripts/typing_delta.py``.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
@@ -971,7 +971,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_sets_mixins.py           # Pins for set-family mixins shared by ``FilterSet`` and ``OrderSet``.
 ├── test_shared_checkout_guard.py # Tests for ``scripts/shared_checkout_guard.py``: the Claude edit hook and the pytest guard.
 ├── test_sqlite_rows.py           # Script tests for ``scripts/_sqlite_rows.py``, the row-level merge ``work.py land`` runs.
-├── test_strawberry_patches.py    # Tests for the Strawberry request-body and Relay patches.
+├── test_strawberry_patches.py    # Tests for the Strawberry connection-page rebind.
 ├── test_typing_delta.py          # Script tests for the typing-change report in ``scripts/typing_delta.py``.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.

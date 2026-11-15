@@ -19,7 +19,7 @@ scanner, wherever the literal sits in the document. Neither upstream caller
 catches it: left alone, a view would answer an unhandled ``500`` and the package
 WebSocket consumer would close ``1011`` and log a server-side failure. (A document
 nested past the recursion limit raises ``RecursionError`` instead; that one is
-answered by ``_strawberry_patches.py`` on HTTP and by the consumer's loop
+answered by ``views.py::_RequestBodyBoundaryMixin.parse_json`` on HTTP and by the consumer's loop
 containment on WebSocket, not here.)
 
 :func:`decode_json` is the package's override body for that seam, shared by
@@ -39,11 +39,10 @@ runs through upstream's ``BaseView.decode_json`` frame, the ``json.loads`` call
 that frame makes. A ``ValueError`` raised by a consumer's own ``decode_json``
 override, or by any other code the delegate reaches, keeps its ``500``.
 
-Permanent package policy, not an upstream-bug workaround riding the
-``APPLY_UPSTREAM_PATCHES`` gate: the package's resource policy names this limit as
-what bounds an integer a request carries and states that such a request is refused
-as malformed input (spec-047 Decision 13), so the refusal must hold on every
-package mount whatever that setting says.
+Package policy, not gated by ``APPLY_UPSTREAM_PATCHES``: the package's resource
+policy names this limit as what bounds an integer a request carries and states that
+such a request is refused as malformed input (spec-047 Decision 13), so the refusal
+holds on every package mount.
 """
 
 from __future__ import annotations

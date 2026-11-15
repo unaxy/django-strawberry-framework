@@ -51,16 +51,9 @@ those rows because this module already owns the ``/async-graphql/`` mount and th
 An integer literal one digit past CPython's integer string conversion limit is
 pinned in every position a request's JSON can carry it - body members, a batch
 element, a bare scalar body, GET ``variables`` / ``extensions``, multipart
-``operations`` / ``map`` - on both views and with the Strawberry patch opted out:
-each is upstream's own ``400`` and literal, through the views' ``decode_json``,
-against a control one digit shorter that executes.
-
-The final section pins the strict UTF-8 wire contract as package policy on the
-*view*, not as one of the upstream-bug patches, so it is asserted on both
-transports with ``APPLY_UPSTREAM_PATCHES = {"strawberry": False}`` in effect -
-and the workaround the switch really does own is asserted to be genuinely off in
-the same state, so the ownership split cannot be satisfied by moving everything
-somewhere ungated.
+``operations`` / ``map`` - on both views: each is upstream's own ``400`` and
+literal, through the views' ``decode_json``, against a control one digit shorter
+that executes.
 
 Three of those rows need a body shape neither ``Client`` nor ``AsyncClient`` can
 present, so they drive Django's own ``ASGIHandler`` in-process through
@@ -78,10 +71,9 @@ go through the shared helpers.
 """
 
 import asyncio
-import contextlib
 import functools
 import json
-from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, overload
 
 import pytest
@@ -111,11 +103,9 @@ from graphql_client import (
 )
 from strawberry.extensions import AddValidationRules
 from strawberry.file_uploads import Upload
-from strawberry.http.base import BaseView
 from typing_extensions import TypedDict, Unpack, override
 
 from django_strawberry_framework import DjangoSchema, strawberry_config
-from django_strawberry_framework import _strawberry_patches as strawberry_patches
 from django_strawberry_framework._boundary_ordering import _BOUNDARY_MARKER
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.middleware.request_body import _package_view_instance
@@ -388,11 +378,10 @@ class _ParseSpyView(DjangoGraphQLView):
     Subclassing rather than monkeypatching keeps the recorder scoped to one
     mount, so the surrounding suite's own posts never pollute the witness. The
     override delegates through ``super()``, so the whole shipped chain still runs
-    behind it - the package's strict UTF-8 wire contract
-    (``views.py::_RequestBodyBoundaryMixin.parse_json``) and then the
-    malformed-body hardening (``_strawberry_patches.py::_patched_parse_json``) -
-    and the under-cap control behaves exactly like the real mount. Recording
-    before the delegation is deliberate: the witness has to be the bytes as they
+    behind it - the package's strict UTF-8 wire contract and its malformed-body
+    refusals (``views.py::_RequestBodyBoundaryMixin.parse_json``) - and the
+    under-cap control behaves exactly like the real mount. Recording before the
+    delegation is deliberate: the witness has to be the bytes as they
     arrived, so a ``413`` that leaves the list empty proves the cap ran ahead of
     the entire parse chain rather than merely ahead of the JSON decode.
     """
@@ -2139,120 +2128,13 @@ async def test_the_async_package_view_enforces_the_same_body_cap() -> None:
     assert under.json()["data"] == {"__typename": "Query"}
 
 
-# ===========================================================================
-# The strict UTF-8 wire contract is the package VIEW's policy,
-# so it does not share the ``APPLY_UPSTREAM_PATCHES`` lifecycle. These rows
-# mount the package view with the Strawberry patch opted out and assert the
-# policy still holds - and, separately, that the upstream-bug workaround the
-# switch really does own is genuinely off in the same state.
-# ===========================================================================
-
-#: The three non-UTF-8 shapes, as real request bodies. Two fail at the
-#: view's strict decode (a BOM'd multi-byte form's leading byte is not valid
-#: UTF-8) and the third decodes cleanly and is refused by ``json.loads`` for its
-#: leading U+FEFF - so the trio covers both mechanisms, which matters because
-#: only one of them is the package's own code.
-_NON_UTF8_BODIES = (
-    pytest.param(json.dumps({"query": _TYPENAME}).encode("utf-16"), id="utf-16-with-bom"),
-    pytest.param(json.dumps({"query": _TYPENAME}).encode("utf-32"), id="utf-32-with-bom"),
-    pytest.param(b"\xef\xbb\xbf" + json.dumps({"query": _TYPENAME}).encode(), id="utf-8-bom"),
-)
-
-
-@contextlib.contextmanager
-def _strawberry_patch_opted_out() -> Generator[None, None, None]:
-    """Run the block in the state ``APPLY_UPSTREAM_PATCHES = {"strawberry": False}`` produces.
-
-    The patch installs from ``AppConfig.ready()``, long before any test runs, so
-    setting the switch alone cannot un-install it - a row that only overrode the
-    setting would prove nothing. The honest simulation restores upstream's own two
-    methods *and* sets the switch, so a stray ``apply()`` during the
-    block stays a no-op. The two multipart delegates stay installed: no row in
-    this block posts multipart, so they are unreachable here, and what the rows
-    observe is exactly what an opted-out consumer observes on the JSON-body path.
-    """
-    override = override_settings(
-        ROOT_URLCONF=__name__,
-        DJANGO_STRAWBERRY_FRAMEWORK={"APPLY_UPSTREAM_PATCHES": {"strawberry": False}},
-    )
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(BaseView, "parse_json", strawberry_patches._original_parse_json)
-        patch.setattr(
-            BaseView,
-            "parse_query_params",
-            strawberry_patches._original_parse_query_params,
-        )
-        assert strawberry_patches._patch_is_installed() is False
-        with override:
-            yield
-
-
-@pytest.mark.parametrize("body", _NON_UTF8_BODIES)
-@pytest.mark.django_db
-def test_the_utf8_wire_contract_survives_the_upstream_patch_kill_switch(body: bytes) -> None:
-    """Over the wire, a non-UTF-8 body still 400s with the patch opted out.
-
-    A strict decode inside ``_strawberry_patches.py::_patched_parse_json`` would
-    let a consumer who disabled the package's workarounds for *upstream bugs* also
-    disable a permanent package security policy and silently get UTF-16 / UTF-32
-    acceptance. A permanent security contract must not share a temporary patch's
-    lifecycle, so the decode lives on the mounted view.
-
-    The valid-UTF-8 control in the same opted-out state is what makes the
-    rejection attributable: it shows the mount still serves real GraphQL while the
-    patch is off, so the 400 is the wire contract firing rather than a broken
-    endpoint.
-    """
-    seed_data(1)
-
-    with _strawberry_patch_opted_out():
-        client = Client()
-        rejected = _post_bytes(client, body)
-        control = _post_bytes(client, json.dumps({"query": _TYPENAME}))
-
-    assert rejected.status_code == 400
-    _assert_no_graphql_envelope(rejected)
-
-    assert control.status_code == 200
-    assert control.json()["data"] == {"__typename": "Query"}
-
-
-@pytest.mark.parametrize("body", _NON_UTF8_BODIES)
-async def test_the_async_view_keeps_the_utf8_wire_contract_with_the_patch_opted_out(
-    body: bytes,
-) -> None:
-    """The async colour: one shared mixin method, so neither transport can drift.
-
-    Worth its own row for the same reason the patch-on async row is: only the
-    **sync** view swaps upstream's request adapter, so on this transport the
-    bytes reach ``parse_json`` raw with or without any patch. If the wire
-    contract were still gated, this is the transport where a UTF-16 body would
-    silently *succeed* - ``json.loads`` auto-detects raw bytes - rather than
-    merely 500. DB-free like its sibling async rows: the subject is the
-    transport.
-    """
-    with _strawberry_patch_opted_out():
-        client = AsyncClient()
-        rejected = await _post_bytes(client, body, path="/async-graphql/")
-        control = await _post_bytes(
-            client,
-            json.dumps({"query": _TYPENAME}),
-            path="/async-graphql/",
-        )
-
-    assert rejected.status_code == 400
-
-    assert control.status_code == 200
-    assert control.json()["data"] == {"__typename": "Query"}
-
-
 # ---------------------------------------------------------------------------
 # An integer literal past CPython's integer string conversion limit. ``json.loads``
 # refuses it with a plain ``ValueError`` rather than a ``json.JSONDecodeError``,
 # which upstream's ``parse_json`` does not catch; the package views' ``decode_json``
 # (``_json_decode.py::decode_json``) re-raises exactly that refusal as the
 # ``JSONDecodeError`` upstream answers, so every JSON document a request carries
-# gets upstream's own ``400`` and literal, in every patch state.
+# gets upstream's own ``400`` and literal.
 # ---------------------------------------------------------------------------
 
 #: One digit past the interpreter's default limit (``sys.get_int_max_str_digits``,
@@ -2393,71 +2275,6 @@ async def test_an_over_limit_integer_in_a_multipart_control_document_on_the_asyn
         )
 
     _assert_upstreams_parse_refusal(response)
-
-
-def test_the_integer_limit_refusal_survives_the_upstream_patch_kill_switch() -> None:
-    """Patch opted out: the refusal is view-owned, so it holds whatever the switch says.
-
-    The package's resource policy names this limit as what bounds an integer a request
-    carries and states the request is refused as malformed input (spec-047 Decision 13),
-    so the translation lives on the views rather than in the opt-out patch module.
-    """
-    with _strawberry_patch_opted_out():
-        client = Client(raise_request_exception=False)
-        body = _post_bytes(
-            client,
-            _with_integer(
-                '{"query": "{ __typename }", "variables": {"x": {n}}}',
-                _OVER_LIMIT_INTEGER,
-            ),
-        )
-        get = client.get("/graphql/", {"query": _TYPENAME, "variables": _OVER_LIMIT_INTEGER})
-
-    _assert_upstreams_parse_refusal(body)
-    _assert_upstreams_parse_refusal(get)
-
-
-async def test_the_async_integer_limit_refusal_survives_the_upstream_patch_kill_switch() -> None:
-    """The async colour of the kill-switch row."""
-    with _strawberry_patch_opted_out():
-        response = await _post_bytes(
-            AsyncClient(raise_request_exception=False),
-            _OVER_LIMIT_INTEGER,
-            path="/async-graphql/",
-        )
-
-    _assert_upstreams_parse_refusal(response)
-
-
-@pytest.mark.django_db
-def test_the_upstream_bug_workaround_still_respects_its_own_opt_out() -> None:
-    """The other half of the ownership split: what the switch DOES still turn off.
-
-    The two rows above would be satisfiable by a bad fix - moving everything
-    somewhere ungated - so this row is what stops that. A JSON scalar body is
-    upstream defect #3398: ``parse_http_body`` falls through to
-    ``data.get("query")`` and raises a raw ``AttributeError``. The package's
-    envelope guard converts it to a ``400``, and that guard is a workaround for a
-    specific upstream version's bug, so a consumer pinning a fixed or reshaped
-    Strawberry must be able to switch it off - and here it demonstrably is off,
-    with the same body 400ing on the same mount once the patch is back.
-
-    ``raise_request_exception=False`` is what lets the unhandled case be observed
-    as the 500 a real deployment would return, instead of being re-raised into the
-    test.
-    """
-    seed_data(1)
-    scalar = b"42"
-
-    with _strawberry_patch_opted_out():
-        unguarded = _post_bytes(Client(raise_request_exception=False), scalar)
-
-    guarded = _post_bytes(Client(), scalar)
-
-    assert unguarded.status_code == 500
-
-    assert guarded.status_code == 400
-    assert b"request body" in guarded.content
 
 
 # ---------------------------------------------------------------------------
@@ -2730,7 +2547,7 @@ async def test_post_pathologically_nested_body_returns_400_on_the_async_view_too
 ) -> None:
     """Async transport: a body nested past the parser's C stack -> controlled 400.
 
-    Both views inherit the one patched ``BaseView.parse_json``, but the wire
+    Both views inherit the one ``_RequestBodyBoundaryMixin.parse_json``, but the wire
     answer deserves its own row per transport: the ``RecursionError`` is
     translated to a ``400`` here too, never an unhandled ``500`` from
     ``run`` on the event loop.

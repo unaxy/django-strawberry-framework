@@ -74,6 +74,7 @@ from strawberry.relay.types import NodeIterableType
 from strawberry.types import Info, get_object_definition
 from strawberry.types.field import StrawberryField
 from strawberry.utils.await_maybe import AwaitableOrValue
+from strawberry.utils.inspect import in_async_context
 from typing_extensions import override
 
 from .exceptions import ConfigurationError
@@ -981,6 +982,8 @@ def _consume_fallback(
     page size is the same ``PaginationArgumentError``, a negative or
     non-canonical cursor is never a slice position, and a page reaching past the
     largest index is the same past-the-end page the window serves.
+    A page selecting neither ``edges`` nor ``pageInfo`` (``_page_requested``) is
+    served empty before ``ListConnection`` slices, on both transports.
     ``ListConnection`` is then called with no ``try`` around it: once the
     arguments are valid, whatever it raises comes from the consumer's
     source or from row hydration, and travels as that exception for the error
@@ -1021,6 +1024,19 @@ def _consume_fallback(
         prefix=_offset_cursor_prefix(cls),
         info=info,
     )
+    if not _page_requested(info):
+        # ``ListConnection``'s own empty page, served before it slices: its async branch never
+        # asks the page check, so it would fetch rows a count-only or typename-only page skips.
+        empty = _empty_page_connection(
+            cls,
+            offset=0,
+            has_next_page=False,
+            want_count=False,
+            total=0,
+        )
+        if isinstance(nodes, AsyncIterable) and in_async_context():
+            return _attach_count_async(_ready(empty), nodes, want_count=want_count)
+        return _attach_count_sync(empty, nodes, want_count=want_count)
     # The cast states the source as ``ListConnection`` takes it: it slices a ``__getitem__``-only
     # source its iterable annotation leaves out. ``_pipeline_sync`` / ``_pipeline_async`` refuse
     # a non-iterable first (``_guard_non_queryset_iterable``); a direct call passes it through.
@@ -1370,8 +1386,9 @@ def _page_requested(info: Info[object, object]) -> bool:
     the wire names ``edges`` / ``pageInfo`` and answers ``False`` when a
     ``NameConverter`` respells both (``page_info`` under
     ``auto_camel_case=False``), which serves an empty page with
-    ``hasNextPage: false``; it also matches a fragment spread named ``edges``. Both
-    the keyset page and the patched offset check
+    ``hasNextPage: false``; it also matches a fragment spread named ``edges``. The
+    keyset page, the offset page's early empty page in ``_consume_fallback`` and
+    the rebound offset check
     (``_strawberry_patches.py::_patched_should_resolve_list_connection_edges``)
     therefore ask this alone.
     """
@@ -1696,6 +1713,11 @@ def _attach_count_sync(conn: _ConnectionT, nodes: object, *, want_count: bool) -
         # iterator - shapes the consumer-resolver contract admits) pages unchanged.
         return conn
     return _set_total_count(conn, want_count=True, value=counted.count)
+
+
+async def _ready(conn: _ConnectionT) -> _ConnectionT:
+    """Return an already-built connection from a coroutine, for ``_attach_count_async``."""
+    return conn
 
 
 async def _attach_count_async(
