@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 240 to do.
+Progress: 0 done, 241 to do.
 
 ## From dry-0_0_15_3
 
@@ -1165,6 +1165,13 @@ Progress: 0 done, 240 to do.
   lookup name, and an override's `in` list and a package `RangeFilter`'s bounds are cleaned as elements, so the code
   receives the values the input carries (an override delegating to `super().filter` with `in` over the array now
   builds and sends elements to the lookup)
+- [ ] 954. CHANGELOG entry for item 953: `node(id:)` (`DjangoNodeField`) holds a consumer `resolve_nodes` override to
+  the return contract `nodes(ids:)` holds it to: a return that is not exactly one row (or `None`) for the id raises the
+  named `ConfigurationError` instead of an unknown error (an empty return) or a silently served first row (more than
+  one row), and an `async def` override under a synchronous view is refused with a `SyncMisuseError` naming
+  `resolve_nodes`, its coroutine closed; a type overriding `resolve_node` keeps it. Documented: a node id names its row
+  by the key column's exact value, so an id matching only through a case-insensitive collation (SQLite `NOCASE`, a
+  MySQL `_ci` collation, a PostgreSQL nondeterministic collation) is `null` from `node` / `nodes`
 
 ## From dry-upstream-0_0_15
 

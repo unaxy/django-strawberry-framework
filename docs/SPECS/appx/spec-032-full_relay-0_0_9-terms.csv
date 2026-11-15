@@ -1,5 +1,5 @@
 term,anchor,notes
-Relay Node integration,relay-node-integration,Shipped 0.0.5 foundation; the resolve_node / resolve_nodes defaults the root fields dispatch to
+Relay Node integration,relay-node-integration,Shipped 0.0.5 foundation; the resolve_nodes default the root fields dispatch to
 DjangoType,djangotype,The Relay-Node-shaped types the root fields resolve to and the relation upgrade walks
 DjangoNodeField,djangonodefield,This card ships it (bare interface form + typed form); shipped (0.0.9)
 DjangoNodesField,djangonodesfield,Batch refetch sibling this card ships; shipped (0.0.9)

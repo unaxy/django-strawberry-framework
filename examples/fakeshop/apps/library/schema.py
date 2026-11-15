@@ -841,9 +841,9 @@ class ReadingListType(DjangoType):
     Refetch by id answers from this type's own ``resolve_nodes``, the one
     Relay resolver it overrides: a curator's draft list (a title under
     ``DRAFT_READING_LIST_PREFIX``) names no node there, so ``nodes(ids:)``
-    and ``node(id:)``, which reads one id through Strawberry's
-    ``Node.resolve_node`` delegating to ``resolve_nodes``, both answer
-    ``null`` for it. Connections still list it.
+    and ``node(id:)``, which reads one id through ``resolve_nodes`` as
+    Strawberry's ``Node.resolve_node`` does, both answer ``null`` for it.
+    Connections still list it.
     """
 
     @classmethod

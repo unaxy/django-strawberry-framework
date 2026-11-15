@@ -643,9 +643,9 @@ def test_resolve_node_applies_get_queryset() -> None:
 def test_resolve_node_accepts_strawberry_positional_call_shape() -> None:
     """Strawberry calls ``cls.resolve_node(node_id, info=info)`` - positional ``node_id``.
 
-    Pins the bound signature of the ``resolve_node`` default: Strawberry's
-    Relay machinery passes ``node_id`` positionally and ``info`` as a
-    keyword. With the signature ``(cls, node_id, *, info,
+    Pins the bound signature of the inherited ``resolve_node``, Strawberry's own:
+    Strawberry's Relay machinery passes ``node_id`` positionally and ``info`` as
+    a keyword. With the signature ``(cls, node_id, *, info,
     required=False)`` this call shape lands correctly; a
     ``(cls, info, node_id, ...)`` shape would make Python raise ``TypeError: got
     multiple values for argument 'info'``.

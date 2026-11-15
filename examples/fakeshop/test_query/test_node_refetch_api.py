@@ -12,7 +12,9 @@ Their function-local models use real temporary tables and native HTTP requests.
 Both equal-value alternate spellings and different existing-type keys cross the
 same public refetch fields, as do a comma-list key whose Python value is an
 unhashable list, a decimal key SQLite stores as a float, and naive datetime keys
-read in the default time zone (including a DST fold or gap wall clock).
+read in the default time zone (including a DST fold or gap wall clock). A text key
+under SQLite's ``NOCASE`` collation answers only its stored value, never a spelling
+the collation alone matches.
 
 An id naming a Relay type the executing schema does not publish (one another schema
 over the same registry emitted, or a model-label id whose primary type the schema omits)
@@ -26,12 +28,18 @@ rows and an uncoercible literal alike, before any key read, read routing or hook
 An ``async def`` consumer ``resolve_node`` / ``resolve_nodes`` or ``get_queryset``
 under the sync view is refused with its sync-misuse message, never a null row or
 an invalid-id error; the exception classes stay in ``tests/test_relay_node_field.py``.
+``node(id:)`` reads one id through a type's ``resolve_nodes`` under the batch field's
+guards (a return not 1:1 with the id is the named configuration error, an ``async def``
+override under the sync view is refused naming ``resolve_nodes``), unless the type
+overrides ``resolve_node``, which then answers.
 """
 
 import contextlib
 import datetime
+import gc
+import warnings
 import zoneinfo
-from collections.abc import Generator, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from decimal import Decimal
 from functools import wraps
 from types import UnionType
@@ -580,6 +588,25 @@ def _spelled_model(kind: str) -> type[Model]:
                 return self.name
 
         return RefetchDecimalRow
+    if kind == "nocase":
+
+        class RefetchNocaseRow(Model):
+            code: "models.TextField[str | Combinable, str]" = models.TextField(
+                primary_key=True,
+                db_collation="NOCASE",
+            )
+            name: "models.TextField[str | Combinable, str]" = models.TextField()
+
+            class Meta:
+                app_label = "products"
+                managed = False
+                db_table = "refetch_nocase_row"
+
+            @override
+            def __str__(self) -> str:
+                return self.name
+
+        return RefetchNocaseRow
 
     class RefetchStampRow(Model):
         stamp: "_AwareStamp" = models.DateTimeField(
@@ -627,6 +654,24 @@ def _spelled_answer(model: type[Model], spelled: str, root: str) -> JSONObject:
         f"query ($id: ID!) {{ {selection} {{ ... on SpelledNode {{ name }} }} }}",
         variables={"id": global_id_for(node_type, spelled)},
     )
+
+
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite NOCASE collation")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("spelled", ["abc", "ABC", "Abc"])
+@pytest.mark.parametrize("root", ["node", "nodes"])
+def test_refetch_finds_a_text_key_by_its_value_not_its_collation(root: str, spelled: str) -> None:
+    """Only the stored value answers; a match the column's collation adds is ``null``.
+
+    Django's own ``filter(pk=...)`` finds the row for every spelling, so the ``null``
+    is the documented identity rule, not a missed row.
+    """
+    model = _spelled_model("nocase")
+    with _key_table(model, "abc"):
+        assert model._default_manager.filter(pk=spelled).exists()
+        payload = _spelled_answer(model, spelled, root)
+    answer = {"name": "stored"} if spelled == "abc" else None
+    assert payload == {"data": {root: answer if root == "node" else [answer]}}
 
 
 @pytest.mark.skipif(
@@ -1378,6 +1423,250 @@ def test_sync_batch_refetch_refuses_an_async_consumer_resolve_nodes() -> None:
         "DjangoNodeField and DjangoNodesField execute resolve_node(s) synchronously under "
         "schema.execute_sync(); make the consumer override synchronous or run the schema "
         "asynchronously."
+    )
+
+
+def _batch_override_type(
+    rows: Callable[[list[str]], list[Category | None]],
+    *,
+    flavor: str,
+    single: Category | None = None,
+    single_flavor: str = "sync",
+) -> type[DjangoType]:
+    """A ``CategoryNode`` whose ``resolve_nodes`` answers ``rows(node_ids)``, sync or async.
+
+    ``single`` adds a ``resolve_node`` override (``single_flavor``: sync or ``async def``)
+    answering that row for every id.
+    """
+    if flavor == "sync":
+
+        def _resolve_nodes(
+            _cls: type[DjangoType],
+            *,
+            info: strawberry.Info[object, object],
+            node_ids: Iterable[str],
+            required: bool = False,
+        ) -> list[Category | None]:
+            del info, required
+            return rows(list(node_ids))
+
+        namespace: dict[str, object] = {"resolve_nodes": classmethod(_resolve_nodes)}
+    else:
+
+        async def _aresolve_nodes(
+            _cls: type[DjangoType],
+            *,
+            info: strawberry.Info[object, object],
+            node_ids: Iterable[str],
+            required: bool = False,
+        ) -> list[Category | None]:
+            del info, required
+            return rows(list(node_ids))
+
+        namespace = {"resolve_nodes": classmethod(_aresolve_nodes)}
+    if single is not None and single_flavor == "sync":
+
+        def _resolve_node(
+            _cls: type[DjangoType],
+            node_id: str,
+            *,
+            info: strawberry.Info[object, object],
+            required: bool = False,
+        ) -> Category | None:
+            del node_id, info, required
+            return single
+
+        namespace["resolve_node"] = classmethod(_resolve_node)
+    elif single is not None:
+
+        async def _aresolve_node(
+            _cls: type[DjangoType],
+            node_id: str,
+            *,
+            info: strawberry.Info[object, object],
+            required: bool = False,
+        ) -> Category | None:
+            del node_id, info, required
+            return single
+
+        namespace["resolve_node"] = classmethod(_aresolve_node)
+    return make_django_type("CategoryNode", Category, ("id", "name"), namespace_extra=namespace)
+
+
+async def _post_with(
+    executor: str,
+    schema: strawberry.Schema,
+    query: str,
+    variables: Mapping[str, object],
+) -> JSONObject:
+    if executor == "sync":
+        return await sync_to_async(_post)(schema, query, variables=variables)
+    return await _post_async(schema, query, variables=variables)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("flavor", "executor"),
+    [("sync", "sync"), ("sync", "async"), ("async", "async")],
+)
+@pytest.mark.parametrize("returned", [0, 2])
+async def test_node_refetch_names_a_wrong_length_consumer_batch(
+    flavor: str,
+    executor: str,
+    returned: int,
+) -> None:
+    """``node`` reads one id through ``resolve_nodes`` and names a return not 1:1 with it.
+
+    The override never queries, so the sync flavor runs under the async view too.
+    """
+    await sync_to_async(services.seed_data)(1)
+    row = await Category.objects.order_by("pk").afirst()
+    assert row is not None
+    node_type = _batch_override_type(lambda _ids: [None] * returned, flavor=flavor)
+    schema = await sync_to_async(_schema_with)(
+        "category",
+        node_type | None,
+        DjangoNodeField(node_type),
+        expose_errors=True,
+    )
+    payload = await _post_with(
+        executor,
+        schema,
+        "query ($id: ID!) { category(id: $id) { name } }",
+        {"id": global_id_for(node_type, saved_pk(row))},
+    )
+    assert payload["data"] == {"category": None}, payload
+    assert len(json_list(payload, "errors")) == 1
+    assert json_at(payload, "errors", 0, "path") == ["category"]
+    assert json_str(payload, "errors", 0, "message") == (
+        f"CategoryNode.resolve_nodes returned {returned} row(s) for 1 requested id(s); "
+        "a resolve_nodes override must return a list input-ordered and 1:1 with node_ids "
+        "(None for missing) - the _resolve_nodes_default / _order_nodes shape."
+    )
+
+
+@pytest.mark.django_db
+def test_sync_node_refetch_refuses_an_async_consumer_resolve_nodes_and_closes_it() -> None:
+    """A sync ``node`` refetch over an ``async def`` ``resolve_nodes`` names that method.
+
+    The refused coroutine is closed, so no never-awaited warning follows the request.
+    """
+    services.seed_data(1)
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    node_type = _batch_override_type(lambda ids: [None for _ in ids], flavor="async")
+    schema = _schema_with(
+        "category",
+        node_type | None,
+        DjangoNodeField(node_type),
+        expose_errors=True,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        payload = _post(
+            schema,
+            "query ($id: ID!) { category(id: $id) { name } }",
+            variables={"id": global_id_for(node_type, saved_pk(row))},
+        )
+        gc.collect()
+    assert [str(entry.message) for entry in caught if "never awaited" in str(entry.message)] == []
+    assert payload["data"] == {"category": None}, payload
+    assert len(json_list(payload, "errors")) == 1
+    assert json_at(payload, "errors", 0, "path") == ["category"]
+    assert json_str(payload, "errors", 0, "message") == (
+        "CategoryNode.resolve_nodes returned a coroutine in a sync Relay refetch context. "
+        "DjangoNodeField and DjangoNodesField execute resolve_node(s) synchronously under "
+        "schema.execute_sync(); make the consumer override synchronous or run the schema "
+        "asynchronously."
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("flavor", "executor"),
+    [("sync", "sync"), ("async", "async")],
+)
+@pytest.mark.parametrize("target", ["shown", "withheld"])
+async def test_node_refetch_serves_a_contract_keeping_consumer_batch(
+    flavor: str,
+    executor: str,
+    target: str,
+) -> None:
+    """An override returning one row or ``None`` per id answers ``node`` with it, both executors."""
+    await sync_to_async(services.seed_data)(2)
+    shown, withheld = [row async for row in Category.objects.order_by("pk")[:2]]
+    visible = {str(saved_pk(shown)): shown}
+    node_type = _batch_override_type(
+        lambda ids: [visible.get(node_id) for node_id in ids],
+        flavor=flavor,
+    )
+    schema = await sync_to_async(_schema_with)(
+        "category",
+        node_type | None,
+        DjangoNodeField(node_type),
+    )
+    row = shown if target == "shown" else withheld
+    payload = await _post_with(
+        executor,
+        schema,
+        "query ($id: ID!) { category(id: $id) { __typename name } }",
+        {"id": global_id_for(node_type, saved_pk(row))},
+    )
+    expected = {"__typename": "CategoryNode", "name": shown.name} if target == "shown" else None
+    assert payload == {"data": {"category": expected}}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("single_flavor", "executor"),
+    [("sync", "sync"), ("sync", "async"), ("async", "async")],
+)
+async def test_node_refetch_calls_a_consumer_resolve_node_over_its_resolve_nodes(
+    single_flavor: str,
+    executor: str,
+) -> None:
+    """A type overriding ``resolve_node`` is answered by it; ``nodes`` still checks the batch."""
+    await sync_to_async(services.seed_data)(1)
+    row = await Category.objects.order_by("pk").afirst()
+    assert row is not None
+    node_type = _batch_override_type(
+        lambda _ids: [],
+        flavor="sync",
+        single=row,
+        single_flavor=single_flavor,
+    )
+
+    @strawberry.type
+    class Query:
+        node: relay.Node | None = DjangoNodeField()
+        nodes: list[relay.Node | None] = DjangoNodesField()
+
+    await sync_to_async(finalize_django_types)()
+    schema = DjangoSchema(
+        query=Query,
+        config=strawberry_config(),
+        types=[node_type],
+        error_policy=ErrorPolicy(enabled=False),
+    )
+    variables = {"id": global_id_for(node_type, saved_pk(row))}
+    single = await _post_with(
+        executor,
+        schema,
+        "query ($id: ID!) { node(id: $id) { ... on CategoryNode { name } } }",
+        variables,
+    )
+    assert single == {"data": {"node": {"name": row.name}}}
+    batch = await _post_with(
+        executor,
+        schema,
+        "query ($id: ID!) { nodes(ids: [$id]) { ... on CategoryNode { name } } }",
+        variables,
+    )
+    assert batch["data"] is None, batch
+    assert len(json_list(batch, "errors")) == 1
+    assert json_at(batch, "errors", 0, "path") == ["nodes"]
+    assert json_str(batch, "errors", 0, "message").startswith(
+        "CategoryNode.resolve_nodes returned 0 row(s) for 1 requested id(s);",
     )
 
 

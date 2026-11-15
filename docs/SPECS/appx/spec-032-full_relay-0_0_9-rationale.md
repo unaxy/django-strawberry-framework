@@ -36,7 +36,7 @@ Spec: [Decision 3 — Root fields dispatch through the package decode, not Straw
 
 - **Native dispatch cannot decode the default payload.** Strawberry's `NodeExtension` resolves `node_type = id.resolve_type(info)` = `info.schema.get_type_by_name(type_name)` (the `uv.lock`-resolved release). The default strategy emits model-label payloads (`library.genre:42`); no schema type carries that name, so the native field fails for every default-strategy id. [`spec-031`][spec-031] Decision 8 makes `decode_global_id` the package's single decode entry point.
 - **The card mandates server-side distrust.** "Decode the GlobalID server-side (never trust the client's claim of which type the ID belongs to)" — `decode_global_id`'s resolve-then-enforce dispatch rejects payload shapes the resolved candidate's recorded strategy does not emit, which the native schema lookup cannot do.
-- **The permission contract is already downstream.** `decode_global_id` returns the *type*; the shipped `resolve_node` / `resolve_nodes` defaults run [`get_queryset`][glossary-get_queryset-visibility-hook] on both sync and async branches, so dispatching to them gives the card's "respects `get_queryset`" requirement with zero new permission code.
+- **The permission contract is already downstream.** `decode_global_id` returns the *type*; the shipped `resolve_nodes` default runs [`get_queryset`][glossary-get_queryset-visibility-hook] on both sync and async branches, so dispatching to it gives the card's "respects `get_queryset`" requirement with zero new permission code.
 - **Engine reuse everywhere else.** `GlobalID` parsing, the `Node` interface, the field machinery, and the connection mechanics all stay Strawberry's ([`START.md`][start] "Strawberry = engine"); only the type-resolution hop is package-owned, because it is the one hop the engine resolves by GraphQL type name.
 
 ### Alternatives considered (and rejected)
@@ -67,7 +67,7 @@ Spec: [Decision 5 — Null for invisible rows, GraphQLError for malformed ids][s
 
 ### Justification
 
-- The Relay spec requires `null` (not an exception) for an unresolvable-but-well-formed node lookup, and the card pins it twice; the shipped `resolve_node` default with `required=False` already implements the single-code-path property.
+- The Relay spec requires `null` (not an exception) for an unresolvable-but-well-formed node lookup, and the card pins it twice; the shipped `resolve_nodes` default, which `DjangoNodeField` calls with its one id and `required=False`, already implements the single-code-path property.
 - A malformed id is a *request* error: silently returning `null` for it would make client bugs (truncated ids, double-encoding) indistinguishable from visibility outcomes — the exact debugging trap the loud-`GraphQLError` posture of the `first`+`last` guard and the filter layer's `Invalid filter input` (`extensions={"code": "FILTER_INVALID"}`) already avoids. The `GLOBALID_INVALID` code follows that shipped naming convention.
 - Converting at the field boundary (rather than letting [`ConfigurationError`][glossary-configurationerror] bubble raw) keeps internal exception classes and `decode_global_id`'s implementation-flavored messages out of the public wire contract while preserving the diagnostic reason.
 

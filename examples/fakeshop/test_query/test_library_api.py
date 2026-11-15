@@ -13204,8 +13204,8 @@ def test_node_refetch_reads_a_resolve_nodes_only_override_live() -> None:
     """``node(id:)`` answers through a type that overrides only ``resolve_nodes``.
 
     ``ReadingListType`` withholds a draft list in its own ``resolve_nodes`` and
-    keeps Strawberry's ``Node.resolve_node``, which reads one id as a batch of
-    one: the draft's id is ``null`` on ``node(id:)`` exactly as on
+    keeps Strawberry's ``Node.resolve_node``, so ``node(id:)`` reads one id as a
+    batch of one: the draft's id is ``null`` on ``node(id:)`` exactly as on
     ``nodes(ids:)``, and the published list's id answers its row on both.
     """
     published = models.ReadingList.objects.create(title="Classics")

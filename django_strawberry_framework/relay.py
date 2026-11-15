@@ -85,6 +85,7 @@ import strawberry
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from graphql import GraphQLError, get_named_type, is_object_type
+from strawberry import relay
 from strawberry.schema import Schema
 from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types import Info
@@ -126,7 +127,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterable, Mapping, Sequence, Sized
 
     from graphql import GraphQLField
-    from strawberry import relay
     from typing_extensions import TypeIs
 
     from .types.base import DjangoType
@@ -814,6 +814,56 @@ async def _await_and_stamp(
     return _stamp_node_type(resolved_type, await awaitable)
 
 
+def _first_checked_node(
+    resolved_type: type[_RelayDjangoType],
+    rows: Iterable[object],
+    node_id: str,
+) -> object:
+    """Check a one-id ``resolve_nodes`` return as the batch field does, then stamp its row."""
+    return _stamp_nodes(resolved_type, _check_nodes_result(resolved_type, rows, [node_id]))[0]
+
+
+async def _await_first_checked_node(
+    resolved_type: type[_RelayDjangoType],
+    awaitable: Awaitable[Iterable[object]],
+    node_id: str,
+) -> object:
+    """Await an async one-id ``resolve_nodes`` return, then check and stamp it (async sibling)."""
+    return _first_checked_node(resolved_type, await awaitable, node_id)
+
+
+def _resolve_one_through_nodes(
+    resolved_type: type[_RelayDjangoType],
+    node_id: str,
+    info: Info[object, object],
+    *,
+    is_async: bool,
+) -> object:
+    """Answer ``node(id:)`` for a type that keeps Strawberry's ``Node.resolve_node``.
+
+    That ``resolve_node`` reads one id as ``resolve_nodes(node_ids=[node_id])`` and takes
+    the first row with a bare ``next(iter(...))``, so a wrong-length override return
+    would surface as a ``StopIteration`` and an async override under a sync executor
+    as a refusal naming ``resolve_node``, its coroutine never awaited. The field calls
+    the type's ``resolve_nodes`` itself instead, through the guards ``DjangoNodesField``
+    applies to the same call: ``reject_async_in_sync_context`` (the coroutine closed, the
+    error naming ``resolve_nodes``) and ``_check_nodes_result`` (the named
+    ``ConfigurationError`` for a return not 1:1 with the one id).
+    """
+    result = resolved_type.resolve_nodes(info=info, node_ids=[node_id], required=False)
+    if is_async and inspect.isawaitable(result):
+        return _await_first_checked_node(resolved_type, result, node_id)
+    # As in ``DjangoNodesField``: the owner name is built only for the awaitable it refuses.
+    rows = reject_async_in_sync_context(
+        result,
+        owner=truth.name(resolved_type) if inspect.isawaitable(result) else "",
+        method="resolve_nodes",
+        context="Relay refetch",
+        recourse=_SYNC_RESOLVER_RECOURSE,
+    )
+    return _first_checked_node(resolved_type, rows, node_id)
+
+
 @overload
 def DjangoNodeField(
     target_type: None = None,
@@ -846,6 +896,13 @@ def DjangoNodeField(  # noqa: N802 - PascalCase for graphene-django parity
     (nullable-by-contract dispatch, the ``GLOBALID_INVALID`` boundary, the id of
     an unpublished type or of one the annotation does not hold, and the
     bare-field ``strawberry.Schema(types=[...])`` engine note).
+
+    The id is read through the resolved type's ``resolve_nodes`` with ``[node_id]``,
+    the call Strawberry's ``Node.resolve_node`` makes, made here so the return meets
+    the ``DjangoNodesField`` override contract: a return not 1:1 with the one id is
+    the same named ``ConfigurationError``, and an awaitable under a sync executor the
+    same ``SyncMisuseError`` naming ``resolve_nodes``. A type that overrides
+    ``resolve_node`` is answered by its override instead.
 
     The declared return type is the value the field resolves to, not the object
     returned: at run time this returns a ``StrawberryField``. The overloads state
@@ -891,15 +948,16 @@ def DjangoNodeField(  # noqa: N802 - PascalCase for graphene-django parity
         ):
             # Uncoercible literal -> null with no query issued.
             return None
-        # In async context ``resolve_node`` returns a coroutine Strawberry's
-        # executor awaits as a plain-field return (Edge cases "Async
-        # end-to-end") - the stamp then rides inside ``_await_and_stamp``.
-        # Calling the classmethod (not the underscore default) preserves
-        # consumer overrides for free. It receives the decoded ``node_id``
-        # string, exactly what Strawberry's own ``relay.node()`` field passes
-        # (``Node.resolve_node(node_id: str)``); the coercion above only gates.
         # Mode first: an async override called before a refusal leaves its coroutine unawaited.
         is_async = async_execution()
+        if not truth.overrides(resolved, relay.Node, "resolve_node"):
+            return _resolve_one_through_nodes(resolved, node_id, info, is_async=is_async)
+        # A consumer ``resolve_node`` override is called as written. In async context it
+        # may return a coroutine Strawberry's executor awaits as a plain-field return
+        # (Edge cases "Async end-to-end") - the stamp then rides inside
+        # ``_await_and_stamp``. It receives the decoded ``node_id`` string, exactly what
+        # Strawberry's own ``relay.node()`` field passes (``Node.resolve_node(node_id:
+        # str)``); the coercion above only gates.
         result = resolved.resolve_node(node_id, info=info, required=False)
         if not is_async and inspect.isawaitable(result):
             result = reject_async_in_sync_context(

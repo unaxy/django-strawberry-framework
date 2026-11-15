@@ -1254,10 +1254,11 @@ def _resolve_nodes_default(
     ``classmethod`` binding: ``(cls, *, info, node_ids, required=False)``.
     The package installs no ``resolve_node``: Strawberry's own
     ``strawberry/relay/types.py::Node.resolve_node`` answers a single id as
-    ``resolve_nodes(node_ids=[node_id])``, so ``node(id:)``, ``relay.node()``
-    and ``GlobalID.resolve_node`` read one id through this default, or
-    through a consumer's ``resolve_nodes`` override, with the same answer a
-    batch gives it.
+    ``resolve_nodes(node_ids=[node_id])``, and ``relay.py::DjangoNodeField``
+    makes that call itself for a type that keeps it, so ``node(id:)``,
+    ``relay.node()`` and ``GlobalID.resolve_node`` read one id through this
+    default, or through a consumer's ``resolve_nodes`` override, with the same
+    answer a batch gives it.
     ``node_ids`` defaults to ``None`` here (Strawberry's upstream slot is
     a required keyword argument) so the package can offer the bulk-fetch
     "no ids -> full queryset" path documented in the spec without

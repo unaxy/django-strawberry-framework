@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 525 done, 108 to do. The CHANGELOG entries filed here moved to
+Progress: 526 done, 110 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3170,6 +3170,20 @@ Progress: 525 done, 108 to do. The CHANGELOG entries filed here moved to
   element, 72 nested refused. Pinned by 80 rows in `tests/filters/test_inputs.py` (`_consumer_code` over `method=` and
   override); spec-027 (Decision 4 rows, refusal list, the listless "Not judged" list, the `ArrayField` Edge case, Test
   plan, Definition of done), GLOSSARY `FilterSet`. Filed 950, 951; CHANGELOG 952
+- [x] 953. fixed: `node(id:)` over a type that keeps Strawberry's `Node.resolve_node` reads its one id through the
+  type's `resolve_nodes(node_ids=[id], required=False)` itself, under the guards `nodes(ids:)` applies: a return that
+  is not one row (or `None`) for the id is the named `ConfigurationError` where it was "An unknown error occurred." (a
+  bare `StopIteration`) or a silent first row, and an `async def` override under a sync view is refused naming
+  `resolve_nodes` with its coroutine closed; a type overriding `resolve_node` is answered by it
+  (`relay.py::DjangoNodeField._resolve`, `_resolve_one_through_nodes`, `_first_checked_node`,
+  `_await_first_checked_node`). The id names its row by the key column's exact value: a match only through a
+  case-insensitive collation answers null, documented. Pinned by
+  `examples/fakeshop/test_query/test_node_refetch_api.py::test_node_refetch_names_a_wrong_length_consumer_batch`,
+  `::test_sync_node_refetch_refuses_an_async_consumer_resolve_nodes_and_closes_it`,
+  `::test_node_refetch_serves_a_contract_keeping_consumer_batch`,
+  `::test_node_refetch_calls_a_consumer_resolve_node_over_its_resolve_nodes`,
+  `::test_refetch_finds_a_text_key_by_its_value_not_its_collation`. spec-032, spec-015, spec-031, spec-034, README,
+  GLOSSARY `DjangoNodeField`. Filed 955, 956; CHANGELOG 954
 
 ## To do: found along the way
 
@@ -3316,6 +3330,13 @@ Progress: 525 done, 108 to do. The CHANGELOG entries filed here moved to
 - [ ] 951. (robustness) A `method=` `DateFromToRangeFilter` over an integer column publishes `Int` bounds (typed by the
   column, as a `method=` filter is) that its `DateField` form cannot clean: every request raises `'int' object has no
   attribute 'strip'` (masked). Found researching 864
+- [ ] 955. (robustness) A `resolve_node` override that delegates to `super().resolve_node` over a `resolve_nodes`
+  override returning no row for the id answers "An unknown error occurred." (Strawberry's `Node.resolve_node` takes
+  `next(iter(...))`); the override's call is kept as written, so the package does not check it. Found verifying 953
+- [ ] 956. A GlobalID decoded on the write side or in a filter may disagree with `node(id:)` on an id matched only
+  through the key column's collation: `get(pk=...)` and `_resolve_real_pk`'s `.filter(...).first()` find the row
+  through the collation, `_resolve_real_pks_batched` compares in Python and does not, and `node` / `nodes` answer null
+  (traced, not run). Found verifying 953
 
 ## To do: holes found re-checking the fixes
 
