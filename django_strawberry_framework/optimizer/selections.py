@@ -70,7 +70,6 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils.typing import (
     graphql_fields,
     graphql_type_of,
-    inline_fragment_type_condition,
     published_python_name,
 )
 
@@ -283,7 +282,7 @@ def _stamp(
     """
     for selection, node in zip(selections, nodes, strict=True):
         if isinstance(node, InlineFragmentNode):
-            condition = inline_fragment_type_condition(node)
+            condition = node.type_condition
             below = read_on if condition is None else info.schema.get_type(condition.name.value)
             _stamp(info, selection.selections, ast_child_selections(node), below)
         elif isinstance(node, FragmentSpreadNode):

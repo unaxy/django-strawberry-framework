@@ -323,7 +323,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── sessions.py               # The session-engine resolver and the connection actor lease, shared across the opt-in boundary.
     ├── strings.py                # GraphQL/Django naming helpers for case conversion and lookup-path flattening.
     ├── truth.py                  # Truthful identity reads: facts about an object read from the interpreter, never asked of it.
-    ├── typing.py                 # Async-callable detection and type-unwrapping helpers for Strawberry, Python, and GraphQL types.
+    ├── typing.py                 # Async-callable detection and type-unwrapping helpers for Strawberry and GraphQL types.
     ├── widgets.py                # The form-data keys a Django widget reads, and the entries that bind a value under them.
     ├── write_transaction.py      # Write-transaction plumbing: the managed alias, alias pinning, row locks, and conflicts.
     └── write_values.py           # Neutral write-value primitives shared by the model, form, and serializer flavors.
@@ -472,7 +472,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
     ├── sessions.py               # The session-engine resolver and the connection actor lease, shared across the opt-in boundary.
     ├── strings.py                # GraphQL/Django naming helpers for case conversion and lookup-path flattening.
     ├── truth.py                  # Truthful identity reads: facts about an object read from the interpreter, never asked of it.
-    ├── typing.py                 # Async-callable detection and type-unwrapping helpers for Strawberry, Python, and GraphQL types.
+    ├── typing.py                 # Async-callable detection and type-unwrapping helpers for Strawberry and GraphQL types.
     ├── widgets.py                # The form-data keys a Django widget reads, and the entries that bind a value under them.
     ├── write_transaction.py      # Write-transaction plumbing: the managed alias, alias pinning, row locks, and conflicts.
     └── write_values.py           # Neutral write-value primitives shared by the model, form, and serializer flavors.
@@ -708,7 +708,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_sessions.py          # Behavioral tests for the session-engine resolver and connection actor lease.
     ├── test_strings.py           # String utility tests for Pascal case conversion and Django lookup-path flattening.
     ├── test_truth.py             # Tests for ``django_strawberry_framework/utils/truth.py``: identity reads a consumer cannot fake.
-    ├── test_typing.py            # Typing utility tests for async-callable detection and Strawberry, Python, and GraphQL unwrapping.
+    ├── test_typing.py            # Typing utility tests for async-callable detection and Strawberry and GraphQL unwrapping.
     ├── test_widgets.py           # Tests for the form-data keys a widget reads (``utils/widgets.py``).
     └── test_write_values.py      # Direct pins of write-value decode internals a GraphQL request cannot name.
 ```
@@ -1114,7 +1114,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_sessions.py          # Behavioral tests for the session-engine resolver and connection actor lease.
     ├── test_strings.py           # String utility tests for Pascal case conversion and Django lookup-path flattening.
     ├── test_truth.py             # Tests for ``django_strawberry_framework/utils/truth.py``: identity reads a consumer cannot fake.
-    ├── test_typing.py            # Typing utility tests for async-callable detection and Strawberry, Python, and GraphQL unwrapping.
+    ├── test_typing.py            # Typing utility tests for async-callable detection and Strawberry and GraphQL unwrapping.
     ├── test_widgets.py           # Tests for the form-data keys a widget reads (``utils/widgets.py``).
     └── test_write_values.py      # Direct pins of write-value decode internals a GraphQL request cannot name.
 ```

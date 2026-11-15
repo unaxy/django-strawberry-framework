@@ -40,7 +40,7 @@ from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr, require
 from django_strawberry_framework.utils.inputs import GeneratedInputArgumentsFactory
-from django_strawberry_framework.utils.typing import unwrap_container_type
+from django_strawberry_framework.utils.typing import peel_strawberry_containers
 from tests._idioms import comparing_metaclass, declare_django_type, definition_raises
 from tests.filters.fixtures.filtersets import SelfReferentialBranchFilter
 
@@ -567,7 +567,7 @@ def test_two_members_of_one_bag_name_and_one_lookup_set_in_any_order_finalize() 
         FilterArgumentsFactory.input_object_types["CaseOrderFilterInputType"],
         strict=True,
     )
-    bags = {field.python_name: unwrap_container_type(field.type) for field in root.fields}
+    bags = {field.python_name: peel_strawberry_containers(field.type)[1] for field in root.fields}
     assert truth.qualname(bags["Price"]) == truth.qualname(bags["price"])
 
 

@@ -161,7 +161,7 @@ from .utils.querysets import (
     reject_awaitable_sync_source,
     reject_residual_async_source,
 )
-from .utils.typing import is_async_callable, object_result, unwrap_container_type
+from .utils.typing import is_async_callable, object_result, peel_strawberry_containers
 
 if TYPE_CHECKING:
     from typing import Literal, TypeAlias
@@ -387,7 +387,7 @@ def _window_edge_class(cls: type[_ConnectionT]) -> type[relay.Edge[relay.Node]]:
 
     ``get_object_definition`` -> ``edges`` field -> ``resolve_type`` -> unwrap
     the ``StrawberryContainer`` (``list[Edge[Node]]``) down to the concrete
-    ``Edge`` subclass via the bounded ``unwrap_container_type`` (-
+    ``Edge`` subclass via the bounded ``peel_strawberry_containers`` (-
     the container-scoped, Power-of-Ten-capped peel), so the fast path builds
     edges through Strawberry's own edge type (cursor PREFIX + base64 stay owned
     there - the fast path passes only the integer offset).
@@ -398,7 +398,7 @@ def _window_edge_class(cls: type[_ConnectionT]) -> type[relay.Edge[relay.Node]]:
     type_def = get_object_definition(cls, strict=True)
     field_def = require_instance(type_def.get_field("edges"), StrawberryField)
     edge_class = require(
-        unwrap_container_type(field_def.resolve_type(type_definition=type_def)),
+        peel_strawberry_containers(field_def.resolve_type(type_definition=type_def))[1],
         _is_edge_class,
     )
     _window_edge_class_cache[cls] = edge_class

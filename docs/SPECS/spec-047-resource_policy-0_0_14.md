@@ -366,7 +366,7 @@ so a policy kept in an instance attribute would be reachable by assignment and t
   construction into one frozen `schema.py::_SchemaEnforcement` record, held in
   `schema.py::_SCHEMA_ENFORCEMENT` (a `utils/private_state.py::PrivateAuthority`) and
   answered by no attribute. `schema.py::DjangoSchema.resource_policy` and `error_policy`
-  answer every read with a copy (`utils/policies.py::copy_policy`). Re-running `__init__`
+  answer every read with a copy (`copy.copy`). Re-running `__init__`
   on a constructed schema is refused. `error_policy.py::ErrorPolicy` is held on exactly the
   same terms, because a write to it would turn masking off and put raw exception text on
   the wire.
@@ -1228,7 +1228,7 @@ check runs rather than about how long anything takes.
 - `utils/inputs.py::RELATION_MULTI` — the bind-spec kind that classifies a relation list
   ahead of the `ID`-scalar test
   ([Decision 4](#decision-4--the-document-and-value-budgets-are-one-iterative-walk)).
-- `utils/policies.py::canonical_policy` / `utils/policies.py::copy_policy` and
+- `utils/policies.py::canonical_policy`, `copy.copy` and
   `utils/private_state.py::PrivateAuthority` / `utils/private_state.py::PrivateMembership` —
   the exact-class rebuild, the per-read copy, and the private stores the schema and the
   extension hold their configuration in

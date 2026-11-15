@@ -30,7 +30,7 @@ rather than a request-context key, so a resolver cannot widen the budget by
 REPLACING it; and the armed object is reachable from no consumer-visible name,
 so a resolver cannot widen it by MUTATING it either. Everything a resolver can
 reach - the schema attribute, the published mirror, whatever
-``policy_from_info`` returns - is a copy (``utils/policies.py::copy_policy``).
+``policy_from_info`` returns - is a ``copy.copy`` duplicate sharing no state with it.
 The policy those copies are taken from is not an attribute of the schema either
 (``schema.py::_SCHEMA_ENFORCEMENT``): ``info.schema`` is handed to every resolver
 in every operation, so an ordinary attribute would be reachable by assignment and
@@ -60,6 +60,7 @@ a safety one.
 from __future__ import annotations
 
 import contextlib
+import copy
 import math
 import time
 from contextvars import ContextVar, Token
@@ -78,7 +79,7 @@ from .utils._narrowing import iter_of, read_attr
 from .utils.context import get_context_value, stash_on_context
 from .utils.errors import coded_error_extensions
 from .utils.operation_lease import OperationLease
-from .utils.policies import canonical_policy, copy_policy, resolve_policy
+from .utils.policies import canonical_policy, resolve_policy
 from .utils.querysets import is_async_only_iterable, normalized_row_source
 
 if TYPE_CHECKING:
@@ -700,7 +701,7 @@ def _publish_budget_mirror(
     under this key; publishing the armed one would make a key documented as a
     mirror into a write seam onto the authority it mirrors.
     """
-    stash_on_context(context, DST_RESOURCE_POLICY, copy_policy(policy))
+    stash_on_context(context, DST_RESOURCE_POLICY, copy.copy(policy))
     stash_on_context(context, DST_RESOURCE_DEADLINE, deadline)
 
 
@@ -958,9 +959,9 @@ def policy_from_info(info: object) -> ResourcePolicy:
     """
     budget = _armed_budget()
     if budget is not None:
-        return copy_policy(budget.policy)
+        return copy.copy(budget.policy)
     value = get_context_value(getattr(info, "context", None), DST_RESOURCE_POLICY)
-    return copy_policy(value if type(value) is ResourcePolicy else _PACKAGE_RESOURCE_POLICY)
+    return copy.copy(value if type(value) is ResourcePolicy else _PACKAGE_RESOURCE_POLICY)
 
 
 def check_deadline(info: object) -> None:

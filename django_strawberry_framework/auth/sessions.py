@@ -67,8 +67,6 @@ from django_strawberry_framework.utils.sessions import (
 )
 
 if TYPE_CHECKING:
-    from types import ModuleType
-
     from django.contrib.sessions.backends.base import SessionBase
 
     from django_strawberry_framework.utils.permissions import MutableChannelsScope
@@ -118,18 +116,6 @@ class Transport(enum.Enum):
     CHANNELS_WEBSOCKET = "channels_websocket"
 
 
-def require_channels() -> ModuleType:
-    """Import + return ``channels``, or raise the auth install-hint ``ImportError``.
-
-    A thin wrapper over the shared optional-import owner
-    (``utils/imports.py::require_optional_module``) passing this module's own
-    ``_CHANNELS_INSTALL_HINT``. Called only from the Channels branch of
-    ``classify_transport`` -- i.e. only after a Channels-shaped context has been
-    recognized -- so ordinary package / ``auth`` import stays channels-free.
-    """
-    return require_optional_module("channels", install_hint=_CHANNELS_INSTALL_HINT)
-
-
 def classify_transport(request: object) -> Transport:
     """Resolve the ``request_from_info`` result to one explicit ``Transport`` mode.
 
@@ -138,15 +124,17 @@ def classify_transport(request: object) -> Transport:
     delegation). The request is classified by its real class, so a stand-in that
     only forwards ``__class__`` (a Django lazy proxy included) is rejected. A
     recognized adapter first forces the ``channels`` soft dependency through
-    ``require_channels()`` -- a Channels-shaped context that reached this boundary
-    without the dependency is a loud, actionable ``ImportError``, never a swallowed
-    failure -- then reads ``scope["type"]`` to split Channels HTTP from Channels
-    WebSocket. A Django ``HttpRequest`` takes the native Django path. Every other
-    object, and every missing / unrecognized scope type, is rejected with an
+    ``require_optional_module`` with this module's ``_CHANNELS_INSTALL_HINT`` (so
+    ordinary package / ``auth`` import stays channels-free) -- a Channels-shaped
+    context that reached this boundary without the dependency is a loud,
+    actionable ``ImportError``, never a swallowed failure -- then reads
+    ``scope["type"]`` to split Channels HTTP from Channels WebSocket. A Django
+    ``HttpRequest`` takes the native Django path. Every other object, and every
+    missing / unrecognized scope type, is rejected with an
     actionable ``ConfigurationError``.
     """
     if truth.is_instance(request, ChannelsRequestAdapter):
-        _ = require_channels()
+        _ = require_optional_module("channels", install_hint=_CHANNELS_INSTALL_HINT)
         scope_type = request.scope.get("type")
         if type(scope_type) is str and scope_type == "http":
             return Transport.CHANNELS_HTTP

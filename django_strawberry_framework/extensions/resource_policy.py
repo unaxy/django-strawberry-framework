@@ -85,6 +85,7 @@ Where each pass reaches, stated as the boundary rather than as parity:
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeVar
 
@@ -155,13 +156,11 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.context import restored_context_keys
 from django_strawberry_framework.utils.inputs import RELATION_MULTI
-from django_strawberry_framework.utils.policies import copy_policy
 from django_strawberry_framework.utils.private_state import PrivateAuthority
 from django_strawberry_framework.utils.typing import (
     graphql_fields,
     graphql_input_fields,
     graphql_type_of,
-    inline_fragment_type_condition,
     is_graphql_list,
     published_python_name,
     strawberry_schema_from_schema,
@@ -1515,7 +1514,7 @@ class _DocumentWalk:
                 continue
             if isinstance(node, InlineFragmentNode):
                 condition = parent
-                type_condition = inline_fragment_type_condition(node)
+                type_condition = node.type_condition
                 if type_condition is not None:
                     condition = graphql_schema.get_type(type_condition.name.value) or parent
                 stack.extend(
@@ -1804,7 +1803,7 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
         accepted = _EXPLICIT_POLICY.recall(self)
         if accepted is None or accepted.policy is None:
             return None
-        return copy_policy(accepted.policy)
+        return copy.copy(accepted.policy)
 
     def _resolved_policy(self) -> ResourcePolicy:
         """Return the explicit policy, else the schema's, else the package defaults.

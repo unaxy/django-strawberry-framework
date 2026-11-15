@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import functools
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -117,7 +118,6 @@ from .utils._narrowing import is_mapping, mapping_get
 from .utils.errors import coded_error_extensions
 from .utils.execution_mode import OperationMode, async_execution
 from .utils.inputs import field_name_collision_remedy, generated_type_name_collision
-from .utils.policies import copy_policy
 from .utils.private_state import PrivateAuthority, PrivateMembership
 from .utils.typing import call_forwarded
 from .utils.write_transaction import managed_write_transaction, resolve_write_alias
@@ -1053,13 +1053,13 @@ class DjangoSchema(strawberry.Schema):
         ``policy.__dict__[bound] = wider``, and the object is process-lived, so
         one such write would widen every later request on the process and not
         just the one that made it. Each read therefore answers with a duplicate
-        (``utils/policies.py::copy_policy``): reading a bound is unchanged,
+        (``copy.copy``): reading a bound is unchanged,
         writing one changes only the reader's own copy. The authority the copy
         is taken from is the accepted enforcement record, which no name on
         this object answers with, so REPLACING it is not reachable through
         ``info.schema`` either.
         """
-        return copy_policy(_enforcement(self).resource_policy)
+        return copy.copy(_enforcement(self).resource_policy)
 
     @property
     def error_policy(self) -> ErrorPolicy:
@@ -1073,7 +1073,7 @@ class DjangoSchema(strawberry.Schema):
         one is held in the accepted enforcement record beside the resource
         policy rather than on the schema.
         """
-        return copy_policy(_enforcement(self).error_policy)
+        return copy.copy(_enforcement(self).error_policy)
 
     @override
     def get_extensions(self, sync: bool = False) -> list[SchemaExtension]:

@@ -83,9 +83,9 @@ from .strings import flatten_lookup_path
 from .typing import (
     graphql_input_fields,
     graphql_type_of,
+    peel_strawberry_containers,
     published_argument,
     published_python_name,
-    unwrap_container_type,
 )
 
 _EntryT = TypeVar("_EntryT")
@@ -1907,7 +1907,7 @@ def claim_generated_type_name(
         return
     for field in definition.fields:
         # A lazy reference is not a class: the root it names claims its own name.
-        embedded = unwrap_container_type(field.type)
+        embedded = peel_strawberry_containers(field.type)[1]
         if not truth.is_type(embedded):
             continue
         embedded_definition = get_object_definition(embedded)

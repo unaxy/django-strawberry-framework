@@ -312,6 +312,5 @@
 "tests/utils/test_querysets.py::_MEMBER_TERM_SHAPES" = { S610 = 3, S611 = 3 }
 "tests/utils/test_querysets.py::test_extra_where_executable_sql_fails_closed_before_clone" = { S610 = 1 }
 "tests/utils/test_querysets.py::test_extra_where_non_sequence_sqls_fails_closed" = { S610 = 1 }
-"tests/utils/test_typing.py::test_unwrap_return_type_handles_bare_typing_list" = { UP006 = 1 }
 "tests/utils/test_widgets.py::test_the_postgres_split_array_widget_reads_one_key_per_index" = { PLC0415 = 1 }
 "tests/utils/test_write_values.py::test_refused_save_follows_a_cause_or_the_handlers_reraise_never_another_frames_context" = { B904 = 1 }

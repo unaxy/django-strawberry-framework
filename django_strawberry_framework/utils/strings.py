@@ -10,6 +10,7 @@ Every name transform the package applies at the GraphQL/Django boundary:
   token.
 """
 
+import re
 from typing import TYPE_CHECKING
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -137,7 +138,4 @@ def flatten_lookup_path(name: str) -> str:
     machinery splits on it, the reason generated ``Prefetch`` ``to_attr`` names
     escape it too.
     """
-    flattened = _plain_text(name)
-    while "__" in flattened:
-        flattened = flattened.replace("__", "_")
-    return flattened
+    return re.sub(r"_{2,}", "_", _plain_text(name))

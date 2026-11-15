@@ -36,33 +36,9 @@ if TYPE_CHECKING:
 
     from _typeshed import DataclassInstance
 
-__all__ = ("canonical_policy", "copy_policy", "resolve_policy")
+__all__ = ("canonical_policy", "resolve_policy")
 
 PolicyT = TypeVar("PolicyT", bound="DataclassInstance")
-
-
-def copy_policy(policy: PolicyT) -> PolicyT:
-    """Return a private duplicate of ``policy`` that shares no state with it.
-
-    Every surface that hands a policy OUT gives out one of these rather than the
-    object an enforcement seam reads: the schema attribute a consumer holds, the
-    request-context mirror, and ``resource_policy.py::policy_from_info``. Being a
-    frozen dataclass rejects ``setattr``, which guards against the accident; it
-    does not stop ``instance.__dict__[name] = value`` or ``object.__setattr__``,
-    so frozen is not by itself an authority boundary and is not what keeps a
-    resolver from widening its own request. What keeps it is that the object a
-    resolver can reach is a duplicate - writing it changes the writer's own copy
-    and nothing any bound is read from - and that the authority is reachable
-    from no consumer-visible name at all.
-
-    Built by field-dict copy rather than by calling the constructor, because the
-    source validated itself when it was built and this runs on the path a
-    collection resolver takes: re-validating every bound per read would put a
-    schema-construction check on a per-field seam.
-    """
-    duplicate = object.__new__(type(policy))
-    duplicate.__dict__.update(policy.__dict__)  # truth: ok framework-built canonical policy
-    return duplicate
 
 
 def canonical_policy(policy: object, *, policy_cls: type[PolicyT]) -> PolicyT:

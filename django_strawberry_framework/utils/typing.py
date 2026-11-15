@@ -1,9 +1,8 @@
-"""Async-callable detection and type-unwrapping helpers for Strawberry, Python, and GraphQL types.
+"""Async-callable detection and type-unwrapping helpers for Strawberry and GraphQL types.
 
-Strawberry exposes list-shaped return types in two distinct forms across
-versions: native ``typing.list[T]`` (the modern path) and an internal
-wrapper object that carries an ``of_type`` attribute; that contract lives
-here so optimizer and schema factories do not grow parallel unwrap loops.
+Strawberry wraps a resolved field type in ``StrawberryContainer`` layers
+(``StrawberryList`` / ``StrawberryOptional``); the bounded peel lives here so
+the optimizer and schema factories do not grow parallel unwrap loops.
 graphql-core's own wrapper stacks are peeled by its ``get_named_type``;
 ``unwrap_non_null`` is its ``get_nullable_type`` typed for the package's callers.
 
@@ -36,7 +35,7 @@ import enum
 import functools
 import inspect
 import operator
-from typing import TYPE_CHECKING, Any, Final, TypeGuard, TypeVar, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Final, TypeGuard, TypeVar
 
 from asgiref.sync import iscoroutinefunction
 from graphql import GraphQLList, GraphQLNonNull, is_type
@@ -69,8 +68,6 @@ if TYPE_CHECKING:
         GraphQLScalarType,
         GraphQLType,
         GraphQLUnionType,
-        InlineFragmentNode,
-        NamedTypeNode,
     )
     from strawberry import Info
     from strawberry.schema.config import StrawberryConfig
@@ -134,7 +131,6 @@ __all__ = (
     "graphql_fields",
     "graphql_input_fields",
     "graphql_type_of",
-    "inline_fragment_type_condition",
     "is_async_callable",
     "is_graphql_list",
     "is_marked_coroutine_function",
@@ -147,9 +143,7 @@ __all__ = (
     "schema_config_from_info",
     "strawberry_schema_from_info",
     "strawberry_schema_from_schema",
-    "unwrap_container_type",
     "unwrap_non_null",
-    "unwrap_return_type",
 )
 
 _T = TypeVar("_T")
@@ -486,15 +480,6 @@ def field_return_type(info: "Info[object, object]") -> "GraphQLType":
     return require(read_attr(read_attr(info, "_raw_info"), "return_type"), is_type)
 
 
-def inline_fragment_type_condition(node: "InlineFragmentNode") -> "NamedTypeNode | None":
-    """Return an inline fragment's type condition, ``None`` for a typeless fragment.
-
-    ``Parser.parse_fragment`` stores ``None`` on a fragment with no ``on`` clause
-    (``... @include(if: $x) { ... }``).
-    """
-    return node.type_condition
-
-
 def unwrap_non_null(gql_type: _T) -> "_T | _GraphQLNullableType":
     """Peel one ``GraphQLNonNull`` layer; leave a list wrapper in place.
 
@@ -537,44 +522,3 @@ def peel_strawberry_containers(
         f"peel_strawberry_containers: `of_type` container stack exceeded "
         f"{MAX_TYPE_WRAPPER_DEPTH} layers; the type chain is likely cyclic or corrupt.",
     )
-
-
-def unwrap_container_type(strawberry_type: _T) -> "_T | StrawberryType | type[object]":
-    """Return the core type under Strawberry container layers (``peel_strawberry_containers``)."""
-    return peel_strawberry_containers(strawberry_type)[1]
-
-
-def unwrap_return_type(rt: object) -> object:
-    """Unwrap **one layer** of list / Strawberry-list-wrapper around the inner type.
-
-    Returns the inner type when ``rt`` is ``list[T]``, a Strawberry-style
-    wrapper exposing ``of_type``, or returns ``rt`` itself when there is
-    no wrapper to peel.
-
-    Strawberry exposes lists either as native ``typing.list[T]`` or wraps
-    them in an internal ``StrawberryList``-style object that carries an
-    ``of_type`` attribute. Handling both styles keeps callers portable
-    across Strawberry versions.
-
-    The Strawberry-wrapper check (``of_type``) runs first so a wrapper
-    that *also* presents a list-like origin (a hypothetical
-    ``StrawberryList[list[T]]``) yields its declared inner type rather
-    than the generic-args inner type.
-
-    Examples:
-        ``list[int]`` -> ``int``;
-        ``list[list[int]]`` -> ``list[int]`` (this helper peels one
-        layer; chain calls if you need full unwrapping);
-        ``StrawberryList(of_type=int)`` -> ``int``;
-        ``int`` -> ``int`` (no wrapper to peel).
-
-    """
-    inner = read_attr(rt, "of_type", MISSING_ATTRIBUTE)
-    if inner is not MISSING_ATTRIBUTE:
-        return inner
-    if get_origin(rt) is list:
-        args = get_args(rt)
-        return args[0] if args else Any
-    if rt is list:
-        return Any
-    return rt

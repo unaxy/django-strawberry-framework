@@ -1,4 +1,4 @@
-"""Typing utility tests for async-callable detection and Strawberry, Python, and GraphQL unwrapping.
+"""Typing utility tests for async-callable detection and Strawberry and GraphQL unwrapping.
 
 Wrapper peeling and cyclic-of_type refusal have no selection-set spelling.
 Async field colour on the wire lives in
@@ -8,7 +8,6 @@ Async field colour on the wire lives in
 import functools
 import typing
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 import strawberry
@@ -24,9 +23,6 @@ from graphql import (
     GraphQLScalarType,
     GraphQLSchema,
     GraphQLString,
-    InlineFragmentNode,
-    OperationDefinitionNode,
-    parse,
 )
 from strawberry.annotation import StrawberryAnnotation
 from strawberry.types.base import StrawberryList, StrawberryOptional
@@ -39,7 +35,6 @@ from django_strawberry_framework.utils._narrowing import require, require_instan
 from django_strawberry_framework.utils.typing import (
     MAX_TYPE_WRAPPER_DEPTH,
     _callable_inspection_target,
-    inline_fragment_type_condition,
     is_async_callable,
     is_marked_coroutine_function,
     peel_strawberry_containers,
@@ -48,9 +43,7 @@ from django_strawberry_framework.utils.typing import (
     schema_config_from_info,
     strawberry_schema_from_info,
     strawberry_schema_from_schema,
-    unwrap_container_type,
     unwrap_non_null,
-    unwrap_return_type,
 )
 from tests._info import make_info, raw_info_of
 
@@ -65,7 +58,6 @@ def test_typing_exports_all() -> None:
         "graphql_fields",
         "graphql_input_fields",
         "graphql_type_of",
-        "inline_fragment_type_condition",
         "is_async_callable",
         "is_graphql_list",
         "is_marked_coroutine_function",
@@ -78,104 +70,8 @@ def test_typing_exports_all() -> None:
         "schema_config_from_info",
         "strawberry_schema_from_info",
         "strawberry_schema_from_schema",
-        "unwrap_container_type",
         "unwrap_non_null",
-        "unwrap_return_type",
     )
-
-
-def test_inline_fragment_type_condition_reads_a_typeless_fragment_as_none() -> None:
-    """A typed inline fragment yields its named type; a typeless one (no ``on``) yields ``None``."""
-    operation = parse("{ ... on Query { a } ... @include(if: true) { a } }").definitions[0]
-    assert isinstance(operation, OperationDefinitionNode)
-    typed, typeless = operation.selection_set.selections
-    assert isinstance(typed, InlineFragmentNode)
-    assert isinstance(typeless, InlineFragmentNode)
-
-    condition = inline_fragment_type_condition(typed)
-    assert condition is not None
-    assert condition.name.value == "Query"
-    assert inline_fragment_type_condition(typeless) is None
-
-
-def test_unwrap_return_type_handles_typing_list() -> None:
-    """``list[T]`` annotation unwraps to ``T``."""
-
-    class Inner:
-        pass
-
-    assert unwrap_return_type(list[Inner]) is Inner
-
-
-def test_unwrap_return_type_handles_bare_typing_list() -> None:
-    """``typing.List`` (no parameter) returns ``Any``.
-
-    ``get_origin(typing.List) is list`` so the list branch fires, but
-    ``get_args(typing.List)`` returns ``()``. Indexing ``get_args(rt)[0]``
-    would ``IndexError`` here; the helper returns ``Any``
-    as the "unknown element type" sentinel.
-    """
-    # basedpyright: the bare deprecated ``typing.List`` alias is the input under test; ``list``
-    # is covered by the next test and cannot reach the ``get_args(...) == ()`` list-origin branch
-    assert unwrap_return_type(typing.List) is Any  # noqa: UP006 - the deprecated alias is the value under test  # pyright: ignore[reportDeprecated]
-
-
-def test_unwrap_return_type_handles_bare_builtin_list() -> None:
-    """A bare ``list`` (no parameter) returns ``Any``.
-
-    ``get_origin(list)`` is ``None`` (a bare builtin is not a generic
-    alias), so the list-origin branch does not fire and the dedicated
-    ``rt is list`` branch returns the same ``Any`` sentinel as
-    ``typing.List``.
-    """
-    assert unwrap_return_type(list) is Any
-
-
-def test_unwrap_return_type_handles_strawberry_of_type() -> None:
-    """A Strawberry-style wrapper exposing ``of_type`` unwraps to the inner type."""
-
-    class Inner:
-        pass
-
-    class FakeStrawberryList:
-        of_type = Inner
-
-    assert unwrap_return_type(FakeStrawberryList()) is Inner
-
-
-def test_unwrap_return_type_peels_only_one_layer() -> None:
-    """The annotation helper keeps nested wrappers for callers to inspect."""
-
-    class Inner:
-        pass
-
-    class Outer:
-        of_type = list[Inner]
-
-    assert unwrap_return_type(Outer()) == list[Inner]
-
-
-def test_unwrap_container_type_peels_containers_but_not_a_leaf_with_of_type() -> None:
-    """Only ``StrawberryContainer`` layers peel; a leaf exposing ``of_type`` is NOT descended.
-
-    An ``Edge`` subclass that happens to carry an ``of_type`` attribute must be
-    returned as the leaf, not peeled into.
-    """
-
-    class Edge:
-        of_type = "not a wrapper"
-
-    assert unwrap_container_type(StrawberryList(of_type=Edge)) is Edge
-    assert unwrap_container_type(Edge) is Edge
-
-
-def test_unwrap_container_type_raises_on_cyclic_container_stack() -> None:
-    """A cyclic container chain hits the Power-of-Ten bound and fails loud."""
-    cyclic = StrawberryList(of_type=str)
-    cyclic.of_type = cyclic  # never bottoms out
-
-    with pytest.raises(RuntimeError, match="cyclic or corrupt"):
-        unwrap_container_type(cyclic)
 
 
 def test_peel_strawberry_containers_counts_list_layers_only() -> None:
@@ -202,15 +98,6 @@ def test_peel_strawberry_containers_raises_on_cyclic_container_stack() -> None:
 
     with pytest.raises(RuntimeError, match="cyclic or corrupt"):
         peel_strawberry_containers(cyclic)
-
-
-def test_unwrap_return_type_returns_direct_class_when_unwrapped() -> None:
-    """A bare class with no wrapper passes through unchanged."""
-
-    class Inner:
-        pass
-
-    assert unwrap_return_type(Inner) is Inner
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +253,7 @@ def test_schema_config_from_info_reads_the_strawberry_schema_behind_both_info_fl
     assert schema_config_from_info(None) is None
 
 
-def test_unwrap_container_type_accepts_exact_wrapper_depth() -> None:
+def test_peel_strawberry_containers_accepts_exact_wrapper_depth() -> None:
     """The configured depth is inclusive for Strawberry containers too."""
 
     class Inner:
@@ -376,12 +263,7 @@ def test_unwrap_container_type_accepts_exact_wrapper_depth() -> None:
     for _ in range(MAX_TYPE_WRAPPER_DEPTH):
         wrapped = StrawberryList(of_type=wrapped)
 
-    assert unwrap_container_type(wrapped) is Inner
-
-
-def test_unwrap_return_type_preserves_none_inner_type() -> None:
-    """An ``of_type`` wrapper may carry ``None`` while being resolved."""
-    assert unwrap_return_type(SimpleNamespace(of_type=None)) is None
+    assert peel_strawberry_containers(wrapped) == (MAX_TYPE_WRAPPER_DEPTH, Inner)
 
 
 def test_callable_inspection_target_accepts_exact_wrapper_depth() -> None:

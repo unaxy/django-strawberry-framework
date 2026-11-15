@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import enum
+import functools
 import keyword
 import uuid
 import warnings
@@ -243,24 +244,6 @@ def lookup_leaf_names(lookup: str) -> tuple[str, str | None]:
     return "_".join(attr if wire_name is None else wire_name for attr, wire_name in named), None
 
 
-def _compose_and(branch_qs: list[models.Q]) -> models.Q:
-    """Compose branch Q objects with logical AND."""
-    q = models.Q()
-    for branch_q in branch_qs:
-        q &= branch_q
-    return q
-
-
-def _compose_or(branch_qs: list[models.Q]) -> models.Q:
-    """Compose branch Q objects with logical OR."""
-    if not branch_qs:
-        return models.Q()
-    q = models.Q()
-    for branch_q in branch_qs:
-        q |= branch_q
-    return q
-
-
 def _compose_not(branch_qs: list[models.Q]) -> models.Q:
     """Compose branch Q objects with logical NOT."""
     if not branch_qs:
@@ -296,14 +279,14 @@ LOGIC_OP_AND = LogicOperatorDescriptor(
     python_attr="and_",
     wire_name="and",
     is_sequence=True,
-    compose=_compose_and,
+    compose=lambda branch_qs: functools.reduce(models.Q.__and__, branch_qs, models.Q()),
 )
 
 LOGIC_OP_OR = LogicOperatorDescriptor(
     python_attr="or_",
     wire_name="or",
     is_sequence=True,
-    compose=_compose_or,
+    compose=lambda branch_qs: functools.reduce(models.Q.__or__, branch_qs, models.Q()),
 )
 
 LOGIC_OP_NOT = LogicOperatorDescriptor(
