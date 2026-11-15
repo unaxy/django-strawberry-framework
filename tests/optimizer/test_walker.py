@@ -342,8 +342,6 @@ def _register_type_definition(
             model=model,
             name=None,
             description=None,
-            fields_spec=None,
-            exclude_spec=None,
             selected_fields=selected_fields,
             field_map=field_map
             if field_map is not None

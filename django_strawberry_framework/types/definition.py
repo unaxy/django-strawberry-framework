@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from django.core.exceptions import FieldDoesNotExist
 from graphql import GraphQLError, assert_name
@@ -13,8 +13,7 @@ from strawberry.utils.str_converters import to_camel_case
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import introspection
-from django_strawberry_framework.utils._narrowing import class_namespace, is_str
-from django_strawberry_framework.utils.typing import object_result
+from django_strawberry_framework.utils._narrowing import class_namespace, read_attr
 
 from .relay import _STRAWBERRY_RESOLVE_ID
 
@@ -214,8 +213,6 @@ class DjangoTypeDefinition:
     model: type[models.Model]
     name: str | None
     description: str | Promise | None
-    fields_spec: tuple[str, ...] | Literal["__all__"] | None
-    exclude_spec: tuple[str, ...] | None
     selected_fields: tuple[ModelField, ...]
     field_map: dict[str, FieldMeta]
     optimizer_hints: dict[str, OptimizerHint]
@@ -299,25 +296,15 @@ class DjangoTypeDefinition:
         (``finalizer.py``, ``filters/base.py``, ``filters/inputs.py`` through
         this property, ``types/base.py::_build_annotations`` directly) so the
         copies cannot diverge across renames. This property also checks the
-        name is a non-empty string and a GraphQL Name.
+        name is a GraphQL Name.
         """
-        published = object_result(surface_type_name, self.origin, self.name)
-        label = introspection.kind(self.origin)
-        if not is_str(published):
-            raise ConfigurationError(
-                f"GraphQL type name for {label} must be a non-empty string; got {published!r}.",
-            )
-        normalized = introspection.text(published)
-        if not normalized:
-            raise ConfigurationError(
-                f"GraphQL type name for {label} must be a non-empty string; got an empty name.",
-            )
-        _check_graphql_name(normalized, f"GraphQL type name for {label}")
-        return normalized
+        published = surface_type_name(self.origin, self.name)
+        _check_graphql_name(published, f"GraphQL type name for {introspection.kind(self.origin)}")
+        return published
 
     def related_target_for(
         self,
-        field_name: object,
+        field_name: str,
     ) -> tuple[DjangoTypeDefinition, ModelField] | None:
         """Return ``(target_definition, model_field)`` for a relation field.
 
@@ -334,10 +321,6 @@ class DjangoTypeDefinition:
         Returns ``None`` when no ``DjangoType`` is registered for the
         target model.
         """
-        if not is_str(field_name):
-            return None
-        field_name = introspection.text(field_name)
-
         # In-function import: ``registry`` stays a method-local edge so this
         # module does not depend on it at import time (no load cycle exists
         # either way -- ``registry.py`` keeps its ``types.*`` edges
@@ -392,18 +375,11 @@ class DjangoTypeDefinition:
         attributes and the ``NodeID`` annotation) are stable for the
         definition's lifetime.
         """
-        normalized_pk_name = _normalize_pk_name(pk_name)
-        if normalized_pk_name is None:
-            return False
-        cache_key = (normalized_pk_name, pk_is_relation)
+        cache_key = (pk_name, pk_is_relation)
         if cache_key in self._custom_id_resolver_cache:
             return self._custom_id_resolver_cache[cache_key]
 
-        result = origin_has_custom_id_resolver(
-            self.origin,
-            normalized_pk_name,
-            pk_is_relation=pk_is_relation,
-        )
+        result = origin_has_custom_id_resolver(self.origin, pk_name, pk_is_relation=pk_is_relation)
         self._custom_id_resolver_cache[cache_key] = result
         return result
 
@@ -424,28 +400,14 @@ def origin_has_custom_id_resolver(
     relation resolver under it whenever the type lists the key, and that
     resolver never builds the id.
     """
-    normalized_pk_name = _normalize_pk_name(pk_name)
-    if normalized_pk_name is None:
-        return False
-    resolver_names = (
-        ("resolve_id",)
-        if pk_is_relation
-        else (normalized_pk_name, f"resolve_{normalized_pk_name}")
-    )
+    resolver_names = ("resolve_id",) if pk_is_relation else (pk_name, f"resolve_{pk_name}")
     if any(
         _class_has_custom_id_resolver(cls, name)
         for cls in origin.__mro__
         for name in resolver_names
     ):
         return True
-    return _resolves_id_off_pk(origin, normalized_pk_name)
-
-
-def _normalize_pk_name(pk_name: object) -> str | None:
-    """Return a plain primary-key or id attribute name, or ``None`` for malformed input."""
-    if not is_str(pk_name):
-        return None
-    return introspection.text(pk_name) or None
+    return _resolves_id_off_pk(origin, pk_name)
 
 
 def _resolves_id_off_pk(origin: type[object], pk_name: str) -> bool:
@@ -462,14 +424,11 @@ def _resolves_id_off_pk(origin: type[object], pk_name: str) -> bool:
     if not issubclass(origin, relay.Node):
         return False
     try:
-        # A consumer ``Node`` may override ``resolve_id_attr`` to return anything, so the
-        # result is normalized under the same guard that contains the call.
-        normalized_id_attr = _normalize_pk_name(origin.resolve_id_attr())
+        id_attr = origin.resolve_id_attr()
     except NodeIDAnnotationError:
         # No ``NodeID`` annotation: the framework default resolves to "pk".
         return False
-    # A non-string or empty override result cannot name the pk column.
-    return normalized_id_attr is None or normalized_id_attr not in ("pk", pk_name)
+    return id_attr not in ("pk", pk_name)
 
 
 def _class_has_custom_id_resolver(type_cls: type[object], name: str) -> bool:
@@ -484,4 +443,4 @@ def _class_has_custom_id_resolver(type_cls: type[object], name: str) -> bool:
 
 def _is_framework_relay_id_resolver(value: object) -> bool:
     """Return whether ``value`` holds Strawberry's own ``Node.resolve_id`` (installed or re-exported)."""
-    return introspection.stored_function(value) is _STRAWBERRY_RESOLVE_ID
+    return read_attr(value, "__func__", value) is _STRAWBERRY_RESOLVE_ID

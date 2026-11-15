@@ -50,6 +50,7 @@ from typing import (
     ClassVar,
     Literal,
     NamedTuple,
+    NoReturn,
     TypeAlias,
     TypeVar,
 )
@@ -59,8 +60,8 @@ from django.utils.functional import Promise
 from strawberry import relay
 from strawberry.relay.types import NodeIDPrivate
 from strawberry.types.auto import StrawberryAuto
+from strawberry.types.base import get_object_definition
 from strawberry.types.field import StrawberryField
-from strawberry.types.object_type import StrawberryObjectDefinition
 from typing_extensions import override
 
 from django_strawberry_framework.conf import RELAY_GLOBALID_STRATEGY_KEY
@@ -73,7 +74,6 @@ from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     class_namespace,
     dict_of,
-    instance_state,
     is_class,
     is_dict,
     is_list,
@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     from typing_extensions import TypeIs
 
     from django_strawberry_framework.filters.sets import FilterSet
+    from django_strawberry_framework.optimizer.hints import _PrefetchAny
     from django_strawberry_framework.orders.sets import OrderSet
     from django_strawberry_framework.utils.typing import ModelField
 
@@ -159,10 +160,22 @@ DEFAULT_RELATION_SHAPE = "connection"
 _RELAY_NODE_GATE_LEAD = "requires a Relay-Node-shaped type; add `relay.Node` to `Meta.interfaces`"
 # The tail appended beside the lead-in by every gate but the relation_shapes
 # gate, and by ``global_id_for`` in ``testing/relay.py``: byte-identical at
-# every compose site. The ``_validate_relation_shapes`` gate's "or remove the
-# key." tail and the parenthesized fifth-guard variants in ``relay.py`` /
-# ``connection.py`` are a different byte shape and stay inline.
+# every compose site. The ``_validate_relation_shapes`` gate passes its "or
+# remove the key." tail instead; the parenthesized fifth-guard variants in
+# ``relay.py`` / ``connection.py`` are a different byte shape and stay inline.
 _RELAY_NODE_GATE_INHERIT_TAIL = "or inherit `relay.Node` directly."
+
+
+def _require_relay_shape(
+    subject: str,
+    *,
+    relay_shaped: bool,
+    tail: str = _RELAY_NODE_GATE_INHERIT_TAIL,
+) -> None:
+    """Raise the Relay-Node gate's ``ConfigurationError`` for ``subject`` unless ``relay_shaped``."""
+    if not relay_shaped:
+        raise ConfigurationError(f"{subject} {_RELAY_NODE_GATE_LEAD} {tail}")
+
 
 # The valid string-strategy set and the package default are the single source
 # of truth for the CONFIGURABLE GlobalID-encoding strategy vocabulary, what a
@@ -310,11 +323,7 @@ def _validate_connection(
                 f"{model_name}.Meta.connection['total_count'] must be a bool; got {total_count!r}",
             )
         options["total_count"] = total_count
-    if not relay_shaped:
-        raise ConfigurationError(
-            f"{model_name}.Meta.connection {_RELAY_NODE_GATE_LEAD} "
-            f"{_RELAY_NODE_GATE_INHERIT_TAIL}",
-        )
+    _require_relay_shape(f"{model_name}.Meta.connection", relay_shaped=relay_shaped)
     return options
 
 
@@ -353,10 +362,7 @@ def _validate_cursor_field(
             f"{owner} must be a non-empty non-string sequence of order strings; got {value!r}",
         )
     _ = validate_cursor_field_references(entries, owner=owner)
-    if not relay_shaped:
-        raise ConfigurationError(
-            f"{owner} {_RELAY_NODE_GATE_LEAD} {_RELAY_NODE_GATE_INHERIT_TAIL}",
-        )
+    _require_relay_shape(owner, relay_shaped=relay_shaped)
     return entries
 
 
@@ -413,10 +419,11 @@ def _validate_relation_shapes(
                 f"{sorted(RELATION_SHAPE_VALUES)}.",
             )
         shapes[key] = shape
-    if not relay_shaped:
-        raise ConfigurationError(
-            f"{model_name}.Meta.relation_shapes {_RELAY_NODE_GATE_LEAD} or remove the key.",
-        )
+    _require_relay_shape(
+        f"{model_name}.Meta.relation_shapes",
+        relay_shaped=relay_shaped,
+        tail="or remove the key.",
+    )
     return shapes
 
 
@@ -487,10 +494,7 @@ def _validate_globalid_strategy(
     # The Relay-Node-shape gate is a ``Meta``-only concern (the setting path's
     # per-type gate already ran at type creation); mirrors
     # ``_validate_connection``'s gate and remediation text.
-    if is_meta and not relay_shaped:
-        raise ConfigurationError(
-            f"{subject} {_RELAY_NODE_GATE_LEAD} {_RELAY_NODE_GATE_INHERIT_TAIL}",
-        )
+    _require_relay_shape(subject, relay_shaped=relay_shaped or not is_meta)
     return normalized
 
 
@@ -744,19 +748,8 @@ class DjangoType:
                 "model-inferred; it does not add fields. Add the name to Meta.fields (or "
                 'Meta.fields = "__all__"), or remove the annotation.',
             )
-        consumer_annotated_relation_fields = frozenset(
-            field.name
-            for field in fields
-            if field.is_relation
-            and field.name in consumer_annotations
-            and field.name not in auto_annotated_fields
-        )
-        consumer_annotated_scalar_fields = frozenset(
-            field.name
-            for field in fields
-            if not field.is_relation
-            and field.name in consumer_annotations
-            and field.name not in auto_annotated_fields
+        consumer_annotated_relation_fields, consumer_annotated_scalar_fields = (
+            _partition_by_relation(fields, consumer_annotations.keys() - auto_annotated_fields)
         )
         consumer_assigned_relation_fields, consumer_assigned_scalar_fields = (
             _consumer_assigned_fields(
@@ -861,8 +854,6 @@ class DjangoType:
             model=validated.model,
             name=validated.name,
             description=validated.description,
-            fields_spec=validated.fields_spec,
-            exclude_spec=validated.exclude_spec,
             selected_fields=tuple(fields),
             field_map=field_map,
             optimizer_hints=optimizer_hints,
@@ -1007,12 +998,17 @@ def _normalize_fields_spec(value: object) -> tuple[str, ...] | Literal["__all__"
             "Meta.fields must be '__all__' or a non-string sequence of field names",
         )
     # The real-class check above proved a ``Sequence``.
+    return _field_name_entries(value, "fields")
+
+
+def _field_name_entries(value: object, key: str) -> tuple[str, ...]:
+    """Return the entries of a ``Meta.{key}`` collection, refusing any that is not a ``str``."""
     entries = tuple(list_of(value))
     if _is_str_tuple(entries):
         return entries
     invalid = next(entry for entry in entries if not isinstance(entry, str))
     raise ConfigurationError(
-        f"Meta.fields must contain field name strings; got {invalid!r}",
+        f"Meta.{key} must contain field name strings; got {invalid!r}",
     )
 
 
@@ -1044,13 +1040,7 @@ def _normalize_sequence_spec(value: object, key: str = "exclude") -> tuple[str, 
             f"Meta.{key} must be a non-string sequence or set of field names",
         )
     # The real-class check above proved a ``Sequence`` or ``AbstractSet``.
-    entries = tuple(list_of(value))
-    if _is_str_tuple(entries):
-        return entries
-    invalid = next(entry for entry in entries if not isinstance(entry, str))
-    raise ConfigurationError(
-        f"Meta.{key} must contain field name strings; got {invalid!r}",
-    )
+    return _field_name_entries(value, key)
 
 
 def _consumer_assigned_fields(
@@ -1095,26 +1085,28 @@ def _consumer_assigned_fields(
     ``ConfigurationError`` shape so the failure mode is consistent
     across scalar and relation columns.
     """
-    relation_assigned: set[str] = set()
-    scalar_assigned: set[str] = set()
     namespace = class_namespace(cls)
     for field in fields:
-        if field.name not in namespace:
-            continue
-        value = namespace[field.name]
-        if isinstance(value, StrawberryField):
-            if field.is_relation:
-                relation_assigned.add(field.name)
-            else:
-                scalar_assigned.add(field.name)
-            continue
-        kind = "relation" if field.is_relation else "scalar"
-        raise ConfigurationError(
-            f"{cls.__name__}.{field.name} shadows a Django {kind} field with an unsupported "
-            "class attribute. Use a type annotation for type overrides, or use "
-            "strawberry.field(resolver=...) / @strawberry.field for resolver overrides.",
-        )
-    return frozenset(relation_assigned), frozenset(scalar_assigned)
+        if field.name in namespace and not isinstance(namespace[field.name], StrawberryField):
+            kind = "relation" if field.is_relation else "scalar"
+            raise ConfigurationError(
+                f"{cls.__name__}.{field.name} shadows a Django {kind} field with an unsupported "
+                "class attribute. Use a type annotation for type overrides, or use "
+                "strawberry.field(resolver=...) / @strawberry.field for resolver overrides.",
+            )
+    return _partition_by_relation(fields, namespace.keys())
+
+
+def _partition_by_relation(
+    fields: "tuple[ModelField, ...]",
+    names: AbstractSet[str],
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return the ``(relation, scalar)`` split of the selected ``fields`` named in ``names``."""
+    named = [field for field in fields if field.name in names]
+    return (
+        frozenset(field.name for field in named if field.is_relation),
+        frozenset(field.name for field in named if not field.is_relation),
+    )
 
 
 def _meta_optimizer_hints(meta: object, model: type[models.Model]) -> dict[str, object]:
@@ -1147,22 +1139,22 @@ def _meta_optimizer_hints(meta: object, model: type[models.Model]) -> dict[str, 
     return hints
 
 
-def _format_unknown_fields_error(
+def _refuse_unknown_fields(
     *,
     model: type[models.Model],
     attr: str,
     unknown: list[str],
     available: set[str],
-) -> str:
-    """Return the standard "unknown fields ... Available: ..." error message.
+) -> NoReturn:
+    """Raise the standard "unknown fields ... Available: ..." ``ConfigurationError``.
 
     Used by every validator that points at a typo in a ``Meta`` key naming
-    model fields; ``attr`` names the offending key.  Centralizing the format
+    model fields; ``attr`` names the offending key.  Centralizing the message
     keeps the consumer-visible error shape consistent across typo-guard sites.
     """
-    return (
+    raise ConfigurationError(
         f"{model.__name__}.Meta.{attr} names unknown fields: {unknown}. "
-        f"Available: {sorted(available)}."
+        f"Available: {sorted(available)}.",
     )
 
 
@@ -1244,8 +1236,7 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
     - Rejects strings, sets, generators, dicts, ints, and other
       non-sequence values.
     - Each entry must satisfy
-      ``hasattr(entry, "__strawberry_definition__") and
-      entry.__strawberry_definition__.is_interface``.
+      ``get_object_definition(entry)`` answering an interface definition.
     - Rejects string entries (no lazy/forward-reference lookup).
     - Rejects the six ``strawberry.relay`` non-interface helpers
       (``GlobalID``, ``NodeID``, ``Connection``, ``ListConnection``,
@@ -1306,8 +1297,8 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
                 f"DjangoType subclasses (got {entry.__name__}). DjangoType is not a "
                 "Strawberry interface.",
             )
-        definition: object = read_attr(entry, "__strawberry_definition__", None)
-        if not (isinstance(definition, StrawberryObjectDefinition) and definition.is_interface):
+        definition = get_object_definition(entry)
+        if definition is None or not definition.is_interface:
             raise ConfigurationError(
                 f"{model_name}.Meta.interfaces entry {entry.__name__} is not a "
                 "Strawberry interface. Use @strawberry.interface or one of the "
@@ -1582,7 +1573,7 @@ def _validate_optimizer_hints(
        without ``to_attr`` seeds rows the lookup's relation can serve
        (``_hinted_prefetch_seed_defect``).
 
-    Field-name error sites route through ``_format_unknown_fields_error``
+    Field-name error sites route through ``_refuse_unknown_fields``
     so the consumer-visible shape matches ``Meta.fields`` /
     ``Meta.exclude`` typo guards; value errors use a dedicated
     ``OptimizerHint`` message.
@@ -1613,23 +1604,19 @@ def _validate_optimizer_hints(
 
     unknown_hint_fields = sorted(set(hints) - valid_field_names)
     if unknown_hint_fields:
-        raise ConfigurationError(
-            _format_unknown_fields_error(
-                model=model,
-                attr="optimizer_hints",
-                unknown=unknown_hint_fields,
-                available=valid_field_names,
-            ),
+        _refuse_unknown_fields(
+            model=model,
+            attr="optimizer_hints",
+            unknown=unknown_hint_fields,
+            available=valid_field_names,
         )
     excluded_hint_fields = sorted(set(hints) - selected_relation_names)
     if excluded_hint_fields:
-        raise ConfigurationError(
-            _format_unknown_fields_error(
-                model=model,
-                attr="optimizer_hints",
-                unknown=excluded_hint_fields,
-                available=selected_relation_names,
-            ),
+        _refuse_unknown_fields(
+            model=model,
+            attr="optimizer_hints",
+            unknown=excluded_hint_fields,
+            available=selected_relation_names,
         )
     validated: dict[str, OptimizerHint] = {}
     bad_values: list[str] = []
@@ -1654,7 +1641,10 @@ def _validate_optimizer_hints(
     return validated
 
 
-def _hinted_prefetch_seed_defect(model: type[models.Model], prefetch: object) -> str | None:
+def _hinted_prefetch_seed_defect(
+    model: type[models.Model],
+    prefetch: "_PrefetchAny",
+) -> str | None:
     """Return why a hinted seed cannot serve its relation, or ``None`` when it can.
 
     Django builds a prefetch's rows from its queryset's ``Query.model`` and
@@ -1673,37 +1663,17 @@ def _hinted_prefetch_seed_defect(model: type[models.Model], prefetch: object) ->
     relation, a lazy string target) is left to Django at fetch. Only a
     ``Prefetch`` without ``to_attr`` is checked: a ``to_attr`` lands its rows on
     that attribute, which only a consumer-assigned resolver reads, never on the
-    relation's cache, and a ``Prefetch`` with no queryset has no seed. Every read
-    is of the instance state Django's ``Prefetch``, ``QuerySet`` and ``Query``
-    store; a seed that is not a
-    ``QuerySet`` (a manager, say) carries no ``Query`` and is refused as such.
+    relation's cache, and a ``Prefetch`` with no queryset has no seed.
     """
-    prefetch_state = instance_state(prefetch)
-    queryset = prefetch_state.get("queryset")
-    to_attr = prefetch_state.get("to_attr")
-    if queryset is None or (is_str(to_attr) and introspection.text(to_attr) != ""):
+    queryset = prefetch.queryset
+    if queryset is None or prefetch.to_attr:
         return None
-    through = prefetch_state.get("prefetch_through")
-    lookup = introspection.text(through) if is_str(through) else None
-    if lookup is None:
-        return None
+    lookup = introspection.text(prefetch.prefetch_through)
     target = _prefetch_relation_target_or_none(model, lookup)
     if target is None:
         return None
-    # Read through an ``object`` binding: the class check below proves a ``QuerySet``
-    # without saying over which model, which the instance state answers.
-    seed: object = queryset
-    if not isinstance(queryset, models.QuerySet):
-        return (
-            f"the hinted Prefetch({lookup!r}) queryset is a {introspection.kind(queryset)}, not a "
-            f"QuerySet. Pass a queryset over {target.__name__} (or a proxy model of it)."
-        )
-    queryset_state = instance_state(seed)
-    query = queryset_state.get("_query")
-    query_state = instance_state(query) if query is not None else {}
-    row_models = (query_state.get("model"), queryset_state.get("model"))
     concrete = _concrete_or_none(target)
-    for row_model in row_models:
+    for row_model in (queryset.query.model, queryset.model):
         if not (
             is_class(row_model)
             and issubclass(row_model, target)
@@ -1732,7 +1702,7 @@ def _selected_meta_targets(
     The unknown/excluded half shared by every ``Meta`` key that targets a set
     of field names on the type (spec-029 Decision 8 / spec-032 Decision 7 /
     spec-048 Decision 2): reject names unknown to the model (via the shared
-    ``_format_unknown_fields_error`` keyed on ``attr`` so the consumer-visible
+    ``_refuse_unknown_fields`` keyed on ``attr`` so the consumer-visible
     shape matches the ``Meta.fields`` / ``Meta.exclude`` typo guards), then
     reject names not in the selected set (via the caller's family-specific
     ``excluded_error``, which receives the sorted excluded names). Returns the
@@ -1748,13 +1718,11 @@ def _selected_meta_targets(
     model_field_names = {f.name for f in model._meta.get_fields()}
     unknown = sorted(targets - model_field_names)
     if unknown:
-        raise ConfigurationError(
-            _format_unknown_fields_error(
-                model=model,
-                attr=attr,
-                unknown=unknown,
-                available=model_field_names,
-            ),
+        _refuse_unknown_fields(
+            model=model,
+            attr=attr,
+            unknown=unknown,
+            available=model_field_names,
         )
     selected_by_name = {f.name: f for f in selected_fields}
     excluded = sorted(targets - set(selected_by_name))
@@ -1785,7 +1753,7 @@ def _validate_nullability_override_targets(
     ``Meta.exclude`` contract is not collapsed into "unknown": the model-wide
     names (``model._meta.get_fields()``) gate the *unknown-field* path, and the
     selected-field names gate the *excluded / not-selected* path. The unknown
-    path routes through ``_format_unknown_fields_error`` so its consumer-visible
+    path routes through ``_refuse_unknown_fields`` so its consumer-visible
     shape matches the ``Meta.fields`` / ``Meta.exclude`` / ``Meta.optimizer_hints``
     typo guards.
 
@@ -1949,7 +1917,7 @@ def _validate_relation_shape_targets(
     Check order mirrors the sibling: unknown -> excluded -> per-name checks
     (non-relation / single-valued / consumer-authored), iterating keys sorted
     for deterministic messages. The unknown path routes through
-    ``_format_unknown_fields_error`` so its consumer-visible shape matches the
+    ``_refuse_unknown_fields`` so its consumer-visible shape matches the
     ``Meta.fields`` / ``Meta.exclude`` / ``Meta.optimizer_hints`` typo guards.
     Cardinality is read from ``FieldMeta.is_many_side`` (the same single-source
     classifier the generated relation resolvers and the Phase-2.5 synthesis
@@ -2046,40 +2014,20 @@ def _select_fields(
             so typos surface loudly instead of silently dropping.
 
     """
-    all_fields = list(model._meta.get_fields())
-    all_names = [f.name for f in all_fields]
-    valid_names = set(all_names)
-
+    all_fields = tuple(model._meta.get_fields())
+    valid_names = {f.name for f in all_fields}
     if fields_spec == "__all__":
-        selected_names = valid_names
-    elif fields_spec is not None:
-        unknown = sorted(set(fields_spec) - valid_names)
-        if unknown:
-            raise ConfigurationError(
-                _format_unknown_fields_error(
-                    model=model,
-                    attr="fields",
-                    unknown=unknown,
-                    available=valid_names,
-                ),
-            )
-        selected_names = set(fields_spec)
+        return all_fields
+    if fields_spec is not None:
+        attr, names = "fields", set(fields_spec)
     elif exclude_spec is not None:
-        excluded = exclude_spec
-        unknown = sorted(set(excluded) - valid_names)
-        if unknown:
-            raise ConfigurationError(
-                _format_unknown_fields_error(
-                    model=model,
-                    attr="exclude",
-                    unknown=unknown,
-                    available=valid_names,
-                ),
-            )
-        selected_names = valid_names - set(excluded)
+        attr, names = "exclude", set(exclude_spec)
     else:
-        selected_names = valid_names
-
+        return all_fields
+    unknown = sorted(names - valid_names)
+    if unknown:
+        _refuse_unknown_fields(model=model, attr=attr, unknown=unknown, available=valid_names)
+    selected_names = names if attr == "fields" else valid_names - names
     return tuple(f for f in all_fields if f.name in selected_names)
 
 

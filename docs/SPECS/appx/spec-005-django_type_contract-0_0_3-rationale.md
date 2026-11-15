@@ -49,7 +49,7 @@ type, so it is kept out of the consumer-authored set and routed back into synthe
 Spec: [Invalid `Meta.fields` and `Meta.exclude` names][spec-005-selection].
 
 The model + unknowns + available shape lets a consumer fix a typo from the message alone. Because
-every field-naming `Meta` key reuses `types/base.py::_format_unknown_fields_error`, the spec states
+every field-naming `Meta` key reuses `types/base.py::_refuse_unknown_fields`, the spec states
 the obligation a new key inherits rather than listing the keys: a reader who finds a list short still
 has the rule.
 

@@ -53,7 +53,7 @@ Why the boundary is the consumer-authored set rather than the merge order is rec
 
 This rule is final. The error shape — model + unknowns + available — is part of the public contract: a consumer can rely on every `ConfigurationError` from this code path naming both the bad input and the valid surface.
 
-The shape is not this section's alone. `types/base.py::_format_unknown_fields_error` is its single source, and every later `Meta` key whose value names model fields reuses it, so `Meta.optimizer_hints`, `Meta.nullable_overrides` / `Meta.required_overrides`, `Meta.filesystem_path_fields`, and `Meta.relation_shapes` all owe a consumer the same message shape. A new field-naming key adopts that helper rather than formatting its own.
+The shape is not this section's alone. `types/base.py::_refuse_unknown_fields` is its single source, and every later `Meta` key whose value names model fields reuses it, so `Meta.optimizer_hints`, `Meta.nullable_overrides` / `Meta.required_overrides`, `Meta.filesystem_path_fields`, and `Meta.relation_shapes` all owe a consumer the same message shape. A new field-naming key adopts that helper rather than formatting its own.
 
 ### Accepted vs deferred Meta keys
 

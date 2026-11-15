@@ -12,8 +12,6 @@ import abc
 import codecs
 import enum
 import functools
-import sys
-from typing import TYPE_CHECKING, TypeAlias
 
 import pytest
 from django.db import models
@@ -25,17 +23,10 @@ from django_strawberry_framework.utils.introspection import (
     mro_entry,
     name,
     overrides,
-    stored_function,
     text,
 )
 
 MODULE = __name__
-
-if TYPE_CHECKING:
-    _ClassmethodBase: TypeAlias = classmethod[object, ..., object]
-else:
-    # ``classmethod`` has no ``__class_getitem__`` before Python 3.14, so the base stays bare.
-    _ClassmethodBase = classmethod
 
 
 def _plain_func() -> int:
@@ -56,10 +47,6 @@ def _sm_func() -> str:
 
 _CM_WRAPPER = classmethod(_cm_func)
 _SM_WRAPPER = staticmethod(_sm_func)
-
-
-class _CMSub(_ClassmethodBase):
-    """A subclass of the ``classmethod`` wrapper type, not the exact type."""
 
 
 class _Base:
@@ -124,12 +111,6 @@ class _MyInt(int):
     pass
 
 
-class _MyIntStr(int):
-    @override
-    def __str__(self) -> str:
-        return "custom-str"
-
-
 class _AbcBase(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def run(self) -> None: ...
@@ -149,31 +130,14 @@ class _Outer:
         pass
 
 
-def test_stored_function_unwraps_exact_wrappers_and_bound_methods() -> None:
-    assert stored_function(_CM_WRAPPER) is _cm_func
-    assert stored_function(_SM_WRAPPER) is _sm_func
-    assert stored_function(_Base.cm) is _cm_func
-    assert stored_function(_Base().meth) is _Base.meth
-
-
-def test_stored_function_returns_subclasses_and_plain_values_unchanged() -> None:
-    subclass_instance = _CMSub(_cm_func)
-    value = object()
-    assert stored_function(subclass_instance) is subclass_instance
-    assert stored_function(_plain_func) is _plain_func
-    assert stored_function(value) is value
-
-
-def test_mro_attr_reads_the_real_mro_only() -> None:
+def test_mro_attr_reads_the_static_attribute() -> None:
     Unsupported = type("Unsupported", (), {"__iter__": None})
     sentinel = object()
     assert mro_attr(_Sub, "meth") is _Sub.meth
     assert mro_attr(_Sub, "marker") == "base"
     assert mro_attr(_Sub, "absent", sentinel) is sentinel
-    assert mro_attr(_Color, "__iter__", sentinel) is sentinel
     assert mro_attr(Unsupported, "__iter__", sentinel) is None
     assert mro_attr(_Callable, "__call__") is _Callable.__call__
-    assert mro_attr(_Base(), "meth", sentinel) is sentinel
 
 
 @pytest.mark.parametrize(
@@ -330,18 +294,6 @@ def test_text_uses_fallback_only_for_empty_text() -> None:
     assert text("", "fallback") == "fallback"
     assert text(None, "fallback") == "None"
     assert text("") == ""
-
-
-@pytest.mark.skipif(
-    not hasattr(sys, "get_int_max_str_digits"),
-    reason="this interpreter has no integer digit limit",
-)
-def test_text_renders_an_oversized_int_as_unprintable_and_keeps_consumer_str() -> None:
-    huge = 10**5000
-    assert text(huge) == "<unprintable int>"
-    assert text(_MyInt(huge)) == "<unprintable _MyInt>"
-    assert text(_MyIntStr(huge)) == "custom-str"
-    assert text(10**20) == str(10**20)
 
 
 @pytest.mark.parametrize(

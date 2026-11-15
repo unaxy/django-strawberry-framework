@@ -39,8 +39,8 @@ finalized flag flips only after every type's Phase 3 call returns, via
 ``registry.mark_finalized()`` as the last statement of
 ``finalize_django_types()``: a raise inside Phase 2, 2.5, or 3 leaves
 the flag False and supports a fine-grained partial recovery on rerun.
-The per-entry ``if definition.finalized: continue`` guards at the head
-of each phase loop skip already-decorated types on the rerun.
+Each phase loop walks ``_unfinalized_definitions``, so already-decorated
+types are skipped on the rerun.
 ``registry.clear()`` remains the recommended escape hatch only when the
 offending type cannot be fixed in place.
 """
@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 import strawberry
 from strawberry import relay
+from strawberry.types.base import get_object_definition
 from strawberry.types.field import StrawberryField
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -70,7 +71,6 @@ from django_strawberry_framework.utils._narrowing import (
     class_namespace,
     is_class,
     is_dict,
-    list_of,
     read_attr,
     require,
     require_instance,
@@ -95,7 +95,7 @@ from .relay import (
 from .resolvers import _attach_file_resolvers, _attach_relation_resolvers
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from django.db import models
 
@@ -117,7 +117,7 @@ def _format_unresolved_targets_error(unresolved: list[PendingRelation]) -> str:
     """Return the canonical unresolved relation target error message.
 
     Sibling convention: ``_format_ambiguity_error`` below owns the canonical
-    primary-ambiguity error string; ``types/base.py::_format_unknown_fields_error``
+    primary-ambiguity error string; ``types/base.py::_refuse_unknown_fields``
     owns the other consumer-surface ``Meta.fields`` / ``Meta.exclude`` /
     ``Meta.optimizer_hints`` error strings. If consumer-surface ``Meta.*`` keys
     are renamed or supplemented, update the formatters together.
@@ -211,16 +211,9 @@ def _field_surface_names(type_cls: type[DjangoType]) -> frozenset[str]:
     """
     names: set[str] = set()
     for base in type_cls.__mro__[1:]:
-        definition = read_attr(base, "__strawberry_definition__", None)
-        if definition is None:
-            continue
-        for field in list_of(read_attr(definition, "fields")):
-            # Strawberry declares ``python_name`` as ``str``, but its getter answers ``None``
-            # for a field no name has been assigned to.
-            python_name = read_attr(field, "python_name")
-            label = python_name if python_name is not None else read_attr(field, "graphql_name")
-            if label is not None:
-                names.add(str(label))
+        definition = get_object_definition(base)
+        if definition is not None:
+            names.update(field.python_name for field in definition.fields)
     names.update(type_cls.__annotations__)
     names.update(
         name
@@ -331,16 +324,9 @@ def _audit_model_label_routing(multi_type_models: tuple[type[models.Model], ...]
         if emitter is None:
             continue
         # ``_audit_primary_ambiguity`` already rejected every multi-type model
-        # without a declared primary; a ``None`` primary has no definition either,
-        # so it would fail the raise below rather than slip through.
+        # without a declared primary; a ``None`` primary has no definition either.
         primary = registry.primary_for(model)
-        primary_definition = registry.get_definition(primary)
-        if primary_definition is None:
-            raise ConfigurationError(
-                f"Cannot finalize {model.__name__}: its primary DjangoType "
-                f"{introspection.name(primary)} has no registered DjangoTypeDefinition.",
-            )
-        primary_strategy = primary_definition.effective_globalid_strategy
+        primary_strategy = _definition_or_raise(model, primary).effective_globalid_strategy
         if not _accepts_model_label_decode(primary_strategy):
             offenders.append((model, emitter, primary_strategy))
     if not offenders:
@@ -364,20 +350,18 @@ def _first_model_label_emitter(model: type[models.Model]) -> type[DjangoType] | 
     return None
 
 
-def _definition_or_raise(
-    model: type[models.Model],
-    type_cls: type[DjangoType],
-) -> DjangoTypeDefinition:
+def _definition_or_raise(model: type[models.Model], type_cls: object) -> DjangoTypeDefinition:
     """Return ``type_cls``'s registered definition, raising when it has none.
 
-    ``registry.register()`` accepts a type without a definition, so a model-label
-    audit reading a registered type's strategy refuses that type by name.
+    ``registry.register()`` accepts a type without a definition, and
+    ``registry.primary_for`` answers ``None`` for a model with no primary, so a
+    finalize step reading a registered type's definition refuses that type by name.
     """
     definition = registry.get_definition(type_cls)
     if definition is None:
         raise ConfigurationError(
             f"Cannot finalize {model.__name__}: registered DjangoType "
-            f"{type_cls.__name__} has no DjangoTypeDefinition.",
+            f"{introspection.name(type_cls)} has no DjangoTypeDefinition.",
         )
     return definition
 
@@ -555,6 +539,13 @@ def _register_relation_connection_teardown(
     registry.register_type_teardown(type_cls, teardown)
 
 
+def _unfinalized_definitions() -> Iterator[tuple[type[DjangoType], DjangoTypeDefinition]]:
+    """Yield each registered ``(type, definition)`` that ``strawberry.type`` has not decorated."""
+    for type_cls, definition in registry.iter_definitions():
+        if not definition.finalized:
+            yield type_cls, definition
+
+
 def _synthesize_relation_connections() -> None:
     """Synthesize ``<field>_connection`` siblings for eligible many-side relations.
 
@@ -609,9 +600,7 @@ def _synthesize_relation_connections() -> None:
         _connection_type_for,
     )
 
-    for type_cls, definition in registry.iter_definitions():
-        if definition.finalized:
-            continue
+    for type_cls, definition in _unfinalized_definitions():
         if not implements_relay_node(type_cls):
             continue
         shapes = definition.relation_shapes or {}
@@ -655,17 +644,7 @@ def _synthesize_relation_connections() -> None:
             # class this field publishes, the sidecar arguments its signature
             # carries, and the model its pipeline seeds and seals against all
             # come from that one object, and the target class is never asked.
-            # A registered Relay target always has a registered
-            # definition; its absence is a framework defect, not a consumer
-            # error, so the miss fails loudly rather than degrading the shape.
-            target_definition = registry.get_definition(target_type)
-            if target_definition is None:
-                raise ConfigurationError(
-                    f"{type_cls.__name__}.{name} resolves to registered type "
-                    f"{target_type.__name__}, which carries no registered "
-                    f"DjangoTypeDefinition; the synthesized relation connection cannot be "
-                    f"built without one.",
-                )
+            target_definition = _definition_or_raise(related_model, target_type)
             generated = f"{name}_connection"
             attached = class_namespace(type_cls).get(generated)
             if read_attr(attached, _SYNTHESIZED_RELATION_CONNECTION_MARKER, False):
@@ -778,9 +757,9 @@ def finalize_django_types() -> None:
     Partial-failure recovery: if ``strawberry.type`` (or any earlier
     Phase 2/2.5 step) raises mid-iteration, the call is partially
     applied. Calling ``finalize_django_types()`` again is safe and
-    resumes from the failing entry - the per-entry
-    ``if definition.finalized: continue`` guard at the head of each
-    phase loop skips already-decorated types on the rerun, and
+    resumes from the failing entry - each phase loop walks
+    ``_unfinalized_definitions``, which skips already-decorated types on
+    the rerun, and
     ``apply_interfaces`` re-mutating ``__bases__`` is a no-op because
     it skips every interface already on ``type_cls.__mro__`` (by identity).
     ``registry.clear()`` is the recommended path only when the consumer
@@ -826,30 +805,14 @@ def finalize_django_types() -> None:
     unresolved: list[PendingRelation] = []
     resolved: list[tuple[PendingRelation, type[DjangoType], FieldMeta]] = []
     for pending in registry.iter_pending_relations():
-        # definition is always set; pending records are added after
-        # register_with_definition in DjangoType.__init_subclass__
-        # (see types/base.py register_with_definition / add_pending_relation
-        # ordering).
-        definition = registry.get_definition(pending.source_type)
         target_type = registry.get(pending.related_model)
         if target_type is None:
             unresolved.append(pending)
             continue
-        if definition is None:
-            raise ConfigurationError(
-                f"Cannot finalize {pending.source_type.__name__}: pending relation "
-                f"{introspection.text(pending.field_name)} has no DjangoTypeDefinition.",
-            )
-        try:
-            field_meta = definition.field_map[pending.field_name]
-        except KeyError as exc:
-            raise ConfigurationError(
-                f"Cannot finalize {pending.source_type.__name__}: pending relation "
-                f"{introspection.text(pending.field_name)} has no field metadata.",
-            ) from exc
-        resolved.append(
-            (pending, target_type, field_meta),
-        )
+        # Pending records are added after register_with_definition in
+        # DjangoType.__init_subclass__, from the same fields the field map holds.
+        definition = _definition_or_raise(pending.source_model, pending.source_type)
+        resolved.append((pending, target_type, definition.field_map[pending.field_name]))
 
     if unresolved:
         raise ConfigurationError(_format_unresolved_targets_error(unresolved))
@@ -869,9 +832,7 @@ def finalize_django_types() -> None:
     # live bug. If a future Strawberry interface introduces such a default,
     # swap the loop ordering and pin the consumer-interface-wins behavior in
     # tests.
-    for type_cls, definition in registry.iter_definitions():
-        if definition.finalized:
-            continue
+    for type_cls, definition in _unfinalized_definitions():
         _attach_relation_resolvers(
             type_cls,
             definition.selected_fields,
@@ -892,9 +853,7 @@ def finalize_django_types() -> None:
             skip_field_names=definition.consumer_authored_fields,
         )
 
-    for type_cls, definition in registry.iter_definitions():
-        if definition.finalized:
-            continue
+    for type_cls, definition in _unfinalized_definitions():
         # ``apply_interfaces`` is the only step that depends on a non-empty
         # ``Meta.interfaces`` tuple. The Relay-node gate and resolver injection
         # are keyed off the resolved MRO (``implements_relay_node``) so they
@@ -1037,14 +996,10 @@ def finalize_django_types() -> None:
     # type's annotation set and before Phase 3 freezes it. Catches an empty
     # surface (``Meta.fields = ()``), which Strawberry otherwise reports late and
     # without DjangoType attribution.
-    for type_cls, definition in registry.iter_definitions():
-        if definition.finalized:
-            continue
+    for type_cls, definition in _unfinalized_definitions():
         _audit_field_surface(type_cls, definition)
 
-    for type_cls, definition in registry.iter_definitions():
-        if definition.finalized:
-            continue
+    for type_cls, definition in _unfinalized_definitions():
         # A lazy ``Meta.description`` renders here, once, in the active language;
         # GraphQL schema descriptions are plain strings.
         description = None if definition.description is None else str(definition.description)

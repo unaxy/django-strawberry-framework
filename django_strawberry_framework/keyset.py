@@ -243,8 +243,6 @@ def validate_cursor_field_references(
     call this function, so malformed references and duplicate columns cannot
     pass one stage and fail under a different rule at the other.
     """
-    if not order_refs:
-        raise ConfigurationError(f"{owner} must contain at least one order string.")
     parsed: list[tuple[str, bool]] = []
     seen: set[str] = set()
     for order_ref in order_refs:

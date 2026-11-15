@@ -69,9 +69,6 @@ class DjangoTypeDefinition:
     model: type[models.Model]
     name: str | None
     description: str | None
-    # Selection (kept verbatim from Meta for diagnostics)
-    fields_spec: tuple[str, ...] | Literal["__all__"] | None
-    exclude_spec: tuple[str, ...] | None
     # Selected Django field objects, in iteration order. Stored alongside
     # field_map because resolver attachment and several optimizer paths
     # need real Django field objects (attname, related_model.DoesNotExist,
@@ -266,8 +263,6 @@ def __init_subclass__(cls, **kwargs):
         model=meta.model,
         name=validated.name,
         description=meta.description,
-        fields_spec=validated.fields_spec,
-        exclude_spec=validated.exclude_spec,
         selected_fields=tuple(fields),
         field_map=field_map,
         optimizer_hints=optimizer_hints,

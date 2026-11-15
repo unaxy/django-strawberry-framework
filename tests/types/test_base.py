@@ -2729,21 +2729,6 @@ def _hinted_prefetch_type(
     return HintedType
 
 
-def _manager_seed_prefetch() -> Prefetch[str]:
-    """A ``Prefetch`` whose queryset slot holds a manager, which Django's ``Prefetch`` admits."""
-    # basedpyright: the manager is the non-QuerySet seed under test; Prefetch types the
-    # queryset parameter as a QuerySet
-    return Prefetch("branch", queryset=ProxyBranch.objects)  # pyright: ignore[reportArgumentType]
-
-
-def _lazy_lookup_prefetch() -> Prefetch[str]:
-    """A ``Prefetch`` whose lookup is a lazy translation string, which Django's ``Prefetch`` admits."""
-    # basedpyright: the lazy string is the non-text lookup under test, bound as the str
-    # Prefetch types its lookup parameter as
-    lookup: str = gettext_lazy("branch")  # pyright: ignore[reportAssignmentType]
-    return Prefetch(lookup, queryset=Branch.objects.all())
-
-
 class _NoteRelation(models.TextChoices):
     """A relation name spelled as a ``TextChoices`` member, as a consumer may pass it."""
 
@@ -2843,17 +2828,6 @@ def _seed_refusal(
             _seed_refusal("branch", "branch", "Branch", "ProxyBranch"),
             id="queryset-model-off-target",
         ),
-        pytest.param(
-            BranchNote,
-            "branch",
-            _manager_seed_prefetch,
-            (
-                "OptimizerHint.prefetch(obj) on HintedType.branch: the hinted Prefetch('branch') "
-                "queryset is a Manager, not a QuerySet. Pass a queryset over ProxyBranch (or a "
-                "proxy model of it)."
-            ),
-            id="manager-seed",
-        ),
     ],
 )
 def test_optimizer_hints_refuse_a_prefetch_seed_the_relation_cannot_serve(
@@ -2911,12 +2885,6 @@ def test_optimizer_hints_refuse_a_prefetch_seed_the_relation_cannot_serve(
             "branch",
             lambda: Prefetch("branch__tags__content_object", queryset=Shelf.objects.all()),
             id="generic-foreign-key-leaf-unresolved",
-        ),
-        pytest.param(
-            BranchNote,
-            "branch",
-            _lazy_lookup_prefetch,
-            id="non-text-lookup-unresolved",
         ),
     ],
 )

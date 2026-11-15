@@ -61,8 +61,6 @@ The sketch is an explicit **subset** of `types/definition.py::DjangoTypeDefiniti
 dataclass field for field lost: the slots later specs added would bury the ones the section argues
 for, and this spec owns none of them, so a copy would drift the first time a slot is added.
 
-- `fields_spec` / `exclude_spec` carry the `_spec` suffix because they hold the `Meta` declaration,
-  not the resolved selection (`selected_fields`); without the suffix the two read as synonyms.
 - A sidecar slot is a plain `type | None`, never a lazy class reference:
   `types/base.py::_validate_filterset_class` and its `_validate_orderset_class` twin accept only an
   already-resolved subclass at class creation, so no unresolved reference reaches the slot. What

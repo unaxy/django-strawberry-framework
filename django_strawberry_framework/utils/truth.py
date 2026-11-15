@@ -43,7 +43,7 @@ a namespace: ``module`` / ``label`` of a class, ``static_attr``, ``mro_attr``,
 ``overrides``, ``instance_dict``, the name of a callable instance, and the class and scalar
 spellings of ``render`` / ``text`` / ``describe``. The reads that consult no
 namespace (``class_of``, ``is_type``, ``is_instance``, ``is_one_of``,
-``is_mapping_dict``, ``is_subclass``, ``is_exact``, ``is_exact_one_of``, ``is_among``,
+``is_subclass``, ``is_exact``, ``is_exact_one_of``, ``is_among``,
 ``IdentitySet`` / ``IdentityMap`` membership, ``mro``, ``bases``, ``class_dict``, ``kind``,
 ``stored_function``, ``plain_str``, and ``name`` / ``qualname`` of a class, function,
 builtin or C descriptor) never raise and run no consumer code for any object. ``render`` /
@@ -95,7 +95,6 @@ __all__ = (
     "is_exact",
     "is_exact_one_of",
     "is_instance",
-    "is_mapping_dict",
     "is_one_of",
     "is_subclass",
     "is_type",
@@ -270,8 +269,7 @@ def is_type(obj: object) -> TypeIs[type[object]]:
 # ``classmethod``) with ``Unknown`` type arguments, so the builtin containers and
 # ``classmethod`` the package reads consumer values against narrow through their own
 # overloads to a container of ``object``, which the caller then checks member by
-# member (``is_mapping_dict`` is the ``dict`` check for a value already typed as a
-# ``Mapping``, keeping its key and value types). A subclass of one of them
+# member. A subclass of one of them
 # (``OrderedDict``) matches its base's overload and narrows to the base's form.
 @overload
 def is_instance(obj: object, cls: type[dict[object, object]]) -> TypeIs[dict[object, object]]: ...
@@ -313,11 +311,6 @@ def is_one_of(obj: object, classes: tuple[type[object], ...]) -> bool:
     """
     found = _get_mro(type(obj))
     return any(is_among(cls, found) for cls in classes)
-
-
-def is_mapping_dict(obj: Mapping[_K, _V] | None) -> TypeIs[dict[_K, _V]]:
-    """``is_instance(obj, dict)`` for a value typed as a ``Mapping``, keeping its key and value types."""
-    return is_among(dict, _get_mro(type(obj)))
 
 
 def is_subclass(sub: object, cls: type[_T]) -> TypeIs[type[_T]]:

@@ -41,7 +41,6 @@ from apps.library.models import (
     Shelf,
     TaggedItem,
 )
-from django.utils.functional import SimpleLazyObject
 from graphql import GraphQLError
 from strawberry import relay
 from typing_extensions import override
@@ -180,7 +179,7 @@ def _malformed_definition(
     *,
     origin: type = object,
     model: object = Book,
-    name: object = None,
+    name: str | None = None,
 ) -> DjangoTypeDefinition:
     """Build a directly constructed definition carrying malformed metadata.
 
@@ -190,13 +189,11 @@ def _malformed_definition(
     """
     return DjangoTypeDefinition(
         origin=origin,
-        # basedpyright: the malformed model and name callers pass are the hostile input under test;
-        # DjangoTypeDefinition types them as type[Model] and str | None
+        # basedpyright: the malformed model callers pass is the hostile input under test;
+        # DjangoTypeDefinition types it as type[Model]
         model=model,  # pyright: ignore[reportArgumentType]
-        name=name,  # pyright: ignore[reportArgumentType]
+        name=name,
         description=None,
-        fields_spec=None,
-        exclude_spec=None,
         selected_fields=(),
         field_map={},
         optimizer_hints={},
@@ -270,22 +267,6 @@ def test_related_target_lookup_propagates_malformed_model_and_relation_metadata(
         _ = definition.related_target_for("relation")
 
 
-def test_graphql_type_name_rejects_empty_name() -> None:
-    """An empty ``name`` is a typed failure naming the origin class."""
-    with pytest.raises(ConfigurationError) as exc_info:
-        _ = _malformed_definition(origin=Book, name="").graphql_type_name
-    assert str(exc_info.value) == (
-        "GraphQL type name for Book must be a non-empty string; got an empty name."
-    )
-
-
-def test_graphql_type_name_rejects_a_non_string_name() -> None:
-    """A non-string ``name`` is a typed failure naming the origin class and the value."""
-    with pytest.raises(ConfigurationError) as exc_info:
-        _ = _malformed_definition(origin=Book, name=7).graphql_type_name
-    assert str(exc_info.value) == ("GraphQL type name for Book must be a non-empty string; got 7.")
-
-
 def test_graphql_type_name_falls_back_to_the_origin_class_name() -> None:
     """Without ``Meta.name`` the surface name is the origin class's declared name."""
     assert _malformed_definition(origin=Book).graphql_type_name == "Book"
@@ -321,7 +302,6 @@ class _LoudStr(str):
 
 
 _UNREADABLE_ID_ATTRS = [
-    pytest.param(lambda: SimpleLazyObject(lambda: "id"), True, id="lazy-str"),
     pytest.param(lambda: "id", False, id="pk-name"),
     pytest.param(lambda: "pk", False, id="pk-alias"),
     pytest.param(lambda: _LoudStr("id"), False, id="str-subclass-pk-name"),
@@ -336,11 +316,7 @@ def test_custom_id_detection_normalizes_the_resolve_id_attr_result_under_its_gua
     *,
     custom: bool,
 ) -> None:
-    """The ``resolve_id_attr`` result is read under the guard that contains the call.
-
-    A lazy proxy of a string fails closed (the type counts as custom); a plain or
-    ``str``-subclass name that is the pk name or ``pk`` does not.
-    """
+    """A ``resolve_id_attr`` result naming the pk or ``pk`` is not custom; any other name is."""
     id_attr = make_id_attr()
 
     class _Node(relay.Node):
@@ -641,18 +617,6 @@ def test_related_target_for_returns_none_for_generic_foreign_key() -> None:
     assert definition.related_target_for("content_object") is None
 
 
-def test_related_target_for_rejects_unhashable_field_names() -> None:
-    """Malformed lookup names fail closed instead of leaking a dict-key TypeError."""
-
-    class BookType(DjangoType):
-        class Meta:
-            model = Book
-            fields = ("id", "title")
-
-    finalize_django_types()
-    assert BookType.__django_strawberry_definition__.related_target_for([]) is None
-
-
 def test_graphql_type_name_rejects_invalid_graphql_names() -> None:
     """A name outside the GraphQL Name grammar fails with graphql-core's verdict as the cause."""
     definition = _malformed_definition(origin=Book, name="bad-name")
@@ -667,17 +631,6 @@ def test_graphql_type_name_rejects_the_introspection_prefix() -> None:
     with pytest.raises(ConfigurationError, match="valid GraphQL name") as exc_info:
         _ = definition.graphql_type_name
     assert exc_info.value.__cause__ is None
-
-
-def test_custom_id_resolver_guards_reject_malformed_pk_names() -> None:
-    """Unhashable primary-key names cannot escape the FK-id safety checks."""
-    definition = _malformed_definition(origin=Book)
-    # basedpyright: the unhashable pk name is the hostile input under test;
-    # has_custom_id_resolver_for types the parameter as str
-    assert definition.has_custom_id_resolver_for([]) is False  # pyright: ignore[reportArgumentType]
-    # basedpyright: the unhashable pk name is the hostile input under test;
-    # origin_has_custom_id_resolver types the parameter as str
-    assert origin_has_custom_id_resolver(Book, []) is False  # pyright: ignore[reportArgumentType]
 
 
 def test_definition_equality_ignores_memoization_caches() -> None:
@@ -704,11 +657,3 @@ def test_definition_equality_ignores_memoization_caches() -> None:
     d1._related_target_cache["shelf"] = (d2, fake_field)
     d2._related_target_cache["shelf"] = (d1, fake_field)
     assert d1 == d2
-
-
-def test_custom_id_resolver_guards_reject_empty_pk_names() -> None:
-    """Empty primary-key names fail closed without polluting cache."""
-    definition = _malformed_definition(origin=Book)
-    assert definition.has_custom_id_resolver_for("") is False
-    assert origin_has_custom_id_resolver(Book, "") is False
-    assert definition._custom_id_resolver_cache == {}

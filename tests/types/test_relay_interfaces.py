@@ -211,8 +211,6 @@ def test_meta_interfaces_stored_on_definition() -> None:
         model=Category,
         name=None,
         description=None,
-        fields_spec=None,
-        exclude_spec=None,
         selected_fields=(),
         field_map={},
         optimizer_hints={},

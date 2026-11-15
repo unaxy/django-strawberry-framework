@@ -447,8 +447,6 @@
 "tests/testing/test_client.py::test_export_surface_is_the_testing_root_not_the_package_root" = { reportAny = 1 }
 "tests/testing/test_wrap.py::test_safe_wrap_connection_method_keeps_type_error_boundary_for_hostile_repr" = { reportArgumentType = 1 }
 "tests/testing/test_wrap.py::test_safe_wrap_connection_method_raises_on_non_callable_wrapper" = { reportArgumentType = 1 }
-"tests/types/test_base.py::_lazy_lookup_prefetch" = { reportAssignmentType = 1 }
-"tests/types/test_base.py::_manager_seed_prefetch" = { reportArgumentType = 1 }
 "tests/types/test_base.py::test_auto_string_spelling_accepted_without_future_import.StringAutoType" = { reportUndefinedVariable = 1 }
 "tests/types/test_base.py::test_has_custom_get_queryset_inherits_through_intermediate_base.ChildCategoryType.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/types/test_converters.py::_blank_choice_model" = { reportAssignmentType = 1 }
@@ -460,14 +458,11 @@
 "tests/types/test_definition_order.py::test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises.CategoryNodeMy" = { reportUndefinedVariable = 1 }
 "tests/types/test_definition_order.py::test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises.CategoryNodeNot" = { reportUndefinedVariable = 1 }
 "tests/types/test_definition_order.py::test_consumer_id_unresolved_non_nodeid_string_on_relay_node_type_raises.CategoryNode" = { reportUndefinedVariable = 1 }
-"tests/types/test_definition_relations.py::_malformed_definition" = { reportArgumentType = 2 }
+"tests/types/test_definition_relations.py::_malformed_definition" = { reportArgumentType = 1 }
 "tests/types/test_definition_relations.py::test_custom_id_detection_normalizes_the_resolve_id_attr_result_under_its_guard._Node.resolve_id_attr" = { cast = 1 }
 "tests/types/test_definition_relations.py::test_custom_id_detection_propagates_and_flags_consumer_relay_resolver._NonStringNode.resolve_id_attr" = { reportIncompatibleMethodOverride = 1 }
-"tests/types/test_definition_relations.py::test_custom_id_resolver_guards_reject_malformed_pk_names" = { reportArgumentType = 2 }
-"tests/types/test_finalizer.py::test_field_surface_names_ignores_field_without_python_or_graphql_name" = { reportArgumentType = 1 }
 "tests/types/test_finalizer.py::test_finalize_rerun_after_phase3_raise_keeps_finalized_sets_wired" = { reportAttributeAccessIssue = 1 }
 "tests/types/test_finalizer.py::test_incomplete_registry_registration_is_typed_at_finalize" = { reportArgumentType = 2 }
-"tests/types/test_finalizer.py::test_pending_relation_without_source_definition_is_typed" = { reportArgumentType = 1 }
 "tests/types/test_relations.py::_NonHashableField.__hash__" = { reportAssignmentType = 1 }
 "tests/types/test_relations.py::_build_pending" = { reportArgumentType = 1 }
 "tests/types/test_relations.py::test_pending_relation_is_frozen_dataclass" = { reportAttributeAccessIssue = 1 }

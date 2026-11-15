@@ -366,8 +366,6 @@ The package equivalent:
 class DjangoTypeDefinition:
     origin: type
     model: type[models.Model]
-    fields_spec: tuple[str, ...] | Literal["__all__"] | None
-    exclude_spec: tuple[str, ...] | None
     filterset_class: type | None
     orderset_class: type | None
     fields_class: type | None

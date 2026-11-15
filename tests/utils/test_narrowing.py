@@ -1,14 +1,13 @@
 """Tests for ``django_strawberry_framework/utils/_narrowing.py``'s checked narrowings.
 
 ``require_instance`` and ``require`` are the checked narrowings the package applies to a
-value whose source guarantees its class but types it loosely; the ``is_exact_*`` container
-predicates prove a builtin type without consulting the value's class. They inspect a Python
+value whose source guarantees its class but types it loosely. They inspect a Python
 value, not a GraphQL request, so there is no live sibling in
 ``examples/fakeshop/test_query/``.
 """
 
 from collections import UserDict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Collection, Mapping
 
 import pytest
 from django.db import models
@@ -16,15 +15,12 @@ from django.db.models.lookups import Exact
 from django.db.models.sql.where import WhereNode
 from django.utils.functional import Promise, lazy
 from django.utils.translation import gettext_lazy
-from typing_extensions import override
 
 from django_strawberry_framework.utils._narrowing import (
     del_item,
     get_item,
     is_char_wise,
     is_concrete_field,
-    is_exact_set_or_frozenset,
-    is_exact_tuple_or_frozenset,
     is_lookup,
     is_queryset,
     is_real_collection,
@@ -161,80 +157,6 @@ def test_is_text_atom_never_evaluates_a_lazy_promise() -> None:
 
     assert is_text_atom(lazy(translate, str)()) is True
     assert calls == []
-
-
-class _TupleSubclass(tuple[object, ...]):
-    """A ``tuple`` subclass: an instance passes ``isinstance`` for ``tuple`` but is not one exactly."""
-
-
-class _FrozensetSubclass(frozenset[object]):
-    """A ``frozenset`` subclass, as ``_TupleSubclass`` is for ``tuple``."""
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ((), True),
-        (("alias",), True),
-        (frozenset[object](), True),
-        (frozenset({"alias"}), True),
-        (_TupleSubclass(), False),
-        (_FrozensetSubclass(), False),
-        (list[object](), False),
-        (set[object](), False),
-        ("alias", False),
-    ],
-    ids=[
-        "empty_tuple",
-        "tuple",
-        "empty_frozenset",
-        "frozenset",
-        "tuple_subclass",
-        "frozenset_subclass",
-        "list",
-        "set",
-        "str",
-    ],
-)
-def test_is_exact_tuple_or_frozenset_admits_exactly_the_two_builtins(
-    value: object,
-    *,
-    expected: bool,
-) -> None:
-    """Only an exact ``tuple`` or ``frozenset`` passes; a subclass of either is refused."""
-    assert is_exact_tuple_or_frozenset(value) is expected
-
-
-class _ClaimsEveryClassMeta(type):
-    """A metaclass whose ``__eq__`` claims equality with every class and records each call."""
-
-    eq_calls: list[object] = []
-
-    @override
-    def __eq__(cls, other: object) -> bool:
-        _ClaimsEveryClassMeta.eq_calls.append(other)
-        return True
-
-    __hash__ = type.__hash__
-
-
-class _ClaimsEveryClass(metaclass=_ClaimsEveryClassMeta):
-    """A class that compares equal to ``list``, ``tuple``, ``set`` and ``frozenset``."""
-
-
-@pytest.mark.parametrize(
-    "predicate",
-    [is_exact_set_or_frozenset, is_exact_tuple_or_frozenset],
-    ids=["set_or_frozenset", "tuple_or_frozenset"],
-)
-def test_exact_container_predicate_refuses_a_class_whose_metaclass_eq_claims_a_builtin(
-    predicate: Callable[[object], bool],
-) -> None:
-    """The type is compared by identity, so the metaclass ``__eq__`` neither runs nor decides."""
-    _ClaimsEveryClassMeta.eq_calls.clear()
-
-    assert predicate(_ClaimsEveryClass()) is False
-    assert _ClaimsEveryClassMeta.eq_calls == []
 
 
 def test_is_concrete_field_accepts_a_model_field_and_refuses_a_reverse_relation() -> None:

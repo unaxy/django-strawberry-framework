@@ -195,14 +195,8 @@ def test_validate_cursor_field_accepts_declared_shape() -> None:
         (("--number", "id"), "not a valid order string"),
         (("periodical__name", "id"), "traverses a relation"),
         (("number", "-number", "id"), "more than once"),
-        ((), "must contain at least one order string"),
     ],
-    ids=[
-        "bare-double-dash",
-        "relation-path",
-        "duplicate-column",
-        "empty",
-    ],
+    ids=["bare-double-dash", "relation-path", "duplicate-column"],
 )
 def test_validate_cursor_field_references_match_declaration_rules(
     cursor_field: tuple[str, ...],

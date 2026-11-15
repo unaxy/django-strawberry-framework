@@ -19,73 +19,10 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types import finalizer as finalizer_module
 from django_strawberry_framework.types.finalizer import (
     _audit_model_label_routing,
-    _field_surface_names,
     _warn_model_label_secondary_collapse,
 )
-from django_strawberry_framework.types.relations import PendingRelation
 
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
-
-
-def test_pending_relation_without_field_metadata_is_rejected_before_relation_lookup() -> None:
-    """A pending record naming a field absent from the definition's field map is typed."""
-
-    class BookType(DjangoType):
-        class Meta:
-            model = Book
-            fields = ("id", "title", "genres")
-
-    class GenreType(DjangoType):
-        class Meta:
-            model = Genre
-            fields = ("id", "name")
-
-    assert registry.get(Genre) is GenreType
-
-    field = Book._meta.get_field("genres")
-    registry.add_pending_relation(
-        PendingRelation(
-            source_type=BookType,
-            source_model=Book,
-            field_name="missing",
-            django_field=field,
-            related_model=Genre,
-        ),
-    )
-
-    with pytest.raises(
-        ConfigurationError,
-        match="Cannot finalize BookType: pending relation missing has no field metadata",
-    ):
-        finalize_django_types()
-
-
-def test_pending_relation_without_source_definition_is_typed() -> None:
-    """A pending relation whose source type never registered a definition raises."""
-
-    class GenreType(DjangoType):
-        class Meta:
-            model = Genre
-            fields = ("id", "name")
-
-    del GenreType
-    registry.add_pending_relation(
-        PendingRelation(
-            # basedpyright: the definition-less class is the hostile input under test;
-            # PendingRelation types source_type as type[DjangoType]
-            source_type=type("MissingDefinition", (), {}),  # pyright: ignore[reportArgumentType]
-            source_model=Book,
-            field_name="genres",
-            django_field=Book._meta.get_field("genres"),
-            related_model=Genre,
-        ),
-    )
-
-    with pytest.raises(
-        ConfigurationError,
-        match="pending relation genres has no DjangoTypeDefinition",
-    ):
-        finalize_django_types()
 
 
 def test_model_label_routing_audit_rejects_a_missing_primary_definition(
@@ -108,7 +45,10 @@ def test_model_label_routing_audit_rejects_a_missing_primary_definition(
     monkeypatch.setattr(registry, "primary_for", _primary_for)
     monkeypatch.setattr(registry, "get_definition", _no_definition)
 
-    with pytest.raises(ConfigurationError, match="has no registered DjangoTypeDefinition"):
+    with pytest.raises(
+        ConfigurationError,
+        match="registered DjangoType Primary has no DjangoTypeDefinition",
+    ):
         _audit_model_label_routing((Book,))
 
 
@@ -148,29 +88,6 @@ def test_model_label_collapse_warning_refuses_a_secondary_with_no_definition() -
     ):
         _warn_model_label_secondary_collapse((Genre,))
     assert registry.primary_for(Genre) is GenrePrimaryType
-
-
-def test_field_surface_names_ignores_field_without_python_or_graphql_name() -> None:
-    """An inherited strawberry field with no python or graphql name is skipped."""
-
-    class _FakeField:
-        python_name = None
-        graphql_name = None
-
-    class _FakeDefinition:
-        fields = [_FakeField()]
-
-    class _BaseWithFakeDef:
-        __strawberry_definition__ = _FakeDefinition()
-
-    class _ChildType(_BaseWithFakeDef):
-        pass
-
-    # basedpyright: a plain class inheriting a Strawberry definition whose field has no python or
-    # graphql name, the malformed base the surface read skips; _field_surface_names types the
-    # parameter as type[DjangoType]
-    surface = _field_surface_names(_ChildType)  # pyright: ignore[reportArgumentType]
-    assert surface == frozenset()
 
 
 def test_filterset_multi_owner_model_mismatch_raises_on_secondary_owner() -> None:

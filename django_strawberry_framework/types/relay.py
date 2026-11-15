@@ -316,7 +316,7 @@ def _resolve_id_attr_default(cls: type[_RelayDjangoType]) -> str:
 # installed beside the package's defaults so a stale ``resolve_id = relay.Node.resolve_id``
 # re-export (a method bound to ``relay.Node``) is re-bound to the concrete type.
 _STRAWBERRY_RESOLVE_ID = require(
-    introspection.stored_function(class_namespace(relay.Node)["resolve_id"]),
+    read_attr(class_namespace(relay.Node)["resolve_id"], "__func__"),
     callable,
 )
 
@@ -581,13 +581,7 @@ def encode_typename(
     """
     if callable(strategy):
         result = strategy(type_cls, definition.model, root)
-        if not isinstance(result, str):
-            raise ConfigurationError(
-                f"{definition.graphql_type_name}: the Meta.globalid_strategy callable "
-                f"returned {result!r}; a (type_cls, model, root) -> str encoder "
-                "must return a non-empty string for the GlobalID type-name slot.",
-            )
-        if not result:
+        if not isinstance(result, str) or not result:
             raise ConfigurationError(
                 f"{definition.graphql_type_name}: the Meta.globalid_strategy callable "
                 f"returned {result!r}; a (type_cls, model, root) -> str encoder "
@@ -804,7 +798,7 @@ def require_returned_node(
 # closure fail the stored-function identity test and be misclassified ``custom``
 # (silently encode-only, audit-blind, and spuriously both-declared when the
 # child carries its own ``Meta.globalid_strategy``). The attribute lives on the
-# plain function, which ``introspection.stored_function`` reads out of any wrapper.
+# plain function, which a wrapper's ``__func__`` holds.
 _FRAMEWORK_CLOSURE_MARKER = "_dsf_globalid_framework_closure"
 
 
@@ -819,9 +813,8 @@ def _inherits_framework_closure(type_cls: type[relay.Node]) -> bool:
     emit the PARENT's payload (the parent ``definition`` is captured in the
     inherited closure).
     """
-    existing_func = introspection.stored_function(
-        introspection.mro_attr(type_cls, "resolve_typename"),
-    )
+    existing = introspection.mro_attr(type_cls, "resolve_typename")
+    existing_func = read_attr(existing, "__func__", existing)
     return read_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER, None) is True
 
 
@@ -844,9 +837,8 @@ def _consumer_overrode_resolve_typename(type_cls: type[relay.Node]) -> bool:
     installed closure). A consumer override inherited from an abstract base
     lacks the marker, so it still classifies ``custom``.
     """
-    existing_func = introspection.stored_function(
-        introspection.mro_attr(type_cls, "resolve_typename"),
-    )
+    existing = introspection.mro_attr(type_cls, "resolve_typename")
+    existing_func = read_attr(existing, "__func__", existing)
     if existing_func is None or read_attr(existing_func, _FRAMEWORK_CLOSURE_MARKER, None) is True:
         return False
     return introspection.overrides(type_cls, relay.Node, "resolve_typename")

@@ -1160,7 +1160,10 @@ def test_a_relay_target_with_no_registered_definition_fails_the_synthesized_conn
     # basedpyright: the Relay node registered without a definition is the hostile input under test;
     # TypeRegistry.register types the parameter as type[DjangoType]
     registry.register(Item, BareNode, primary=True)  # pyright: ignore[reportArgumentType]
-    with pytest.raises(ConfigurationError, match="carries no registered DjangoTypeDefinition"):
+    with pytest.raises(
+        ConfigurationError,
+        match="registered DjangoType BareNode has no DjangoTypeDefinition",
+    ):
         finalize_django_types()
 
 

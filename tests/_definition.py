@@ -27,8 +27,6 @@ def make_definition(
         model=model,
         name=name,
         description=None,
-        fields_spec=None,
-        exclude_spec=None,
         selected_fields=(),
         field_map={},
         optimizer_hints={},
