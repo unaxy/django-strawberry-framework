@@ -10,7 +10,7 @@ DjangoOptimizerExtension,djangooptimizerextension,the register payload re-fetch 
 SerializerMutation,serializermutation,the sibling 0.0.13 flavor whose release-status wording shares this card's version cut
 ConfigurationError,configurationerror,bind validation / post-finalize factory raise
 SyncMisuseError,syncmisuseerror,"async permission hooks rejected; never a silent allow (groups: reject_async_in_sync_context, is_async_callable, _PERMISSION_ASYNC_RECOURSE)"
-finalize_django_types,finalize_django_types,"phase 2.5 bind via bind_auth_mutations() (groups: register_subsystem_clear, TypeRegistry, clear_mutation_registry, clear_form_mutation_registry, iter_subsystem_clears, declaration ledger, emit ledger, reload_all_project_schemas, _PROJECT_APP_SCHEMA_MODULES, _clear_if_importable, _subsystem_clears)"
+finalize_django_types,finalize_django_types,"phase 2.5 bind via bind_auth_mutations() (groups: register_subsystem_clear, TypeRegistry, clear_mutation_registry, clear_form_mutation_registry, iter_subsystem_clears, declaration ledger, emit ledger, reload_all_project_schemas, _PROJECT_APP_SCHEMA_MODULES, _subsystem_clears)"
 get_queryset,get_queryset-visibility-hook,"the visibility hook deliberately NOT re-run for the session actor (groups: relation_kind, is_forward_many_to_many, visible_related_object, visible_related_objects)"
 apply_cascade_permissions,apply_cascade_permissions,the cascade seam named in the visibility discussion
 Meta.primary,metaprimary,"the registry primary lookup resolving the user type (groups: registry.get, registry.types_for)"

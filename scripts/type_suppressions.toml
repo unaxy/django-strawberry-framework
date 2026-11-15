@@ -442,7 +442,6 @@
 "tests/test_lateral_pg_parity.py::test_keyset_lateral_seek_is_an_index_seek" = { reportArgumentType = 1 }
 "tests/test_list_field.py::_SubclassedQ.resolve_expression" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_list_field.py::_as_strawberry_info" = { reportReturnType = 1 }
-"tests/test_list_field.py::_swap_definition_attribute" = { reportAttributeAccessIssue = 1 }
 "tests/test_list_field.py::test_a_list_field_trusted_max_rows_opt_in_must_be_exactly_boolean" = { reportArgumentType = 1 }
 "tests/test_list_field.py::test_async_completion_adapter_semantics" = { reportGeneralTypeIssues = 1, reportUnknownVariableType = 1 }
 "tests/test_list_field.py::test_djangolistfield_rejects_a_target_whose_class_cannot_be_trusted" = { reportArgumentType = 1 }

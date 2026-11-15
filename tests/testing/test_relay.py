@@ -238,18 +238,11 @@ def test_global_id_for_non_node_raises(shape: str) -> None:
     assert str(excinfo.value) == expected
 
 
-@pytest.mark.parametrize("shape", ["replaced", "stale"], ids=str)
-def test_global_id_for_rejects_replaced_or_stale_definitions(
-    monkeypatch: pytest.MonkeyPatch,
-    shape: str,
-) -> None:
-    """Only the active registry's own definition may mint a GlobalID."""
+def test_global_id_for_rejects_stale_definitions() -> None:
+    """Only a type the active registry holds may mint a GlobalID."""
     type_cls = _make_node_type("CategoryNode")
     finalize_django_types()
-    if shape == "replaced":
-        monkeypatch.setattr(type_cls, "__django_strawberry_definition__", object())
-    else:
-        registry.clear()
+    registry.clear()
     with pytest.raises(ConfigurationError, match="not a registered DjangoType subclass"):
         global_id_for(type_cls, 1)
 

@@ -4,7 +4,7 @@ The single owner for the package's "reach into a module that may not be
 importable / may not be loaded" patterns. Call sites that share this
 shape route through here:
 
-- ``registry.py::_clear_if_importable`` (best-effort per-type co-clears);
+- ``registry.py::TypeRegistry.unregister`` (best-effort per-type co-clear);
 - ``types/finalizer.py`` auth bind (opt-in-preserving ``loaded_attr``);
 - ``utils/inputs.py::_safe_import`` (generated-input namespace clearing;
   attr-lenient wrapper over ``import_attr_if_importable``);

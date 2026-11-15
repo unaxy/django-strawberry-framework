@@ -76,12 +76,12 @@ def global_id_for(
     under a ``type`` strategy the slot is the name ``schema`` published for the
     type when a schema is given (``ConfigurationError`` if that schema publishes
     no Relay-Node object type for it), else the ``graphql_type_name``. Raises
-    ``ConfigurationError`` for an input without its own registered definition
-    (``registry.py::TypeRegistry.registered_own_definition``), unfinalized types,
+    ``ConfigurationError`` for an input without a registered definition
+    (``registry.py::TypeRegistry.get_definition``), unfinalized types,
     finalized non-Relay-Node types, and ``callable`` / ``custom`` strategies
     (see the module docstring for the full contract).
     """
-    definition = registry.registered_own_definition(type_cls)
+    definition = registry.get_definition(type_cls)
     if definition is None:
         raise ConfigurationError(
             f"global_id_for: {truth.render(type_cls)} is not a registered "

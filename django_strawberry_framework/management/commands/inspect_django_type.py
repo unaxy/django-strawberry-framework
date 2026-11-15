@@ -176,7 +176,7 @@ class Command(BaseCommand):
         if not truth.is_subclass(target, DjangoType):
             raise CommandError(f"{type_name} is not a DjangoType subclass")
 
-        definition = registry.registered_own_definition(target)
+        definition = registry.get_definition(target)
         if definition is None:
             raise CommandError(
                 f"{truth.name(target)} is not a registered DjangoType "

@@ -34,33 +34,6 @@ if TYPE_CHECKING:
     from .types.relations import PendingRelation
 
 
-def _clear_if_importable(
-    module_path: str,
-    attr_name: str,
-    action: Callable[[object], object],
-) -> None:
-    """Best-effort: import ``module_path.attr_name`` and run ``action`` on it.
-
-    The cycle-safe local-import shape for a PER-TYPE co-clear -
-    ``TypeRegistry.unregister``'s connection-class cache eviction is the only
-    caller today - delegating the import handling to its single owner
-    ``utils/imports.py::import_attr_if_importable``. An unreachable subsystem
-    (a partial-load build state where ``registry`` is imported but a sidecar
-    package is not) is skipped so a missing subsystem never turns "all traces
-    of this one type" into a raise.
-
-    ``clear()``'s REGISTRY-WIDE co-clears (filter / order input namespaces
-    and helper ledgers, the connection-class cache, the root node-field
-    ledger) do not go through this helper - each subsystem owner registers
-    its own callback via ``register_subsystem_clear`` at import time, and
-    ``clear()`` replays the resolved callables via ``iter_subsystem_clears()``.
-    """
-    target = import_attr_if_importable(module_path, attr_name)
-    if target is None:
-        return
-    _ = action(target)
-
-
 _subsystem_clears: dict[str, tuple[Callable[[], None], bool]] = {}
 
 
@@ -369,19 +342,19 @@ class TypeRegistry:
         self._pending = [
             pending for pending in self._pending if pending.source_type is not type_cls
         ]
-        # Connection-class cache eviction (best-effort via ``_clear_if_importable``
-        # - the ``clear()`` co-clear precedent). The cache is identity-keyed on
-        # the target type, so a leftover entry is hygiene rather than correctness -
-        # but this method promises "all traces", and ``clear()`` already purges the
-        # whole cache; eviction keeps the two public mutators consistent.
-        _clear_if_importable(
+        # Connection-class cache eviction, skipped when ``connection.py`` is not
+        # importable. The cache is identity-keyed on the target type, so a leftover
+        # entry is hygiene rather than correctness - but this method promises "all
+        # traces", and ``clear()`` already purges the whole cache; eviction keeps
+        # the two public mutators consistent. The attribute is ``connection.py``'s
+        # own ``_connection_type_cache``, an identity map keyed by ``DjangoType``
+        # class, read by name to dodge the import cycle.
+        cache = import_attr_if_importable(
             "django_strawberry_framework.connection",
             "_connection_type_cache",
-            # The attribute is ``connection.py``'s own ``_connection_type_cache``, an
-            # identity map keyed by ``DjangoType`` class, read by name to dodge the
-            # import cycle.
-            lambda cache: require(cache, is_identity_map).pop(type_cls, None),
         )
+        if cache is not None:
+            _ = require(cache, is_identity_map).pop(type_cls, None)
 
     def get(self, model: type[models.Model]) -> type[DjangoType] | None:
         """Return the relation-resolution target for ``model``, or ``None``.
@@ -515,26 +488,6 @@ class TypeRegistry:
         """Return the collected definition for ``type_cls``, or ``None``."""
         # Any object is a valid probe (see ``model_for_type``).
         return self._definitions.get(type_cls)
-
-    def registered_own_definition(self, type_cls: object) -> DjangoTypeDefinition | None:
-        """Return ``type_cls``'s own registered definition, or ``None``.
-
-        Own means the registry holds a definition for ``type_cls`` whose ``origin``
-        is ``type_cls``, and the class's ``__django_strawberry_definition__``,
-        read from the real class namespaces (``truth.static_attr``), IS that
-        object. ``DjangoType.__init_subclass__`` writes the entry and the
-        attribute from one value, so every concrete type passes (and refuses a
-        ``Meta``-less subclass of a concrete type, so no class inherits another's
-        attribute); a class dropped by ``clear()`` / ``unregister``, a replaced attribute (a copy or a
-        fabricated lookalike), a definition registered for another class, and
-        any non-class probe each answer ``None``. ``origin`` is read only off the
-        registry's own object, never off a replacement attribute.
-        """
-        definition = self._definitions.get(type_cls)
-        if definition is None:
-            return None
-        attribute = truth.static_attr(type_cls, "__django_strawberry_definition__")
-        return definition if attribute is definition and type_cls is definition.origin else None
 
     def definition_for_graphql_name(self, name: str) -> DjangoTypeDefinition:
         """Return the unique Relay-Node ``DjangoTypeDefinition`` for a GraphQL type ``name``.

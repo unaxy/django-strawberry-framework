@@ -287,8 +287,8 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity.
 ):
     # max_rows / trusted_max_rows validation and the shared target guards (Decision 5).
     if resolver is None:
-        def _default(*args, offset=None, limit=None, order_by=strawberry.UNSET, **kwargs):
-            _, info, args_record = _argument_record(args, kwargs, ...)
+        def _default(root=None, *, info, offset=None, limit=None, order_by=strawberry.UNSET):
+            args_record = _argument_record(info, ...)
             qs = base_queryset(target_model)
             if async_execution():
                 return _execute_queryset_pipeline_async(node_type, qs, info, args_record, ...)
@@ -371,7 +371,7 @@ The `DjangoListField(arg, *, resolver=None, description=None, deprecation_reason
 
 - `arg` is a class, asked of the value's real type (`django_strawberry_framework/utils/truth.py::is_type`, so a `__class__` property on the value can neither raise nor claim `type`); otherwise `ConfigurationError("DjangoListField requires a DjangoType class; got <repr>.")`.
 - `arg` is `issubclass(arg, DjangoType)`; otherwise `ConfigurationError("DjangoListField requires a DjangoType subclass; got <name>.")`.
-- `arg` carries its **own** registered definition — `django_strawberry_framework/registry.py::TypeRegistry.registered_own_definition(arg)` is not `None`: the object the registry holds for `arg` (never a copy or a fabricated same-origin definition), which the class attribute `__django_strawberry_definition__` IS by identity (read from the real class namespaces by `django_strawberry_framework/utils/truth.py::static_attr`) and whose `origin is arg` (read only off the registry's own object, never off a replacement attribute); a `Meta`-less abstract base, a definition registered for another class and an unregistered class each answer `None`, which is the rejection; otherwise `ConfigurationError("DjangoListField target <name> is not a registered DjangoType. This usually means <name> declares no `class Meta` (a Meta-less abstract base never registers a definition), or its definition was replaced or cleared.")`. The attribute is assigned at `django_strawberry_framework/types/base.py::DjangoType.__init_subclass__ #"cls.__django_strawberry_definition__ = definition"` only when the `DjangoType` subclass carries a `Meta` with a `model`; a `Meta`-less subclass of a concrete type, which would inherit it, is refused at class creation, so no factory receives one. The own-class-origin identity check is the invariant, and the registry-identity check closes a definition object that merely claims the origin (`tests/test_list_field.py::test_djangolistfield_rejects_a_fabricated_same_origin_definition`, `::test_djangolistfield_rejects_a_copy_of_the_real_definition`).
+- `arg` is registered — `django_strawberry_framework/registry.py::TypeRegistry.get_definition(arg)` is not `None`: the object the registry holds for `arg`, keyed by the class's identity; a `Meta`-less abstract base and an unregistered class each answer `None`, which is the rejection; otherwise `ConfigurationError("DjangoListField target <name> is not a registered DjangoType. This usually means <name> declares no `class Meta` (a Meta-less abstract base never registers a definition), or its definition was cleared.")`. The registry entry and the class attribute `__django_strawberry_definition__` are written from one value at `django_strawberry_framework/types/base.py::DjangoType.__init_subclass__ #"cls.__django_strawberry_definition__ = definition"` only when the `DjangoType` subclass carries a `Meta` with a `model`; a `Meta`-less subclass of a concrete type, which would inherit the attribute, is refused at class creation, so no factory receives one.
 - `resolver`, when supplied, is callable; otherwise `ConfigurationError("DjangoListField resolver must be callable.")`.
 
 The four target checks above are ordered among themselves, and that order is load-bearing — each one assumes the previous passed. They are shared, not local to this factory: see [Decision 1](#decision-1--module-location-mechanism--public-export).
@@ -509,7 +509,7 @@ Validation tests (Slice 2):
 - `test_djangolistfield_rejects_non_class_argument` — passing a string, int, instance, etc., raises `ConfigurationError`.
 - `test_djangolistfield_rejects_non_djangotype_class` — passing a plain class that doesn't subclass `DjangoType` raises `ConfigurationError`.
 - `test_djangolistfield_rejects_djangotype_without_definition` — passing an abstract `DjangoType` base without a `Meta` raises `ConfigurationError`.
-- `test_djangolistfield_rejects_a_fabricated_same_origin_definition` / `test_djangolistfield_rejects_a_copy_of_the_real_definition` — only the registry's exact definition object is accepted.
+- `test_djangolistfield_rejects_a_target_the_registry_has_never_seen` / `test_djangolistfield_accepts_and_captures_the_registrys_exact_object` — only the registry's definition object is accepted.
 - `test_djangolistfield_rejects_non_callable_resolver` — `resolver="not callable"` raises `ConfigurationError`.
 - `test_djangolistfield_rejects_a_non_positive_max_rows_at_construction` — the row-bound guard runs first.
 - `test_a_list_field_trusted_max_rows_opt_in_must_be_exactly_boolean` — `trusted_max_rows=` accepts only an exact `bool`.

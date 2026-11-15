@@ -103,7 +103,6 @@ from .utils._narrowing import (
     is_tuple,
     list_of,
     read_attr,
-    require_instance,
 )
 from .utils.connections import is_supplied
 from .utils.directives import validated_field_directives
@@ -133,7 +132,7 @@ from .utils.querysets import (
 from .utils.typing import is_async_callable, published_argument_wire_name
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Mapping, Sequence
+    from collections.abc import Callable, Coroutine, Sequence
     from typing import TypeAlias
 
     from django.db.models.sql.query import Query
@@ -152,9 +151,6 @@ else:
 __all__ = ("DjangoListField", "ListArgumentError")
 
 _TargetT = TypeVar("_TargetT")
-
-# Strawberry calls a resolver with at most ``(root, info)`` positionally.
-_RESOLVER_POSITIONAL_INPUTS = 2
 
 _ListArgumentReason = Literal[
     "negative",
@@ -184,10 +180,10 @@ def _validate_djangotype_target(
 
     Order is load-bearing - each target-type check assumes the previous one
     passed. The class and subclass gates read the real metaclass chain and MRO
-    (``utils/truth.py``); the registration check accepts only the target's own
-    registered definition (``registry.py::TypeRegistry.registered_own_definition``),
-    so a Meta-less abstract base, a class the registry dropped, and a fabricated or
-    copied definition are rejected here, at the line that constructed the field, instead
+    (``utils/truth.py``); the registration check accepts only a target the registry
+    holds a definition for (``registry.py::TypeRegistry.get_definition``), so a
+    Meta-less abstract base and a class the registry dropped are rejected here, at
+    the line that constructed the field, instead
     of surfacing later as a Strawberry runtime-type error over an unrelated
     model. Rejection messages render the target through ``truth.render`` /
     ``truth.name``.
@@ -206,13 +202,13 @@ def _validate_djangotype_target(
         raise ConfigurationError(
             f"{field} requires a DjangoType subclass; got {truth.name(target_type)}.",
         )
-    definition = registry.registered_own_definition(target_type)
+    definition = registry.get_definition(target_type)
     if definition is None:
         raise ConfigurationError(
             f"{field} target {truth.name(target_type)} is not a registered DjangoType. "
             f"This usually means {truth.name(target_type)} declares no `class Meta` "
             "(a Meta-less abstract base never registers a definition), or its definition "
-            "was replaced or cleared.",
+            "was cleared.",
         )
     if resolver is not None and not callable(resolver):
         raise ConfigurationError(f"{field} resolver must be callable.")
@@ -231,7 +227,7 @@ def _validate_relay_djangotype_target(
     The Relay-shaped target guard shared by ``DjangoConnectionField`` and
     ``relay.py::_validate_node_target`` (which backs ``DjangoNodeField`` /
     ``DjangoNodesField``) -- single-sited. Delegates the base checks -
-    including the registry-canonicality identity check - to
+    including the registration check - to
     ``_validate_djangotype_target`` (with the call site's
     ``resolver`` seam), then rejects a non-Relay-Node-shaped target.
     ``_is_relay_shaped`` reads the declared ``Meta.interfaces`` (a
@@ -243,8 +239,8 @@ def _validate_relay_djangotype_target(
 
     Reconsideration triggers: a new Relay-shape arm
     (``types/base.py::_is_relay_shaped`` owns the predicate), a
-    registration-canonicality change
-    (``registry.py::TypeRegistry.registered_own_definition`` owns it), or a
+    registration-lookup change
+    (``registry.py::TypeRegistry.get_definition`` owns it), or a
     guard reading ``DecodeResult`` statuses (row existence lives in the
     ``types/relay.py`` resolve defaults, relation-target existence in the
     finalizer audit - construction answers registered + shaped only).
@@ -252,7 +248,7 @@ def _validate_relay_djangotype_target(
     # The definition comes back from the base validator's one read; the Relay
     # guard and the field build consume that same object.
     definition = _validate_djangotype_target(target_type, resolver, field=field)
-    # The base validator proved ``definition.origin is target_type``.
+    # The registry keys each definition by its own class, so ``origin`` is ``target_type``.
     if not _is_relay_shaped(definition.origin, definition.interfaces):
         raise ConfigurationError(relay_error_message)
     return definition
@@ -1299,48 +1295,18 @@ def _field_label(info: Info[object, object]) -> str:
     return truth.text(field_name, "DjangoListField")
 
 
-def _resolver_root_and_info(
-    args: tuple[object, ...],
-    kwargs: Mapping[str, object],
-) -> tuple[object, Info[object, object]]:
-    """Extract Strawberry's positional resolver context and reject unknown call inputs."""
-    if len(args) > _RESOLVER_POSITIONAL_INPUTS:
-        raise TypeError("DjangoListField resolver accepts only root and info positional inputs.")
-    unexpected = set(kwargs) - {"info", "root"}
-    if unexpected:
-        names = ", ".join(sorted(unexpected))
-        raise TypeError(f"DjangoListField resolver received unexpected keyword inputs: {names}.")
-    if args and "root" in kwargs:
-        raise TypeError("DjangoListField resolver received multiple values for root.")
-    if len(args) > 1 and "info" in kwargs:
-        raise TypeError("DjangoListField resolver received multiple values for info.")
-    root = args[0] if args else kwargs.get("root")
-    if len(args) > 1:
-        info = args[1]
-    else:
-        try:
-            info = kwargs["info"]
-        except KeyError as exc:
-            raise TypeError("DjangoListField resolver requires info.") from exc
-    # Strawberry binds its own ``Info`` to the resolver parameter annotated ``Info`` (here
-    # the synthesized keyword-only ``info``); any other value is a ``TypeError``.
-    return root, require_instance(info, Info)
-
-
 def _argument_record(
-    args: tuple[object, ...],
-    kwargs: Mapping[str, object],
+    info: Info[object, object],
     *,
     max_rows: int | None,
     trusted_max_rows: bool,
     offset: object = None,
     limit: object = None,
     order_by: object = UNSET,
-) -> tuple[object, Info[object, object], _ListArguments]:
-    """Extract root, info, and normalize list arguments for any resolver invocation."""
-    root, info = _resolver_root_and_info(args, kwargs)
+) -> _ListArguments:
+    """Normalize list arguments for any resolver invocation."""
     field_name = _field_label(info)
-    args_record = _normalize_list_arguments(
+    return _normalize_list_arguments(
         field_name,
         info,
         max_rows,
@@ -1349,7 +1315,6 @@ def _argument_record(
         limit=limit,
         order_by=order_by,
     )
-    return root, info, args_record
 
 
 def _build_non_queryset_rejection_error(
@@ -1709,15 +1674,17 @@ def DjangoListField(  # noqa: N802 - PascalCase for graphene-django parity
     if resolver is None:
 
         def _default(
-            *args: object,
+            root: object = None,
+            *,
+            info: Info[object, object],
             offset: object = None,
             limit: object = None,
             order_by: object = UNSET,
-            **kwargs: object,
         ) -> object:
-            _, info, args_record = _argument_record(
-                args,
-                kwargs,
+            # The published signature carries ``root``; the default reads the model instead.
+            del root
+            args_record = _argument_record(
+                info,
                 max_rows=max_rows,
                 trusted_max_rows=trusted_max_rows,
                 offset=offset,
@@ -1779,15 +1746,15 @@ def DjangoListField(  # noqa: N802 - PascalCase for graphene-django parity
         ) -> Callable[..., object]:
 
             async def _wrap(
-                *args: object,
+                root: object = None,
+                *,
+                info: Info[object, object],
                 offset: object = None,
                 limit: object = None,
                 order_by: object = UNSET,
-                **kwargs: object,
             ) -> object:
-                root, info, args_record = _argument_record(
-                    args,
-                    kwargs,
+                args_record = _argument_record(
+                    info,
                     max_rows=max_rows,
                     trusted_max_rows=trusted_max_rows,
                     offset=offset,
@@ -1819,15 +1786,15 @@ def DjangoListField(  # noqa: N802 - PascalCase for graphene-django parity
         def _sync_wrap() -> Callable[..., object]:
 
             def _wrap(
-                *args: object,
+                root: object = None,
+                *,
+                info: Info[object, object],
                 offset: object = None,
                 limit: object = None,
                 order_by: object = UNSET,
-                **kwargs: object,
             ) -> object:
-                root, info, args_record = _argument_record(
-                    args,
-                    kwargs,
+                args_record = _argument_record(
+                    info,
                     max_rows=max_rows,
                     trusted_max_rows=trusted_max_rows,
                     offset=offset,

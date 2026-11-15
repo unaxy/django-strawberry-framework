@@ -623,29 +623,21 @@ in. A Phase-2.5 synthesized relation connection takes its target's definition fr
 REGISTRY (`django_strawberry_framework/registry.py::TypeRegistry.get_definition`) at
 finalization and threads it the same way, so it never asks the target class.
 
-The registry is what "the target's definition" MEANS. `origin is target_type` proves only that
-whatever answered the class read names this class, and anything can name it, so the shared
-validator accepts only `django_strawberry_framework/registry.py::TypeRegistry.registered_own_definition`:
-the object the registry holds for the target, which the class attribute IS (identity) and whose
-`origin` is the target. `django_strawberry_framework/testing/relay.py::global_id_for` and
-`manage.py inspect_django_type` ask the same predicate.
-A fabricated same-origin object, a copy of the real definition, and a definition for a type the
-registry has never seen are each rejected with `ConfigurationError` at the line that constructed
+The registry is what "the target's definition" MEANS: the shared validator accepts only
+`django_strawberry_framework/registry.py::TypeRegistry.get_definition`, the object the registry
+holds for the target. `django_strawberry_framework/testing/relay.py::global_id_for` and
+`manage.py inspect_django_type` ask the same lookup.
+A type the registry has never seen is rejected with `ConfigurationError` at the line that constructed
 the field, rather than surfacing later as an engine runtime-type error over a GraphQL type and a
 Django model that are unrelated. List, connection, and Relay node fields all enter through that
 one validator, so "registered target" cannot drift by factory.
 
-Every identity fact the validator and the predicate read is read truthfully through
+Every identity fact the validator reads is read truthfully through
 [`django_strawberry_framework/utils/truth.py`][truth]. The class and subclass gates read the
 target's real type and MRO, so a `__class__` property that raises or lies is the typed
-`requires a DjangoType class` rejection. The definition attribute is read by
-`django_strawberry_framework/utils/truth.py::static_attr` from the real class namespaces,
-without running a metaclass `__getattribute__`, a metaclass property or a descriptor. The
-registry stores definitions in a `django_strawberry_framework/utils/truth.py::IdentityMap`, so
+`requires a DjangoType class` rejection. The registry stores definitions in a `django_strawberry_framework/utils/truth.py::IdentityMap`, so
 the lookup compares the class object itself and never runs a target metaclass's `__hash__` or
 `__eq__` (`tests/test_list_field.py::test_djangolistfield_registry_lookup_never_hashes_the_target`).
-The attribute is compared to the registry's object before `origin` is read, so `origin` is only
-ever read off the registry's own definition.
 
 The generated-connection cache carries the same rule.
 `django_strawberry_framework/connection.py::_connection_type_for` keys on target identity, so a
@@ -2312,11 +2304,8 @@ Where each part of the surface lives, keyed to the slice checklist:
   arithmetic neither evaluates nor recreates it from the target model's default manager.
 - Existing [relation handling][glossary-relation-handling] keeps nested raw-list pagination
   out of this root-only surface; nested pages remain connections.
-- A target whose class attribute answers with a fabricated same-origin object, a copy of the
-  real definition, or a definition for a type the registry does not hold is rejected at the
-  constructing line, not at schema build. The definition attribute is read from the real class
-  namespaces without consulting the metaclass, and the registry lookup is by identity, so no
-  target hook runs during the check.
+- A target the registry does not hold is rejected at the constructing line, not at schema
+  build. The registry lookup is by identity, so no target hook runs during the check.
 - A second connection field over one target holding different metadata is rejected rather
   than served the warm cache's shape; `registry.unregister` and `registry.clear` evict the
   entry, so a fresh registration regenerates rather than collides.
@@ -2899,14 +2888,10 @@ sync or async HTTP request cannot isolate:
   afterward - the sync cleanup contract Decision 8 declines
   (`test_list_field_declined_sync_cleanup_generator_suspended`, beside
   `tests/test_resource_policy.py::test_bounded_rows_declined_sync_cleanup_resumable`);
-- the target guard: a fabricated same-origin definition, a copy of the real definition, a
-  target the registry has never seen, and a definition registered for another class are each
-  rejected at construction, the accepted object IS `registry.get_definition(target)`, and the
-  registry lookup never hashes the target
-  (`test_djangolistfield_rejects_a_fabricated_same_origin_definition`,
-  `test_djangolistfield_rejects_a_copy_of_the_real_definition`,
-  `test_djangolistfield_rejects_a_target_the_registry_has_never_seen`,
-  `test_djangolistfield_rejects_a_definition_registered_for_another_class`,
+- the target guard: a target the registry has never seen is rejected at construction, the
+  accepted object IS `registry.get_definition(target)`, and the registry lookup never hashes
+  the target
+  (`test_djangolistfield_rejects_a_target_the_registry_has_never_seen`,
   `test_djangolistfield_accepts_and_captures_the_registrys_exact_object`,
   `test_djangolistfield_registry_lookup_never_hashes_the_target`);
 - the executor read: a list field refuses a synchronous operation inside an event loop
@@ -3035,8 +3020,7 @@ delegation inside an open scope is `test_async_child_delegated_ordering_still_or
 and `test_async_child_delegated_impure_ordering_is_rejected`.
 
 Metadata integrity is proven at the boundary it lives on. The validator rows above hand the
-factory a fabricated same-origin object, a `copy.copy` of the registered definition, and a
-target the registry has dropped. `tests/test_connection.py::test_a_warm_connection_cache_refuses_alternate_metadata_for_its_target`
+factory a target the registry has dropped. `tests/test_connection.py::test_a_warm_connection_cache_refuses_alternate_metadata_for_its_target`
 warms an entry from the real definition, then presents a `copy.copy` of it carrying
 `connection = {"total_count": True}` and asserts the rejection rather than the earlier shape,
 with the real definition's entry intact afterward.

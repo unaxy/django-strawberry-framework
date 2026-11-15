@@ -47,8 +47,6 @@ test_library_branches_via_djangolistfield_optimized_nested_selection``.
 """
 
 import asyncio
-import contextlib
-import copy
 import dataclasses
 import datetime
 import gc
@@ -121,7 +119,6 @@ from django_strawberry_framework.list_field import (
     _order_normalization_scope,
     _orderset_class_from_definition,
     _resolve_argument_wire_name,
-    _resolver_root_and_info,
     _synthesized_list_signature,
     _validate_djangotype_target,
 )
@@ -136,9 +133,7 @@ from django_strawberry_framework.resource_policy import (
     ResourcePolicy,
     _windowed_rows,
 )
-from django_strawberry_framework.types.definition import DjangoTypeDefinition
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import list_of, read_attr, require_instance
+from django_strawberry_framework.utils._narrowing import list_of, read_attr
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
@@ -1393,27 +1388,6 @@ def test_omitted_list_arguments_do_not_resolve_policy(monkeypatch: pytest.Monkey
     )
 
 
-def test_resolver_call_context_accepts_strawberry_shape_and_rejects_unknown_inputs() -> None:
-    info = make_info(field_name="items")
-    root = object()
-
-    assert _resolver_root_and_info((root, info), {}) == (root, info)
-    assert _resolver_root_and_info((), {"root": root, "info": info}) == (root, info)
-    with pytest.raises(TypeError, match="only root and info positional"):
-        _resolver_root_and_info((root, info, object()), {})
-    with pytest.raises(TypeError, match="unexpected keyword inputs: surprise"):
-        _resolver_root_and_info((), {"info": info, "surprise": True})
-    with pytest.raises(TypeError, match="multiple values for root"):
-        _resolver_root_and_info((root, info), {"root": root})
-    with pytest.raises(TypeError, match="multiple values for info"):
-        _resolver_root_and_info((root, info), {"info": info})
-    with pytest.raises(TypeError, match="requires info"):
-        _resolver_root_and_info((root,), {})
-    # Only Strawberry's own ``Info`` is the resolver context.
-    with pytest.raises(TypeError, match="expected an instance of"):
-        _resolver_root_and_info((root, SimpleNamespace(field_name="items")), {})
-
-
 def test_field_label_falls_back_without_a_field_name() -> None:
     assert _field_label(_as_strawberry_info(SimpleNamespace())) == "DjangoListField"
     assert _field_label(_as_strawberry_info(SimpleNamespace(field_name=""))) == "DjangoListField"
@@ -2393,92 +2367,6 @@ async def test_list_field_rejected_async_iterator_is_closed_when_building_the_re
 # =============================================================================
 
 
-@contextlib.contextmanager
-def _swap_definition_attribute(
-    target_type: type[DjangoType],
-    replacement: object,
-) -> Generator[None, None, None]:
-    """Put ``replacement`` on ``target_type``'s definition attribute, restoring after."""
-    original = require_instance(
-        truth.class_dict(target_type)["__django_strawberry_definition__"],
-        DjangoTypeDefinition,
-    )
-    # basedpyright: the planted stand-in definition is the hostile input under test; DjangoType
-    # types the slot as DjangoTypeDefinition
-    target_type.__django_strawberry_definition__ = replacement  # pyright: ignore[reportAttributeAccessIssue]
-    try:
-        yield
-    finally:
-        target_type.__django_strawberry_definition__ = original
-
-
-def test_djangolistfield_rejects_a_fabricated_same_origin_definition() -> None:
-    """An object that merely LOOKS like the target's definition is not accepted.
-
-    ``origin is target_type`` proves only that whatever answered the read
-    names this class. Anything can name it. The accepted object must be the
-    exact ``DjangoTypeDefinition`` the registry holds for the target, so a
-    hand-built stand-in carrying a model of its own is rejected at the line
-    that constructed the field - not later, as a Strawberry runtime-type error
-    over a GraphQL type and a Django model that have nothing to do with
-    each other.
-
-    Package-side with its two siblings below: a field whose construction
-    raises never reaches a schema, so no request can express the claim. The
-    accepted path is what the live tier covers, over every shipped list and
-    connection field.
-    """
-
-    class FabricatedTargetType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    fabricated = SimpleNamespace(
-        origin=FabricatedTargetType,
-        model=Item,
-        orderset_class=None,
-        filterset_class=None,
-        interfaces=(),
-    )
-    with (
-        pytest.raises(
-            ConfigurationError,
-            match=r"DjangoListField target FabricatedTargetType is not a registered DjangoType",
-        ),
-        _swap_definition_attribute(FabricatedTargetType, fabricated),
-    ):
-        DjangoListField(FabricatedTargetType)
-
-
-def test_djangolistfield_rejects_a_copy_of_the_real_definition() -> None:
-    """A faithful COPY of the registered definition is rejected too.
-
-    Equality is not the test; identity is. A copy is a second object that can
-    be mutated independently of the one the registry, the finalizer and the
-    optimizer all read, which is exactly the divergence the one-definition rule
-    exists to prevent - and it would pass any check weaker than ``is``.
-    """
-
-    class CopiedTargetType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    real = CopiedTargetType.__django_strawberry_definition__
-    duplicate = copy.copy(real)
-    assert duplicate is not real
-    assert duplicate.origin is CopiedTargetType
-    with (
-        pytest.raises(
-            ConfigurationError,
-            match=r"DjangoListField target CopiedTargetType is not a registered DjangoType",
-        ),
-        _swap_definition_attribute(CopiedTargetType, duplicate),
-    ):
-        DjangoListField(CopiedTargetType)
-
-
 def test_djangolistfield_rejects_a_target_the_registry_has_never_seen() -> None:
     """A target the registry does not hold is unregistered, and says so.
 
@@ -2553,76 +2441,6 @@ def test_djangolistfield_registry_lookup_never_hashes_the_target() -> None:
         _ArmedHashMeta.armed = False
     assert definition is not None
     assert definition is HashedTarget.__django_strawberry_definition__
-
-
-class _RaisingOriginDefinition:
-    """A stand-in definition whose ``origin`` read raises."""
-
-    def __init__(self, raised: type[BaseException]) -> None:
-        self._raised = raised
-
-    @property
-    def origin(self) -> NoReturn:
-        raise self._raised("hostile origin")
-
-
-@pytest.mark.parametrize("raised", _RAISING_CLASS_ERRORS)
-def test_djangolistfield_never_reads_origin_off_a_replaced_definition(
-    raised: type[BaseException],
-) -> None:
-    """The attribute is compared to the registry's object before ``origin`` is read.
-
-    A definition attribute reassigned to an object that is not the registry's
-    is rejected by identity, so a stand-in whose ``origin`` raises is never
-    asked for it.
-    """
-
-    class ReplacedTarget(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    with (
-        pytest.raises(ConfigurationError) as exc_info,
-        _swap_definition_attribute(ReplacedTarget, _RaisingOriginDefinition(raised)),
-    ):
-        DjangoListField(ReplacedTarget)
-    assert str(exc_info.value) == (
-        "DjangoListField target ReplacedTarget is not a registered DjangoType. "
-        "This usually means ReplacedTarget declares no `class Meta` (a Meta-less abstract "
-        "base never registers a definition), or its definition was replaced or cleared."
-    )
-
-
-def test_djangolistfield_rejects_a_definition_registered_for_another_class() -> None:
-    """The registry's object must also name THIS class as its origin.
-
-    Identity with the registry's object is not enough when the registry's object
-    belongs to a different class: a type whose attribute and registry entry are
-    both another type's definition is not a registered target of its own.
-    """
-
-    class OwnerType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    class BorrowerType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    owner_definition = OwnerType.__django_strawberry_definition__
-    registry.unregister(BorrowerType)
-    registry.register_definition(BorrowerType, owner_definition)
-    with (
-        pytest.raises(
-            ConfigurationError,
-            match=r"DjangoListField target BorrowerType is not a registered DjangoType",
-        ),
-        _swap_definition_attribute(BorrowerType, owner_definition),
-    ):
-        DjangoListField(BorrowerType)
 
 
 # ---------------------------------------------------------------------------
