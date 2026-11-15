@@ -660,54 +660,6 @@ def test_finalize_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [CategoryType]
 
 
-def test_finalize_discards_consumer_authored_pending_relation_without_rewriting_annotation() -> (
-    None
-):
-    """Consumer-authored relation annotations are not rewritten if a stale pending record exists.
-
-    Registry lifecycle: finalize-time class mutation, pending records, and phase failure atomicity.
-    A live request never sees a half-finalized registry. Live sibling for a successful compose:
-    ``examples/fakeshop/test_query/test_schema_composition_api.py``.
-    """
-    try:
-
-        class ManualPendingCategoryType(DjangoType):
-            items: list["ManualPendingItemType"]
-
-            class Meta:
-                model = Category
-                fields = ("id", "name", "items")
-
-        definition = registry.get_definition(ManualPendingCategoryType)
-        assert definition is not None
-        assert definition.consumer_authored_fields == frozenset({"items"})
-
-        registry.add_pending_relation(
-            PendingRelation(
-                source_type=ManualPendingCategoryType,
-                source_model=Category,
-                field_name="items",
-                django_field=Category._meta.get_field("items"),
-                related_model=Item,
-            ),
-        )
-
-        class ManualPendingItemType(DjangoType):
-            class Meta:
-                model = Item
-                fields = ("id", "name")
-
-        globals()["ManualPendingItemType"] = ManualPendingItemType
-
-        finalize_django_types()
-
-        annotation = ManualPendingCategoryType.__annotations__["items"]
-        assert getattr(annotation, "__args__", ()) == ("ManualPendingItemType",)
-        assert list(registry.iter_pending_relations()) == []
-    finally:
-        globals().pop("ManualPendingItemType", None)
-
-
 def test_finalize_skips_definitions_marked_finalized_when_registry_is_unfinalized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

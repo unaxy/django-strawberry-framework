@@ -75,8 +75,6 @@ def _parse_bigint(value: object) -> int:
         - non-decimal strings ("abc", "1.9", "1e3", "0x10")
         - None and other types
     """
-    if type(value) is int:
-        return int.__int__(value)
     if truth.is_instance(value, bool):
         # This parser uniformly raises ValueError (never TypeError) for every
         # invalid BigInt input; bool is rejected here
@@ -87,22 +85,16 @@ def _parse_bigint(value: object) -> int:
         # The base slot, so an int subclass's own ``__int__`` never decides the
         # value handed to a resolver.
         return int.__int__(value)
-    if type(value) is str:
-        plain_value = value
-    elif truth.is_instance(value, str):
-        # Copied to an exact ``str`` before regex and integer conversion, so a
-        # subclass's ``__int__`` / ``__str__`` never decides the accepted value.
-        plain_value = truth.text(value)
-    else:
+    if not truth.is_instance(value, str):
         raise ValueError(f"BigInt cannot parse {truth.kind(value)}")
-    if not _BIGINT_STRING_PATTERN.fullmatch(plain_value):
+    if not _BIGINT_STRING_PATTERN.fullmatch(value):
         raise ValueError(
             f"BigInt requires a plain ASCII decimal integer string "
             f"(optional leading minus for non-zero, no leading zeroes, "
             f"no underscores, no plus sign, no Unicode digits); got "
             f"{truth.render(value)}",
         )
-    return int(plain_value)
+    return int(value)
 
 
 def _serialize_bigint(value: object) -> str:
@@ -119,8 +111,6 @@ def _serialize_bigint(value: object) -> str:
     permissive ``serialize=str`` would let a schema emit values the parser
     rejects, breaking the input/output symmetry contract.
     """
-    if type(value) is int:
-        return int.__repr__(value)
     if truth.is_instance(value, bool):
         raise TypeError(f"BigInt cannot serialize bool value {value!r}")
     if truth.is_instance(value, int):

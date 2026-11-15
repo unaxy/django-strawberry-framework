@@ -142,6 +142,7 @@ def test_make_relation_resolver_forward_is_named_resolve_field() -> None:
     """
     fake_field = SimpleNamespace(
         name="category",
+        is_relation=True,
         attname="category_id",
         many_to_many=False,
         one_to_many=False,
@@ -365,7 +366,7 @@ def test_check_n1_ignores_bare_field_name_key() -> None:
     )
 
     with pytest.raises(OptimizerError, match="Unplanned N\\+1"):
-        _check_n1(fake_info, SimpleNamespace(), "category", ItemType, kind=None)
+        _check_n1(fake_info, SimpleNamespace(), "category", ItemType, kind="forward_single")
 
 
 def test_check_n1_returns_when_relation_is_already_loaded() -> None:
@@ -379,10 +380,10 @@ def test_check_n1_returns_when_relation_is_already_loaded() -> None:
 
     _check_n1(
         fake_info,
-        SimpleNamespace(category="cached"),
+        SimpleNamespace(_state=SimpleNamespace(fields_cache={"category": "cached"})),
         "category",
         ItemType,
-        kind=None,
+        kind="forward_single",
     )
 
 
@@ -396,7 +397,7 @@ def test_check_n1_warns_for_unplanned_lazy_load(caplog: pytest.LogCaptureFixture
     )
 
     caplog.set_level("WARNING", logger="django_strawberry_framework")
-    _check_n1(fake_info, SimpleNamespace(), "category", ItemType, kind=None)
+    _check_n1(fake_info, SimpleNamespace(), "category", ItemType, kind="forward_single")
 
     assert any("Potential N+1 on category" in r.message for r in caplog.records)
 
@@ -575,6 +576,7 @@ def test_make_relation_resolver_reverse_one_to_one_returns_none_on_doesnotexist(
 
     fake_field = SimpleNamespace(
         name="profile",
+        is_relation=True,
         many_to_many=False,
         one_to_many=False,
         one_to_one=True,
@@ -699,6 +701,7 @@ def test_reverse_one_to_one_propagates_plain_attribute_error() -> None:
 
     fake_field = SimpleNamespace(
         name="profile",
+        is_relation=True,
         many_to_many=False,
         one_to_many=False,
         one_to_one=True,
@@ -828,6 +831,7 @@ def test_reverse_one_to_one_without_related_model_propagates_attribute_error() -
     """
     fake_field = SimpleNamespace(
         name="profile",
+        is_relation=True,
         many_to_many=False,
         one_to_many=False,
         one_to_one=True,
@@ -853,6 +857,7 @@ def test_forward_resolver_without_related_model_propagates_attribute_error() -> 
     """
     fake_field = SimpleNamespace(
         name="category",
+        is_relation=True,
         many_to_many=False,
         one_to_many=False,
         one_to_one=False,
@@ -1013,9 +1018,8 @@ def test_strictness_check_is_connection_agnostic_under_non_default_alias() -> No
     _ParentType = _parent_type(Item, "_ParentType")
 
     # ``_state.db = "shard_b"`` proves the non-default alias is accepted
-    # without altering the check's shape; ``fields_cache`` is empty so the
-    # second lazy-load gate at ``_will_lazy_load_single`` reports the
-    # relation is unloaded.
+    # without altering the check's shape; ``fields_cache`` is empty so
+    # ``_will_lazy_load_single`` reports the relation is unloaded.
     fields_cache: dict[str, object] = {}
     state = SimpleNamespace(db="shard_b", fields_cache=fields_cache)
     root = SimpleNamespace(_state=state)

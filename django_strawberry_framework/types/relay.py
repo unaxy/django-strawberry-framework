@@ -38,7 +38,7 @@ from graphql import GraphQLObjectType, get_named_type, is_abstract_type
 from strawberry import relay
 from strawberry.relay.exceptions import NodeIDAnnotationError
 from strawberry.types.base import StrawberryObjectDefinition
-from strawberry.types.cast import TYPE_CAST_ATTRIBUTE
+from strawberry.types.cast import get_strawberry_type_cast
 
 from django_strawberry_framework.conf import relay_globalid_strategy_setting
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -124,10 +124,6 @@ def install_is_type_of(type_cls: type[DjangoType]) -> None:
     Unmarked instances (relation resolvers, uncast consumer resolvers) keep the
     isinstance behavior.
 
-    The mark is read from the real namespaces through ``truth.static_attr``
-    (where upstream's ``get_strawberry_type_cast`` runs ``getattr``), so a
-    consumer object's ``__getattr__`` / ``__getattribute__`` never runs here.
-
     Preserves a consumer-declared ``is_type_of`` via the ``cls.__dict__``
     membership check (the same discriminator strawberry-django uses); a
     function inherited from a base does not count as "declared on this
@@ -139,7 +135,7 @@ def install_is_type_of(type_cls: type[DjangoType]) -> None:
 
     def is_type_of(obj: object, _info: object) -> bool:
         obj = unwrap_lazy_object(obj)
-        type_cast = truth.static_attr(obj, TYPE_CAST_ATTRIBUTE)
+        type_cast = get_strawberry_type_cast(obj)
         if type_cast is not None:
             return type_cast is type_cls
         return truth.is_instance(obj, type_cls) or truth.is_instance(obj, model)
@@ -978,19 +974,6 @@ def _install_typename_closure(
     type_cls.resolve_typename = classmethod(resolve_typename)  # pyright: ignore[reportAttributeAccessIssue]
 
 
-def _plain_globalid_slot(slot: object) -> str | None:
-    """Return a ``GlobalID`` slot as a plain ``str``, or ``None`` when it is not a string.
-
-    ``GlobalID.__post_init__`` enforces string slots, but an instance built around it (or a
-    subclass) can carry any value. A ``str`` subclass is normalized before truthiness,
-    splitting, and registry lookups so hostile ``__str__`` / ``__format__`` overrides cannot
-    escape the decode input boundary.
-    """
-    if not truth.is_instance(slot, str):
-        return None
-    return truth.text(slot)
-
-
 def model_for_label_slot(label: str) -> type[models.Model] | None:
     """Return the installed model a model-label ``type_name`` slot names, or ``None``.
 
@@ -1099,16 +1082,8 @@ def decode_global_id(
         # Not a ``str``, so the real-class gate above admitted a ``GlobalID``.
         decoded = gid
 
-    # A caller-built ``GlobalID`` (or subclass) carries whatever its slots were given.
-    raw_type_name: object = decoded.type_name
-    raw_node_id: object = decoded.node_id
-    if (type_name := _plain_globalid_slot(raw_type_name)) is None or (
-        node_id := _plain_globalid_slot(raw_node_id)
-    ) is None:
-        raise ConfigurationError(
-            "decode_global_id: GlobalID fields must be strings; both type_name and "
-            "node_id must be non-empty.",
-        )
+    type_name = decoded.type_name
+    node_id = decoded.node_id
     if not type_name or not node_id:
         raise ConfigurationError(
             f"decode_global_id: GlobalID has an empty slot (type_name={truth.render(type_name)}, "

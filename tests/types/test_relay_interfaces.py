@@ -26,7 +26,6 @@ from django.utils.functional import SimpleLazyObject
 from strawberry import relay
 from strawberry.schema.name_converter import NameConverter
 from strawberry.types.base import StrawberryObjectDefinition
-from strawberry.types.cast import TYPE_CAST_ATTRIBUTE
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoType, conf, finalize_django_types, strawberry_config
@@ -406,27 +405,6 @@ def test_consumer_declared_is_type_of_is_preserved() -> None:
 
     assert CustomNode.__dict__["is_type_of"] is consumer_is_type_of
     assert CustomNode.__dict__["is_type_of"](Category(), None) is False
-
-
-def test_is_type_of_hostile_cast_lookup_falls_back_to_instance_check() -> None:
-    """A hostile ``__getattribute__`` never runs: the ``strawberry.cast`` mark is read statically."""
-
-    class HostileObject:
-        @override
-        def __getattribute__(self, name: str) -> object:
-            if name == TYPE_CAST_ATTRIBUTE:
-                raise RuntimeError("hostile cast lookup")
-            return object_result(super().__getattribute__, name)
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    is_type_of = truth.class_dict(CategoryNode)["is_type_of"]
-    assert callable(is_type_of)
-    assert is_type_of(Category(), None) is True
-    assert is_type_of(HostileObject(), None) is False
 
 
 # ---------------------------------------------------------------------------
@@ -2677,7 +2655,7 @@ def test_callable_setting_partial_wrapped_async_callable_raises(
 # ---------------------------------------------------------------------------
 # The registry-lifecycle validated setting snapshot (one read + one validation
 # per finalization; fail-loud even with zero / all-overriding Relay types;
-# retry-lifecycle mixed-strategy guard; no request-time read; clear-and-rebuild
+# a retry keeps the snapshot; no request-time read; clear-and-rebuild
 # flips the strategy with no process-global).
 # ---------------------------------------------------------------------------
 
@@ -2871,16 +2849,14 @@ def test_no_request_time_setting_read(
     assert _emitted_typename(CategoryNode) == "products.category"
 
 
-def test_retry_lifecycle_rejects_setting_change_no_mixed_strategy(
+def test_retry_lifecycle_keeps_snapshot_until_clear(
     settings: pytest_django.Settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A retry after a partial finalize with a CHANGED setting raises (no mixed schema).
+    """A partial finalize keeps its snapshot; ``registry.clear()`` + rebuild takes a new value.
 
     A Phase-3 failure stamps >= 1 type under the snapshotted value while leaving
-    ``finalized = False`` (the recover-in-place contract). If the configured value
-    then differs, the retry must refuse rather than stamp the rest under a new
-    value; ``registry.clear()`` + rebuild under the new value succeeds.
+    ``finalized = False`` (the recover-in-place contract) and the snapshot set.
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RELAY_GLOBALID_STRATEGY": "type"}
 
@@ -2900,12 +2876,8 @@ def test_retry_lifecycle_rejects_setting_change_no_mixed_strategy(
     assert _definition_of(CategoryNode).effective_globalid_strategy == "type"
     assert registry._globalid_setting_snapshot == "type"
 
-    # Changing the setting and retrying trips the mixed-strategy guard.
+    # A clean rebuild under a new value succeeds (snapshot reset by clear()).
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RELAY_GLOBALID_STRATEGY": "type+model"}
-    with pytest.raises(ConfigurationError, match="changed between finalization attempts"):
-        finalize_django_types()
-
-    # A clean rebuild under the new value succeeds (snapshot reset by clear()).
     monkeypatch.undo()
     registry.clear()
 
@@ -3265,16 +3237,6 @@ def test_decode_hostile_globalid_slots_propagate() -> None:
     object.__setattr__(value, "type_name", "CategoryNode")
     object.__setattr__(value, "node_id", "1")
     with pytest.raises(RuntimeError, match="hostile type_name"):
-        decode_global_id(value)
-
-
-def test_decode_globalid_rejects_non_string_slots() -> None:
-    """A GlobalID carrying a non-string slot is rejected before decoding."""
-    value = object.__new__(relay.GlobalID)
-    object.__setattr__(value, "type_name", 123)
-    object.__setattr__(value, "node_id", "1")
-
-    with pytest.raises(ConfigurationError, match="fields must be strings"):
         decode_global_id(value)
 
 

@@ -45,7 +45,7 @@ Each top-level item maps to one commit in the [Implementation plan](#implementat
       - [ ] Every serializer verdict on a resolver value is live in `examples/fakeshop/test_query/test_converter_outputs_api.py`: `::test_an_outbound_bigint_rejects_bool_beside_its_integer_control` (`True` and `False`), `::test_an_outbound_bigint_refuses_a_non_int_resolver_value` (`1.9`, `0.0`, `str`, `Decimal`, a `str` subclass, a custom object), `::test_an_outbound_bigint_refusal_names_the_class_past_a_hostile_type_name_hook` (an object whose metaclass `__name__` hook raises) and `::test_an_outbound_bigint_int_subclass_serializes_its_canonical_decimal` (the hostile and hex-rendering `int` subclasses serialize to their canonical decimal string)
     - Parser:
       - [ ] `test_bigint_rejects_none` — unit-level test. Strawberry strips `null` before calling `parse_value` for nullable input positions, so this code path is reachable only through direct calls. Tested for defense in depth so the parser's `None` rejection is not removed as "unreachable".
-      - [ ] `test_bigint_parser_survives_hostile_values` — the rejected value's kind is read through `utils/truth.py::kind`, so a hostile metaclass `__name__` hook never runs and the parser's message names the real class; a hostile `str` subclass parses through its base slot
+      - [ ] `test_bigint_parser_survives_hostile_values` — the rejected value's kind is read through `utils/truth.py::kind`, so a hostile metaclass `__name__` hook never runs and the parser's message names the real class
     - Warning-free import:
       - [ ] `test_package_import_does_not_emit_strawberry_deprecation_warning` — **subprocess-based** test running `python -W error::DeprecationWarning -c "import django_strawberry_framework"`, asserts `returncode == 0`. See [Decision 7](#decision-7--test-strategy) for the implementation pattern and why `importlib.reload` is *not* used.
   - [ ] Live `/graphql/` tests (every parse / serialize case a request can express):
@@ -210,7 +210,7 @@ _PACKAGE_SCALAR_MAP: dict[object, ScalarDefinition] = {
 
 `BigInt` is a **bare** `NewType`: passing a class or `NewType` to `strawberry.scalar(...)` emits Strawberry's `Passing a class to strawberry.scalar() is deprecated` warning, so the `ScalarDefinition` is built from the `name=`-only overload and bound to the `NewType` through `_PACKAGE_SCALAR_MAP`, which `strawberry_config()` merges into a consumer's schema config ([Decision 6](#decision-6--bigint-public-export-status-and-registration-contract)).
 
-**Subclass normalization.** The parser returns `int.__int__(value)` and matches a `str` subclass's base-slot copy (`utils/truth.py::text`), and the serializer emits `int.__repr__(value)`, so an `int` / `str` subclass's own `__int__` / `__str__` / `__repr__` can neither alter the accepted value nor replace the scalar's error contract. Error text names a rejected value's kind through `utils/truth.py::kind`, which reads the interpreter's type slot, so a hostile metaclass `__name__` hook never runs; a rejected string is spelled through `utils/truth.py::render`.
+**Subclass normalization.** The parser returns `int.__int__(value)` and the serializer emits `int.__repr__(value)`, so an `int` subclass's own `__int__` / `__str__` / `__repr__` (an `IntegerChoices` member's included) can neither alter the accepted value nor replace the scalar's canonical decimal. Error text names a rejected value's kind through `utils/truth.py::kind`, which reads the interpreter's type slot, so a hostile metaclass `__name__` hook never runs; a rejected string is spelled through `utils/truth.py::render`.
 **Why `BigInt` exists at all:** GraphQL's `Int` is a signed 32-bit scalar. Executing a query that returns an `int`-annotated field whose value exceeds `2**31 - 1` yields a `GraphQLError` with message containing `Int cannot represent non 32-bit signed integer value`.
 
 **The parser must reject rather than coerce.** `bool` is rejected before the `int` check because `bool` subclasses `int`; `float` is rejected outright because `int(1.9) == 1` truncates silently. The regex is deliberately narrower than `int(str)`, so `"1_000"`, `"+1"`, `"01"`, `"-0"`, and Unicode-digit strings raise instead of parsing.
@@ -493,7 +493,7 @@ Test categories:
 
 1. Wire format: decimal-string serialization including `0`, negative values, int64-min, int64-max (live).
 2. Strict serializer negative cases: `bool`, `float`, `str`, `Decimal`, `None`, custom object (package); a resolver returning `bool` (package, schema execution).
-3. Hostile `int` / `str` subclasses normalized (package).
+3. Hostile `int` subclasses normalized (package).
 4. Strict parser positive cases: int and string zero, negative decimal strings, int64-min/max strings, decimal strings past the JS safe integer (live).
 5. Strict parser negative cases: `bool` / `float` literals and empty / whitespace-padded / non-decimal / underscore / leading-plus / leading-zero / `-0` / Unicode-digit strings (live); Python `bool`, `float`, `None` (package).
 6. Annotation generation and `null=True` widening via schema introspection.

@@ -2929,12 +2929,6 @@ def test_strictness_includes_fk_id_elision_in_planned_paths(
     assert not any("Potential N+1" in r.message for r in caplog.records)
 
 
-def test_will_lazy_load_false_when_cached() -> None:
-    """Pin the __dict__ compatibility seam used by synthetic test doubles."""
-    root = SimpleNamespace(category="cached_value")
-    assert _will_lazy_load_single(root, "category") is False
-
-
 def test_will_lazy_load_false_when_in_fields_cache() -> None:
     """_will_lazy_load_single returns False when a relation is in _state.fields_cache."""
     root = SimpleNamespace(_state=SimpleNamespace(fields_cache={"card": "cached"}))

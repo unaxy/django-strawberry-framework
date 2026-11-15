@@ -7,9 +7,8 @@ decoration touches a consumer-facing class:
 
 - Phase 1 (failure-atomic): walk ``registry.iter_pending_relations()`` and
   classify each pending record as ``unresolved`` (no DjangoType registered
-  for the target model), ``consumer_authored`` (consumer wrote their own
-  annotation; defense-in-depth path), or ``resolved`` (target registered;
-  rewrite the synthesized annotation via ``resolved_relation_annotation``).
+  for the target model) or ``resolved`` (target registered; rewrite the
+  synthesized annotation via ``resolved_relation_annotation``).
   Any unresolved targets raise ``ConfigurationError`` BEFORE any class
   object is mutated, so a finalize() that detects a config error leaves
   every collected class intact for a re-call. The primary-ambiguity audit
@@ -110,25 +109,6 @@ if TYPE_CHECKING:
 # The sidecar family one phase-2.5 binding pass runs over: every hook in one
 # ``_SidecarBindingSpec`` takes the same family's set classes.
 _SetT = TypeVar("_SetT", bound="type[FilterSet | OrderSet]")
-
-
-def _annotation_names(type_cls: type[DjangoType]) -> tuple[str, ...]:
-    """Snapshot and validate a type's annotation keys before GraphQL conversion.
-
-    A key is accepted by its real type (``str`` or a subclass) and copied to an
-    exact ``str`` through the base slot, so a subclass's own dunders never run
-    while the surface is built.
-    """
-    # A metaclass can inject non-string keys into a consumer class's annotations, which
-    # typeshed types as string-keyed, so each key is read as the ``object`` it may be.
-    names = tuple(list_of(type_cls.__annotations__))
-    invalid = next((name for name in names if not truth.is_instance(name, str)), None)
-    if invalid is not None:
-        raise ConfigurationError(
-            f"Cannot finalize {truth.name(type_cls)}: annotation keys must be field-name "
-            f"strings; got {truth.render(invalid)}.",
-        )
-    return tuple(truth.text(name) for name in names)
 
 
 def _format_unresolved_targets_error(unresolved: list[PendingRelation]) -> str:
@@ -240,7 +220,7 @@ def _field_surface_names(type_cls: type[DjangoType]) -> frozenset[str]:
             label = python_name if python_name is not None else read_attr(field, "graphql_name")
             if label is not None:
                 names.add(str(label))
-    names.update(_annotation_names(type_cls))
+    names.update(type_cls.__annotations__)
     names.update(
         name
         for name, value in truth.class_dict(type_cls).items()
@@ -840,40 +820,17 @@ def finalize_django_types() -> None:
     current_globalid_setting = _validated_globalid_setting()
     if registry._globalid_setting_snapshot is GLOBALID_SETTING_UNSET:
         registry._globalid_setting_snapshot = current_globalid_setting
-    elif current_globalid_setting != registry._globalid_setting_snapshot:
-        # Retry path (the recover-in-place contract after a partial failure): the
-        # snapshot already stamped some Relay types under the prior value. A
-        # differing configured value now would produce a mixed-strategy schema
-        # (some types stamped old, the rest new), so refuse and require a clean
-        # rebuild rather than silently mixing.
-        raise ConfigurationError(
-            "RELAY_GLOBALID_STRATEGY changed between finalization attempts "
-            f"({registry._globalid_setting_snapshot!r} -> {current_globalid_setting!r}); "
-            "a retry after a partial finalize must reuse the original snapshot to "
-            "avoid a mixed-strategy schema. Call registry.clear() first, then "
-            "rebuild under the new value.",
-        )
 
     _audit_primary_ambiguity(multi_type_models)
 
     unresolved: list[PendingRelation] = []
     resolved: list[tuple[PendingRelation, type[DjangoType], FieldMeta]] = []
-    consumer_authored: list[PendingRelation] = []
     for pending in registry.iter_pending_relations():
         # definition is always set; pending records are added after
         # register_with_definition in DjangoType.__init_subclass__
         # (see types/base.py register_with_definition / add_pending_relation
         # ordering). The ``is not None`` guard is kept as defense-in-depth.
         definition = registry.get_definition(pending.source_type)
-        # Defense-in-depth: ``types/base.py::_build_annotations`` already skips the
-        # pending append for consumer-annotated relations, so this branch
-        # is a no-op under the documented call graph. Kept so a future
-        # change to ``_build_annotations`` (e.g. a lazy/forward-reference
-        # path that does append a pending record) cannot double-mutate
-        # ``__annotations__`` here.
-        if definition is not None and pending.field_name in definition.consumer_authored_fields:
-            consumer_authored.append(pending)
-            continue
         target_type = registry.get(pending.related_model)
         if target_type is None:
             unresolved.append(pending)
@@ -897,7 +854,7 @@ def finalize_django_types() -> None:
     if unresolved:
         raise ConfigurationError(_format_unresolved_targets_error(unresolved))
 
-    resolved_pending = [*consumer_authored]
+    resolved_pending: list[PendingRelation] = []
     for pending, target_type, field_meta in resolved:
         pending.source_type.__annotations__[pending.field_name] = resolved_relation_annotation(
             pending.django_field,

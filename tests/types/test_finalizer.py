@@ -6,14 +6,10 @@ This file keeps finalize-time diagnostics that never become a GraphQL response.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import NoReturn
-
 import pytest
 import strawberry
 from apps.library.models import Book, Genre
 from strawberry.exceptions import MissingReturnAnnotationError
-from typing_extensions import override
 
 from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -22,7 +18,6 @@ from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types import finalizer as finalizer_module
 from django_strawberry_framework.types.finalizer import (
-    _annotation_names,
     _audit_model_label_routing,
     _field_surface_names,
     _warn_model_label_secondary_collapse,
@@ -30,25 +25,6 @@ from django_strawberry_framework.types.finalizer import (
 from django_strawberry_framework.types.relations import PendingRelation
 
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
-
-
-def test_malformed_annotation_key_is_rejected_before_graphql_conversion() -> None:
-    """A non-string annotation key is rejected by name before GraphQL conversion."""
-
-    class BookType(DjangoType):
-        class Meta:
-            model = Book
-            fields = ("id", "title")
-
-    # basedpyright: the int annotation key is the hostile input under test; typeshed types
-    # __annotations__ keys as str
-    BookType.__annotations__[123] = str  # pyright: ignore[reportArgumentType]
-
-    with pytest.raises(ConfigurationError) as exc_info:
-        finalize_django_types()
-    assert str(exc_info.value) == (
-        "Cannot finalize BookType: annotation keys must be field-name strings; got 123."
-    )
 
 
 def test_pending_relation_without_field_metadata_is_rejected_before_relation_lookup() -> None:
@@ -82,33 +58,6 @@ def test_pending_relation_without_field_metadata_is_rejected_before_relation_loo
         match="Cannot finalize BookType: pending relation missing has no field metadata",
     ):
         finalize_django_types()
-
-
-def test_annotation_name_snapshot_propagates_an_unreadable_mapping() -> None:
-    """An annotation mapping that refuses enumeration propagates its own error."""
-
-    class _UnreadableAnnotations(Mapping[str, object]):
-        @override
-        def __iter__(self) -> NoReturn:
-            raise RuntimeError("annotation enumeration exploded")
-
-        @override
-        def __len__(self) -> int:
-            return 1
-
-        @override
-        def __getitem__(self, key: str) -> NoReturn:
-            raise KeyError(key)
-
-    class _Type:
-        # basedpyright: an unreadable annotations mapping replaces the dict on purpose; the test
-        # proves ``_annotation_names`` lets the mapping's own failure propagate
-        __annotations__ = _UnreadableAnnotations()  # pyright: ignore[reportAssignmentType]
-
-    with pytest.raises(RuntimeError, match="annotation enumeration exploded"):
-        # basedpyright: the class with unreadable annotations is the hostile input under test;
-        # _annotation_names types the parameter as type[DjangoType]
-        _annotation_names(_Type)  # pyright: ignore[reportArgumentType]
 
 
 def test_pending_relation_without_source_definition_is_typed() -> None:

@@ -82,14 +82,6 @@ def test_bigint_int_subclasses_are_normalized_before_parsing() -> None:
         def __str__(self) -> str:
             return hex(self)
 
-    class _HostileStr(str):
-        def __int__(self) -> int:
-            raise RuntimeError("int exploded")
-
-        @override
-        def __str__(self) -> str:
-            return "forged"
-
     value = _HostileInt(7)
     parsed = _parse_bigint(value)
     assert parsed == 7
@@ -99,13 +91,6 @@ def test_bigint_int_subclasses_are_normalized_before_parsing() -> None:
     parsed_hex = _parse_bigint(hex_val)
     assert parsed_hex == 255
     assert type(parsed_hex) is int
-
-    # The parser's subclass-``str`` leg copies through the base slot, so the
-    # forged ``__str__`` never decides the accepted value.
-    hostile_str = _HostileStr("7")
-    parsed_str = _parse_bigint(hostile_str)
-    assert parsed_str == 7
-    assert type(parsed_str) is int
 
 
 def test_bigint_serialize_rejects_none() -> None:
@@ -155,10 +140,9 @@ def test_bigint_rejection_messages_are_pinned() -> None:
 
 
 def test_bigint_parser_survives_hostile_values() -> None:
-    """A hostile ``str`` subclass parses and a hostile type-name hook is rejected by real name.
+    """A hostile type-name hook is rejected by real name.
 
-    A ``str`` subclass whose dunders raise is read through its base slot, so it parses
-    to its integer. A rejected value's kind is read from the interpreter, so a
+    A rejected value's kind is read from the interpreter, so a
     metaclass ``__name__`` hook never runs and the message names the real class. No GraphQL
     argument carries a Python object to the parser; the serializer's twin is live in
     ``examples/fakeshop/test_query/test_converter_outputs_api.py::test_an_outbound_bigint_refusal_names_the_class_past_a_hostile_type_name_hook``.
@@ -174,19 +158,6 @@ def test_bigint_parser_survives_hostile_values() -> None:
     class _HostileObject(metaclass=_HostileTypeMeta):
         pass
 
-    class _HostileString(str):
-        def __int__(self) -> int:
-            raise RuntimeError("int exploded")
-
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr exploded")
-
-        @override
-        def __str__(self) -> str:
-            raise RuntimeError("str exploded")
-
-    assert _parse_bigint(_HostileString("7")) == 7
     with pytest.raises(ValueError, match=r"^BigInt cannot parse _HostileObject$"):
         _parse_bigint(_HostileObject())
 

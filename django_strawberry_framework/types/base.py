@@ -70,7 +70,13 @@ from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.hints import OptimizerHint
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import dict_of, is_str, is_text_atom, list_of
+from django_strawberry_framework.utils._narrowing import (
+    dict_of,
+    is_str,
+    is_text_atom,
+    list_of,
+    read_attr,
+)
 from django_strawberry_framework.utils.querysets import (
     _concrete_or_none,
     _prefetch_relation_target_or_none,
@@ -597,23 +603,6 @@ def _is_relay_shaped(cls: "type[DjangoType]", interfaces: tuple[type[object], ..
         cls,
         relay.Node,
     )
-
-
-def _meta_attr(meta: object, key: str, default: object = None) -> object:
-    """Read one declared ``Meta`` attribute (inherited ``Meta`` bases included).
-
-    The value is read from the real namespaces of ``meta``'s MRO, so no
-    metaclass ``__getattr__`` / ``__getattribute__`` or descriptor runs; a
-    declared value comes back exactly as the class body stored it, with one
-    exception: a ``staticmethod`` wrapper comes back as the function it wraps,
-    which is what reading the attribute off the class returns. The wrapper is
-    recognised by its exact builtin class, so its ``__func__`` slot is the
-    interpreter's own and no consumer code runs to read it.
-    """
-    value = truth.static_attr(meta, key, default)
-    if truth.is_exact(value, staticmethod):
-        return value.__func__
-    return value
 
 
 # ``strawberry.auto`` is ``Annotated[Any, StrawberryAuto()]``; this alias carries the same
@@ -1158,7 +1147,7 @@ def _meta_optimizer_hints(meta: object, model: type[models.Model]) -> dict[str, 
     (``utils/truth.py::kind``): an instance by its real class, a class by its
     own name (``got Category.``), never by its metaclass.
     """
-    value = _meta_attr(meta, "optimizer_hints")
+    value = read_attr(meta, "optimizer_hints", None)
     if value is None:
         return {}
     if not issubclass(truth.class_of(value), Mapping):
@@ -1292,7 +1281,7 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
     helper only validates the shape and contents of the
     ``Meta.interfaces`` tuple itself.
     """
-    raw = _meta_attr(meta, "interfaces")
+    raw = read_attr(meta, "interfaces", None)
     if raw is None:
         return ()
     if truth.is_instance(raw, str):
@@ -1443,14 +1432,14 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
         ConfigurationError: any of the above violations.
 
     """
-    model = _meta_attr(meta, "model")
+    model = read_attr(meta, "model", None)
     if model is None:
         raise ConfigurationError("Meta.model is required")
     if not truth.is_subclass(model, models.Model):
         raise ConfigurationError("Meta.model must be a Django model class")
     model_name = truth.name(model)
 
-    raw_name = _meta_attr(meta, "name")
+    raw_name = read_attr(meta, "name", None)
     if raw_name is not None:
         if not truth.is_instance(raw_name, str):
             raise ConfigurationError(
@@ -1465,7 +1454,7 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     else:
         name = None
 
-    raw_description = _meta_attr(meta, "description")
+    raw_description = read_attr(meta, "description", None)
     description: str | Promise | None
     if raw_description is None or truth.is_instance(raw_description, Promise):
         # A lazy translation string stays lazy until finalize, which renders it once.
@@ -1483,22 +1472,22 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     # below (the ``deferred`` / ``unknown`` checks): an unsupported key is
     # flagged only when THIS ``Meta`` declares it, so a base ``Meta``'s
     # already-validated keys are not re-flagged on every subclass. This is the
-    # intentional counterpart to the MRO-walking ``_meta_attr`` check just
+    # intentional counterpart to the MRO-walking ``read_attr`` check just
     # below; the two differ on purpose -- do not "unify" them.
     declared = truth.declared_meta_keys(meta)
 
-    # Use the MRO-walking ``_meta_attr`` rather than own-namespace membership
+    # Use the MRO-walking ``read_attr`` rather than own-namespace membership
     # so a child Meta inheriting ``fields`` from a base Meta still trips the
     # mutual-exclusion check when it declares ``exclude`` (and vice versa). ``fields = None``
     # (or ``exclude = None``) remains "unset" - matches
     # ``_normalize_fields_spec``'s treatment of ``None`` and the broader
     # convention that an explicit ``None`` means "no preference".
-    has_fields = _meta_attr(meta, "fields") is not None
-    has_exclude = _meta_attr(meta, "exclude") is not None
+    has_fields = read_attr(meta, "fields", None) is not None
+    has_exclude = read_attr(meta, "exclude", None) is not None
     if has_fields and has_exclude:
         raise ConfigurationError("Meta.fields and Meta.exclude are mutually exclusive")
 
-    primary = _meta_attr(meta, "primary", default=False)
+    primary = read_attr(meta, "primary", False)
     if not truth.is_exact(primary, bool):
         raise ConfigurationError("Meta.primary must be a bool")
 
@@ -1512,31 +1501,31 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     if unknown:
         raise ConfigurationError(f"Unknown Meta keys: {unknown}")
 
-    fields_spec = _normalize_fields_spec(_meta_attr(meta, "fields"))
-    exclude_spec = _normalize_sequence_spec(_meta_attr(meta, "exclude"), "exclude")
+    fields_spec = _normalize_fields_spec(read_attr(meta, "fields", None))
+    exclude_spec = _normalize_sequence_spec(read_attr(meta, "exclude", None), "exclude")
     optimizer_hints = _meta_optimizer_hints(meta, model)
     interfaces = _validate_interfaces(meta, model)
     relay_shaped = _is_relay_shaped(cls, interfaces)
-    filterset_class = _validate_filterset_class(model, _meta_attr(meta, "filterset_class"))
-    orderset_class = _validate_orderset_class(model, _meta_attr(meta, "orderset_class"))
+    filterset_class = _validate_filterset_class(model, read_attr(meta, "filterset_class", None))
+    orderset_class = _validate_orderset_class(model, read_attr(meta, "orderset_class", None))
     connection = _validate_connection(
         model,
-        _meta_attr(meta, "connection"),
+        read_attr(meta, "connection", None),
         relay_shaped=relay_shaped,
     )
     cursor_field = _validate_cursor_field(
         model,
-        _meta_attr(meta, "cursor_field"),
+        read_attr(meta, "cursor_field", None),
         relay_shaped=relay_shaped,
     )
     globalid_strategy = _validate_globalid_strategy(
         model,
-        _meta_attr(meta, "globalid_strategy"),
+        read_attr(meta, "globalid_strategy", None),
         relay_shaped=relay_shaped,
     )
     relation_shapes = _validate_relation_shapes(
         model,
-        _meta_attr(meta, "relation_shapes"),
+        read_attr(meta, "relation_shapes", None),
         relay_shaped=relay_shaped,
     )
     # Override shape stage (spec-029 Decision 8, shape + normalize): the two set-valued
@@ -1548,11 +1537,11 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     # (unknown / excluded / consumer-authored / Relay-pk / relation) need the
     # selected fields and run later in ``_validate_nullability_override_targets``.
     nullable_overrides = frozenset(
-        _normalize_sequence_spec(_meta_attr(meta, "nullable_overrides"), "nullable_overrides")
+        _normalize_sequence_spec(read_attr(meta, "nullable_overrides", None), "nullable_overrides")
         or (),
     )
     required_overrides = frozenset(
-        _normalize_sequence_spec(_meta_attr(meta, "required_overrides"), "required_overrides")
+        _normalize_sequence_spec(read_attr(meta, "required_overrides", None), "required_overrides")
         or (),
     )
     both_sets_collision = sorted(nullable_overrides & required_overrides)
@@ -1570,7 +1559,7 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
     # ``_validate_filesystem_path_targets``.
     filesystem_path_fields = frozenset(
         _normalize_sequence_spec(
-            _meta_attr(meta, "filesystem_path_fields"),
+            read_attr(meta, "filesystem_path_fields", None),
             "filesystem_path_fields",
         )
         or (),

@@ -342,19 +342,8 @@ def finalize_django_types() -> None:
     # and unresolved pending record without mutating classes.
     unresolved: list[PendingRelation] = []
     resolved: list[tuple[PendingRelation, type, FieldMeta]] = []
-    consumer_authored: list[PendingRelation] = []
     for p in registry.iter_pending_relations():
         owning_def = registry.get_definition(p.source_type)
-        # Defense-in-depth, and unreachable under the documented call
-        # graph: collection never appends a pending record for a
-        # consumer-authored name, so no such record can arrive here. Kept
-        # because the invariant lives in another function — a future
-        # collection path that DOES record pending for an overridden name
-        # (a lazy or forward-reference route, say) would otherwise
-        # overwrite the consumer's annotation below with no guard between.
-        if owning_def is not None and p.field_name in owning_def.consumer_authored_fields:
-            consumer_authored.append(p)  # nothing to resolve, but not unresolved
-            continue
         target_type = registry.get(p.related_model)
         if target_type is None:
             unresolved.append(p)
@@ -368,7 +357,7 @@ def finalize_django_types() -> None:
     # finalized if there are unresolved targets.
     if unresolved:
         raise ConfigurationError(_format_unresolved_targets_error(unresolved))
-    resolved_pending = [*consumer_authored]
+    resolved_pending: list[PendingRelation] = []
     for p, target_type, field_meta in resolved:
         p.source_type.__annotations__[p.field_name] = resolved_relation_annotation(
             p.django_field,
@@ -376,8 +365,7 @@ def finalize_django_types() -> None:
             field_meta=field_meta,
         )
         resolved_pending.append(p)
-    # Every pending relation either resolved or was claimed by the
-    # consumer-authored escape hatch. Drop them so post-finalization
+    # Every pending relation resolved. Drop them so post-finalization
     # diagnostics see an empty pending set.
     registry.discard_pending(resolved_pending)
     # Phase 2 (attach generated resolvers). Uses definition.selected_fields
@@ -469,7 +457,7 @@ We take one concept and explicitly reject everything else.
 - **Single-threaded setup window.** `finalize_django_types()` must be called once during single-threaded import / app / schema construction, before any request handling begins. The function mutates a process-global registry **and** mutates class objects (annotations, attached fields, `__strawberry_definition__`, `__django_strawberry_definition__`); the registry is intentionally lockless (see `registry.py::TypeRegistry`) and concurrent finalization can produce partial Strawberry definitions. Calling the finalizer from a request thread, async resolver, or any other concurrent context is **not supported**. Future helpers that auto-trigger finalization must be constrained to schema construction time or must acquire a real lock around the finalizer.
 - A `DjangoType` declared **after** `finalize_django_types()` returns raises `ConfigurationError` from `__init_subclass__` with the message "`finalize_django_types()` already ran; cannot register `<TypeName>` after finalization. Call `registry.clear()` first if this is a test." This is the contract that makes test isolation predictable: test modules that declare fresh types opt into `tests/conftest.py::isolate_global_registry` (`registry.clear(); yield; registry.clear()`) through a module-level `pytestmark = pytest.mark.usefixtures("isolate_global_registry")` (as `tests/types/test_base.py` declares), and never see a stale pending-relation set.
 - **`registry.clear()` resets registry state for fresh type classes; it does not roll back class mutation.** `clear()` resets every map it owns — `_types`, `_models`, `_enums`, `_definitions`, `_pending`, `_finalized`, and the slots later specs added beside them — so the next test's `__init_subclass__` and `finalize_django_types()` calls behave like a fresh process *for newly created classes*. It also runs the teardown callbacks that registered types and loaded subsystems supplied, which undoes the class-level artifacts the framework itself installed and explicitly registered. What it cannot undo is everything nobody registered a teardown for: it cannot remove `__strawberry_definition__` from already-finalized classes, cannot remove relation resolver attributes from mutated classes, and cannot remove `__django_strawberry_definition__` or rewritten `__annotations__`. Tests must not reuse finalized `DjangoType` classes after `clear()`; the isolation fixture pattern naturally avoids this because each test redefines its types inside the test function or fixture.
-- **Pending records are dropped after a successful resolution.** The finalizer calls `registry.discard_pending(resolved_pending)` once phase 1 has matched every pending entry to either a target type or the consumer-authored escape hatch. Post-finalization, `registry.iter_pending_relations()` returns an empty iterator. This keeps schema-audit and diagnostic code from seeing records that are no longer pending.
+- **Pending records are dropped after a successful resolution.** The finalizer calls `registry.discard_pending(resolved_pending)` once phase 1 has matched every pending entry to a target type. Post-finalization, `registry.iter_pending_relations()` returns an empty iterator. This keeps schema-audit and diagnostic code from seeing records that are no longer pending.
 ## Test fixtures and acceptance criteria
 ### Model substrate
 Cardinality coverage comes from the real `library` example app, not a test-only fixture app. `examples/fakeshop/apps/library/models.py` provides, among others, `Branch`, `Shelf`, `Genre`, `Book`, `Patron`, `MembershipCard`, and `Loan`; together they cover forward FK, reverse FK, forward OneToOne, reverse OneToOne, forward M2M, reverse M2M, a choice field, and a nullable scalar field. The `products` app's `Category` / `Item` / `Entry` / `Property` graph supplies the multi-cycle case.

@@ -61,7 +61,6 @@ from django_strawberry_framework.resource_policy import (
     bounded_rows_async,
     check_deadline,
 )
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_queryset, is_str, read_attr, require
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.querysets import (
@@ -135,32 +134,13 @@ _PLAN_UNREAD: Final = _PlanUnread.UNREAD
 _FK_ELISION_UNSAFE: object = object()
 
 
-def _in_instance_namespace(root: object, name: str) -> bool:
-    """Whether ``name`` is stored in ``root``'s real instance ``__dict__``.
-
-    Read through ``truth.instance_dict``, so a ``__dict__`` property on the
-    row's class never answers; a row with no instance namespace stores nothing.
-    """
-    namespace = truth.instance_dict(root)
-    return namespace is not None and name in namespace
-
-
 def _fk_attname_is_deferred(root: object, attname: str) -> bool:
     """Return ``True`` when reading ``root.<attname>`` would trigger a deferred fetch.
 
-    The FK column lives in ``root.__dict__`` on a fully-loaded instance and is
-    absent on a deferred one (the ``DeferredAttribute`` descriptor lazy-loads on
-    access) - the same loaded signal ``_will_lazy_load_single`` uses, applied to
-    the FK *column* attname rather than the relation field name. Absence from
-    ``__dict__`` alone is not enough: the resolver's "compatibility for test
-    doubles" contract treats a class-attribute-backed value (a plain test
-    double, no DB) as loaded, so deferral is confirmed only when ``root`` is a
-    real Django instance whose ``get_deferred_fields()`` lists the column. A
-    double can simulate the deferred case by exposing a ``get_deferred_fields``
-    that returns the attname while keeping it out of ``__dict__``.
+    Deferral is confirmed only when ``root`` is a real Django instance whose
+    ``get_deferred_fields()`` lists the column; a row without that method (a
+    plain test double, no DB) counts as loaded.
     """
-    if _in_instance_namespace(root, attname):
-        return False
     get_deferred_fields = getattr(root, "get_deferred_fields", None)
     if get_deferred_fields is None:
         return False
@@ -214,15 +194,9 @@ def _will_lazy_load_single(root: object, field_name: str) -> bool:
     """Return ``True`` if a single-valued relation access would trigger a query.
 
     Forward FK, forward OneToOne, and reverse OneToOne. Django's
-    descriptor populates ``root._state.fields_cache`` after a load and
-    also stamps ``root.__dict__`` on some access paths (e.g. when the
-    related instance has been assigned). Both paths count as cached.
-    Synthetic test doubles that pre-populate ``__dict__`` are therefore
-    treated as already loaded - matching the resolver's existing
-    "compatibility for test doubles" contract.
+    descriptor populates ``root._state.fields_cache`` after a load or an
+    assignment of the related instance.
     """
-    if _in_instance_namespace(root, field_name):
-        return False
     state = getattr(root, "_state", None)
     fields_cache = getattr(state, "fields_cache", {})
     return field_name not in fields_cache
@@ -234,10 +208,7 @@ def _will_lazy_load_many(root: object, field_name: str) -> bool:
     Reverse FK and M2M. The only Django-supported cache for the many
     side is ``root._prefetched_objects_cache``; setting
     ``root.<field_name>`` directly does not populate any cache and
-    accessing the descriptor still hits the database. The
-    ``__dict__`` short-circuit used for single-valued relations is
-    intentionally NOT applied here - it would silently exempt the
-    many-side strictness path from the optimizer's N+1 contract.
+    accessing the descriptor still hits the database.
     """
     prefetch_cache = getattr(root, "_prefetched_objects_cache", {})
     return field_name not in prefetch_cache
@@ -299,7 +270,7 @@ def _check_n1(
     field_name: str,
     parent_type: "type[DjangoType] | None" = None,
     *,
-    kind: RelationKind | Literal["connection_to_attr"] | None,
+    kind: RelationKind | Literal["connection_to_attr"],
     cache_name: str | None = None,
     reason: str | None = None,
     planned: AbstractSet[object] | _PlanUnread | None = _PLAN_UNREAD,
@@ -314,11 +285,7 @@ def _check_n1(
     use the many-side cache check; the special ``"connection_to_attr"``
     value (spec-033 Decision 8) probes nothing, because its caller has
     already decided the windowed page was not served; every other known
-    relation shape uses the single-valued cache check. Production
-    ``_make_relation_resolver`` always supplies the relation kind; the
-    ``kind=None`` fallback is reserved for test-double direct callers that
-    exercise the single-valued cache check (see
-    ``tests/types/test_resolvers.py::test_check_n1_*``).
+    relation shape uses the single-valued cache check.
 
     ``field_name`` keys the PLAN lookup (the optimizer walker emits
     resolver keys in field-name vocabulary); ``cache_name`` keys the
@@ -422,9 +389,7 @@ def _field_meta_for_resolver(
     """Return registered ``FieldMeta`` for ``field`` when the parent type exposes it.
 
     Production callers MUST pass ``parent_type=cls`` so the branch-sensitive
-    resolver key matches what the optimizer walker emitted; the ``None`` default
-    ONLY supports test-double direct callers exercising the single-valued /
-    many-side code paths without a registered ``DjangoType``.
+    resolver key matches what the optimizer walker emitted.
     """
     if parent_type is not None:
         definition = registry.get_definition(parent_type)
@@ -432,16 +397,6 @@ def _field_meta_for_resolver(
             meta = definition.field_map.get(field.name)
             if meta is not None:
                 return meta
-    if not hasattr(field, "is_relation"):
-        # Test-double fallback. The canonical builder
-        # ``FieldMeta.from_django_field`` requires ``field.is_relation``;
-        # test doubles like ``SimpleNamespace(name=..., many_to_many=...)``
-        # lack it. Delegating to the shared shape helper keeps the
-        # observable ``FieldMeta`` identical to what the canonical
-        # builder would produce on the same descriptor, with
-        # ``is_relation=True`` hard-coded because the caller is by
-        # definition asking about a relation field.
-        return FieldMeta._from_field_shape(field, is_relation=True)
     return FieldMeta.from_django_field(field)
 
 

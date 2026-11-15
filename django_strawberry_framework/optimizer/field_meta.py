@@ -269,21 +269,16 @@ class FieldMeta:
     ) -> FieldMeta:
         """Build a ``FieldMeta`` from a guard-cleared field-shaped descriptor.
 
-        Internal helper shared by the canonical ``from_django_field``
-        entry point and ``types/resolvers.py::_field_meta_for_resolver``'s
-        test-double fallback. Both call sites have already established
-        that the input exposes the field-shaped attribute surface
-        (``name`` plus the ``getattr``-defaulted cardinality / target /
-        related-model attributes); they differ only in how
-        ``is_relation`` is determined - ``from_django_field`` reads
-        ``bool(field.is_relation)``, the resolver-side fallback fires
-        only when the field lacks the ``is_relation`` attribute and the
-        caller is by definition asking about a relation (``True``).
+        Internal helper behind the canonical ``from_django_field`` entry
+        point, which has already established that the input exposes the
+        field-shaped attribute surface (``name`` plus the
+        ``getattr``-defaulted cardinality / target / related-model
+        attributes) and reads ``is_relation`` as ``bool(field.is_relation)``.
 
-        The cardinality-gated nullable rule (many-side -> ``False``;
-        reverse OneToOne -> ``True``; otherwise ``field.null``) and the
+        It holds the cardinality-gated nullable rule (many-side -> ``False``;
+        reverse OneToOne -> ``True``; otherwise ``field.null``), the
         ``getattr``-defaulted relation-shape reads and the derived FK-id
-        elision metadata live here so the two call sites cannot drift.
+        elision metadata.
         """
         if field_name is None:
             field_name = read_attr(field, "name", None)

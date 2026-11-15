@@ -536,12 +536,9 @@
 "tests/types/test_definition_relations.py::test_custom_id_detection_propagates_and_flags_consumer_relay_resolver._NonStringNode.resolve_id_attr" = { reportIncompatibleMethodOverride = 1 }
 "tests/types/test_definition_relations.py::test_custom_id_detection_reads_hostile_class_metadata_truthfully" = { reportArgumentType = 1 }
 "tests/types/test_definition_relations.py::test_custom_id_resolver_guards_reject_malformed_pk_names" = { reportArgumentType = 2 }
-"tests/types/test_finalizer.py::test_annotation_name_snapshot_propagates_an_unreadable_mapping" = { reportArgumentType = 1 }
-"tests/types/test_finalizer.py::test_annotation_name_snapshot_propagates_an_unreadable_mapping._Type" = { reportAssignmentType = 1 }
 "tests/types/test_finalizer.py::test_field_surface_names_ignores_field_without_python_or_graphql_name" = { reportArgumentType = 1 }
 "tests/types/test_finalizer.py::test_finalize_rerun_after_phase3_raise_keeps_finalized_sets_wired" = { reportAttributeAccessIssue = 1 }
 "tests/types/test_finalizer.py::test_incomplete_registry_registration_is_typed_at_finalize" = { reportArgumentType = 2 }
-"tests/types/test_finalizer.py::test_malformed_annotation_key_is_rejected_before_graphql_conversion" = { reportArgumentType = 1 }
 "tests/types/test_finalizer.py::test_pending_relation_without_source_definition_is_typed" = { reportArgumentType = 1 }
 "tests/types/test_relations.py::_NonHashableField.__hash__" = { reportAssignmentType = 1 }
 "tests/types/test_relations.py::_build_pending" = { reportArgumentType = 1 }

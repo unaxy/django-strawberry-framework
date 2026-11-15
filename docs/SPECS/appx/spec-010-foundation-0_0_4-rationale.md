@@ -149,16 +149,6 @@ mixed-strategy schema (`django_strawberry_framework/types/finalizer.py::finalize
 spec states that write rather than an unqualified "nothing has happened yet", because `registry.clear()`
 resets it precisely because it is state.
 
-## `### Finalization phase` — the consumer-authored arm in phase 1
-
-The arm is unreachable under the documented call graph: `_build_annotations` never records a pending
-relation for a consumer-authored name. It stays because the invariant lives in a different function; a
-future collection path that records pending for an overridden name would otherwise overwrite the
-consumer's annotation with no guard between the two.
-
-*Rejected: deleting it as dead code.* Keeping three unreachable lines costs a reader one paragraph;
-deleting them turns a future collection-side change into a silent consumer-override clobber.
-
 ## `## What we take from strawberry-graphql-django` — third-party line citations
 
 Pinned upstream snapshots cannot move, so a line number is the most precise address for them; in-repo
