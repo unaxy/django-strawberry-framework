@@ -111,18 +111,21 @@ from django_strawberry_framework.sets_mixins import (
 )
 from django_strawberry_framework.types.converters import _field_label, _generated_output_issue
 from django_strawberry_framework.types.relay import implements_relay_node
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._array_field import array_leaf_field, is_array_in_lookup
 from django_strawberry_framework.utils._narrowing import (
     call_method,
-    dict_items,
+    class_namespace,
     dict_of,
+    instance_state,
+    is_class,
     is_concrete_field,
     is_dict,
+    is_instance,
+    is_list,
     is_list_or_tuple,
     is_lookup,
     is_queryset,
-    is_str,
     is_tuple,
     list_of,
     optional_instance,
@@ -471,7 +474,7 @@ def _lookups_for_field(
                 field_class,
                 registered,
             ).items()
-            if truth.is_type(lookup) and _type_is_genuinely_django(lookup)
+            if is_class(lookup) and _type_is_genuinely_django(lookup)
         },
     )
     if not package_default or _is_text_column(field_class):
@@ -508,7 +511,7 @@ def _generated_filter_field(
     except (LookupValidationError, FieldError) as error:
         raise FieldLookupError(field, lookup_expr) from error
     resolved = field if output is generated_column(field) else output
-    return resolved, require(lookup.lookup_name, is_str)
+    return resolved, require_instance(lookup.lookup_name, str)
 
 
 # Django's text-pattern lookups. Each compares the column's TEXT rendering against
@@ -579,15 +582,15 @@ def _without_foreign_postgres_lookups(
 
     Every lookup is kept when ``field_class`` (or a class on its MRO) is defined
     under ``django.contrib.postgres``; otherwise a lookup class defined there is
-    dropped. Module names are read through ``truth.module``.
+    dropped.
     """
     own_field = any(
-        truth.module(cls).startswith(_CONTRIB_POSTGRES_PREFIX) for cls in truth.mro(field_class)
+        cls.__module__.startswith(_CONTRIB_POSTGRES_PREFIX) for cls in field_class.__mro__
     )
     return {
         lookup_expr: lookup
         for lookup_expr, lookup in lookups.items()
-        if own_field or not truth.module(lookup).startswith(_CONTRIB_POSTGRES_PREFIX)
+        if own_field or not lookup.__module__.startswith(_CONTRIB_POSTGRES_PREFIX)
     }
 
 
@@ -906,7 +909,7 @@ _FRAMEWORK_GENERATED_ORIGINS: frozenset[FilterOrigin] = frozenset(
 # queryset. The only two recognized shapes are (a) exact audited / package-owned
 # classes (registry keys) and (b) django-filter's genuine empty-body dynamic
 # ``in`` / ``range`` CSV classes over an exact-audited scalar family, validated
-# structurally in ``_family_profile_for``.
+# structurally in ``_is_audited_family``.
 #
 # Membership is the whole answer. There is deliberately no per-family runtime
 # read table and no request-time re-verification of a leaf's behavior: routing is
@@ -924,7 +927,7 @@ def _decodes_before_binding(filter_instance: Filter | None) -> bool:
     (``_own_filter``: the ``FilterMethod`` a ``method=`` installs, or a callable its
     ``__init__`` stores on the instance) replaces that decode, and so does a subclass
     whose class-level ``filter`` overrides the GlobalID filter's
-    (``utils/truth.py::overrides``), so its value reaches the consumer's code undecoded,
+    (``utils/introspection.py::overrides``), so its value reaches the consumer's code undecoded,
     whether or not that code decodes it in turn. A projected copy is read through to the
     child filter it runs (``_projected_terminal``).
     """
@@ -936,8 +939,8 @@ def _decodes_before_binding(filter_instance: Filter | None) -> bool:
         decoding = GlobalIDMultipleChoiceFilter
     else:
         return False
-    return _own_filter(filter_instance) is None and not truth.overrides(
-        truth.class_of(filter_instance),
+    return _own_filter(filter_instance) is None and not introspection.overrides(
+        type(filter_instance),
         decoding,
         "filter",
     )
@@ -957,15 +960,15 @@ def _projected_terminal(filter_instance: Filter) -> Filter:
 
 
 # Exact-class supported-family registry. Membership is by EXACT type
-# (``_family_profile_for`` never walks the MRO), so member ORDER is cosmetic. ``Filter``
+# (``_is_audited_family`` never walks the MRO), so member ORDER is cosmetic. ``Filter``
 # itself is DELIBERATELY absent (an exact bare ``Filter`` is not a supported family), and
 # so are ``BaseInFilter`` / ``BaseRangeFilter``: django-filter's dynamic ``in`` / ``range``
-# CSV classes are recognised structurally by ``_dynamic_csv_profile_for`` (reached
-# through ``_family_profile_for``), which references those two bases directly. An
+# CSV classes are recognised structurally by ``_is_dynamic_csv_class`` (reached
+# through ``_is_audited_family``), which references those two bases directly. An
 # arbitrary subclass of any key below is NOT audited (it may
 # override ``.filter`` or add state this package never reviewed) and therefore is no
 # member.
-_FILTER_FAMILY_REGISTRY: truth.IdentitySet[type[object]] = truth.IdentitySet(
+_FILTER_FAMILY_REGISTRY: frozenset[type[object]] = frozenset(
     (
         # Package Relay-GlobalID relation families.
         GlobalIDMultipleChoiceFilter,
@@ -1031,11 +1034,11 @@ class _EmptyBodyDynamicCsvReference(Filter):
 
 
 _EMPTY_BODY_DYNAMIC_CSV_ATTRS: frozenset[str] = frozenset(
-    truth.class_dict(_EmptyBodyDynamicCsvReference),
+    class_namespace(_EmptyBodyDynamicCsvReference),
 )
 
 
-def _dynamic_csv_profile_for(klass: type[object]) -> bool:
+def _is_dynamic_csv_class(klass: type[object]) -> bool:
     """Return whether ``klass`` is a genuine dynamic ``in``/``range`` CSV class.
 
     django-filter builds ``class ConcreteInFilter(BaseInFilter, <scalar>): pass`` (and the
@@ -1070,12 +1073,12 @@ def _dynamic_csv_profile_for(klass: type[object]) -> bool:
     class>)`` wrapper (``filters/base.py::membership_in_filter_class``); it is unwrapped
     one level first, so it resolves exactly as the class django-filter built does.
     """
-    bases = truth.bases(klass)
-    empty_body = frozenset(truth.class_dict(klass)) == _EMPTY_BODY_DYNAMIC_CSV_ATTRS
+    bases = klass.__bases__
+    empty_body = frozenset(class_namespace(klass)) == _EMPTY_BODY_DYNAMIC_CSV_ATTRS
     match bases:
         case (wrapper_base, wrapped) if wrapper_base is MembershipInFilter and empty_body:
             klass = wrapped
-            bases = truth.bases(klass)
+            bases = klass.__bases__
         case _:
             pass
     match bases:
@@ -1086,11 +1089,11 @@ def _dynamic_csv_profile_for(klass: type[object]) -> bool:
     return (
         (csv_base is BaseInFilter or csv_base is BaseRangeFilter)
         and scalar_base in _FILTER_FAMILY_REGISTRY
-        and frozenset(truth.class_dict(klass)) == _EMPTY_BODY_DYNAMIC_CSV_ATTRS
+        and frozenset(class_namespace(klass)) == _EMPTY_BODY_DYNAMIC_CSV_ATTRS
     )
 
 
-def _family_profile_for(filter_instance: object) -> bool:
+def _is_audited_family(filter_instance: object) -> bool:
     """Return whether ``filter_instance``'s class is an audited supported filter family.
 
     Resolution is fail-closed and never rediscovered from arbitrary ancestry:
@@ -1101,7 +1104,7 @@ def _family_profile_for(filter_instance: object) -> bool:
        has never reviewed against the correlated rewrite.
     2. Otherwise, structurally-validated dynamic-CSV recognition -- django-filter's genuine
        empty-body ``ConcreteInFilter`` / ``ConcreteRangeFilter`` over an exact-audited
-       scalar family is admitted (see ``_dynamic_csv_profile_for``); anything that adds a
+       scalar family is admitted (see ``_is_dynamic_csv_class``); anything that adds a
        method, descriptor, or state-bearing attribute fails closed.
     3. Otherwise ``False``.
 
@@ -1111,7 +1114,7 @@ def _family_profile_for(filter_instance: object) -> bool:
     class merely through inheritance.
     """
     klass = type(filter_instance)
-    return klass in _FILTER_FAMILY_REGISTRY or _dynamic_csv_profile_for(klass)
+    return klass in _FILTER_FAMILY_REGISTRY or _is_dynamic_csv_class(klass)
 
 
 @dataclass(frozen=True)
@@ -1152,7 +1155,7 @@ class CandidateFilterMetadata:
       leaves get a row), the ORM path crosses a many-side hop
       (``path_plan.first_many_index is not None``), the leaf carries no
       consumer ``method``, AND its filter class resolves to an audited supported
-      family (``_family_profile_for``). The last conjunct is the
+      family (``_is_audited_family``). The last conjunct is the
       executable fail-closed boundary: an unaudited family placed behind a
       framework origin -- e.g. a
       consumer subclass, or a class introduced by a future ``django-filter`` release
@@ -1337,7 +1340,7 @@ def _candidate_metadata_for(
 
     Eligibility is read off the plan + instance per
     ``CandidateFilterMetadata.eligible``: a many-side path, no consumer ``method``,
-    AND an audited supported family (``_family_profile_for``). An
+    AND an audited supported family (``_is_audited_family``). An
     unaudited / ambiguous family is ineligible -- so a
     consumer subclass, or a future ``django-filter`` release that places a novel class
     behind a framework origin, fails CLOSED to the outer invocation until it is
@@ -1356,7 +1359,7 @@ def _candidate_metadata_for(
     eligible = (
         path_plan.first_many_index is not None
         and getattr(filter_instance, "method", None) is None
-        and _family_profile_for(filter_instance)
+        and _is_audited_family(filter_instance)
     )
     return CandidateFilterMetadata(
         path_plan=path_plan,
@@ -1389,7 +1392,7 @@ else:
 #: ``filter_overrides``, ``form``, ``unknown_field_behavior``. A class body's own ``Meta``
 #: declaring any other key is refused at class creation.
 _ALLOWED_FILTERSET_META_KEYS: frozenset[str] = frozenset(
-    truth.instance_state(FilterSetOptions()),
+    instance_state(FilterSetOptions()),
 ) | frozenset({FILTERSET_FIELDS_ALIAS})
 
 
@@ -1429,7 +1432,7 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
         # instance scope: ``BaseFilterSet.__init__`` deep-copies ``base_filters``
         # before binding ``model`` and ``parent``.
         for attr_name, attr_value in tuple(attrs.items()):
-            if truth.is_instance(attr_value, Filter) and (
+            if isinstance(attr_value, Filter) and (
                 filter_generation_provenance(attr_value) is not None
                 or _expansion_record(attr_value) is not None
             ):
@@ -1465,7 +1468,7 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
         related_candidates = {
             name
             for name, declaration in new_class.declared_filters.items()
-            if truth.is_instance(declaration, RelatedFilter)
+            if isinstance(declaration, RelatedFilter)
         }
         related_filters = collect_related_declarations(
             new_class,
@@ -1521,9 +1524,7 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
         # attributes out of ``attrs``), never from whether a private attribute
         # happens to exist.
         own_declared_names = {
-            attr_name
-            for attr_name, attr_value in class_items
-            if truth.is_instance(attr_value, Filter)
+            attr_name for attr_name, attr_value in class_items if isinstance(attr_value, Filter)
         }
         for declaration_name, declaration in new_class.declared_filters.items():
             if (
@@ -1661,7 +1662,7 @@ class ProjectedChildFilter(Filter):
         filter class, so the round trip lands on the same class). ``deepcopy``
         reduces the same way.
         """
-        return (_new_projected, (self._projected_from,), truth.instance_state(self))
+        return (_new_projected, (self._projected_from,), instance_state(self))
 
     @property
     def _projection(self) -> ChildProjection:
@@ -1710,10 +1711,10 @@ class ProjectedChildFilter(Filter):
 @cache
 def _projected_class_for(filter_cls: type[Filter]) -> type[ProjectedChildFilter]:
     """Return the projected subclass of ``filter_cls``, one per class; a projected class is its own."""
-    if truth.is_subclass(filter_cls, ProjectedChildFilter):
+    if issubclass(filter_cls, ProjectedChildFilter):
         return filter_cls
     return type(
-        f"Projected{truth.name(filter_cls)}",
+        f"Projected{filter_cls.__name__}",
         (ProjectedChildFilter, filter_cls),
         {"_projected_from": filter_cls},
     )
@@ -1747,7 +1748,7 @@ def _sentinel_comparison(filter_instance: Filter) -> bool | None:
     replaces it; the leaf's own comparison, run for the sentinel
     (``_null_sentinel_reading``), tells the two apart.
     """
-    for klass in truth.mro(truth.class_of(filter_instance)):
+    for klass in type(filter_instance).__mro__:
         per_member = _NULL_SENTINEL_COMPARISONS.get(klass)
         if per_member is not None:
             return per_member
@@ -1961,13 +1962,13 @@ class _LeafDeclaration:
     @property
     def kind(self) -> str:
         """The declared filter's class name, never the runtime-built ``Projected<Class>``."""
-        return truth.kind(self.declared)
+        return introspection.kind(self.declared)
 
     def owner(self, filterset_cls: type[FilterSet] | None) -> str:
         """Return the message's owner: the declaring set's attribute, else the input's set."""
         if self.attribute is not None:
             return self.attribute
-        return truth.name(filterset_cls) if filterset_cls is not None else "FilterSet"
+        return filterset_cls.__name__ if filterset_cls is not None else "FilterSet"
 
     @property
     def route(self) -> str:
@@ -2005,10 +2006,10 @@ def _leaf_declaration(
         owner is None or projection.holds_in(owner)
     ):
         through.append(
-            f"{truth.name(owner)}.{projection.branch}" if owner is not None else projection.branch,
+            f"{owner.__name__}.{projection.branch}" if owner is not None else projection.branch,
         )
         owner = projection.filterset
-        attribute = f"{truth.name(owner)}.{projection.name}"
+        attribute = f"{owner.__name__}.{projection.name}"
         current = _projection_child_filter(projection)
     return _LeafDeclaration(current, attribute, tuple(through), owner)
 
@@ -2119,7 +2120,7 @@ def _admitted_rows(
     pinned = None if explicit is None else queryset_db(explicit)
     if pinned is not None and pinned != using:
         raise ConfigurationError(
-            f"RelatedFilter {truth.qualname(owner)}.{declared_attr}: "
+            f"RelatedFilter {owner.__qualname__}.{declared_attr}: "
             f"the explicit ``queryset=`` is pinned with ``.using()`` to database alias "
             f"{pinned!r}, but this request reads alias {using!r}; one resolution never "
             "spans two database connections. Remove the ``.using(...)`` call so the "
@@ -2136,12 +2137,12 @@ def _admitted_rows(
     # filter and both models.
     if explicit.model is not child_rows.model:
         raise ConfigurationError(
-            f"RelatedFilter {truth.qualname(owner)}.{declared_attr}: "
+            f"RelatedFilter {owner.__qualname__}.{declared_attr}: "
             f"the explicit ``queryset=`` is keyed on "
-            f"{truth.qualname(explicit.model)} but the target "
+            f"{explicit.model.__qualname__} but the target "
             f"filterset is keyed on "
-            f"{truth.qualname(child_rows.model)}. Pass a queryset "
-            f"of {truth.qualname(child_rows.model)} instances to "
+            f"{child_rows.model.__qualname__}. Pass a queryset "
+            f"of {child_rows.model.__qualname__} instances to "
             "``RelatedFilter(queryset=...)``; its model must be "
             "the target filterset's own, so proxy and "
             "multi-table-inheritance children are NOT accepted.",
@@ -2486,7 +2487,8 @@ class _KeyMatch:
             # null test, names no row of the relation's target.
             return None
         shipped = _shipped_filter_class(self.terminal)
-        shipped_filter = truth.stored_function(truth.class_dict(shipped)["filter"])
+        stored = class_namespace(shipped)["filter"]
+        shipped_filter = read_attr(stored, "__func__", stored)
         if _builds_consumer_predicate(self.terminal, shipped_filter):
             return None
         members = _model_choice_members(value)
@@ -2506,7 +2508,7 @@ class _KeyMatch:
             return [shipped.filter(reading.reader, rows, [each]) for each in reading.values]
         target = rows.model._meta
         if not members or not all(
-            check_rel_lookup_compatibility(truth.class_of(member), target, self.relation)
+            check_rel_lookup_compatibility(type(member), target, self.relation)
             for member in members
         ):
             return None
@@ -2699,7 +2701,7 @@ def _published_path(owner: type[FilterSet], filter_instance: Filter) -> str | No
     """
     field_name = filter_instance.field_name
     record = _expansion_record(filter_instance)
-    if record is None or not record.holds_in(owner) or not is_str(field_name):
+    if record is None or not record.holds_in(owner) or not isinstance(field_name, str):
         return field_name
     related_filter = owner.related_filters[record.branch]
     prefix = f"{_branch_relation(owner, related_filter)}{LOOKUP_SEP}"
@@ -2834,7 +2836,7 @@ def _bind_filter(
     both here, so none can move ``parent`` and leave ``model`` behind. Written into
     the instance dict: the stubs declare neither attribute.
     """
-    truth.instance_state(filter_instance).update(model=model, parent=owner)
+    instance_state(filter_instance).update(model=model, parent=owner)
 
 
 def _rebound_terminal(
@@ -2890,9 +2892,9 @@ def _require_relation_path(owner: type[FilterSet], declared_attr: str, f: Relate
     segments = field_name.split(LOOKUP_SEP)
     if len(hops) < len(segments):
         raise ConfigurationError(
-            f"FilterSet {truth.qualname(owner)}: RelatedFilter {declared_attr!r} has "
+            f"FilterSet {owner.__qualname__}: RelatedFilter {declared_attr!r} has "
             f"field_name {field_name!r}, but {segments[len(hops)]!r} is not a relation "
-            f"of the model the path has reached from {truth.qualname(model)}. A "
+            f"of the model the path has reached from {model.__qualname__}. A "
             "RelatedFilter's field_name must name a path of relations.",
         )
 
@@ -2933,15 +2935,15 @@ def _require_correlated_target(
     # ``_require_relation_path`` proved every segment a relation hop.
     reached = leading_relation_hops(model, field_name)[-1].target_model
     keyed_on = (
-        f"is keyed on {truth.qualname(target_model)}"
+        f"is keyed on {target_model.__qualname__}"
         if target_model is not None
         else "declares no Meta.model"
     )
     raise ConfigurationError(
-        f"FilterSet {truth.qualname(owner)}: RelatedFilter {declared_attr!r} has field_name "
-        f"{field_name!r}, which reaches {truth.qualname(reached)}, but its target FilterSet "
-        f"{truth.qualname(target)} {keyed_on}. A RelatedFilter's target FilterSet must be "
-        f"keyed on {truth.qualname(reached)}, a proxy of it, or a multi-table-inheritance "
+        f"FilterSet {owner.__qualname__}: RelatedFilter {declared_attr!r} has field_name "
+        f"{field_name!r}, which reaches {reached.__qualname__}, but its target FilterSet "
+        f"{target.__qualname__} {keyed_on}. A RelatedFilter's target FilterSet must be "
+        f"keyed on {reached.__qualname__}, a proxy of it, or a multi-table-inheritance "
         "child of it (an ancestor only across a forward or many-to-many relation whose "
         "columns it carries and whose foreign key has a database constraint).",
     )
@@ -3112,13 +3114,13 @@ def _flat_filter_limit() -> int:
 
     The type gate admits the built-in ``int`` exactly, never ``bool`` or another
     subclass, so the ``< 0`` comparison runs no consumer code; the ``got`` tail
-    renders through ``truth.describe``.
+    names the value's kind and ``repr``.
     """
     limit = max_flat_filters_setting()
     if type(limit) is not int or limit < 0:
         raise ConfigurationError(
             "DJANGO_STRAWBERRY_FRAMEWORK['MAX_FLAT_FILTERS'] must be a non-negative int; "
-            f"got {truth.describe(limit)}.",
+            f"got {introspection.kind(limit)} {limit!r}.",
         )
     return limit
 
@@ -3196,7 +3198,7 @@ def _declared_as_text(filter_instance: Filter) -> Filter:
     """Return ``filter_instance``, or a copy holding its ``field_name`` and ``lookup_expr`` as text.
 
     A set reads a lazily spelled name (a lazy translation string, a ``SimpleLazyObject``)
-    as the exact ``str`` it renders (``utils/truth.py::text``), as
+    as the exact ``str`` it renders (``utils/introspection.py::text``), as
     its publication's own checks read it (``filters/base.py::refuse_unresolvable_lookup``),
     so django-filter and Django receive that text on every path, walked or not: a
     ``MultipleChoiceFilter`` keys its ``Q`` by the name and joins it to the lookup, which
@@ -3212,17 +3214,17 @@ def _declared_as_text(filter_instance: Filter) -> Filter:
     ``FilterMethod`` a ``method=`` installs, a callable its ``__init__`` stores) is bound
     to the copy, so it reads the copy's text and the set the copy is bound to.
     """
-    field_name = filter_instance.field_name
-    lookup_expr = filter_instance.lookup_expr
-    lazy_field_name = field_name is not None and not truth.is_instance(field_name, str)
-    lazy_lookup_expr = not truth.is_instance(lookup_expr, str)
+    field_name = read_attr(filter_instance, "field_name")
+    lookup_expr = read_attr(filter_instance, "lookup_expr")
+    lazy_field_name = field_name is not None and not issubclass(type(field_name), str)
+    lazy_lookup_expr = not issubclass(type(lookup_expr), str)
     if not (lazy_field_name or lazy_lookup_expr):
         return filter_instance
     copied = copy.deepcopy(filter_instance)
     if lazy_field_name:
-        copied.field_name = truth.text(field_name)
+        copied.field_name = introspection.text(field_name)
     if lazy_lookup_expr:
-        copied.lookup_expr = truth.text(lookup_expr)
+        copied.lookup_expr = introspection.text(lookup_expr)
     return copied
 
 
@@ -3257,17 +3259,17 @@ def _shipped_filter_class(filter_instance: Filter) -> type[Filter]:
     """
     return next(
         klass
-        for klass in truth.mro(truth.class_of(filter_instance))
-        if truth.is_subclass(klass, Filter) and _defines_shipped_filter(klass)
+        for klass in type(filter_instance).__mro__
+        if issubclass(klass, Filter) and _defines_shipped_filter(klass)
     )
 
 
 def _defines_shipped_filter(klass: type) -> bool:
     """Whether ``klass``'s own namespace defines a ``filter`` django-filter or this package ships."""
-    function = truth.stored_function(truth.class_dict(klass).get("filter"))
+    stored = class_namespace(klass).get("filter")
+    function = read_attr(stored, "__func__", stored)
     return (
-        function is not None
-        and truth.module(function).partition(".")[0] in _SHIPPED_FILTER_PACKAGES
+        function is not None and function.__module__.partition(".")[0] in _SHIPPED_FILTER_PACKAGES
     )
 
 
@@ -3346,7 +3348,7 @@ def _unbindable_predicate(
         filtered = require(filter_instance.filter(base, value), is_queryset)
     except _PREPARATION_REFUSALS:
         return True
-    alias = require(read_attr(filtered, "db"), is_str)
+    alias = require_instance(read_attr(filtered, "db"), str)
     try:
         # Compiled only for what compiling refuses; the parameters are read per lookup below.
         compiler = call_method(filtered.query, "get_compiler", alias)
@@ -3737,7 +3739,7 @@ def _own_related_filters(filterset: type[object]) -> Mapping[str, RelatedFilter]
     Read from the class's own ``__dict__``, so an inherited map is never mistaken for the
     set's own; a set the metaclass stored none on declares none.
     """
-    return declaration_map(truth.class_dict(filterset).get("related_filters", {}), RelatedFilter)
+    return declaration_map(class_namespace(filterset).get("related_filters", {}), RelatedFilter)
 
 
 def _is_filterset_class(value: object) -> TypeIs[type[FilterSet]]:
@@ -3745,7 +3747,7 @@ def _is_filterset_class(value: object) -> TypeIs[type[FilterSet]]:
 
     Asked of a walked hop's owner, and of the set a declared hop's declaration resolves.
     """
-    return truth.is_subclass(value, FilterSet)
+    return is_class(value) and issubclass(value, FilterSet)
 
 
 def _filter_declaration(hop: DeclaredHop) -> tuple[type[FilterSet], RelatedFilter]:
@@ -3854,7 +3856,7 @@ def _expand_related_filter(
         return expanded
     target_filters = target_filterset._filters_along(path, scope)
     relation = _branch_relation(path[-1], f)
-    via = f"{truth.qualname(path[-1])}.{filter_name}"
+    via = f"{(path[-1]).__qualname__}.{filter_name}"
     for child_name, field in target_filters.items():
         new_name = _branch_key(filter_name, child_name)
         field_copy = copied_declared_filter(field, target_filterset, child_name, via=via)
@@ -3862,7 +3864,7 @@ def _expand_related_filter(
         origin = ChildProjection(target_filterset, child_name, filter_name)
         setattr(field_copy, _EXPANSION_ATTR, origin)
         if _owner_bound_child(target_filterset, field):
-            field_copy.__class__ = _projected_class_for(type(field_copy))  # truth: ok class store
+            field_copy.__class__ = _projected_class_for(type(field_copy))
             projected = require_instance(field_copy, ProjectedChildFilter)
             # An instance ``filter`` (``_own_filter``: django-filter's ``method`` setter
             # installs a ``FilterMethod``, the package's list filters theirs the same
@@ -3870,7 +3872,7 @@ def _expand_related_filter(
             # INSTANCE; the copy carried that shadow, which would run on the parent.
             # The child's own filter, inside the child instance, keeps its shadow;
             # the projection's class-level ``filter`` runs here.
-            _ = truth.instance_state(projected).pop("filter", None)
+            _ = instance_state(projected).pop("filter", None)
         # The deep copy holds the CHILD leaf's frozen provenance record as is, so
         # an expanded copy of a DECLARED child stays ``origin="declared"`` and an
         # unstamped child (e.g. a consumer-returned object) yields an unstamped
@@ -4175,7 +4177,7 @@ class FilterSet(
         if snapshot is None or not snapshot.deferred_copies or not pipeline_built:
             # ``BaseFilterSet.__init__`` deep-copies ``self.base_filters``: an unpublished
             # set's instance attribute shadows the class-creation table for that one read.
-            instance_attrs = truth.instance_state(self)
+            instance_attrs = instance_state(self)
             if unpublished is not None:
                 instance_attrs["base_filters"] = OrderedDict(unpublished)
             try:
@@ -4195,7 +4197,7 @@ class FilterSet(
         # ``BaseFilterSet.__init__`` deep-copies ``self.base_filters`` into
         # ``self.filters`` and binds each copy; an instance attribute shadows the
         # class's for that one read.
-        instance_attrs = truth.instance_state(self)
+        instance_attrs = instance_state(self)
         instance_attrs["base_filters"] = OrderedDict(
             (name, f) for name, f in source.items() if name not in deferred or name in named
         )
@@ -4256,7 +4258,7 @@ class FilterSet(
             form_class = super().get_form_class()
             overrides = self._flat_comparison_fields()
             return (
-                type(f"{truth.kind(self)}ComparisonForm", (form_class,), overrides)
+                type(f"{introspection.kind(self)}ComparisonForm", (form_class,), overrides)
                 if overrides
                 else form_class
             )
@@ -4268,7 +4270,7 @@ class FilterSet(
             for name in names
             if name not in self._unnamed_copies
         )
-        return type(f"{truth.kind(self)}Form", (self._meta.form,), fields)
+        return type(f"{introspection.kind(self)}Form", (self._meta.form,), fields)
 
     def _flat_comparison_fields(self) -> dict[str, forms.Field]:
         """Install missing comparison cleaners from the actual final source, if cached."""
@@ -4366,7 +4368,10 @@ class FilterSet(
             owned.element_field = field
             owned.depth = depth
             owned.members_are_arrays = is_array_in_lookup(operand.lookup)
-            owned.bounds = truth.is_subclass(operand.lookup, models.lookups.Range)
+            owned.bounds = operand.lookup is not None and issubclass(
+                operand.lookup,
+                models.lookups.Range,
+            )
             return True
         if isinstance(owned, RangeField):
             owned.bound_field = field
@@ -4460,7 +4465,7 @@ class FilterSet(
         still filters, and reports a late refusal beside it). Only a ``filter_queryset``
         override can add or replace a path before the leaves apply (an annotation, an alias,
         one shadowing a name the handed queryset holds), so a set that overrides none, its
-        own class or a consumer mixin ahead of ``FilterSet`` (``utils/truth.py::overrides``),
+        own class or a consumer mixin ahead of ``FilterSet`` (``utils/introspection.py::overrides``),
         builds nothing here: a name it lists was refused no cleaner by the handed queryset
         itself (a ``JSONField`` annotation's output gives none), and its leaves apply over
         that same queryset.
@@ -4469,7 +4474,7 @@ class FilterSet(
             self._pipeline_constructed
             or self._settling_late
             or not self.is_bound
-            or not truth.overrides(type(self), FilterSet, "filter_queryset")
+            or not introspection.overrides(type(self), FilterSet, "filter_queryset")
             or self.form.errors
             or not self._late_comparison_names()
         ):
@@ -4528,8 +4533,8 @@ class FilterSet(
             _ElementField.to_python if isinstance(field, _ElementField) else RangeField.to_python
         )
         return (
-            truth.mro_attr(type(field), "to_python") is parser
-            and truth.mro_attr(type(field), "clean") is forms.Field.clean
+            introspection.mro_attr(type(field), "to_python") is parser
+            and introspection.mro_attr(type(field), "clean") is forms.Field.clean
         )
 
     def _missing_comparison_fields(
@@ -4646,7 +4651,7 @@ class FilterSet(
         if refusals:
             # Adapted from Django BaseForm.full_clean (BSD-3-Clause;
             # LICENSE.django): initialize the error generation before add_error.
-            truth.instance_state(form)["_errors"] = ErrorDict(renderer=form.renderer)
+            instance_state(form)["_errors"] = ErrorDict(renderer=form.renderer)
             form.cleaned_data = {}
             for name, refusal in refusals.items():
                 form.add_error(name, refusal)
@@ -4722,7 +4727,7 @@ class FilterSet(
         """
         built = require(self.queryset, is_queryset)
         for name, field in list(form.fields.items()):
-            if not truth.is_instance(field, _MODEL_CHOICE_FIELD):
+            if not is_instance(field, _MODEL_CHOICE_FIELD):
                 continue
             filter_instance = self._filter_named(name)
             if not isinstance(filter_instance, RelatedFilter) or self._leaf_absent(name):
@@ -4800,7 +4805,7 @@ class FilterSet(
         own_model = cls._meta.model
         if own_model is not None and own_model._meta.abstract:
             raise ConfigurationError(
-                f"{truth.name(cls)}: Meta.model {truth.name(own_model)} is an abstract model; a "
+                f"{cls.__name__}: Meta.model {own_model.__name__} is an abstract model; a "
                 f"FilterSet needs a concrete model.",
             )
 
@@ -4844,7 +4849,7 @@ class FilterSet(
                 # this expansion's caller and finishes on its own.
                 for declaration in related_filters_val.values():
                     target = declaration.filterset
-                    if target is not None and not truth.class_dict(target).get(
+                    if target is not None and not class_namespace(target).get(
                         target._lifecycle.guard,
                     ):
                         _ = target._filter_table()
@@ -4879,7 +4884,7 @@ class FilterSet(
         # The cached expansion (never a reentrant call's unpublished surface), not
         # yet published: publish it.
         if (
-            truth.class_dict(cls).get(cls._lifecycle.cache) is surface
+            class_namespace(cls).get(cls._lifecycle.cache) is surface
             and cls._expansion_snapshot() is None
         ):
             cls._publish_filters(surface)
@@ -4921,7 +4926,7 @@ class FilterSet(
         )
         # A set whose instances edit their filters or build their own form can supply a
         # model-choice queryset per request: trusted, not judged.
-        builds_own_form = cls._customizes_instances() or truth.overrides(
+        builds_own_form = cls._customizes_instances() or introspection.overrides(
             cls,
             FilterSet,
             "get_form_class",
@@ -5020,10 +5025,10 @@ class FilterSet(
         if projection.holds_in(cls):
             return
         raise ConfigurationError(
-            f"FilterSet {truth.qualname(cls)}: filter {filter_name!r} is a projected copy of "
-            f"{truth.qualname(projection.filterset)}.{projection.name} expanded through a "
-            f"{projection.branch!r} branch, but {truth.qualname(cls)} declares no "
-            f"{projection.branch!r} RelatedFilter into {truth.qualname(projection.filterset)}, "
+            f"FilterSet {cls.__qualname__}: filter {filter_name!r} is a projected copy of "
+            f"{projection.filterset.__qualname__}.{projection.name} expanded through a "
+            f"{projection.branch!r} branch, but {cls.__qualname__} declares no "
+            f"{projection.branch!r} RelatedFilter into {projection.filterset.__qualname__}, "
             "so the copy has no branch to run its child filter across. Declare that "
             "RelatedFilter, or declare a filter of this set's own.",
         )
@@ -5123,12 +5128,12 @@ class FilterSet(
             # stops at the first path past the limit, never enumerating the rest.
             if len(filters) - own > scope.limit:
                 root = path[0]
-                trail = " -> ".join(truth.qualname(visited) for visited in path)
+                trail = " -> ".join(visited.__qualname__ for visited in path)
                 raise ConfigurationError(
-                    f"FilterSet {truth.qualname(root)}: its RelatedFilter expansion publishes "
+                    f"FilterSet {root.__qualname__}: its RelatedFilter expansion publishes "
                     f"more than {scope.limit} flat filters, crossed expanding "
-                    f"{truth.qualname(cls)}.{filter_name} along {trail}. Mark "
-                    f"{truth.qualname(cls)}'s RelatedFilter declarations flat=False, or raise "
+                    f"{cls.__qualname__}.{filter_name} along {trail}. Mark "
+                    f"{cls.__qualname__}'s RelatedFilter declarations flat=False, or raise "
                     "DJANGO_STRAWBERRY_FRAMEWORK['MAX_FLAT_FILTERS']; a target behind a "
                     "flat=False declaration still builds on its own.",
                 )
@@ -5153,7 +5158,7 @@ class FilterSet(
         own table, and is kept in ``scope`` for every other path reaching the set
         through the same sets (one entry for every path the set is already on).
         """
-        on_path = truth.is_among(cls, path)
+        on_path = cls in path
         if not on_path and _reachable_filtersets(cls, scope).isdisjoint(
             id(visited) for visited in path
         ):
@@ -5223,7 +5228,7 @@ class FilterSet(
         """
         # Only the expansion cache writes this own-namespace slot, with an ``ExpansionSnapshot``.
         return optional_instance(
-            truth.class_dict(cls).get("_expanded_snapshot"),
+            class_namespace(cls).get("_expanded_snapshot"),
             ExpansionSnapshot,
         )
 
@@ -5319,8 +5324,8 @@ class FilterSet(
         listed: list[str] = []
         if (
             meta_fields is not None
-            and not truth.is_instance(meta_fields, str)
-            and not truth.is_instance(meta_fields, Promise)
+            and not isinstance(meta_fields, str)
+            and not isinstance(meta_fields, Promise)
         ):
             # Text is exempt here (unlike the order family): the top-level
             # ``"__all__"`` shorthand IS a string declaration, and any other
@@ -5343,8 +5348,8 @@ class FilterSet(
                 # A lookup-bag value is django-filter's to walk as the field's lookups, so it
                 # is gated beside its key: ``"__all__"`` or re-readable lookup-name strings.
                 # Every key passed ``require_field_name`` above, so its text is the key.
-                for name, lookups in dict_items(meta_fields):
-                    require_lookup_names(cls, truth.text(name), lookups)
+                for name, lookups in meta_fields.items():
+                    require_lookup_names(cls, introspection.text(name), lookups)
         exclude = options.exclude
         if exclude is not None:
             # No ``str`` exemption: upstream reads ``exclude`` only by membership, so a
@@ -5389,10 +5394,10 @@ class FilterSet(
         # Put it in the canonical order the order family expands in; the declaration and the
         # names upstream kept (``exclude`` applied) stay as they are.
         canonical = canonicalize_set_meta_fields(meta_fields)
-        if canonical is not meta_fields and truth.is_instance(canonical, list):
+        if canonical is not meta_fields and is_list(canonical):
             rank = {name: index for index, name in enumerate(canonical)}
             fields = OrderedDict(sorted(fields.items(), key=lambda pair: rank[pair[0]]))
-        elif truth.is_instance(canonical, dict):
+        elif is_dict(canonical):
             for name in fields:
                 fields[name] = canonical[name]
         model = cls._meta.model
@@ -5400,7 +5405,7 @@ class FilterSet(
         # Per-field ``"__all__"`` expansion (dict form). Runs before the
         # top-level branch below; the two shapes are mutually exclusive
         # (``meta_fields`` is either the ``"__all__"`` string or a dict).
-        if model is not None and truth.is_instance(meta_fields, dict):
+        if model is not None and isinstance(meta_fields, dict):
             for field_name in list(fields):
                 if fields[field_name] == "__all__":
                     model_field = get_model_field(model, field_name)
@@ -5468,13 +5473,13 @@ class FilterSet(
         """
         token = _generating_key_var.set((cls, field_name))
         try:
-            if truth.is_instance(field, models.GeneratedField):
+            if isinstance(field, models.GeneratedField):
                 # Adapted from django-filter BaseFilterSet.filter_for_field (BSD-3-Clause;
                 # LICENSE.django-filter), resolved by ``_generated_filter_field``.
                 if lookup_expr is None:
-                    lookup_expr = require(
+                    lookup_expr = require_instance(
                         read_attr(_filter_settings, "DEFAULT_LOOKUP_EXPR"),
-                        is_str,
+                        str,
                     )
                 resolved, lookup_type = _generated_filter_field(field, lookup_expr)
                 default: dict[str, object] = {"field_name": field_name, "lookup_expr": lookup_expr}
@@ -5483,9 +5488,9 @@ class FilterSet(
                 if filter_class is None:
                     cls.handle_unrecognized_field(
                         field_name,
-                        f"{truth.name(cls)} resolved field '{field_name}' with "
+                        f"{cls.__name__} resolved field '{field_name}' with "
                         f"'{lookup_expr}' lookup to an unrecognized field type "
-                        f"{truth.name(type(resolved))}. Try adding an override to "
+                        f"{type(resolved).__name__}. Try adding an override to "
                         "'Meta.filter_overrides'. See: "
                         "https://django-filter.readthedocs.io/en/main/ref/filterset.html"
                         "#customise-filter-generation-with-filter-overrides",
@@ -5703,10 +5708,10 @@ class FilterSet(
         delegating override whose selected class happens to be package-shaped.
         """
         origin = cls._generation_origin_for_field(field, lookup_expr)
-        shape_capable = not truth.overrides(cls, FilterSet, *FilterSet._GENERATION_SEAMS)
+        shape_capable = not introspection.overrides(cls, FilterSet, *FilterSet._GENERATION_SEAMS)
         if (
             origin == "framework_default"
-            and truth.overrides(cls, FilterSet, "filter_for_lookup")
+            and introspection.overrides(cls, FilterSet, "filter_for_lookup")
             and (
                 cls._is_own_pk_under_relay_owner(field, field_name)
                 or getattr(field, "is_relation", False)
@@ -5775,7 +5780,7 @@ class FilterSet(
         ``BooleanField`` override upstream, and this oracle agrees.
         """
         try:
-            if truth.is_instance(field, models.GeneratedField):
+            if isinstance(field, models.GeneratedField):
                 resolved_field, lookup_type = _generated_filter_field(
                     field,
                     lookup_expr or "exact",
@@ -5909,7 +5914,7 @@ class FilterSet(
         * ``filter_for_field`` override -- the ``super()``-and-mutate seam: a
           consumer subclass that calls ``super().filter_for_field(...)`` and then
           mutates the framework-stamped instance would keep the stamp; comparing
-          the stored function with ``FilterSet``'s (``utils/truth.py::overrides``)
+          the stored function with ``FilterSet``'s (``utils/introspection.py::overrides``)
           rejects any such subclass wholesale.
         * ``filter_for_lookup`` override -- the custom-generated-class seam: a
           consumer returning its OWN generated filter class from
@@ -5936,8 +5941,8 @@ class FilterSet(
         bound.
         """
         return (
-            not truth.overrides(cls, FilterSet, *FilterSet._GENERATION_SEAMS)
-            and truth.static_attr(cls, "FILTER_DEFAULTS")
+            not introspection.overrides(cls, FilterSet, *FilterSet._GENERATION_SEAMS)
+            and introspection.mro_attr(cls, "FILTER_DEFAULTS")
             is filterset.BaseFilterSet.FILTER_DEFAULTS
             and not cls._customizes_instances()
         )
@@ -6010,9 +6015,7 @@ class FilterSet(
                 if isinstance(
                     child_filter,
                     _ColumnCleanedFilter,
-                ) and "_field" in truth.instance_state(
-                    child_filter,
-                ):
+                ) and "_field" in instance_state(child_filter):
                     child_filter._hand_column_field(child_filter.field)
             child._projection_context_rows = cached_rows
         return child
@@ -6032,10 +6035,10 @@ class FilterSet(
         to route its leaves (``_is_generation_capable``) and why
         ``_expand_related_filter`` projects them through a child instance rather
         than rebinding a copy (``_owner_bound_child``). ``__init__`` is compared
-        with ``FilterSet``'s by ``utils/truth.py::overrides``, so an unmodified
+        with ``FilterSet``'s by ``utils/introspection.py::overrides``, so an unmodified
         subclass, which inherits it, customizes nothing.
         """
-        return truth.overrides(cls, FilterSet, "__init__")
+        return introspection.overrides(cls, FilterSet, "__init__")
 
     @classmethod
     def _upstream_filter_for_lookup(
@@ -6149,11 +6152,11 @@ class FilterSet(
                 if issue == "file"
                 else "drop its output base_field choices or remove it from Meta.fields"
                 if issue == "array_choices"
-                else f"register {truth.kind(computed)} in SCALAR_MAP or remove it from Meta.fields"
+                else f"register {introspection.kind(computed)} in SCALAR_MAP or remove it from Meta.fields"
             )
             raise ConfigurationError(
-                f"FilterSet {truth.qualname(cls)}: Meta.fields names GeneratedField "
-                f"{_field_label(computed)} with an unsupported {truth.kind(computed)} output; "
+                f"FilterSet {cls.__qualname__}: Meta.fields names GeneratedField "
+                f"{_field_label(computed)} with an unsupported {introspection.kind(computed)} output; "
                 f"{remedy}.",
             )
         default_class, params = cls._upstream_filter_for_lookup(field, lookup_type)
@@ -6181,7 +6184,7 @@ class FilterSet(
                 return GlobalIDFilter, params
             field_name = getattr(field, "name", "<pk>")
             raise ConfigurationError(
-                f"{truth.name(cls)}: lookup {lookup_type!r} is not supported on the "
+                f"{cls.__name__}: lookup {lookup_type!r} is not supported on the "
                 f"Relay node's own primary key {field_name!r}; a GlobalID supports "
                 "only 'exact', 'in', and 'isnull'. Remove it from Meta.fields.",
             )
@@ -6233,8 +6236,8 @@ class FilterSet(
                 # builds: fail at build rather than generate a filter without that rule.
                 if not issubclass(default_class, BaseInFilter):
                     raise ConfigurationError(
-                        f"{truth.name(cls)}: the inherited filter_for_lookup returned "
-                        f"{truth.name(default_class)!r} for the 'in' lookup on "
+                        f"{cls.__name__}: the inherited filter_for_lookup returned "
+                        f"{default_class.__name__!r} for the 'in' lookup on "
                         f"{getattr(field, 'name', field)!r}, which is not a BaseInFilter; the "
                         "package cannot apply its membership rule.",
                     )
@@ -6316,7 +6319,7 @@ class FilterSet(
         field_name = getattr(field, "name", "<relation>")
         identity = "a GlobalID" if relay_target else "the related row's primary key"
         raise ConfigurationError(
-            f"{truth.name(cls)}: lookup {lookup_type!r} is not supported on the "
+            f"{cls.__name__}: lookup {lookup_type!r} is not supported on the "
             f"relation key {field_name!r} in Meta.fields; a relation key filters by "
             f"{identity} and supports only 'exact', 'in', and 'isnull'. Filter on the "
             "related row's own fields through a RelatedFilter instead.",
@@ -6362,7 +6365,7 @@ class FilterSet(
         # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset,
         # and a bound set declares a model class: the binder refuses one with no
         # ``Meta.model`` (``types/finalizer.py::_bind_filterset_owner``) or a non-class one.
-        meta = require_instance(truth.static_attr(cls, "_meta", None), FilterSetOptions)
+        meta = require_instance(introspection.mro_attr(cls, "_meta", None), FilterSetOptions)
         model = require(meta.model, is_model_class)
         pk = getattr(model._meta, "pk", None)
         if pk is None or field is not pk:
@@ -6480,19 +6483,19 @@ class FilterSet(
         is_sequence = is_list_or_tuple(value)
         if op is not None and not op.is_sequence:
             if is_sequence:
-                cls_label = truth.qualname(cls)
+                cls_label = cls.__qualname__
                 raise ConfigurationError(
                     f"FilterSet {cls_label}: logical branch {wire_key!r} takes a "
-                    f"single filter input, got a {truth.kind(value)}. Wrap the "
+                    f"single filter input, got a {introspection.kind(value)}. Wrap the "
                     f"clause as '{wire_key}: {{...}}', not a list.",
                 )
             cls._validate_logic_element_shape(wire_key, value)
             return
         if not is_sequence:
-            cls_label = truth.qualname(cls)
+            cls_label = cls.__qualname__
             raise ConfigurationError(
                 f"FilterSet {cls_label}: logical branch {wire_key!r} takes a "
-                f"list of filter inputs, got a {truth.kind(value)}. Wrap the "
+                f"list of filter inputs, got a {introspection.kind(value)}. Wrap the "
                 f"clauses as '{wire_key}: [{{...}}]'.",
             )
         for element in value:
@@ -6513,10 +6516,10 @@ class FilterSet(
         if is_inactive_value(element, unset_sentinel=UNSET):
             return
         if iter_input_items(element) is None:
-            cls_label = truth.qualname(cls)
+            cls_label = cls.__qualname__
             raise ConfigurationError(
                 f"FilterSet {cls_label}: logical branch {wire_key!r} takes "
-                f"filter inputs, got a {truth.kind(element)} ({truth.render(element)}). Each "
+                f"filter inputs, got a {introspection.kind(element)} ({element!r}). Each "
                 "clause must be a mapping or filter-input object, not a scalar.",
             )
 
@@ -6580,9 +6583,9 @@ class FilterSet(
             # a programmatic mapping can pass it to the public apply pipeline.
             # Related branches share the guard; none may answer with rows.
             raise ConfigurationError(
-                f"FilterSet {truth.qualname(cls)}: the filter input must be a "
+                f"FilterSet {cls.__qualname__}: the filter input must be a "
                 f"mapping or a filter-input object, got a "
-                f"{truth.kind(input_value)} ({truth.render(input_value)}). "
+                f"{introspection.kind(input_value)} ({input_value!r}). "
                 "A non-walkable input would silently drop every predicate and "
                 "skip every check_* permission gate.",
             )
@@ -6706,13 +6709,13 @@ class FilterSet(
         lookups = lookups_by_attr.get(python_attr)
         if lookups is None and cls._meta.model is None:
             raise ConfigurationError(
-                f"FilterSet {truth.qualname(cls)}: {python_attr!r} cannot apply: the set "
+                f"FilterSet {cls.__qualname__}: {python_attr!r} cannot apply: the set "
                 "declares no Meta.model, which every leaf filter resolves against. Declare "
                 "Meta.model on the set, or apply a subclass that declares it.",
             )
         if lookups is None:
             raise ConfigurationError(
-                f"FilterSet {truth.qualname(cls)}: {python_attr!r} is not a filter input "
+                f"FilterSet {cls.__qualname__}: {python_attr!r} is not a filter input "
                 "field; it would apply nothing.",
             )
         bag_items = cls._operator_bag_items(raw_value, lookups)
@@ -6722,7 +6725,7 @@ class FilterSet(
                 entry = next(iter(lookups.values()))
             if entry is None:
                 raise ConfigurationError(
-                    f"FilterSet {truth.qualname(cls)}: filter input field {python_attr!r} "
+                    f"FilterSet {cls.__qualname__}: filter input field {python_attr!r} "
                     f"has no exact lookup to take a bare value (lookups: "
                     f"{sorted(lookups)!r}); pass an operator bag.",
                 )
@@ -6737,7 +6740,7 @@ class FilterSet(
             entry = lookups.get(lookup_attr)
             if entry is None:
                 raise ConfigurationError(
-                    f"FilterSet {truth.qualname(cls)}: filter input field {python_attr!r} "
+                    f"FilterSet {cls.__qualname__}: filter input field {python_attr!r} "
                     f"has no {lookup_attr!r} lookup (lookups: {sorted(lookups)!r}); it "
                     "would apply nothing.",
                 )
@@ -6779,8 +6782,8 @@ class FilterSet(
         ``Projected<Class>``.
         """
         raise ConfigurationError(
-            f"FilterSet {truth.qualname(cls)}: filter {form_key!r} received a dict "
-            f"value ({truth.render(lookup_value)}) but "
+            f"FilterSet {cls.__qualname__}: filter {form_key!r} received a dict "
+            f"value ({lookup_value!r}) but "
             f"{_leaf_declaration(filter_instance, cls).kind} consumes a single scalar form "
             "key. A dict value here would be splatted into unknown form-data "
             "keys the form silently ignores, dropping the filter. Pass the "
@@ -6926,20 +6929,18 @@ class FilterSet(
         if resolved is None:
             child_filterset = related_filter.filterset
             child_model = getattr(
-                truth.static_attr(child_filterset, "_meta", None),
+                introspection.mro_attr(child_filterset, "_meta", None),
                 "model",
                 None,
             )
-            target_label = (
-                truth.qualname(child_model) if truth.is_type(child_model) else "<unresolved>"
-            )
+            target_label = child_model.__qualname__ if is_class(child_model) else "<unresolved>"
             reason = (
                 f"no DjangoType is registered for its target model {target_label}"
                 if child_filterset is not None
                 else "its target FilterSet could not be resolved"
             )
             raise ConfigurationError(
-                f"FilterSet {truth.qualname(cls)}: related filter branch "
+                f"FilterSet {cls.__qualname__}: related filter branch "
                 f"{field_name!r} is active in the filter input (nested, or walked by a "
                 f"flat leaf) but {reason}. "
                 "The branch's visibility scoping runs the target type's "
@@ -7282,7 +7283,7 @@ class FilterSet(
             return owner_type
         # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
         child_meta = optional_instance(
-            truth.static_attr(child_filterset, "_meta", None),
+            introspection.mro_attr(child_filterset, "_meta", None),
             FilterSetOptions,
         )
         child_model: type[models.Model] | None = getattr(child_meta, "model", None)
@@ -8203,9 +8204,9 @@ class FilterSet(
         """
         with _joinless_restated(type(self), filter_instance, rows):
             result = self._invoke_suppressing_framework_distinct(filter_instance, rows, value)
-        assert truth.is_instance(result, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
-            f"Expected '{truth.kind(self)}' filter {filter_instance.field_name!r} "
-            f"to return a QuerySet, but got a {truth.kind(result)} instead."
+        assert isinstance(result, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
+            f"Expected '{introspection.kind(self)}' filter {filter_instance.field_name!r} "
+            f"to return a QuerySet, but got a {introspection.kind(result)} instead."
         )
         return cast("models.QuerySet[_M]", result)
 
@@ -9368,9 +9369,9 @@ class FilterSet(
             if chain.view:
                 source, terminal = self._relation_view(chain.view, terminal, queryset, using)
             matched = terminal.filter(source, value)
-            assert truth.is_instance(matched, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
-                f"Expected '{truth.kind(self)}' filter {terminal.field_name!r} "
-                f"to return a QuerySet, but got a {truth.kind(matched)} instead."
+            assert isinstance(matched, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
+                f"Expected '{introspection.kind(self)}' filter {terminal.field_name!r} "
+                f"to return a QuerySet, but got a {introspection.kind(matched)} instead."
             )
             if matched is source:
                 return queryset
@@ -9700,9 +9701,9 @@ class FilterSet(
             if not routed:
                 with _joinless_restated(type(self), filter_instance, queryset):
                     queryset = filter_instance.filter(queryset, value)
-                assert truth.is_instance(queryset, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
-                    f"Expected '{truth.kind(self)}.{name}' to return a QuerySet, "
-                    f"but got a {truth.kind(queryset)} instead."
+                assert isinstance(queryset, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
+                    f"Expected '{introspection.kind(self)}.{name}' to return a QuerySet, "
+                    f"but got a {introspection.kind(queryset)} instead."
                 )
                 continue
             inner_root = correlated_inner_root(queryset)
@@ -9711,9 +9712,9 @@ class FilterSet(
                 inner_root,
                 value,
             )
-            assert truth.is_instance(result, _QUERYSET), (  # noqa: S101 - same assertion as django-filter's filter_queryset
-                f"Expected '{truth.kind(self)}.{name}' to return a QuerySet, "
-                f"but got a {truth.kind(result)} instead."
+            assert isinstance(result, _QUERYSET), (  # noqa: S101 - same assertion as django-filter's filter_queryset
+                f"Expected '{introspection.kind(self)}.{name}' to return a QuerySet, "
+                f"but got a {introspection.kind(result)} instead."
             )
             if result is inner_root:
                 continue
@@ -10031,7 +10032,7 @@ class FilterSet(
                 child_set._suppress_new_bind_hooks = probed.instance._suppress_new_bind_hooks
             child_set._prepare_annotation_hops_sync(child_input)
             _ = child_set._finish_known_annotation_validation((), defer_bind=False)
-        if truth.overrides(type(child_set), filterset.BaseFilterSet, "qs"):
+        if introspection.overrides(type(child_set), filterset.BaseFilterSet, "qs"):
             # A consumer ``qs`` override (django-filter's seam) runs inside the arm as it
             # does at the top level; its rows compose as ``pk__in`` like any other arm.
             return models.Q(pk__in=child_set.qs.values("pk"))

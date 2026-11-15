@@ -77,8 +77,7 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.finalizer import _bind_orderset_owner
 from django_strawberry_framework.types.relay import apply_interfaces
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils._narrowing import class_namespace, read_attr
 from tests._idioms import definition_raises
 
 if TYPE_CHECKING:
@@ -977,10 +976,10 @@ def test_an_orderset_subclass_binds_its_own_owner_apart_from_its_base(
     finalize_django_types()
     assert ViaHidingBookType.__django_strawberry_definition__.orderset_class is ViaHidingBookOrder
     assert ViaPlainBookType.__django_strawberry_definition__.orderset_class is ViaPlainBookOrder
-    assert read_attr(truth.class_dict(ShelfOrder)["_owner_definition"], "origin") is (
+    assert read_attr(class_namespace(ShelfOrder)["_owner_definition"], "origin") is (
         hiding_type if base_on_hiding else plain_type
     )
-    assert read_attr(truth.class_dict(SubShelfOrder)["_owner_definition"], "origin") is (
+    assert read_attr(class_namespace(SubShelfOrder)["_owner_definition"], "origin") is (
         plain_type if base_on_hiding else hiding_type
     )
 
@@ -1376,7 +1375,7 @@ def test_related_order_whose_target_type_the_hop_cannot_scope_by_is_refused_at_f
     """
     with pytest.raises(ConfigurationError) as exc_info:
         _finalize_wired_declaration(owner_model, field_name, set_model, type_model)
-    assert str(exc_info.value) == _scope_refusal(field_name, reached, truth.qualname(type_model))
+    assert str(exc_info.value) == _scope_refusal(field_name, reached, type_model.__qualname__)
 
 
 @pytest.mark.parametrize(

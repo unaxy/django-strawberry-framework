@@ -42,7 +42,7 @@ from django_strawberry_framework.filters.sets import (
     _without_foreign_postgres_lookups,
     filter_generation_provenance,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_list
 from tests._postgres_fields import FakeArrayField, patch_array_field
 
 if TYPE_CHECKING:
@@ -300,7 +300,7 @@ _TEXT_FIELDS: tuple[type[models.Field[object, object]], ...] = (
 @pytest.mark.parametrize(
     "field_class",
     _NON_TEXT_FIELDS,
-    ids=[truth.name(field_class) for field_class in _NON_TEXT_FIELDS],
+    ids=[field_class.__name__ for field_class in _NON_TEXT_FIELDS],
 )
 def test_non_text_column_withholds_every_text_pattern_lookup(
     field_class: type[models.Field[object, object]],
@@ -325,7 +325,7 @@ def test_non_text_column_withholds_every_text_pattern_lookup(
 @pytest.mark.parametrize(
     "field_class",
     _TEXT_FIELDS,
-    ids=[truth.name(field_class) for field_class in _TEXT_FIELDS],
+    ids=[field_class.__name__ for field_class in _TEXT_FIELDS],
 )
 def test_text_column_keeps_every_text_pattern_lookup(
     field_class: type[models.Field[object, object]],
@@ -493,7 +493,7 @@ def _parent_bag(field: "ModelField") -> set[str]:
 def _all_bag(filterset: type[FilterSet], name: str) -> set[str]:
     """The lookups ``filterset.get_fields()`` expands ``name``'s ``"__all__"`` to."""
     value = filterset.get_fields()[name]
-    assert truth.is_instance(value, list)
+    assert is_list(value)
     return {str(lookup) for lookup in value}
 
 

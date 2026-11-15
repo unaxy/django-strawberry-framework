@@ -30,7 +30,8 @@ from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import is_class
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -130,17 +131,14 @@ class RelatedOrder(RelatedSetTargetMixin["OrderSet"]):
         silently walking the filter family's fields through the order input
         builder). Mirrors the filter twin's
         ``filters/base.py::RelatedFilter._validate_target``.
-
-        Target and owner identity are read by ``utils/truth.py``, so a value
-        is never asked whether it is a class.
         """
-        if not truth.is_subclass(resolved, _order_set_class()):
+        if not (is_class(resolved) and issubclass(resolved, _order_set_class())):
             # ``_bind_owner`` is the one writer of the owner slot, and it stores a set class.
             owner: type[object] | None = getattr(self, self._owner_attr, None)
-            owner_label = truth.qualname(owner) if truth.is_type(owner) else "<unbound>"
+            owner_label = owner.__qualname__ if is_class(owner) else "<unbound>"
             raise ConfigurationError(
-                f"{owner_label} declares RelatedOrder {truth.render(self.field_name)} targeting "
-                f"{truth.kind(resolved)}, which is not an OrderSet subclass. "
+                f"{owner_label} declares RelatedOrder {self.field_name!r} targeting "
+                f"{introspection.kind(resolved)}, which is not an OrderSet subclass. "
                 "RelatedOrder targets must resolve to an OrderSet subclass (a class, "
                 "an import-path string, or a zero-arg factory returning one); "
                 "a FilterSet or unrelated class cannot order a relation branch. "

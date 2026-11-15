@@ -58,7 +58,7 @@ from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.input_values import UNSET
 from tests._definition import make_definition
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
-from tests._idioms import ClaimsClass, ClassReadRaises, consumer_module, consumer_query
+from tests._idioms import consumer_module, consumer_query
 from tests._soft_dependency import blocked_modules
 from tests._subprocess import run_in_fresh_process
 
@@ -668,51 +668,6 @@ def _order_input_subscript_form(value: object) -> object:
 
 
 @pytest.mark.parametrize(
-    ("spell", "prefix"),
-    [
-        pytest.param(
-            _order_input_call_form,
-            "order_input_type() requires an OrderSet subclass; got ",
-            id="call-form",
-        ),
-        pytest.param(
-            _order_input_subscript_form,
-            "OrderInput[...] requires an OrderSet subclass; got ",
-            id="subscript-form",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    ("value", "rendered"),
-    [
-        pytest.param(ClassReadRaises(RuntimeError), "<ClassReadRaises>", id="class-read-raises"),
-        pytest.param(
-            ClassReadRaises(KeyboardInterrupt),
-            "<ClassReadRaises>",
-            id="class-read-interrupts",
-        ),
-        pytest.param(ClaimsClass(type), "<ClaimsClass>", id="claims-type"),
-    ],
-)
-def test_order_input_helpers_type_reject_a_value_whose_class_hooks_fail(
-    spell: Callable[[object], object],
-    prefix: str,
-    value: object,
-    rendered: str,
-) -> None:
-    """The helpers promise ``TypeError`` for any non-OrderSet argument, whatever its hooks do.
-
-    ``isinstance`` / ``issubclass`` fall back to the argument's ``__class__``, which can raise
-    or claim a class it is not, and the message quotes the argument's ``repr``.
-    """
-    initial = set(_helper_referenced_ordersets)
-    with pytest.raises(TypeError) as excinfo:
-        spell(value)
-    assert str(excinfo.value) == f"{prefix}{rendered}"
-    assert _helper_referenced_ordersets == initial
-
-
-@pytest.mark.parametrize(
     "spell",
     [
         pytest.param(_order_input_call_form, id="call-form"),
@@ -725,7 +680,7 @@ def test_order_input_helpers_propagate_a_rejected_value_whose_repr_raises(
     """A rejected value's own ``__repr__`` runs to quote it, and what it raises propagates.
 
     The class test reads the real class and never runs a hook, but the message quotes the
-    argument through ``utils/truth.py::render``, which is the value's consumer ``__repr__``.
+    argument through its own ``repr``, which is the value's consumer ``__repr__``.
     """
     initial = set(_helper_referenced_ordersets)
     with pytest.raises(RuntimeError, match="hostile __repr__"):

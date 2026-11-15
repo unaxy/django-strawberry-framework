@@ -167,8 +167,6 @@ from django_strawberry_framework.utils.typing import object_result
 from tests._cleaned_filter_sets import cleaned_specimen
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import (
-    ClaimsClass,
-    ClassReadRaises,
     ModelSerializerBase,
     consumer_module,
     consumer_query,
@@ -2962,50 +2960,6 @@ def _filter_input_subscript_form(value: object) -> object:
 
 
 @pytest.mark.parametrize(
-    ("spell", "prefix"),
-    [
-        pytest.param(
-            _filter_input_call_form,
-            "filter_input_type() requires a FilterSet subclass; got ",
-            id="call-form",
-        ),
-        pytest.param(
-            _filter_input_subscript_form,
-            "FilterInput[...] requires a FilterSet subclass; got ",
-            id="subscript-form",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    ("value", "rendered"),
-    [
-        pytest.param(ClassReadRaises(RuntimeError), "<ClassReadRaises>", id="class-read-raises"),
-        pytest.param(
-            ClassReadRaises(KeyboardInterrupt),
-            "<ClassReadRaises>",
-            id="class-read-interrupts",
-        ),
-        pytest.param(ClaimsClass(type), "<ClaimsClass>", id="claims-type"),
-    ],
-)
-def test_filter_input_helpers_type_reject_a_value_whose_class_hooks_fail(
-    spell: Callable[[object], object],
-    prefix: str,
-    value: object,
-    rendered: str,
-) -> None:
-    """The helpers promise ``TypeError`` for any non-FilterSet argument, whatever its hooks do.
-
-    ``isinstance`` / ``issubclass`` fall back to the argument's ``__class__``, which can raise
-    or claim a class it is not, and the message quotes the argument's ``repr``.
-    """
-    with pytest.raises(TypeError) as excinfo:
-        spell(value)
-    assert str(excinfo.value) == f"{prefix}{rendered}"
-    assert _helper_referenced_filtersets == set()
-
-
-@pytest.mark.parametrize(
     "spell",
     [
         pytest.param(_filter_input_call_form, id="call-form"),
@@ -3018,7 +2972,7 @@ def test_filter_input_helpers_propagate_a_rejected_value_whose_repr_raises(
     """A rejected value's own ``__repr__`` runs to quote it, and what it raises propagates.
 
     The class test reads the real class and never runs a hook, but the message quotes the
-    argument through ``utils/truth.py::render``, which is the value's consumer ``__repr__``.
+    argument through its own ``repr``, which is the value's consumer ``__repr__``.
     """
     with pytest.raises(RuntimeError, match="hostile __repr__"):
         spell(_RaisingRepr())

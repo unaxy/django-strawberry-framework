@@ -23,6 +23,7 @@ from django_strawberry_framework.utils.introspection import (
     mro_entry,
     name,
     overrides,
+    plain_str,
     text,
 )
 
@@ -288,6 +289,20 @@ def test_text_spells_classes_as_their_metaclass_does() -> None:
     assert text(_Color) == "<enum '_Color'>"
     assert text(_Outer.Inner) == f"<class '{MODULE}._Outer.Inner'>"
     assert text(NoModule) == "<class 'NoModule'>"
+
+
+def test_plain_str_copies_a_str_subclass_and_passes_anything_else_through() -> None:
+    """A ``TextChoices`` member comes back as its exact ``str``; a non-``str`` as itself."""
+
+    class Color(models.TextChoices):
+        RED = "red"
+
+    sentinel = object()
+    assert (type(plain_str(Color.RED)), plain_str(Color.RED), plain_str(sentinel)) == (
+        str,
+        "red",
+        sentinel,
+    )
 
 
 def test_text_uses_fallback_only_for_empty_text() -> None:

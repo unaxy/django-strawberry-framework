@@ -69,11 +69,13 @@ from django_strawberry_framework.types.converters import (
     refuse_nested_array,
     scalar_for_field,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._array_field import array_element_field
 from django_strawberry_framework.utils._narrowing import (
+    class_namespace,
     dict_of,
     enum_value,
+    is_class,
     is_concrete_field,
     is_list_or_tuple,
     is_mapping,
@@ -433,8 +435,10 @@ def refuse_unannotated_joinless_relation(
     """
     # django-filter's ``Filter.filter`` hands Django ``field_name__lookup_expr``; a lazy part
     # is read as the text it renders.
-    lookup_expr = truth.text(filter_instance.lookup_expr)
-    argument = LOOKUP_SEP.join((truth.text(_declared_field_name(filter_instance)), lookup_expr))
+    lookup_expr = introspection.text(filter_instance.lookup_expr)
+    argument = LOOKUP_SEP.join(
+        (introspection.text(_declared_field_name(filter_instance)), lookup_expr),
+    )
     # The name of the annotation claiming a leading part, or a false value for none (the
     # stubs type it as the expression an older Django returned).
     claimed, _rest = refs_expression(argument.split(LOOKUP_SEP), queryset.query.annotations)
@@ -486,7 +490,7 @@ def _unscalared_field_refusal(
     reads = "continues past" if crossed else "reads"
     subject = (
         f"{_declaration_subject(declaration, filterset_cls)} {reads} "
-        f"{_field_label(model_field)}, a {truth.kind(model_field)}"
+        f"{_field_label(model_field)}, a {introspection.kind(model_field)}"
     )
     if generated_issue == "file":
         return ConfigurationError(
@@ -508,7 +512,7 @@ def _unscalared_field_refusal(
     unscalared = f"{subject} no SCALAR_MAP entry types, so nothing types its input"
     if not model_field.is_relation:
         return ConfigurationError(
-            f"{unscalared}; register {truth.kind(model_field)} (or a class it subclasses) in "
+            f"{unscalared}; register {introspection.kind(model_field)} (or a class it subclasses) in "
             "SCALAR_MAP.",
         )
     compared = _compared_columns(filter_instance, model_field)
@@ -528,7 +532,9 @@ def _unscalared_field_refusal(
         return ConfigurationError(
             f"{subject} {_linked_by_columns(len(compared))}",
         )
-    walked = truth.text(_filterset_walked_lookup(declaration.filterset, declaration.declared)[0])
+    walked = introspection.text(
+        _filterset_walked_lookup(declaration.filterset, declaration.declared)[0],
+    )
     path = LOOKUP_SEP.join((*walked.split(LOOKUP_SEP)[:-1], model_field.name))
     column = _related_column_path(model_field, path)
     key = relation_identity_column(model_field)
@@ -587,7 +593,9 @@ def _scalar_prerequisite(column: ModelField | None) -> str:
     """State the missing scalar a suggested key or joined-column route must first register."""
     if column is None or _registered_scalar_entry(column) is not None:
         return ""
-    return f" (first register {truth.kind(column)} for {_field_label(column)} in SCALAR_MAP)"
+    return (
+        f" (first register {introspection.kind(column)} for {_field_label(column)} in SCALAR_MAP)"
+    )
 
 
 def _refuse_generated_filter_output(
@@ -732,8 +740,8 @@ def _passes_value_through(form_field: object) -> bool:
     ``clean``: its ``to_python`` returns the value unchanged, so it cleans a value of any
     scalar the input publishes and the lookup receives it as sent.
     """
-    return truth.is_instance(form_field, forms.Field) and not truth.overrides(
-        truth.class_of(form_field),
+    return isinstance(form_field, forms.Field) and not introspection.overrides(
+        type(form_field),
         forms.Field,
         "to_python",
         "clean",
@@ -769,10 +777,10 @@ def _keeps_cleaning_of(form_class: type[object], kind_class: type[object]) -> bo
     the classes after it, so a member keeps the kind ``kind_class`` names, while a consumer
     member class cleaning its own way is seen past it.
     """
-    below_kind = takewhile(lambda klass: klass is not kind_class, truth.mro(form_class))
+    below_kind = takewhile(lambda klass: klass is not kind_class, form_class.__mro__)
     return not any(
         klass is not BaseCSVField
-        and any(name in truth.class_dict(klass) for name in _CLEANING_METHODS)
+        and any(name in class_namespace(klass) for name in _CLEANING_METHODS)
         for klass in below_kind
     )
 
@@ -787,17 +795,17 @@ def _cleaned_kind(form_field: object) -> object | None:
     the kind (``_keeps_cleaning_of``): a ``DateField`` subclass whose ``clean`` returns the
     ISO text of the date it validates cleans text.
     """
-    form_class: type[object] = truth.class_of(form_field)
+    form_class: type[object] = type(form_field)
     coercing: type[forms.Field] | None = next(
-        (base for base in _COERCING_FORM_FIELDS if truth.is_subclass(form_class, base)),
+        (base for base in _COERCING_FORM_FIELDS if issubclass(form_class, base)),
         None,
     )
     entry: tuple[type[object], object] | None
     if coercing is not None:
         coerce = read_attr(form_field, "coerce", None)
-        entry = (coercing, coerce if truth.is_type(coerce) else None)
+        entry = (coercing, coerce if is_class(coerce) else None)
     else:
-        entry = truth.mro_entry(_CLEANED_KINDS, form_class)
+        entry = introspection.mro_entry(_CLEANED_KINDS, form_class)
     if entry is None or not _keeps_cleaning_of(form_class, entry[0]):
         return None
     return entry[1]
@@ -806,13 +814,17 @@ def _cleaned_kind(form_field: object) -> object | None:
 #: The packages whose form-field classes the no-value ask runs: Django's and django-filter's
 #: (``_cleans_in_shipped_code``).
 _SHIPPED_FORM_PACKAGES = frozenset(
-    {truth.module(forms.Field).partition(".")[0], truth.module(BaseCSVField).partition(".")[0]},
+    {forms.Field.__module__.partition(".")[0], BaseCSVField.__module__.partition(".")[0]},
 )
 
 
 def _is_shipped_code(obj: object) -> bool:
-    """Whether the class or function ``obj`` is defined in a ``_SHIPPED_FORM_PACKAGES`` package."""
-    return truth.module(obj).partition(".")[0] in _SHIPPED_FORM_PACKAGES
+    """Whether the class or function ``obj`` is defined in a ``_SHIPPED_FORM_PACKAGES`` package.
+
+    A C callable naming no module of its own (``str.strip``, a bound builtin) is not.
+    """
+    module = read_attr(obj, "__module__", None)
+    return isinstance(module, str) and module.partition(".")[0] in _SHIPPED_FORM_PACKAGES
 
 
 def _cleans_in_shipped_code(form_field: object) -> bool:
@@ -829,15 +841,15 @@ def _cleans_in_shipped_code(form_field: object) -> bool:
     ``coerce`` that is a class, a consumer's included (a ``TextChoices``), is asked, so the
     build calls it with each sample.
     """
-    form_class: type[object] = truth.class_of(form_field)
-    if any(truth.is_subclass(form_class, base) for base in _COERCING_FORM_FIELDS):
+    form_class: type[object] = type(form_field)
+    if any(issubclass(form_class, base) for base in _COERCING_FORM_FIELDS):
         coerce = read_attr(form_field, "coerce", None)
-        if not truth.is_type(coerce) and not _is_shipped_code(coerce):
+        if not is_class(coerce) and not _is_shipped_code(coerce):
             return False
     return all(
         _is_shipped_code(klass)
-        for klass in truth.mro(form_class)
-        if any(name in truth.class_dict(klass) for name in _CLEANING_METHODS)
+        for klass in form_class.__mro__
+        if any(name in class_namespace(klass) for name in _CLEANING_METHODS)
     )
 
 
@@ -882,19 +894,20 @@ def _refuse_kind_json_cannot_encode(
     """
     lookup = _filterset_lookup_operand(filterset_cls, filter_instance).lookup
     if (
-        not truth.is_instance(column, models.JSONField)
+        not isinstance(column, models.JSONField)
         or read_attr(column, "encoder", None) is not None
-        or not truth.is_subclass(lookup, FieldGetDbPrepValueMixin)
+        or lookup is None
+        or not issubclass(lookup, FieldGetDbPrepValueMixin)
         or not _runs_shipped_filter(filter_instance)
     ):
         return
     kinds = {_cleaned_kind(form_field) for form_field in form_fields}
     refused = sorted(
-        truth.name(kind)
+        introspection.name(kind)
         for kind in kinds
         if kind is not None
         and kind is not strawberry.scalars.JSON
-        and not any(truth.is_subclass(kind, native) for native in _JSON_NATIVE_KINDS)
+        and not (is_class(kind) and issubclass(kind, _JSON_NATIVE_KINDS))
     )
     if not refused:
         return
@@ -944,7 +957,7 @@ def _column_cleaned_scalar(
     through; and for any other filter, whose own form cleans its values.
     """
     if (
-        not truth.is_instance(filter_instance, _ColumnCleanedFilter)
+        not isinstance(filter_instance, _ColumnCleanedFilter)
         or value_field is None
         or not holds_values_as_given(value_field)
     ):
@@ -1012,7 +1025,7 @@ def _form_cleaned_value_field(
     whose own form and lookup answer no value of it is refused by its arm once typed
     (``_refuse_form_serving_no_value``), never here, which a request reaches too.
     """
-    if value_field is None or truth.is_instance(filter_instance, _ColumnCleanedFilter):
+    if value_field is None or isinstance(filter_instance, _ColumnCleanedFilter):
         return value_field
     form_fields = _form_value_fields(filter_instance)
     if form_fields and holds_values_as_given(value_field):
@@ -1031,8 +1044,9 @@ def _form_cleaned_value_field(
     if all(
         _passes_value_through(form_field)
         or (
-            truth.is_type(compared)
-            and truth.is_subclass(_scalar_from_form_field(form_field), compared)
+            is_class(compared)
+            and is_class(scalar := _scalar_from_form_field(form_field))
+            and issubclass(scalar, compared)
         )
         for form_field in form_fields
     ):
@@ -1055,7 +1069,7 @@ def _range_bounds(filter_instance: Filter, value: object) -> object:
         _RangeFormPatch,
     )
     keys = require(patch.axis_keys, is_list_or_tuple)
-    return [patch.get(truth.text(key)) for key in keys]
+    return [patch.get(introspection.text(key)) for key in keys]
 
 
 #: One value of each scalar a column's leaf is published as, in the Python kind Strawberry
@@ -1088,7 +1102,7 @@ def _published_samples(element: object) -> tuple[object, ...]:
     scalar answers its row in ``_SCALAR_SAMPLES``; any other (text, a consumer ``SCALAR_MAP``
     entry) none, so its leaf is asked only its choice form's keys (``_asked_samples``).
     """
-    if truth.is_subclass(element, enum.Enum):
+    if is_class(element) and issubclass(element, enum.Enum):
         return tuple(member for member in element if enum_value(member) not in EMPTY_VALUES)
     return next(
         (samples for kind, samples in _SCALAR_SAMPLES.items() if kind is element),
@@ -1115,7 +1129,7 @@ def _asked_samples(
     parses text by its own syntax, which no finite sample covers), nor does a consumer
     ``SCALAR_MAP`` scalar, and the leaf is not asked.
     """
-    if not truth.is_subclass(element, enum.Enum):
+    if not (is_class(element) and issubclass(element, enum.Enum)):
         keys = _form_choice_samples(filter_instance, form_field)
         if keys is not None:
             return keys
@@ -1131,13 +1145,13 @@ def _django_resolves(owner: type[object], *names: str) -> bool:
     """Whether every method ``names`` the class ``owner`` resolves is defined by Django.
 
     Read as ``filters/base.py::_runs_shipped_filter`` reads ``filter``: the function the
-    class's real MRO resolves (``utils/truth.py::mro_attr``, unwrapped by
-    ``stored_function``), for the module that defines it.
+    class's MRO resolves (``utils/introspection.py::mro_attr``, unwrapped from its
+    ``__func__``), for the module that defines it.
     """
+    stored = [introspection.mro_attr(owner, name) for name in names]
     return all(
-        truth.module(truth.stored_function(truth.mro_attr(owner, name))).partition(".")[0]
-        == "django"
-        for name in names
+        read_attr(entry, "__func__", entry).__module__.partition(".")[0] == "django"
+        for entry in stored
     )
 
 
@@ -1151,12 +1165,9 @@ def _django_converts(column: ModelField) -> bool:
     what Django's ``RelatedLookupMixin.get_prep_lookup`` reads), so each of those is
     asked the same way, down to the concrete key columns.
     """
-    if not _django_resolves(truth.class_of(column), "to_python", "get_prep_value"):
+    if not _django_resolves(type(column), "to_python", "get_prep_value"):
         return False
-    if truth.is_instance(column, models.ForeignObject) or truth.is_instance(
-        column,
-        models.ManyToManyField,
-    ):
+    if isinstance(column, (models.ForeignObject, models.ManyToManyField)):
         return all(_django_converts(field) for field in column.path_infos[-1].target_fields)
     return True
 
@@ -1272,7 +1283,7 @@ def _refuse_form_serving_no_value(
     operand = _filterset_lookup_operand(owner, declared)
     if (
         column is None
-        or truth.is_instance(declared, _ColumnCleanedFilter)
+        or isinstance(declared, _ColumnCleanedFilter)
         or column is not _filterset_model_field(owner, declared)
         or holds_values_as_given(column)
         or operand.null_test
@@ -1296,11 +1307,11 @@ def _refuse_form_serving_no_value(
         _answers_sample(declared, model, form_value(declared, sample)) for sample in samples
     ):
         return
-    form_kind = ", ".join(sorted({truth.kind(form_field) for form_field in form_fields}))
+    form_kind = ", ".join(sorted({introspection.kind(form_field) for form_field in form_fields}))
     raise ConfigurationError(
         f"{_declaration_subject(declaration, filterset_cls)} is published as "
         f"{_field_label(column)} values, but its own form field ({form_kind}) and lookup "
-        f"{truth.render(declared.lookup_expr)} answer no value of that column, so every value "
+        f"{declared.lookup_expr!r} answer no value of that column, so every value "
         "of its input would be refused or would constrain nothing (match every row); filter "
         "a transform of the column whose output its form cleans (a TimeFilter on "
         '`field_name="<column>__time"`), declare a filter class whose form cleans the '
@@ -1352,7 +1363,7 @@ def _served_reach(
         heads = {
             name: leaf
             for name, leaf in table.items()
-            if truth.is_instance(leaf, RelatedFilter) and _expansion_record(leaf) is None
+            if isinstance(leaf, RelatedFilter) and _expansion_record(leaf) is None
         }
         branches: list[tuple[type[FilterSet] | None, str]] = [
             (record.filterset, record.branch)
@@ -1361,7 +1372,7 @@ def _served_reach(
             and not _is_hidden_flat_copy(filterset_cls, leaf)
         ]
         related_filters = declaration_map(
-            truth.static_attr(filterset_cls, "related_filters", OrderedDict[str, object]()),
+            introspection.mro_attr(filterset_cls, "related_filters", OrderedDict[str, object]()),
             RelatedFilter,
         )
         branches.extend(
@@ -1373,7 +1384,7 @@ def _served_reach(
             if child is not None and child not in seen:
                 seen.add(child)
                 pending.append(
-                    (root, child, (*through, f"{truth.name(filterset_cls)}.{branch}")),
+                    (root, child, (*through, f"{filterset_cls.__name__}.{branch}")),
                 )
 
 
@@ -1390,7 +1401,7 @@ def _range_axis_scalar(filter_instance: Filter, filterset_cls: type[FilterSet]) 
     if len(scalars) == 1:
         return scalars.pop()
     declaration = _declaration_of(filter_instance, filterset_cls)
-    kinds = ", ".join(sorted(truth.name(scalar) for scalar in scalars))
+    kinds = ", ".join(sorted(introspection.name(scalar) for scalar in scalars))
     raise ConfigurationError(
         f"{_declaration_subject(declaration, filterset_cls)} cleans its two "
         f"range axes as different kinds ({kinds}), and a range input carries one type for "
@@ -1441,7 +1452,7 @@ def _model_choice_identity_annotation(
             remedy = "Name a column of that model,"
         raise ConfigurationError(
             f"{subject} has to_field_name {to_field_name!r}, which names no column of "
-            f"{truth.qualname(model)}, {source}, so there is no column to type its input "
+            f"{model.__qualname__}, {source}, so there is no column to type its input "
             f"from. {remedy} or drop to_field_name to look values up by primary key.",
         )
     return _scalar_from_model_field(column, filter_instance, filterset_cls)
@@ -1485,7 +1496,7 @@ def _declaration_subject(
     """Return ``<owner>: <Class> on '<field_name>'<route>``, a refusal's subject for a leaf."""
     return (
         f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
-        f"{truth.render(declaration.declared.field_name)}{declaration.route}"
+        f"{declaration.declared.field_name!r}{declaration.route}"
     )
 
 
@@ -1514,7 +1525,7 @@ def _no_choices_refusal(
             "base_field declares no `choices`"
         )
         declare = "declare `choices` on that base_field, or "
-    elif truth.is_type(read_attr(model_field, "model", None)):
+    elif is_class(read_attr(model_field, "model", None)):
         reason = f"reads {_field_label(model_field)}, which declares no `choices`"
         declare = (
             "declare `choices` on the column it filters (a `choices=` list of pairs, or a "
@@ -1522,7 +1533,7 @@ def _no_choices_refusal(
         )
     else:
         reason = (
-            f"reads a transform's output ({truth.kind(model_field)}), which declares no "
+            f"reads a transform's output ({introspection.kind(model_field)}), which declares no "
             "`choices` whatever its column declares"
         )
         declare = ""
@@ -1611,11 +1622,9 @@ def _validates_its_keys(form_field: forms.ChoiceField) -> bool:
     ``_django_resolves`` reads a method: a consumer override accepting values off its keys
     widens which values pass, so the keys do not stand in for it.
     """
-    form_class = truth.class_of(form_field)
-    return all(
-        _is_shipped_code(truth.stored_function(truth.mro_attr(form_class, name)))
-        for name in _CHOICE_VALIDATION_METHODS
-    )
+    form_class = type(form_field)
+    stored = [introspection.mro_attr(form_class, name) for name in _CHOICE_VALIDATION_METHODS]
+    return all(_is_shipped_code(read_attr(entry, "__func__", entry)) for entry in stored)
 
 
 def _form_choice_samples(filter_instance: Filter, form_field: object) -> tuple[object, ...] | None:
@@ -1654,7 +1663,7 @@ def _unnameable_lookup_refusal(
     declaration = _declaration_of(filter_instance, filterset_cls)
     return ConfigurationError(
         f"{_declaration_subject(declaration, filterset_cls)} "
-        f"publishes lookup {truth.render(lookup)}, which is no GraphQL field name. Spell an "
+        f"publishes lookup {lookup!r}, which is no GraphQL field name. Spell an "
         "index or slice in field_name (`<column>__0`, `<column>__0_2`) and name the lookup "
         "in lookup_expr.",
     )
@@ -1714,7 +1723,7 @@ def _array_column_refusal(
         )
     return ConfigurationError(
         f"{_declaration_subject(declaration, filterset_cls)} "
-        f"has no input type for lookup {truth.render(applied)} on the ArrayField column "
+        f"has no input type for lookup {applied!r} on the ArrayField column "
         f"{_field_label(model_field)}: {remedy}",
     )
 
@@ -1835,7 +1844,7 @@ def _element_scalar(
 
     Builds nothing, so ``publishes_json_value`` asks it at request time.
     """
-    if truth.is_instance(filter_instance, TextPatternFilter):
+    if isinstance(filter_instance, TextPatternFilter):
         return str
     model_field = _array_element_column(
         filter_instance,
@@ -1924,7 +1933,7 @@ def _json_publication(filter_instance: Filter, filterset_cls: type[FilterSet]) -
         value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
         column = _array_element_column(matched, value_field, filterset_cls)
         member = _element_scalar(matched, column, filterset_cls)
-        return _JSON_MEMBERS if truth.is_among(member, (strawberry.scalars.JSON,)) else None
+        return _JSON_MEMBERS if member is strawberry.scalars.JSON else None
 
     def _typed(matched: Filter) -> object:
         value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
@@ -1964,7 +1973,7 @@ def _json_publication(filter_instance: Filter, filterset_cls: type[FilterSet]) -
 
 def _json_value_of(scalar: object) -> str | None:
     """``_JSON_VALUE`` when ``scalar`` is ``JSON``, else ``None``."""
-    return _JSON_VALUE if truth.is_among(scalar, (strawberry.scalars.JSON,)) else None
+    return _JSON_VALUE if scalar is strawberry.scalars.JSON else None
 
 
 # ---------------------------------------------------------------------------
@@ -2025,7 +2034,7 @@ def _unexpected_filter_dispatch(obj: object) -> ConfigurationError:
     keeps ``convert_with_mro``'s raising contract all the same.
     """
     return ConfigurationError(
-        f"internal: filter input dispatch reached fallthrough for {truth.render(obj)}",
+        f"internal: filter input dispatch reached fallthrough for {obj!r}",
     )
 
 
@@ -2054,8 +2063,8 @@ def _refuse_method_without_form_field(
         return
     declaration = _declaration_of(filter_instance, filterset_cls)
     raise ConfigurationError(
-        f"{declaration.owner(filterset_cls)}: {declaration.kind}(method={truth.render(method)}) "
-        f"on {truth.render(declaration.declared.field_name)}{declaration.route} is backed by "
+        f"{declaration.owner(filterset_cls)}: {declaration.kind}(method={method!r}) "
+        f"on {declaration.declared.field_name!r}{declaration.route} is backed by "
         "no model field and exposes no form field, so nothing types its value; point "
         "field_name at a model field, or put the method on a typed filter primitive "
         "(`CharFilter(method=...)`, `NumberFilter(method=...)`, `ListFilter(method=...)` for a "
@@ -2088,7 +2097,7 @@ def _refuse_widget_reading_other_keys(
     unless consumer code supplies one per request, and the model-choice arm refuses one
     whose ``field_name`` names no relation).
     """
-    if truth.is_instance(filter_instance, QuerySetRequestMixin):
+    if isinstance(filter_instance, QuerySetRequestMixin):
         queryset = read_attr(filter_instance, "queryset", None)
         if queryset is None or callable(queryset):
             return
@@ -2102,7 +2111,7 @@ def _refuse_widget_reading_other_keys(
     numeric_range = (
         " A NumericRangeFilter filters a PostgreSQL range column, which the schema does not "
         "publish."
-        if truth.is_instance(declaration.declared, NumericRangeFilter)
+        if isinstance(declaration.declared, NumericRangeFilter)
         else ""
     )
     raise ConfigurationError(
@@ -2164,7 +2173,7 @@ def convert_filter_to_input_annotation(
     widget for its two keys (``range_form_keys``).
     """
     _refuse_generated_filter_output(filter_instance, model_field, filterset_cls)
-    if truth.is_instance(filter_instance, LookupChoiceFilter):
+    if isinstance(filter_instance, LookupChoiceFilter):
         declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
             f"{_declaration_subject(declaration, filterset_cls)} filters by "
@@ -2435,7 +2444,7 @@ def _require_list_container(
         raise ConfigurationError(
             f"{_declaration_of(filter_instance, None).kind} consumes a list of values for its "
             f"{filter_instance.field_name!r} input, but received a non-list container "
-            f"({truth.kind(raw_value)} {truth.render(raw_value)}) for the {shape}; "
+            f"({introspection.kind(raw_value)} {raw_value!r}) for the {shape}; "
             "send a list (generated filter inputs deliver a list after GraphQL coercion).",
         )
     return raw_value
@@ -2548,11 +2557,11 @@ def _build_range_input_class(
     stem = pascal_case_or_raise(
         value_path,
         make_error=lambda bad: ConfigurationError(
-            f"RangeFilter stem {truth.render(bad)} contains no word characters; rename the "
+            f"RangeFilter stem {bad!r} contains no word characters; rename the "
             "RangeFilter's `field_name=` so its name has at least one alphanumeric token.",
         ),
     )
-    cls_name = f"{truth.name(filterset_cls)}{stem}RangeInputType"
+    cls_name = f"{filterset_cls.__name__}{stem}RangeInputType"
     return build_input_class(
         cls_name,
         [
@@ -2621,7 +2630,7 @@ def _normalize_range_value(
         raise ConfigurationError(
             f"{_declaration_of(filter_instance, None).kind} consumes a range input with only "
             f"'start' / 'end' axes for its {base!r} input, but received "
-            f"{truth.kind(raw_value)} {truth.render(raw_value)}; send a mapping or "
+            f"{introspection.kind(raw_value)} {raw_value!r}; send a mapping or "
             "input object with 'start' / 'end' (generated filter inputs reject this shape"
             " during GraphQL validation).",
         )
@@ -2691,7 +2700,7 @@ def _range_widget_keys(
         raise ConfigurationError(
             f"{declaration.kind} consumes a range input for its {base!r} "
             f"input{declaration.site}, but its form field's widget does not read exactly two "
-            f"form-data keys ({truth.render(keys)}); give it a two-widget MultiWidget.",
+            f"form-data keys ({keys!r}); give it a two-widget MultiWidget.",
         )
     return keys[0], keys[1]
 
@@ -2710,7 +2719,7 @@ def _enum_prefix(
     """
     if owner_definition is not None:
         return owner_definition.graphql_type_name
-    return truth.name(filterset_cls)
+    return filterset_cls.__name__
 
 
 # ---------------------------------------------------------------------------
@@ -2801,7 +2810,7 @@ def _is_declared_head(filterset_cls: type[FilterSet], name: str, filter_instance
 
     # django-filter's metaclass stores ``declared_filters`` as the name-keyed declared map.
     declared_filters = require(
-        truth.static_attr(filterset_cls, "declared_filters", {}),
+        introspection.mro_attr(filterset_cls, "declared_filters", {}),
         is_mapping,
     )
     if name in declared_filters:
@@ -2853,7 +2862,7 @@ def _group_filters_by_head(
         # `RelatedFilter` forward-ref already exposes the same target;
         # the expanded duplicate would otherwise reach the leaf branch
         # and trip the `ChoiceFilter` guard.
-        if "__" in filter_name and truth.is_instance(filter_instance, RelatedFilter):
+        if "__" in filter_name and isinstance(filter_instance, RelatedFilter):
             continue
         lookup_expr = filter_instance.lookup_expr
         if _is_declared_head(filterset_cls, filter_name, filter_instance):
@@ -2871,7 +2880,7 @@ def _group_filters_by_head(
         prior = bag.get(lookup_token)
         if prior is not None:
             raise ConfigurationError(
-                f"{truth.qualname(filterset_cls)}: filters {prior[0]!r} and {filter_name!r} "
+                f"{filterset_cls.__qualname__}: filters {prior[0]!r} and {filter_name!r} "
                 f"both bind the {lookup_token!r} lookup of input field {head!r}, so one "
                 "would be unreachable from the generated input. Rename one filter or "
                 "drop one via Meta.fields / Meta.exclude.",
@@ -2902,7 +2911,7 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
             prior = lookups.setdefault(lookup_attr, entry)
             if prior is not entry:
                 raise ConfigurationError(
-                    f"{truth.qualname(filterset_cls)}: filters {prior[0]!r} and {entry[0]!r} "
+                    f"{filterset_cls.__qualname__}: filters {prior[0]!r} and {entry[0]!r} "
                     f"both generate the lookup attribute {lookup_attr!r} of input field "
                     f"{head!r}, so one would be unreachable. Rename one filter or drop one "
                     "via Meta.fields / Meta.exclude.",
@@ -2922,7 +2931,7 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
         prior_head = alias_heads.setdefault(input_attr, head)
         if prior_head != head:
             raise ConfigurationError(
-                f"{truth.qualname(filterset_cls)}: filters {prior_head!r} and {head!r} both "
+                f"{filterset_cls.__qualname__}: filters {prior_head!r} and {head!r} both "
                 f"generate the input attribute {input_attr!r} (Django path separators "
                 "flatten to '_'), so one would be unreachable. Rename one filter or "
                 "drop one via Meta.fields / Meta.exclude.",
@@ -2959,10 +2968,8 @@ def _json_text_fields(
     members: dict[str, forms.Field] = {}
     for bag in heads.values():
         for form_key, filter_instance in bag.values():
-            if not truth.is_subclass(
-                read_attr(filter_instance, "field_class", None),
-                forms.JSONField,
-            ):
+            field_class = read_attr(filter_instance, "field_class", None)
+            if not (is_class(field_class) and issubclass(field_class, forms.JSONField)):
                 continue
             field = _declared_form_field(filter_instance)
             publication = (
@@ -3019,7 +3026,7 @@ def _lookup_lever(filterset_cls: type[FilterSet], head: str) -> MemberLever:
     if record is None:
         return MemberLever(LISTED_LOOKUP, via=repr(head))
     child_head = head.removeprefix(f"{record.branch}{LOOKUP_SEP}")
-    return MemberLever(LISTED_LOOKUP, via=f"{child_head!r} on {truth.qualname(record.filterset)}")
+    return MemberLever(LISTED_LOOKUP, via=f"{child_head!r} on {record.filterset.__qualname__}")
 
 
 def _build_input_fields(
@@ -3037,7 +3044,7 @@ def _build_input_fields(
     # The metaclass stores ``related_filters`` from
     # ``sets_mixins.py::collect_related_declarations`` (``RelatedFilter`` only).
     related_filters = declaration_map(
-        truth.static_attr(filterset_cls, "related_filters", OrderedDict[str, object]()),
+        introspection.mro_attr(filterset_cls, "related_filters", OrderedDict[str, object]()),
         RelatedFilter,
     )
     lookup_table = filter_lookup_table(filterset_cls)
@@ -3130,7 +3137,7 @@ def _build_input_fields(
             bag_name,
             bag_specs,
             sources=GeneratedFieldSources(
-                subject=f"FilterSet {truth.qualname(filterset_cls)!r}",
+                subject=f"FilterSet {filterset_cls.__qualname__!r}",
                 field_noun="lookups",
                 rename_clause="Rename one lookup",
                 members={lookup_leaf_names(lookup)[0]: lookup for lookup in lookup_bag},

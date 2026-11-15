@@ -10,7 +10,7 @@ internals a request cannot name.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 import strawberry
@@ -39,9 +39,8 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr, require
-from django_strawberry_framework.utils.inputs import GeneratedInputArgumentsFactory
 from django_strawberry_framework.utils.typing import peel_strawberry_containers
-from tests._idioms import comparing_metaclass, declare_django_type, definition_raises
+from tests._idioms import declare_django_type, definition_raises
 from tests.filters.fixtures.filtersets import SelfReferentialBranchFilter
 
 
@@ -383,35 +382,6 @@ def test_filter_arguments_factory_rejects_subclassing() -> None:
     assert "does not support subclassing" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("shape", ["grand_subclass", "direct"])
-@pytest.mark.parametrize("verdict", ["equal", "unequal", "raises"])
-def test_factory_subclassing_check_finds_the_base_by_identity(
-    verdict: Literal["equal", "unequal", "raises"],
-    shape: Literal["grand_subclass", "direct"],
-) -> None:
-    """A mixin listed before the factory cannot change whether subclassing is rejected.
-
-    The subclassing check looks for ``GeneratedInputArgumentsFactory`` among the new class's
-    bases by identity, so a consumer metaclass ``__eq__`` on a mixin listed first is never
-    called: an always-equal answer cannot pass a grand-subclass of ``FilterArgumentsFactory``
-    off as a direct family factory, a raising one cannot escape class creation, and a direct
-    family factory behind the same mixin is still accepted. The mixin answers only comparisons
-    with ``GeneratedInputArgumentsFactory``: ``typing``'s ``Generic.__init_subclass__`` runs
-    first and tests ``Generic in cls.__bases__``, which compares every base by equality outside
-    the package.
-    """
-    calls: list[str] = []
-    meta = comparing_metaclass(type, verdict, calls, against=GeneratedInputArgumentsFactory)
-    mixin = meta("HostileMixin", (), {})
-    if shape == "grand_subclass":
-        with pytest.raises(TypeError, match="does not support subclassing"):
-            _ = meta("GrandFactory", (mixin, FilterArgumentsFactory), {})
-    else:
-        direct = meta("DirectFactory", (mixin, GeneratedInputArgumentsFactory), {})
-        assert direct.__bases__[1] is GeneratedInputArgumentsFactory
-    assert calls == []
-
-
 def test_filter_arguments_factory_empty_filterset_emits_logic_fields() -> None:
     """A FilterSet with empty fields still emits the and_/or_/not_ logic fields."""
 
@@ -568,7 +538,7 @@ def test_two_members_of_one_bag_name_and_one_lookup_set_in_any_order_finalize() 
         strict=True,
     )
     bags = {field.python_name: peel_strawberry_containers(field.type)[1] for field in root.fields}
-    assert truth.qualname(bags["Price"]) == truth.qualname(bags["price"])
+    assert (bags["Price"]).__qualname__ == (bags["price"]).__qualname__
 
 
 _CASE_CAUSE = "The member names differ only in letter case, which the PascalCase stem drops."
@@ -635,7 +605,7 @@ def test_two_shapes_of_one_generated_name_in_one_set_raise_at_finalize(
     embeds it) and how their names met.
     """
     filterset = build()
-    owner = f"FilterSet {truth.label(filterset)}"
+    owner = f"FilterSet {filterset.__module__}.{filterset.__qualname__}"
     via = "the 'exact' input of " if cause is _RANGE_CAUSE else ""
     with pytest.raises(ConfigurationError) as raised:
         finalize_django_types()

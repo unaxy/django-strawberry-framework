@@ -59,7 +59,8 @@ from django_strawberry_framework.orders.sets import (
     _validate_normalized_terms,
 )
 from django_strawberry_framework.types.base import DjangoType
-from django_strawberry_framework.utils import relations, truth
+from django_strawberry_framework.utils import introspection, relations
+from django_strawberry_framework.utils._narrowing import is_class
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
     _type_name_claims,
@@ -74,7 +75,6 @@ from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import (
     STR_ENUM,
     STR_SUBCLASS_KINDS,
-    ClassReadRaises,
     is_object_list,
     str_subclass_name,
 )
@@ -509,7 +509,7 @@ def test_orderset_meta_exclude_is_inherited_with_the_parent_meta() -> None:
 
     assert list(child.get_fields()) == ["id", "title", "circulation_status"]
     assert list(parent.get_fields()) == ["id", "title", "circulation_status"]
-    assert truth.static_attr(truth.static_attr(parent, "Meta"), "exclude") is declared
+    assert introspection.mro_attr(introspection.mro_attr(parent, "Meta"), "exclude") is declared
     assert declared == ["subtitle", "shelf"]
 
 
@@ -771,8 +771,8 @@ def test_orderset_model_less_sweep_base_builds_and_its_subclass_supplies_the_mod
     The subclass's ``Meta`` inherits the base's declaration and adds ``Meta.model``.
     """
     base = _order_class({**fields, "exclude": ("subtitle",)})
-    base_meta = truth.static_attr(base, "Meta")
-    assert truth.is_type(base_meta)
+    base_meta = introspection.mro_attr(base, "Meta")
+    assert is_class(base_meta)
     child = type("ModelOrder", (base,), {"Meta": type("Meta", (base_meta,), {"model": Book})})
     assert issubclass(child, OrderSet)
 
@@ -827,8 +827,8 @@ def test_orderset_meta_key_guard_reads_only_the_class_body_own_meta() -> None:
     the child's.
     """
     parent = _order_class({"model": Book, "fields": ["title"], "exclude": ["subtitle"]})
-    parent_meta = truth.static_attr(parent, "Meta")
-    assert truth.is_type(parent_meta)
+    parent_meta = introspection.mro_attr(parent, "Meta")
+    assert is_class(parent_meta)
     child = type("PlainChildOrder", (parent,), {"__module__": __name__})
     grandchild = type(
         "MetaChildOrder",
@@ -1499,39 +1499,6 @@ def test_orderset_expand_meta_fields_lazy_all_is_the_shorthand() -> None:
             fields = "__all__"
 
     assert list(LazyAllOrder.get_fields()) == list(PlainAllOrder.get_fields())
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
-def test_orderset_expand_meta_fields_rejects_a_declaration_whose_class_read_raises(
-    escape: type[BaseException],
-) -> None:
-    """``Meta.fields`` whose ``__class__`` raises is the typed re-readability rejection.
-
-    The canonicalizer that runs before the gate dispatches on the value's class, so a
-    ``__class__`` that raises has to reach the gate (which names it) instead of escaping it.
-    """
-    meta = type("Meta", (), {"model": Book, "fields": ClassReadRaises(escape)})
-    hostile = type("HostileFieldsOrder", (OrderSet,), {"Meta": meta})
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        hostile.get_fields()
-    assert str(excinfo.value) == (
-        "OrderSet HostileFieldsOrder.Meta.fields must be '__all__' or a re-readable "
-        "collection of field names; got ClassReadRaises (<ClassReadRaises>). "
-        "Accepted: a re-readable collection of field names -- list, tuple, set, frozenset, "
-        "dict keys/values, or another sized collection; not a one-shot iterator or generator, "
-        "and not a bare string."
-    )
-
-
-@pytest.mark.django_db
-def test_orderset_expand_meta_fields_reads_the_keys_of_a_lookup_bag_with_a_hostile_value() -> None:
-    """A lookup-bag value is never an order path, so a hostile one is not consulted."""
-    meta = type("Meta", (), {"model": Book, "fields": {"title": ClassReadRaises()}})
-    bag = type("HostileValueOrder", (OrderSet,), {"Meta": meta})
-
-    assert list(bag.get_fields()) == ["title"]
 
 
 @pytest.mark.django_db
@@ -3017,7 +2984,7 @@ def test_order_hop_hook_reads_every_target_row_in_the_default_manager_class(
         @override
         def get_queryset(cls, queryset: QuerySet[Shelf], info: object) -> QuerySet[Shelf]:
             codes = tuple(sorted(queryset.values_list("code", flat=True)))
-            seen.append((truth.class_of(queryset), codes))
+            seen.append((type(queryset), codes))
             return queryset
 
     class ShapedShelfOrder(OrderSet):

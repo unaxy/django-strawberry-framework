@@ -59,8 +59,10 @@ from django.utils.functional import Promise
 from django.utils.module_loading import import_string
 
 from .exceptions import ConfigurationError
-from .utils import truth
+from .utils import introspection
 from .utils._narrowing import (
+    class_namespace,
+    is_class,
     is_mapping,
     read_attr,
     require,
@@ -148,13 +150,13 @@ class ClassBasedTypeNameMixin:
         ``utils/inputs.py::claim_generated_type_name``, which merges identical
         fields and refuses two shapes in any schema that serves both.
         """
-        cls_name = truth.name(cls)
+        cls_name = cls.__name__
         if field_path is None:
             return f"{cls_name}{cls._root_type_suffix}"
         pascal = pascal_case_or_raise(
             field_path,
             make_error=lambda bad: ConfigurationError(
-                f"{cls_name}.type_name_for received field_path {truth.render(bad)} "
+                f"{cls_name}.type_name_for received field_path {bad!r} "
                 "which contains no word characters; rename the filter / field so "
                 "its name has at least one alphanumeric token.",
             ),
@@ -166,7 +168,7 @@ class LazyRelatedClassMixin:
     """Lazy resolution for a class reference that may be a string, callable, or class.
 
     Port of `django_graphene_filters/mixins.py::LazyRelatedClassMixin`, with upstream's
-    resolution order and truthful identity reads.
+    resolution order.
     Used by `RelatedFilter` to break cycles between filtersets declared in
     the same module without forcing an `if TYPE_CHECKING` dance on the
     consumer.
@@ -187,18 +189,17 @@ class LazyRelatedClassMixin:
 
         Callables that are not classes are invoked as zero-arg factories
         (their exceptions propagate); everything else is returned as-is.
-        Whether ``class_ref`` is a string or a class, and the owner's module,
-        are read by ``utils/truth.py``, so the value is never asked what it is.
+        The owner's module is its ``__module__``.
         """
-        if truth.is_instance(class_ref, str):
-            ref = truth.text(class_ref)
+        if isinstance(class_ref, str):
+            ref = introspection.text(class_ref)
             try:
                 return _import_object(ref)
             except ImportError:
-                if truth.is_type(bound_class):
-                    return _import_object(f"{truth.module(bound_class)}.{ref}")
+                if is_class(bound_class):
+                    return _import_object(f"{bound_class.__module__}.{ref}")
                 raise
-        if callable(class_ref) and not truth.is_type(class_ref):
+        if callable(class_ref) and not is_class(class_ref):
             return class_ref()
         return class_ref
 
@@ -289,7 +290,7 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin, Generic[_SetT_co]):
         read instead of accepting any target.
         """
         raise NotImplementedError(
-            f"{truth.kind(self)} must supply a `_validate_target()` family gate "
+            f"{introspection.kind(self)} must supply a `_validate_target()` family gate "
             "(raise ConfigurationError for a resolved target outside the family); "
             "the resolution seam validates every distinct value, so a hookless related "
             "declaration would otherwise accept any target.",
@@ -372,13 +373,13 @@ def collect_related_declarations(
         for base in reversed(bases):
             # Every family class's ``collection_attr`` is the map this function stores below.
             inherited = declaration_map(
-                truth.static_attr(base, collection_attr, {}),
+                introspection.mro_attr(base, collection_attr, {}),
                 declaration_type,
             )
             for name, inherited_declaration in inherited.items():
                 collected[name] = inherited_declaration
     for name, declaration in own_items:
-        if truth.is_instance(declaration, declaration_type):
+        if isinstance(declaration, declaration_type):
             collected[name] = declaration
         elif name in collected:
             del collected[name]
@@ -393,15 +394,18 @@ def collect_related_declarations(
             continue
         for base in bases:
             # Each family class keeps its complete declaration map under this name.
-            declarations = require(truth.static_attr(base, base_declarations_attr, {}), is_mapping)
+            declarations = require(
+                introspection.mro_attr(base, base_declarations_attr, {}),
+                is_mapping,
+            )
             if name in declarations:
                 selected = declarations[name]
-                if truth.is_instance(selected, declaration_type):
+                if isinstance(selected, declaration_type):
                     collected[name] = selected
                 else:
                     del collected[name]
                 break
-            if truth.mro_attr(base, name, missing) is not missing:
+            if introspection.mro_attr(base, name, missing) is not missing:
                 del collected[name]
                 break
     _reject_shared_relations(new_class, collected)
@@ -433,7 +437,7 @@ def _reject_shared_relations(
         prior = claimed.setdefault(relation, name)
         if prior != name:
             raise ConfigurationError(
-                f"{truth.qualname(new_class)}: {truth.kind(declaration)}s "
+                f"{new_class.__qualname__}: {introspection.kind(declaration)}s "
                 f"{prior!r} and {name!r} both declare the relation "
                 f"{LOOKUP_SEP.join(relation)!r}. A set declares "
                 "each relation once, since its flat leaves, order terms and permission gates "
@@ -450,7 +454,7 @@ def _declared_relation(name: str, declaration: object) -> tuple[str, ...] | None
     """
     field_name: object = getattr(declaration, "field_name", None)
     relation = name if field_name is None else field_name
-    return tuple(relation.split(LOOKUP_SEP)) if truth.is_instance(relation, str) else None
+    return tuple(relation.split(LOOKUP_SEP)) if isinstance(relation, str) else None
 
 
 def reject_captured_branches(
@@ -492,7 +496,7 @@ def reject_captured_branches(
                 continue
             target = read_attr(short, target_attr)
             remainder = long_relation[len(short_relation) :]
-            if not truth.is_subclass(target, family) or not _target_reaches(
+            if not (is_class(target) and issubclass(target, family)) or not _target_reaches(
                 target,
                 remainder,
                 family=family,
@@ -502,11 +506,11 @@ def reject_captured_branches(
             ):
                 continue
             raise ConfigurationError(
-                f"{truth.qualname(set_cls)}: {truth.kind(long_declaration)} "
+                f"{set_cls.__qualname__}: {introspection.kind(long_declaration)} "
                 f"{long_name!r} declares the relation {LOOKUP_SEP.join(long_relation)!r}, "
                 f"which continues the relation {LOOKUP_SEP.join(short_relation)!r} of "
                 f"{short_name!r} into {LOOKUP_SEP.join(remainder)!r}, a path the target "
-                f"{truth.qualname(target)} of {short_name!r} reaches. Every "
+                f"{target.__qualname__} of {short_name!r} reaches. Every "
                 f"path through {short_name!r} into it would read {long_name!r} instead; drop "
                 "one of them.",
             )
@@ -540,7 +544,7 @@ def _target_reaches(
             continue
         child = read_attr(declaration, target_attr)
         # A ``None`` placeholder target generates no input, so no path runs through it.
-        if not truth.is_subclass(child, family):
+        if not (is_class(child) and issubclass(child, family)):
             continue
         if len(relation) >= len(remainder) or _target_reaches(
             child,
@@ -593,7 +597,7 @@ def expanded_once(
     and the order side's second thread builds once more). Do not introduce a
     ``threading.local`` here without a real consumer call path requiring it.
     """
-    own = truth.class_dict(cls)
+    own = class_namespace(cls)
     cached = own.get(cache_attr)
     if cached is not None:
         return cast("_T", cached)  # the slot holds what ``build()`` stored for this class
@@ -626,10 +630,10 @@ def should_cache_expansion(cls: type[object], *, related_attr: str, target_slot:
     class (``FilterSet._expand_along`` / ``OrderSet.get_fields``), so a cached
     value never depends on which class expanded first.
     """
-    own = truth.class_dict(cls)
+    own = class_namespace(cls)
     # The set metaclass stores ``related_attr`` as a name-keyed declaration map.
     return related_attr in own and all(
-        not truth.is_instance(read_attr(entry, target_slot), str)
+        not isinstance(read_attr(entry, target_slot), str)
         for entry in require(own[related_attr], is_mapping).values()
     )
 
@@ -682,8 +686,8 @@ def require_re_readable_field_declaration(
     if is_re_readable_field_declaration(value):
         return value
     raise ConfigurationError(
-        f"{subject} {truth.qualname(set_cls)}.Meta.{meta_attr} must be {accepted}; got "
-        f"{truth.kind(value)} ({truth.render(value)}). {RE_READABLE_FIELDS_HELP}",
+        f"{subject} {set_cls.__qualname__}.Meta.{meta_attr} must be {accepted}; got "
+        f"{introspection.kind(value)} ({value!r}). {RE_READABLE_FIELDS_HELP}",
     )
 
 
@@ -707,11 +711,11 @@ def require_field_name(
     field list. ``subject`` is the family label and ``meta_attr`` the ``Meta``
     attribute the message names.
     """
-    if truth.is_exact(value, str):
+    if type(value) is str:
         return value
     raise ConfigurationError(
-        f"{subject} {truth.qualname(set_cls)}.Meta.{meta_attr} entries must be field-name "
-        f"strings; got {truth.kind(value)} ({truth.render(value)}).",
+        f"{subject} {set_cls.__qualname__}.Meta.{meta_attr} entries must be field-name "
+        f"strings; got {introspection.kind(value)} ({value!r}).",
     )
 
 
@@ -730,22 +734,22 @@ def require_lookup_names(set_cls: type[object], field_name: str, lookups: object
     ``str`` lookup names; ``utils/inputs.py::plain_set_meta_fields`` has already
     read every ``str`` subclass member (a ``StrEnum`` lookup) as its text.
     """
-    if truth.is_exact(lookups, str) or truth.is_instance(lookups, Promise):
+    if type(lookups) is str or isinstance(lookups, Promise):
         if lookups == "__all__":
             return
     elif is_re_readable_field_declaration(lookups):
         for lookup in lookups:
-            if not truth.is_exact(lookup, str):
+            if type(lookup) is not str:
                 raise ConfigurationError(
-                    f"FilterSet {truth.qualname(set_cls)}.Meta.fields[{field_name!r}] entries "
-                    f"must be lookup-name strings; got {truth.kind(lookup)} "
-                    f"({truth.render(lookup)}).",
+                    f"FilterSet {set_cls.__qualname__}.Meta.fields[{field_name!r}] entries "
+                    f"must be lookup-name strings; got {introspection.kind(lookup)} "
+                    f"({lookup!r}).",
                 )
         return
     raise ConfigurationError(
-        f"FilterSet {truth.qualname(set_cls)}.Meta.fields[{field_name!r}] must be '__all__' or "
+        f"FilterSet {set_cls.__qualname__}.Meta.fields[{field_name!r}] must be '__all__' or "
         "a re-readable collection of lookup-name strings; got "
-        f"{truth.kind(lookups)} ({truth.render(lookups)}).",
+        f"{introspection.kind(lookups)} ({lookups!r}).",
     )
 
 
@@ -783,7 +787,7 @@ def reject_unknown_exclude_names(
     excluded_declarations = sorted(excluded_names & set(declared))
     if excluded_declarations:
         raise ConfigurationError(
-            f"{subject} {truth.qualname(set_cls)}.Meta.exclude names declared "
+            f"{subject} {set_cls.__qualname__}.Meta.exclude names declared "
             f"{declared_kind}: {excluded_declarations}. An exclude never removes a "
             "declaration: remove it, or disable an inherited one with "
             f"`{excluded_declarations[0]} = None` in the class body.",
@@ -794,9 +798,9 @@ def reject_unknown_exclude_names(
     unknown = sorted(excluded_names - legal)
     if unknown:
         raise ConfigurationError(
-            f"{subject} {truth.qualname(set_cls)}.Meta.exclude names unknown fields: "
+            f"{subject} {set_cls.__qualname__}.Meta.exclude names unknown fields: "
             f"{unknown}. Available: {sorted(legal)}. Exclude only a field of "
-            f"{truth.name(model)} or a Meta.fields entry.",
+            f"{model.__name__} or a Meta.fields entry.",
         )
 
 
@@ -825,7 +829,7 @@ def require_sweep_model(
         else "Meta.exclude without Meta.fields (the '__all__' sweep minus exclude)"
     )
     raise ConfigurationError(
-        f"{truth.name(set_cls)}.{declaration} requires Meta.model "
+        f"{set_cls.__name__}.{declaration} requires Meta.model "
         f"so the {noun} field names can be derived from "
         "model._meta.get_fields().",
     )

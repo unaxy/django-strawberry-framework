@@ -44,6 +44,10 @@ declares ``Model.pk`` ``Any``, and ``dict`` / ``list`` of an ``object`` match no
 overload; under the checker each answers in ``object`` terms, which the caller
 narrows like any other consumer value.
 
+``is_instance`` is ``isinstance`` itself, typed to narrow to the class it is handed with that
+class's own type arguments, for a generic class (``ModelChoiceField[Model]`` through a typed
+alias) where a bare ``isinstance`` leaves them ``Unknown``.
+
 ``is_concrete_field``, ``is_queryset``, ``is_options``, ``is_lookup`` and ``is_identity_map``
 are ``isinstance`` checks (like ``is_dict``, each name IS the class's own ``__instancecheck__``)
 whose claim is only what the check proves: a model ``Field`` (never a reverse
@@ -181,6 +185,10 @@ if TYPE_CHECKING:
         """Return the value's own ``__dict__`` (``vars(value)``)."""
         ...
 
+    def is_instance(_value: object, _cls: type[_ValueT], /) -> TypeIs[_ValueT]:
+        """Return ``isinstance(value, cls)``, narrowing to ``cls``'s own type arguments."""
+        ...
+
     def is_awaitable(_value: object, /) -> TypeIs[Awaitable[object]]:
         """Return whether ``await`` accepts the value (``inspect.isawaitable``).
 
@@ -279,6 +287,7 @@ else:
     is_awaitable = inspect.isawaitable
     class_namespace = vars
     instance_state = vars
+    is_instance = isinstance
     read_attr = getattr
     pk_of = attrgetter("pk")
     enum_value = attrgetter("value")
@@ -318,6 +327,7 @@ __all__ = (
     "is_exact_pair",
     "is_exact_tuple",
     "is_identity_map",
+    "is_instance",
     "is_iterable",
     "is_list",
     "is_list_or_tuple",

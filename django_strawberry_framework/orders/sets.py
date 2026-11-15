@@ -62,7 +62,7 @@ from django_strawberry_framework.sets_mixins import (
     require_sweep_model,
     should_cache_expansion,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import is_exact_list, is_exact_pair
 from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
 from django_strawberry_framework.utils.inputs import (
@@ -147,16 +147,16 @@ def _validate_normalized_terms(
     """
     if not is_exact_list(data):
         raise ConfigurationError(
-            f"OrderSet {truth.qualname(cls)}._normalize_input returned invalid data "
-            f"{truth.render(data)}; expected a list of (field_path, direction) tuples.",
+            f"OrderSet {cls.__qualname__}._normalize_input returned invalid data "
+            f"{data!r}; expected a list of (field_path, direction) tuples.",
         )
     if _are_normalized_terms(data):
         return data
     # The guard failed, so some term is invalid: name the first one.
     term = next(term for term in data if not is_exact_pair(term))
     raise ConfigurationError(
-        f"OrderSet {truth.qualname(cls)}._normalize_input returned invalid term "
-        f"{truth.render(term)}; expected a (field_path, direction) 2-tuple.",
+        f"OrderSet {cls.__qualname__}._normalize_input returned invalid term "
+        f"{term!r}; expected a (field_path, direction) 2-tuple.",
     )
 
 
@@ -192,17 +192,17 @@ def _require_scoped_order_target(
     (or ``None``) answers for nothing: the hop reads the relation's own type.
     """
     scope = set_bound_type(target)
-    if scope is None:
+    if target is None or scope is None:
         return None
     scope_model = model_for(scope)
     if correlates_joined_rows(reached, scope_model):
         return scope
     raise ConfigurationError(
-        f"OrderSet {truth.qualname(owner)}: RelatedOrder {declared_attr!r} has field_name "
-        f"{relation!r}, which reaches {truth.qualname(reached)}, but its target OrderSet "
-        f"{truth.qualname(target)} is bound to {truth.qualname(scope)}, whose model is "
-        f"{truth.qualname(scope_model)}. A RelatedOrder's target OrderSet must be bound to a "
-        f"type of {truth.qualname(reached)}, a proxy of it, or a multi-table-inheritance "
+        f"OrderSet {owner.__qualname__}: RelatedOrder {declared_attr!r} has field_name "
+        f"{relation!r}, which reaches {reached.__qualname__}, but its target OrderSet "
+        f"{target.__qualname__} is bound to {scope.__qualname__}, whose model is "
+        f"{introspection.name(scope_model)}. A RelatedOrder's target OrderSet must be bound to a "
+        f"type of {reached.__qualname__}, a proxy of it, or a multi-table-inheritance "
         "parent or child of it keyed by the same column.",
     )
 
@@ -226,9 +226,9 @@ def _require_order_relation_path(
     segments = relation.split(LOOKUP_SEP)
     if len(hops) < len(segments):
         raise ConfigurationError(
-            f"OrderSet {truth.qualname(owner)}: RelatedOrder {declared_attr!r} has field_name "
+            f"OrderSet {owner.__qualname__}: RelatedOrder {declared_attr!r} has field_name "
             f"{relation!r}, but {segments[len(hops)]!r} is not a relation of the model the "
-            f"path has reached from {truth.qualname(model)}. A RelatedOrder's field_name must "
+            f"path has reached from {model.__qualname__}. A RelatedOrder's field_name must "
             "name a path of relations.",
         )
     return hops[-1].target_model
@@ -395,7 +395,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             # The metaclass stores ``related_orders`` from
             # ``sets_mixins.py::collect_related_declarations`` (``RelatedOrder`` only).
             related_orders = declaration_map(
-                truth.static_attr(cls, "related_orders", {}),
+                introspection.mro_attr(cls, "related_orders", {}),
                 RelatedOrder,
             )
             for k, v in related_orders.items():
@@ -483,7 +483,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
           the entries that are not strings at all.
         """
         fields: OrderedDict[str, RelatedOrder | None] = OrderedDict()
-        meta = truth.static_attr(cls, "Meta", None)
+        meta = introspection.mro_attr(cls, "Meta", None)
         # No write-back: the metaclass owns alias promotion; expansion must not mutate class Meta.
         meta_fields = read_set_meta_fields(meta)
         excluded = cls._read_meta_exclude(meta)
@@ -495,7 +495,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             # runtime cycle stays inert without a deferred local import.
             model = require_sweep_model(
                 cls,
-                truth.static_attr(meta, "model", None),
+                introspection.mro_attr(meta, "model", None),
                 fields_declared=meta_fields is not None,
                 noun="order",
             )
@@ -519,7 +519,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             subject="OrderSet",
             accepted="'__all__' or a re-readable collection of field names",
         )
-        model = truth.static_attr(meta, "model", None)
+        model = introspection.mro_attr(meta, "model", None)
         listed = [
             require_field_name(cls, field_path, subject="OrderSet", meta_attr="fields")
             for field_path in names
@@ -542,8 +542,8 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
                     _classify_declared_path(model, field_path)
                 except PathResolutionError as exc:
                     raise ConfigurationError(
-                        f"OrderSet {truth.qualname(cls)}.Meta.fields contains invalid "
-                        f"order path {field_path!r} for model {truth.kind(model)}: {exc}",
+                        f"OrderSet {cls.__qualname__}.Meta.fields contains invalid "
+                        f"order path {field_path!r} for model {introspection.kind(model)}: {exc}",
                     ) from exc
             fields[field_path] = None
         return fields
@@ -552,8 +552,8 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
     def _read_meta_exclude(cls, meta: object) -> frozenset[str] | None:
         """Return ``Meta.exclude`` as a set of plain field names, or ``None`` when unset.
 
-        Read without mutating class Meta, through the real MRO
-        (``truth.static_attr``), so a subclass inheriting its parent's ``Meta``
+        Read without mutating class Meta, through the MRO
+        (``utils/introspection.py::mro_attr``), so a subclass inheriting its parent's ``Meta``
         inherits the exclusion. Every name is read as plain ``str`` text
         (``utils/inputs.py::plain_set_meta_fields``), as the filter family
         reads its ``Meta.exclude``. The shape gate is the filter family's
@@ -566,7 +566,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         """
         if meta is None:
             return None
-        exclude = plain_set_meta_fields(truth.static_attr(meta, "exclude", None))
+        exclude = plain_set_meta_fields(introspection.mro_attr(meta, "exclude", None))
         if exclude is None:
             return None
         names = require_re_readable_field_declaration(
@@ -584,7 +584,10 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
     @classmethod
     def _declared_order_names(cls) -> Iterable[str]:
         """Return the names of the ``RelatedOrder`` branches this class declares or inherits."""
-        return declaration_map(truth.static_attr(cls, "related_orders", {}), RelatedOrder).keys()
+        return declaration_map(
+            introspection.mro_attr(cls, "related_orders", {}),
+            RelatedOrder,
+        ).keys()
 
     # ------------------------------------------------------------------
     # Resolver-facing API (spec-028 Decision 8)
@@ -675,8 +678,8 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
                 terminal = classify_path(model, field_path).terminal
             except PathResolutionError as exc:
                 raise ConfigurationError(
-                    f"OrderSet {truth.qualname(cls)} received invalid order path "
-                    f"{field_path!r} for model {truth.kind(model)}: {exc}",
+                    f"OrderSet {cls.__qualname__} received invalid order path "
+                    f"{field_path!r} for model {introspection.kind(model)}: {exc}",
                 ) from exc
             terms.append(
                 (

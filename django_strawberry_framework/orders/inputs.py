@@ -30,12 +30,10 @@ from django.db.models import F
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
-    is_str,
     list_of,
     read_attr,
-    require,
     require_instance,
 )
 from django_strawberry_framework.utils.input_values import RELATED, iter_active_fields
@@ -177,15 +175,15 @@ def _get_concrete_field_names_for_order(model: object) -> list[str]:
     ``ForeignObject`` links, in model field order; it excludes reverse
     relations, M2M managers, ``GenericRelation`` and ``GenericForeignKey``.
     """
-    meta = truth.static_attr(model, "_meta", None)
+    meta = introspection.mro_attr(model, "_meta", None)
     fields = read_attr(meta, "fields", None)
     if fields is None:
         raise ConfigurationError(
             f"Expected a Django Model class with '_meta.fields'; "
-            f"got {truth.kind(model)} ({truth.render(model)}).",
+            f"got {introspection.kind(model)} ({model!r}).",
         )
     return [
-        require(read_attr(f, "name"), is_str)
+        require_instance(read_attr(f, "name"), str)
         for f in list_of(fields)
         if is_stored_column(f) or carrier_backed_link(f) is not None
     ]
@@ -342,10 +340,10 @@ def normalize_input_value(
             # Leaf -- ``raw_value`` is an ``Ordering`` member (``None`` was
             # already skipped as inactive by the classifier).
             if not isinstance(field.raw_value, Ordering):
-                owner_name = truth.qualname(orderset_cls)
+                owner_name = orderset_cls.__qualname__
                 raise ConfigurationError(
                     f"OrderSet {owner_name} received invalid order direction "
-                    f"{truth.render(field.raw_value)} for field {field.python_attr!r}; "
+                    f"{field.raw_value!r} for field {field.python_attr!r}; "
                     f"expected an Ordering enum member.",
                 )
             result.append((field.spec.django_source_path, field.raw_value))
@@ -368,9 +366,8 @@ def _ensure_field_specs(orderset_cls: type[OrderSet], input_value: object) -> No
     traversal = orderset_cls._input_traversal()
     if not any(iter_active_fields(orderset_cls, input_value, traversal)):
         return
-    if callable(getattr(orderset_cls, "get_fields", None)) and not truth.is_among(
-        orderset_cls,
-        (owner for owner, _ in _field_specs),
+    if callable(getattr(orderset_cls, "get_fields", None)) and orderset_cls not in (
+        owner for owner, _ in _field_specs
     ):
         _ = _build_input_fields(orderset_cls)
 

@@ -8,7 +8,7 @@
   ``hash`` on the class.
 - ``kind`` and ``text`` spell a value for an error message: a class names itself, any other
   value names its type, and a ``str`` subclass such as a ``(str, Enum)`` member spells as
-  its own text.
+  its own text. ``plain_str`` passes any other value through unchanged.
 - ``name`` names a C callable or a callable instance, which may carry no ``__name__`` of its
   own.
 """
@@ -19,7 +19,7 @@ import inspect
 import types
 from typing import TYPE_CHECKING, TypeVar
 
-from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils._narrowing import is_str, read_attr
 from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
@@ -31,11 +31,13 @@ __all__ = (
     "mro_entry",
     "name",
     "overrides",
+    "plain_str",
     "text",
 )
 
 _K = TypeVar("_K")
 _V = TypeVar("_V")
+_T = TypeVar("_T")
 
 # The two C descriptor types a ``callable`` check does not cover.
 _NON_CALLABLE_C_TYPES = (types.GetSetDescriptorType, types.MemberDescriptorType)
@@ -98,11 +100,17 @@ def text(value: object, fallback: str = "") -> str:
     """Return ``value`` as an exact ``str``, or ``fallback`` when that text is empty.
 
     A ``str`` subclass is copied through the base ``str`` slot, so a ``(str, Enum)`` member
-    or a ``TextChoices`` member spells its value and no consumer ``__str__`` runs. Anything
-    else renders through ``str()``.
+    or a ``TextChoices`` member spells its value and no consumer ``__str__`` runs. The class
+    is the value's real one, so a lazy proxy is no ``str`` and renders through ``str()``, as
+    anything else does.
     """
-    rendered = str.__str__(value) if isinstance(value, str) else str(value)
+    rendered = str.__str__(value) if is_str(value) else str(value)
     return rendered or fallback
+
+
+def plain_str(value: _T) -> _T | str:
+    """Return a ``str`` subclass as the exact ``str`` it spells (``text``); any other value as is."""
+    return text(value) if is_str(value) else value
 
 
 def name(obj: object) -> str:

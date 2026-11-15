@@ -31,7 +31,6 @@ from apps.library import models as library_models
 from apps.library.filters import BookFilter
 from apps.library.models import Book
 from django.db.models import Model
-from django.utils.functional import SimpleLazyObject
 from django_filters import CharFilter
 from typing_extensions import override
 
@@ -59,7 +58,7 @@ from django_strawberry_framework.sets_mixins import (
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
 from django_strawberry_framework.utils.inputs import GeneratedInputFieldSpec
-from tests._idioms import ClassReadRaises, definition_raises
+from tests._idioms import definition_raises
 
 _SHARED_PERMISSION_METHODS = (
     "_request_from_info",
@@ -970,28 +969,6 @@ def test_filter_normalizer_honors_a_subclass_unset_sentinel_override() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_re_readable_gate_rejection_names_a_value_whose_class_read_raises() -> None:
-    """The ``got`` tail renders the value without reading its ``__class__``."""
-
-    class _Probe:
-        pass
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        require_re_readable_field_declaration(
-            _Probe,
-            ClassReadRaises(),
-            subject="OrderSet",
-            accepted="'__all__' or a re-readable collection of field names",
-        )
-    assert str(excinfo.value) == (
-        f"OrderSet {_Probe.__qualname__}.Meta.fields must be '__all__' or a re-readable "
-        "collection of field names; got ClassReadRaises (<ClassReadRaises>). "
-        "Accepted: a re-readable collection of field names -- list, tuple, set, frozenset, "
-        "dict keys/values, or another sized collection; not a one-shot iterator or generator, "
-        "and not a bare string."
-    )
-
-
 def test_re_readable_gate_message_names_the_receipt_and_the_contract() -> None:
     """The rejection names the offending class, the received type, and what IS accepted."""
 
@@ -1371,26 +1348,3 @@ def test_re_readable_gate_message_is_pinned() -> None:
         f"collection of field names; got list_iterator ({one_shot!r}). "
         f"{RE_READABLE_FIELDS_HELP}"
     )
-
-
-def test_collect_related_declarations_never_evaluates_a_lazy_class_body_value() -> None:
-    """A ``SimpleLazyObject`` class-body value is classified by its real class.
-
-    Collection never runs the lazy factory: the value is a plain attribute (not
-    a ``RelatedOrder``), and the factory's own exception surfaces only where the
-    consumer evaluates it.
-    """
-
-    def _factory() -> NoReturn:
-        raise RuntimeError("lazy factory failed")
-
-    class LazyBodyOrder(OrderSet):
-        helper = SimpleLazyObject(_factory)
-
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-    assert "helper" not in LazyBodyOrder.related_orders
-    with pytest.raises(RuntimeError, match="lazy factory failed"):
-        str(LazyBodyOrder.helper)

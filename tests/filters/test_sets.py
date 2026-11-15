@@ -50,7 +50,6 @@ from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     ClassVar,
-    Literal,
     NamedTuple,
     NoReturn,
     TypeAlias,
@@ -172,7 +171,7 @@ from django_strawberry_framework.filters.sets import (
     _candidate_metadata_for,
     _constrains_nothing,
     _expansion_record,
-    _family_profile_for,
+    _is_audited_family,
     _lookups_for_field,
     _normalize_policy_entry,
     _NormalizedPolicyEntry,
@@ -186,8 +185,10 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import collect_related_declarations
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.relay import apply_interfaces
-from django_strawberry_framework.utils import truth, widgets
+from django_strawberry_framework.utils import introspection, widgets
 from django_strawberry_framework.utils._narrowing import (
+    class_namespace,
+    is_class,
     is_dict,
     is_exact_pair,
     is_list_or_tuple,
@@ -209,9 +210,7 @@ from tests._filter_key_models import _DecimalKeyedHolder
 from tests._idioms import (
     STR_ENUM,
     STR_SUBCLASS_KINDS,
-    ClassReadRaises,
     canonical_order,
-    comparing_metaclass,
     definition_raises,
     is_object_dict,
     pickle_roundtrip,
@@ -1222,56 +1221,6 @@ def test_a_related_filter_cycle_through_a_set_with_a_placeholder_declaration_exp
     assert {name: set(fs.get_filters()) for name, fs in sets.items()} == (
         _PLACEHOLDER_CYCLE_FILTERS[owner]
     )
-
-
-@pytest.mark.parametrize("hostile", ["path", "target"])
-@pytest.mark.parametrize("verdict", ["equal", "unequal", "raises"])
-def test_a_related_filter_target_is_matched_against_the_expansion_path_by_identity(
-    verdict: Literal["equal", "unequal", "raises"],
-    hostile: Literal["path", "target"],
-) -> None:
-    """A ``RelatedFilter`` target expands whatever its or a path set's metaclass ``__eq__`` says.
-
-    The cycle rule finds a set already on the path by identity, so a consumer metaclass
-    ``__eq__`` (on the target set or on the set whose path it extends) is never called: an
-    always-equal answer cannot end the path early, a raising one cannot escape ``get_filters``.
-    """
-    calls: list[str] = []
-    meta = comparing_metaclass(FilterSetMetaclass, verdict, calls)
-
-    class IdentityBranchFilter(FilterSet):
-        class Meta:
-            model = library_models.Branch
-            fields = {"name": ["exact"]}
-
-    class IdentityShelfFilter(
-        FilterSet,
-        metaclass=meta if hostile == "target" else FilterSetMetaclass,
-    ):
-        branch = RelatedFilter(IdentityBranchFilter, field_name="branch")
-
-        class Meta:
-            model = library_models.Shelf
-            fields = {"code": ["exact"]}
-
-    class IdentityBookFilter(
-        FilterSet,
-        metaclass=meta if hostile == "path" else FilterSetMetaclass,
-    ):
-        shelf = RelatedFilter(IdentityShelfFilter, field_name="shelf")
-
-        class Meta:
-            model = library_models.Book
-            fields = {"title": ["exact"]}
-
-    assert set(IdentityBookFilter.get_filters()) == {
-        "title",
-        "shelf",
-        "shelf__code",
-        "shelf__branch",
-        "shelf__branch__name",
-    }
-    assert calls == []
 
 
 @pytest.mark.parametrize("relation", ["parent", "children"])
@@ -2343,7 +2292,7 @@ def _path_walk(filterset: type[FilterSet], path: tuple[type[FilterSet], ...] = (
     """
     path = (*path, filterset)
     names = dict.fromkeys(super(FilterSet, filterset).get_filters())
-    declarations = truth.class_dict(filterset)["related_filters"]
+    declarations = class_namespace(filterset)["related_filters"]
     assert is_dict(declarations)
     for declaration_name, declaration in declarations.items():
         assert isinstance(declaration, RelatedFilter)
@@ -4110,29 +4059,6 @@ def test_filterset_get_fields_rejects_one_shot_iterator_at_class_creation() -> N
     assert "not a one-shot iterator or generator" in message
 
 
-@pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
-def test_filterset_get_fields_rejects_a_declaration_whose_class_read_raises(
-    escape: type[BaseException],
-) -> None:
-    """``Meta.fields`` whose ``__class__`` raises is rejected at class creation, typed.
-
-    The shape gate runs before upstream consumes the declaration; the ``str`` exemption in
-    front of it must not read the value's ``__class__`` unguarded, or the value's own
-    exception replaces the typed rejection.
-    """
-    meta = type("Meta", (), {"model": library_models.Shelf, "fields": ClassReadRaises(escape)})
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        type("HostileFieldsFilter", (FilterSet,), {"Meta": meta})
-    assert str(excinfo.value) == (
-        "FilterSet HostileFieldsFilter.Meta.fields must be '__all__', a lookup-bag dict, "
-        "or a re-readable collection of field names; got ClassReadRaises (<ClassReadRaises>). "
-        "Accepted: a re-readable collection of field names -- list, tuple, set, frozenset, "
-        "dict keys/values, or another sized collection; not a one-shot iterator or generator, "
-        "and not a bare string."
-    )
-
-
 def test_filterset_get_fields_rejects_builtin_iterator_too() -> None:
     with pytest.raises(ConfigurationError):
 
@@ -4674,8 +4600,8 @@ def test_filterset_model_less_sweep_is_refused_by_name_and_a_subclass_supplies_t
         "can be derived from model._meta.get_fields()."
     )
 
-    base_meta = truth.static_attr(base, "Meta")
-    assert truth.is_type(base_meta)
+    base_meta = introspection.mro_attr(base, "Meta")
+    assert is_class(base_meta)
     child = type(
         "ModelSweepFilter",
         (base,),
@@ -8712,9 +8638,7 @@ def test_annotation_list_parameter_the_leaf_reads_never_refuses_its_list(
             model = shelf_model
             fields = []
 
-    cursor_factory = (
-        require(read_attr(psycopg, "ClientCursor"), truth.is_type) if client_side else None
-    )
+    cursor_factory = require(read_attr(psycopg, "ClientCursor"), is_class) if client_side else None
     with postgresql_stand_in(psycopg, cursor_factory) as alias:
         queryset = shelf_model.objects.using(alias).annotate(
             clocks_seen=models.Case(
@@ -10734,7 +10658,7 @@ def test_filter_hop_hook_reads_every_target_row_in_the_default_manager_class(
             info: object,
         ) -> QuerySet[library_models.Shelf]:
             codes = tuple(sorted(queryset.values_list("code", flat=True)))
-            seen.append((truth.class_of(queryset), codes))
+            seen.append((type(queryset), codes))
             return queryset
 
     class ShapedShelfFilter(FilterSet):
@@ -12251,7 +12175,8 @@ def test_is_generation_capable_true_for_a_classmethod_rewrap_of_the_package_seam
     seam: str,
 ) -> None:
     """A subclass re-wrapping the package's own seam function in a ``classmethod`` overrides nothing."""
-    package_function = truth.stored_function(truth.class_dict(FilterSet)[seam])
+    stored = class_namespace(FilterSet)[seam]
+    package_function = read_attr(stored, "__func__", stored)
     assert callable(package_function)
 
     class RewrappedFilter(FilterSet):
@@ -12261,14 +12186,14 @@ def test_is_generation_capable_true_for_a_classmethod_rewrap_of_the_package_seam
 
     setattr(RewrappedFilter, seam, classmethod(package_function))
 
-    assert truth.class_dict(RewrappedFilter)[seam] is not truth.class_dict(FilterSet)[seam]
+    assert class_namespace(RewrappedFilter)[seam] is not class_namespace(FilterSet)[seam]
     assert RewrappedFilter._is_generation_capable() is True
 
 
 def test_is_generation_capable_false_for_plain_function_seam_override() -> None:
     """A ``filter_for_field`` shadowed by a plain function is an override -> False.
 
-    ``truth.overrides`` compares the function each class stores for the seam: a
+    ``introspection.overrides`` compares the function each class stores for the seam: a
     plain function is its own stored function, which is not the one ``FilterSet``'s
     ``classmethod`` holds, so ``_is_generation_capable`` reports the seam
     overridden without binding or calling it. Empty ``fields`` keeps class
@@ -12334,7 +12259,7 @@ def test_a_custom_generated_child_keeps_its_class_provenance_and_no_candidate() 
     leaf = ParentBookFilter.get_filters()["loans__note__icontains"]
     assert isinstance(leaf, CustomChildGenerated)
     assert _provenance(leaf).origin == "framework_default"
-    assert not _family_profile_for(leaf)  # unaudited subclass -> no family
+    assert not _is_audited_family(leaf)  # unaudited subclass -> no family
     assert "loans__note__icontains" not in _snapshot(ParentBookFilter).candidates
 
 
@@ -12361,7 +12286,7 @@ def test_a_stock_generated_child_copy_is_owned_by_the_declared_branch() -> None:
     assert ParentBookFilter._is_generation_capable() is True
     assert ChildLoanFilter._is_generation_capable() is True
     leaf = ParentBookFilter.get_filters()["loans__note__icontains"]
-    assert _family_profile_for(leaf)
+    assert _is_audited_family(leaf)
     assert "loans__note__icontains" not in _snapshot(ParentBookFilter).candidates
 
 
@@ -12494,7 +12419,7 @@ def test_method_owned_leaf_is_ineligible_on_framework_many_side_path() -> None:
         leaf,
         FilterGenerationProvenance(origin="framework_default"),
     )
-    assert _family_profile_for(leaf)  # CharFilter IS a registered family
+    assert _is_audited_family(leaf)  # CharFilter IS a registered family
     row = _candidate_metadata_for(library_models.Book, leaf)
     assert isinstance(row, CandidateFilterMetadata)
     assert row.path_plan.first_many_index is not None  # genuinely many-side
@@ -13292,10 +13217,10 @@ def test_genuine_dynamic_concrete_in_and_range_resolve_to_sequence_profile(looku
         inner = concrete.__bases__[1]
         assert inner.__bases__ == (BaseInFilter, CharFilter)
         assert issubclass(inner, Filter)
-        assert _family_profile_for(object.__new__(inner)) is True
+        assert _is_audited_family(object.__new__(inner)) is True
     else:
         assert concrete.__bases__[0] is BaseRangeFilter
-    assert _family_profile_for(object.__new__(concrete)) is True
+    assert _is_audited_family(object.__new__(concrete)) is True
 
 
 @pytest.mark.parametrize("shape", ["unaudited-inner", "audited-inner", "wrapper-body"])
@@ -13319,7 +13244,7 @@ def test_membership_wrapper_only_unwraps_an_audited_empty_body(shape: str) -> No
         "audited-inner": membership_in_filter_class(GenuineIn),
         "wrapper-body": WrapperWithBody,
     }[shape]
-    assert _family_profile_for(object.__new__(wrapped)) is (shape == "audited-inner")
+    assert _is_audited_family(object.__new__(wrapped)) is (shape == "audited-inner")
 
 
 def test_in_lookup_inherited_as_a_non_base_in_filter_fails_at_build() -> None:
@@ -13364,9 +13289,9 @@ def test_integer_in_resolves_by_exact_type_and_bare_base_in_is_unregistered() ->
     assert IntegerInFilter in _FILTER_FAMILY_REGISTRY
     assert BaseInFilter not in _FILTER_FAMILY_REGISTRY
     assert BaseRangeFilter not in _FILTER_FAMILY_REGISTRY
-    assert _family_profile_for(object.__new__(IntegerInFilter))
-    assert not _family_profile_for(object.__new__(BaseInFilter))
-    assert not _family_profile_for(object.__new__(BaseRangeFilter))
+    assert _is_audited_family(object.__new__(IntegerInFilter))
+    assert not _is_audited_family(object.__new__(BaseInFilter))
+    assert not _is_audited_family(object.__new__(BaseRangeFilter))
 
 
 @pytest.mark.parametrize(
@@ -13391,7 +13316,7 @@ def test_unregistered_subclass_of_registered_category_fails_closed(base_cls: typ
         def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
             return qs
 
-    assert not _family_profile_for(object.__new__(_UnauditedSubclass))
+    assert not _is_audited_family(object.__new__(_UnauditedSubclass))
 
 
 @pytest.mark.parametrize(
@@ -13476,7 +13401,7 @@ def test_dynamic_csv_subclass_with_added_behavior_fails_closed(shape: str) -> No
         "unaudited-scalar": _EvilInUnauditedScalar,
         "non-csv-first-base": _TwoBaseFirstNotCsv,
     }
-    assert not _family_profile_for(object.__new__(variants[shape]))
+    assert not _is_audited_family(object.__new__(variants[shape]))
 
 
 @pytest.mark.parametrize("lookup", ["in", "range"], ids=["in", "range"])
@@ -13488,7 +13413,7 @@ def test_empty_body_dynamic_csv_reference_matches_genuine_class_own_names(lookup
     ``__static_attributes__`` on 3.13+) instead of hardcoding a version-coupled allowlist.
     This pins that derivation to what django-filter actually produces: a genuine
     ``ConcreteInFilter`` / ``ConcreteRangeFilter`` has EXACTLY these own names -- so the
-    exact-set compare in ``_dynamic_csv_profile_for`` neither false-closes a real dynamic
+    exact-set compare in ``_is_dynamic_csv_class`` neither false-closes a real dynamic
     class nor admits an extra member.
     """
     genuine = _genuine_dynamic_csv_class(lookup)
@@ -13502,15 +13427,15 @@ def test_empty_body_dynamic_csv_reference_matches_genuine_class_own_names(lookup
 )
 def test_registry_is_a_closed_exact_allowlist(family_cls: type[Filter]) -> None:
     """An audited family's identity is accepted, while an arbitrary subclass is refused."""
-    assert _family_profile_for(object.__new__(family_cls))
+    assert _is_audited_family(object.__new__(family_cls))
     generated_subclass = type(f"Sub_{family_cls.__name__}", (family_cls,), {})
-    assert not _family_profile_for(object.__new__(generated_subclass))
+    assert not _is_audited_family(object.__new__(generated_subclass))
 
 
 def test_bare_filter_base_is_not_a_registered_family() -> None:
     """The universal ``Filter`` base is no audited family (not a catch-all member)."""
     assert Filter not in _FILTER_FAMILY_REGISTRY
-    assert not _family_profile_for(object.__new__(Filter))
+    assert not _is_audited_family(object.__new__(Filter))
 
 
 def test_unknown_family_leaf_is_ineligible_on_framework_many_side_path() -> None:
@@ -13528,7 +13453,7 @@ def test_unknown_family_leaf_is_ineligible_on_framework_many_side_path() -> None
         leaf,
         FilterGenerationProvenance(origin="framework_default"),
     )
-    assert not _family_profile_for(leaf)
+    assert not _is_audited_family(leaf)
     row = _candidate_metadata_for(library_models.Book, leaf)
     assert isinstance(row, CandidateFilterMetadata)
     assert row.path_plan.first_many_index is not None  # genuinely many-side
@@ -13951,7 +13876,7 @@ def test_projected_leaf_gets_no_candidate_row() -> None:
 
     leaf = BookParent.get_filters()["loans__note__icontains"]
     assert isinstance(leaf, ProjectedChildFilter)
-    assert not _family_profile_for(leaf)
+    assert not _is_audited_family(leaf)
     assert _provenance(leaf).origin == "framework_default"
     snapshot = BookParent._expansion_snapshot()
     assert snapshot is not None
@@ -18071,7 +17996,7 @@ def test_enum_choice_filter_resolves_to_the_choice_family_profile() -> None:
     would resolve to no family and lose its row-preserving routing.
     """
     instance = object.__new__(EnumChoiceFilter)
-    assert _family_profile_for(instance)
+    assert _is_audited_family(instance)
 
 
 def test_generated_choice_exact_over_to_many_path_is_an_eligible_enum_choice_leaf() -> None:
@@ -18131,10 +18056,10 @@ def test_every_text_choice_lookup_resolves_to_an_enum_member_filter(lookup: str)
     leaf = _ShelfConditionLookupFilter.get_filters()[_condition_filter_name(lookup)]
     if lookup == "exact":
         assert type(leaf) is EnumChoiceFilter
-        assert _family_profile_for(leaf)
+        assert _is_audited_family(leaf)
     else:
         assert type(leaf) is EnumLookupFilter
-        assert _family_profile_for(leaf)
+        assert _is_audited_family(leaf)
 
 
 @pytest.mark.parametrize("clone", [copy.deepcopy, pickle_roundtrip])

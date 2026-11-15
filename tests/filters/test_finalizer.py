@@ -162,8 +162,9 @@ from django_strawberry_framework.types.finalizer import (
     _bind_filterset_owner,
 )
 from django_strawberry_framework.types.relay import apply_interfaces
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
+    class_namespace,
     is_dict,
     is_list_or_tuple,
     is_queryset,
@@ -721,8 +722,8 @@ def test_a_filterset_subclass_binds_its_own_owner_apart_from_its_base(
         ViaHidingBookType.__django_strawberry_definition__.filterset_class is ViaHidingBookFilter
     )
     assert ViaPlainBookType.__django_strawberry_definition__.filterset_class is ViaPlainBookFilter
-    shelf_owner = truth.class_dict(ShelfFilter)["_owner_definition"]
-    sub_shelf_owner = truth.class_dict(SubShelfFilter)["_owner_definition"]
+    shelf_owner = class_namespace(ShelfFilter)["_owner_definition"]
+    sub_shelf_owner = class_namespace(SubShelfFilter)["_owner_definition"]
     assert isinstance(shelf_owner, DjangoTypeDefinition)
     assert isinstance(sub_shelf_owner, DjangoTypeDefinition)
     assert shelf_owner.origin is (hiding_type if base_on_hiding else plain_type)
@@ -823,10 +824,8 @@ def test_an_unwired_filterset_keeps_its_own_unbound_owner_slot(
             interfaces = (relay.Node,)
 
     finalize_django_types()
-    assert (
-        read_attr(truth.class_dict(ShelfFilter)["_owner_definition"], "origin") is PlainShelfType
-    )
-    assert "_owner_definition" not in truth.class_dict(target)
+    assert read_attr(class_namespace(ShelfFilter)["_owner_definition"], "origin") is PlainShelfType
+    assert "_owner_definition" not in class_namespace(target)
     assert registry.get(Shelf) is HidingShelfType
     assert registry.get(Branch) is BranchType
     assert registry.get(Book) is ViaTargetBookType
@@ -5973,7 +5972,7 @@ def test_a_raw_reverse_key_lookup_any_filter_class_applies_is_refused_at_first_c
     filterset_cls = _raw_key_set(key, walk, probe)
     refusal = _first_use_refusal(filterset_cls, {"probe": value})
     assert refusal.startswith(
-        f"FilterSet SpecimenFilter: {truth.kind(probe)} 'probe' has field_name 'children' and "
+        f"FilterSet SpecimenFilter: {introspection.kind(probe)} 'probe' has field_name 'children' and "
         f"lookup_expr {lookup_expr!r}, but Django resolves no transform or lookup "
         f"{lookup_expr!r} on ",
     )
@@ -6185,7 +6184,7 @@ def _django_outcome(model: type[Model], predicate: dict[str, object]) -> object:
             str(read_attr(row, "pk")) for row in model._default_manager.filter(**predicate)
         )
     except (TypeError, FieldError) as exc:
-        return (truth.kind(exc), str(exc))
+        return (introspection.kind(exc), str(exc))
 
 
 @pytest.mark.django_db
@@ -6495,7 +6494,7 @@ def _raw_outcome(filterset_cls: type[FilterSet], data: dict[str, object]) -> obj
         rows = require(filterset_cls(data=data).qs, is_queryset)
         return sorted(str(read_attr(row, "pk")) for row in rows)
     except (TypeError, FieldError, ConfigurationError) as exc:
-        return (truth.kind(exc), str(exc))
+        return (introspection.kind(exc), str(exc))
 
 
 @pytest.mark.django_db

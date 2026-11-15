@@ -21,6 +21,7 @@ from django_strawberry_framework.utils._narrowing import (
     get_item,
     is_char_wise,
     is_concrete_field,
+    is_instance,
     is_lookup,
     is_queryset,
     is_real_collection,
@@ -177,6 +178,11 @@ def test_is_queryset_accepts_a_queryset_and_refuses_a_manager_and_a_list() -> No
     manager: models.Manager[models.Model] = models.Manager()
     assert is_queryset(manager) is False
     assert is_queryset([]) is False
+
+
+def test_is_instance_is_isinstance() -> None:
+    """``is_instance`` answers what ``isinstance`` answers, a subclass instance included."""
+    assert (is_instance(1, object), is_instance("1", int)) == (True, False)
 
 
 def test_is_lookup_accepts_a_lookup_and_refuses_an_expression_and_a_where_node() -> None:

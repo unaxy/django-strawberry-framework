@@ -19,8 +19,8 @@ from django.forms.utils import ErrorDict
 from django.utils.datastructures import MultiValueDict
 from typing_extensions import override
 
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
+    is_class,
     is_list_or_tuple,
     read_attr,
     require,
@@ -285,7 +285,7 @@ class _BoundFilterForm(forms.Form):
 
 def _is_form_class(value: object) -> TypeIs[type[forms.Form]]:
     """Whether ``value`` is a Django ``Form`` subclass; asked of the class ``type()`` built."""
-    return truth.is_subclass(value, forms.Form)
+    return is_class(value) and issubclass(value, forms.Form)
 
 
 def bound_filter_form_class(
@@ -301,9 +301,9 @@ def bound_filter_form_class(
     return require(
         object_result(
             type,
-            truth.name(actual),
+            actual.__name__,
             bases,
-            {"_filter_bindings": bindings, "__module__": truth.module(actual)},
+            {"_filter_bindings": bindings, "__module__": actual.__module__},
         ),
         _is_form_class,
     )
@@ -472,7 +472,7 @@ class BindAskingFilterForm(forms.Form):
 
 def _is_bind_asking_form_class(value: object) -> TypeIs[type[BindAskingFilterForm]]:
     """Whether ``value`` is a ``BindAskingFilterForm`` subclass; asked of the class ``type()`` built."""
-    return truth.is_subclass(value, BindAskingFilterForm)
+    return is_class(value) and issubclass(value, BindAskingFilterForm)
 
 
 def bind_asking_form_class(
@@ -489,13 +489,9 @@ def bind_asking_form_class(
         owned = require(
             object_result(
                 type,
-                truth.name(actual),
+                actual.__name__,
                 (actual,),
-                {
-                    "_filter_asks": asks,
-                    "full_clean": full_clean,
-                    "__module__": truth.module(actual),
-                },
+                {"_filter_asks": asks, "full_clean": full_clean, "__module__": actual.__module__},
             ),
             _is_bind_asking_form_class,
         )
@@ -503,9 +499,9 @@ def bind_asking_form_class(
     return require(
         object_result(
             type,
-            truth.name(actual),
+            actual.__name__,
             (BindAskingFilterForm, actual),
-            {"_filter_asks": asks, "__module__": truth.module(actual)},
+            {"_filter_asks": asks, "__module__": actual.__module__},
         ),
         _is_bind_asking_form_class,
     )
