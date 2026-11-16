@@ -265,7 +265,7 @@ These pass through to the underlying Strawberry field unchanged.
 
 **Module location.** `DjangoListField` lives in **`django_strawberry_framework/list_field.py`** (a flat single-file module at the package root), not in `connection.py`, which holds the Relay sibling.
 
-**`list_field.py` is the home of the shared field-target validation contract.** The four constructor guards live here as `django_strawberry_framework/list_field.py::_validate_djangotype_target`, and the Relay-Node-shaped superset as `::_validate_relay_djangotype_target`. `DjangoConnectionField` (`django_strawberry_framework/connection.py #"from .list_field import _validate_relay_djangotype_target"`) and the root node fields (`django_strawberry_framework/relay.py::_validate_node_target`) both import the Relay variant, so the target-validation contract is single-sited in this module rather than duplicated per factory. Each caller passes its own `field=` name, so every `ConfigurationError` names the factory that raised it. A reader changing a guard changes it here, once.
+**`list_field.py` is the home of the shared field-target validation contract.** The four constructor guards live here as `django_strawberry_framework/list_field.py::_validate_djangotype_target`, and the Relay-Node-shaped superset as `::_validate_relay_djangotype_target`. `DjangoConnectionField` (`django_strawberry_framework/connection.py #"    _validate_relay_djangotype_target,"`) and the root node fields (`django_strawberry_framework/relay.py::_validate_node_target`) both import the Relay variant, so the target-validation contract is single-sited in this module rather than duplicated per factory. Each caller passes its own `field=` name, so every `ConfigurationError` names the factory that raised it. A reader changing a guard changes it here, once.
 
 Public-export surface:
 
@@ -288,11 +288,10 @@ def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity.
     # max_rows / trusted_max_rows validation and the shared target guards (Decision 5).
     if resolver is None:
         def _default(root=None, *, info, offset=None, limit=None, order_by=strawberry.UNSET):
-            args_record = _argument_record(info, ...)
-            qs = base_queryset(target_model)
-            if async_execution():
-                return _execute_queryset_pipeline_async(node_type, qs, info, args_record, ...)
-            return _execute_queryset_pipeline_sync(node_type, qs, info, args_record, ...)
+            args_record = normalize(info.field_name, info, offset=offset, ...)
+            # _run_pipeline: _execute_queryset_pipeline_async under async_execution(),
+            # else _execute_queryset_pipeline_sync, each bound once with functools.partial.
+            return _run_pipeline(base_queryset(target_model), info, args_record)
         wrapped = _default
     else:
         # _async_wrap: await the consumer coroutine FIRST, then

@@ -128,8 +128,7 @@ Release: [`django_strawberry_framework.__version__`][package-init] reads `"0.0.1
         list-field-specific input class.
   - [ ] The shared target validator accepts only the definition the type registry holds for
         the target, compared by identity; list, connection, and Relay node fields enter
-        through it, and the generated-connection cache verifies the definition that produced
-        each entry on every warm hit.
+        through it.
   - [ ] The optimizer carries the child definition the relation was resolved through into the
         nested planner, and no optimizer decision about a relation target reads
         `__django_strawberry_definition__` off the target class.
@@ -632,12 +631,9 @@ target's real type and MRO, so a `__class__` property that raises or lies is the
 the lookup compares the class object itself and never runs a target metaclass's `__hash__` or
 `__eq__` (`tests/test_list_field.py::test_djangolistfield_registry_lookup_never_hashes_the_target`).
 
-The generated-connection cache carries the same rule.
-`django_strawberry_framework/connection.py::_connection_type_for` keys on target identity, so a
-warm hit returns a class whose shape, SDL name and keyset vocabulary were fixed by whichever
-definition arrived first; an entry therefore records the definition that generated it and a
-caller arriving with a different one is rejected instead of being handed the earlier field's
-shape beside its own published arguments.
+The generated-connection cache
+(`django_strawberry_framework/connection.py::_connection_type_for`) keys on target identity: a
+cold cache generates the class from the caller's definition, and a warm hit returns that class.
 
 The optimizer plans the same field from the same one answer.
 `django_strawberry_framework/optimizer/walker.py::_resolve_relation_target` returns the child
@@ -703,11 +699,9 @@ synthesized signature and SDL order, so a direct call with both values invalid h
 deterministic first failure.
 
 The record answers distinct questions with distinct fields, and no consumer of one reads
-another as a proxy for it. `any_argument_supplied` is true when any of the three arrived
-non-null; it selects the argument-bearing pipeline and nothing else. The `window` fields
-(`offset`, `limit`) say which rows are returned, and `offset: 0` with an omitted limit produces
-the same window as omission - which is why Decision 9's fast path is a MODE decision and never a
-window comparison. `order_by_supplied` says whether an order argument arrived at all, and it,
+another as a proxy for it. The `window` fields (`offset`, `limit`) say which rows are
+returned, and `offset: 0` with an omitted limit produces the same window as omission.
+`order_by_supplied` says whether an order argument arrived at all, and it,
 never material activity, drives the `queryset_required` source check, because an empty list is
 still a supplied order argument. Material order activity is the fourth question and is answered
 only after public apply succeeds. Collapsing any pair of these into one bit would let one
@@ -1472,10 +1466,7 @@ iterator and invokes/awaits `aclose` when that optional method exists, without c
 `__anext__`. A failure to obtain or close the iterator propagates in place of the
 `ListArgumentError`. This uses the same package-private cleanup utility
 (`django_strawberry_framework/resource_policy.py::_cleanup_rejected_async_iterable`) as
-`bounded_rows_async`, so rejection cannot leak a generator or grow a second cleanup policy. The
-close is owed on every rejecting exit, including when constructing the `ListArgumentError`
-itself fails (malformed schema metadata behind the wire-name lookup): the same cleanup runs
-before that failure propagates.
+`bounded_rows_async`, so rejection cannot leak a generator or grow a second cleanup policy.
 
 The same close is owed one seam later, for the same reason. The async raw-list seam
 (`django_strawberry_framework/resource_policy.py::_windowed_rows_async`, the body
@@ -1519,12 +1510,11 @@ source-dependent and could bypass visibility.
 
 When all three arguments are omitted or null,
 [`django_strawberry_framework/list_field.py::_normalize_list_arguments`][list-field] returns an
-all-`None` record with `any_argument_supplied=False` before it reads the policy. Both pipelines,
+all-`None` record before it reads the policy. Both pipelines,
 [`django_strawberry_framework/list_field.py::_execute_queryset_pipeline_sync`][list-field] and
 [`django_strawberry_framework/list_field.py::_execute_queryset_pipeline_async`][list-field],
-test that flag after visibility and delegate to the coordinate-free raw-list window,
-`_windowed_rows(post_vis_qs, info, max_rows, trusted=trusted_max_rows)` - the body
-`bounded_rows` runs. Nothing calculates `offset=0` or rebuilds an equivalent slice. Under the
+then skip the order step, the offset guard returns at once, and `_windowed_rows` with no
+coordinates takes its coordinate-free branch - the body `bounded_rows` runs. Nothing calculates `offset=0` or rebuilds an equivalent slice. Under the
 synchronous executor that result is returned unchanged. Under the asynchronous executor a final
 queryset is wrapped in Decision 5's async-only completion adapter, including when arguments are
 omitted; that representation change keeps the field's completion off the event-loop thread
@@ -1827,7 +1817,7 @@ Where each part of the surface lives, keyed to the slice checklist:
 
 | Slice | Files | Carries |
 |---|---|---|
-| 1 | [`django_strawberry_framework/list_field.py`][list-field], [`django_strawberry_framework/resource_policy.py`][resource-policy], [`django_strawberry_framework/__init__.py`][package-init] | `list_field.py`: the synthesized list signature (`_synthesized_list_signature`), argument normalization into `_ListArguments` with independent supplied/window/order fields and the no-argument fast path (`_normalize_list_arguments`), wire names read from the executable schema only on the error path (`_resolve_argument_wire_name` over `utils/typing.py::published_argument`), and `ListArgumentError`. `resource_policy.py`: the package-private window seams `_windowed_rows` / `_windowed_rows_async` beneath the exported coordinate-free `bounded_rows` / `bounded_rows_async`, and the shared async-iterator cleanup (`_cleanup_rejected_async_iterable` over `_close_async_iterator`). `__init__.py`: the root `ListArgumentError` export. |
+| 1 | [`django_strawberry_framework/list_field.py`][list-field], [`django_strawberry_framework/resource_policy.py`][resource-policy], [`django_strawberry_framework/__init__.py`][package-init] | `list_field.py`: the synthesized list signature (`_synthesized_list_signature`), argument normalization into `_ListArguments` with independent supplied/window/order fields and the no-argument fast path (`_normalize_list_arguments`), wire names read from the executable schema only on the error path (`utils/connections.py::published_page_argument_name` over `utils/typing.py::published_argument`), and `ListArgumentError`. `resource_policy.py`: the package-private window seams `_windowed_rows` / `_windowed_rows_async` beneath the exported coordinate-free `bounded_rows` / `bounded_rows_async`, and the shared async-iterator cleanup (`_cleanup_rejected_async_iterable` over `_close_async_iterator`). `__init__.py`: the root `ListArgumentError` export. |
 | 2 | [`django_strawberry_framework/list_field.py`][list-field], [`django_strawberry_framework/orders/sets.py`][orders-sets], [`django_strawberry_framework/utils/querysets.py`][querysets], [`django_strawberry_framework/optimizer/extension.py::DjangoOptimizerExtension._optimize`][optimizer-extension] | `list_field.py`: the sync/async queryset pipelines, the positive-offset guard. `orders/sets.py`: `OrderSet._input_has_active_terms`. `utils/querysets.py`: `apply_orderset_sync` / `apply_orderset_async`, the post-apply seal under `_SIDECAR_RESULT_POLICY`, `selected_order`, and the async-only queryset completion adapter (`wrap_async_queryset_adapter` / `unwrap_async_queryset_adapter`). `optimizer/extension.py`: the one unwrap/rewrap arm that preserves optimization through the adapter. |
 | 3 | [`tests/test_list_field.py`][test-list-field], [`tests/test_resource_policy.py`][test-resource-policy], [`tests/orders/test_sets.py`][test-orders-sets], [`tests/base/test_init.py`][test-base-init] | Package-tier rows HTTP cannot isolate: construction/direct-call mechanics, naming fallback, the `ListArgumentError` pickle round trip, post-apply validator arms, exact iterator consumption and cleanup precedence, model-order state, query low/high marks, and the root export. |
 | 4 | `examples/fakeshop/test_query/test_list_field_api.py`, [`examples/fakeshop/test_query/test_list_field_async_api.py`][fakeshop-test-list-field-async], [`examples/fakeshop/test_query/test_resource_policy_api.py`][fakeshop-test-resource-policy], [`examples/fakeshop/test_query/test_multi_db.py`][fakeshop-test-multi-db], [`examples/fakeshop/apps/kanban/constants.py`][fakeshop-kanban-constants] | Live rows over the library schema's three Branch list fields (`allLibraryBranchesViaListField` and its nullable and manager-resolver variants), with exceptional fields mounted only in test-local schemas: ordered pages, visibility, caps, errors, naming, sync/async shapes, routing, and SQL. The kanban constants module carries both list-field suites' tracked paths. |
@@ -2088,9 +2078,8 @@ Where each part of the surface lives, keyed to the slice checklist:
   out of this root-only surface; nested pages remain connections.
 - A target the registry does not hold is rejected at the constructing line, not at schema
   build. The registry lookup is by identity, so no target hook runs during the check.
-- A second connection field over one target holding different metadata is rejected rather
-  than served the warm cache's shape; `registry.unregister` and `registry.clear` evict the
-  entry, so a fresh registration regenerates rather than collides.
+- The generated-connection cache holds one class per target; `registry.unregister` and
+  `registry.clear` evict the entry, so a fresh registration regenerates rather than collides.
 - A relation target the registry holds WITHOUT a definition keeps the planner's
   class-predicate fallback. `DjangoType.__init_subclass__` registers type and definition in
   one atomic call, so no real `DjangoType` presents that shape; a bare class registered
@@ -2575,8 +2564,7 @@ sync or async HTTP request cannot isolate:
   state across a pickle round trip (`test_list_field_error_pickle_round_trip`), and an unknown
   reason refused (`test_list_argument_error_rejects_an_unknown_reason_and_renders_bools`);
 - direct-call schema-name fallback and argument-definition lookup
-  (`test_list_field_direct_call_schema_name_fallback_and_definition_lookup`,
-  `test_list_field_wire_name_resolution_falls_back_without_a_usable_definition`);
+  (`test_list_field_direct_call_schema_name_fallback_and_definition_lookup`);
 - error-lazy wire-name resolution: neither a valid normalization nor a rejection invokes the
   schema's `NameConverter`
   (`test_resolve_argument_wire_name_never_runs_the_schema_name_converter`), and malformed
@@ -2639,8 +2627,7 @@ sync or async HTTP request cannot isolate:
   forms refused without their `resolve_expression` ever running
   (`test_order_term_classifier_admits_only_named_forms`), and the queryset's own query left
   with the joins it had (`test_order_classifier_resolves_on_a_clone_of_the_query`);
-- the normalized record's independent fields - `any_argument_supplied` selecting argument mode,
-  the window fields, `order_by_supplied` driving `queryset_required` for an empty list - and
+- the normalized record's independent fields - the window fields, `order_by_supplied` driving `queryset_required` for an empty list - and
   its immutability and the policy-free omitted path (`test_list_field_record_independence`,
   `test_list_arguments_immutability`, `test_omitted_list_arguments_do_not_resolve_policy`,
   `test_normalize_list_arguments_treats_unset_as_omitted`);
@@ -2764,10 +2751,7 @@ replace either public apply method (`test_input_has_active_terms_contract`,
 `test_async_child_delegated_ordering_still_orders_and_pages`.
 
 Metadata integrity is proven at the boundary it lives on. The validator rows above hand the
-factory a target the registry has dropped. `tests/test_connection.py::test_a_warm_connection_cache_refuses_alternate_metadata_for_its_target`
-warms an entry from the real definition, then presents a `copy.copy` of it carrying
-`connection = {"total_count": True}` and asserts the rejection rather than the earlier shape,
-with the real definition's entry intact afterward.
+factory a target the registry has dropped.
 `tests/test_connection.py::test_the_optimizer_plans_a_relation_without_reading_the_target_class`
 is parametrized over hook flavour and relation vocabulary on a `DjangoSchema`: once the schema
 is built, the relation target's definition attribute is replaced by a decoy over a DIFFERENT

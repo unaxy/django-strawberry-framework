@@ -103,7 +103,6 @@ from django_strawberry_framework.exceptions import (
 from django_strawberry_framework.list_field import (
     _build_non_queryset_rejection_error,
     _execute_queryset_pipeline_sync,
-    _field_label,
     _handle_non_queryset_rejections_async,
     _has_deterministic_ordering,
     _is_deterministic_order_term,
@@ -111,7 +110,6 @@ from django_strawberry_framework.list_field import (
     _is_readable_order_node,
     _ListArguments,
     _normalize_list_arguments,
-    _resolve_argument_wire_name,
     _synthesized_list_signature,
     _validate_djangotype_target,
 )
@@ -498,16 +496,6 @@ def test_list_argument_error_rejects_an_unknown_reason_and_renders_bools() -> No
 def _named_argument(name: str) -> SimpleNamespace:
     """An argument definition carrying only its ``name``."""
     return SimpleNamespace(name=name)
-
-
-def _python_named_argument(name: str) -> SimpleNamespace:
-    """An argument definition carrying only its ``python_name``."""
-    return SimpleNamespace(python_name=name)
-
-
-def _no_argument_definition(_name: str) -> None:
-    """A resolver with no definition for any parameter."""
-    return
 
 
 def test_resolve_argument_wire_name_never_runs_the_schema_name_converter(
@@ -1122,14 +1110,7 @@ def test_list_field_error_pickle_round_trip() -> None:
 def test_list_field_direct_call_schema_name_fallback_and_definition_lookup(
     arm_resource_budget: Callable[[object, ResourcePolicy], None],
 ) -> None:
-    """Direct-call stubs fall back to the default spelling; a definition alone is not a name."""
-    info_no_def = SimpleNamespace(schema=None)
-    assert _resolve_argument_wire_name(_as_strawberry_info(info_no_def), "offset") == "offset"
-    assert _resolve_argument_wire_name(_as_strawberry_info(info_no_def), "limit") == "limit"
-    assert _resolve_argument_wire_name(_as_strawberry_info(info_no_def), "order_by") == "orderBy"
-    assert (
-        _resolve_argument_wire_name(_as_strawberry_info(info_no_def), "custom_arg") == "custom_arg"
-    )
+    """A definition alone is not a name: a direct-call stub reports the default spelling."""
 
     class ArgDef:
         name = "order_by"
@@ -1178,14 +1159,12 @@ def test_list_field_record_independence(
 
     # Omitted arguments
     rec_empty = _normalize_list_arguments("f", info, None, trusted_max_rows=False)
-    assert rec_empty.any_argument_supplied is False
     assert rec_empty.offset is None
     assert rec_empty.limit is None
     assert rec_empty.order_by_supplied is False
 
     # offset=0 with no limit produces omission-identical window
     rec_zero = _normalize_list_arguments("f", info, None, trusted_max_rows=False, offset=0)
-    assert rec_zero.any_argument_supplied is True
     assert rec_zero.offset == 0
     assert rec_zero.limit is None
 
@@ -1228,14 +1207,7 @@ def test_omitted_list_arguments_do_not_resolve_policy(monkeypatch: pytest.Monkey
         limit=None,
         order_by=None,
         order_by_supplied=False,
-        any_argument_supplied=False,
     )
-
-
-def test_field_label_falls_back_without_a_field_name() -> None:
-    assert _field_label(_as_strawberry_info(SimpleNamespace())) == "DjangoListField"
-    assert _field_label(_as_strawberry_info(SimpleNamespace(field_name=""))) == "DjangoListField"
-    assert _field_label(make_info(field_name="items")) == "items"
 
 
 async def test_list_field_rejected_async_iterator_cleanup() -> None:
@@ -1265,7 +1237,6 @@ async def test_list_field_rejected_async_iterator_cleanup() -> None:
         limit=None,
         order_by=[{"name": "ASC"}],
         order_by_supplied=True,
-        any_argument_supplied=True,
     )
 
     # Clean close
@@ -1356,7 +1327,6 @@ def test_list_field_deadline_check_position(
         limit=2,
         order_by=None,
         order_by_supplied=False,
-        any_argument_supplied=True,
     )
 
     class ItemDeadType(DjangoType):
@@ -1452,7 +1422,6 @@ def test_list_field_declined_sync_cleanup_generator_suspended(
         limit=3,
         order_by=None,
         order_by_supplied=False,
-        any_argument_supplied=True,
     )
 
     res = _windowed_rows(g, info, offset=args_record.offset, requested_limit=args_record.limit)
@@ -1944,7 +1913,6 @@ def test_list_arguments_immutability() -> None:
         limit=10,
         order_by=None,
         order_by_supplied=False,
-        any_argument_supplied=True,
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         # basedpyright: the write to the frozen dataclass field is the mutation under test; the
@@ -1973,30 +1941,6 @@ def test_is_model_default_ordering_active_exact_bool_identity(
     assert _is_model_default_ordering_active(queryset) is True
 
 
-def test_list_field_wire_name_resolution_falls_back_without_a_usable_definition() -> None:
-    """Every arm that cannot name the wire argument falls back to the default name.
-
-    ``_resolve_argument_wire_name`` runs only while building an error, so a
-    context that cannot answer "what is this argument called on the wire?" must
-    still produce the error rather than replacing it with its own failure. Two
-    such contexts reach the same fallback: no definition for the parameter, and a
-    definition with no executable-schema metadata behind it.
-    """
-    # A resolver that has no definition for the parameter.
-    info_no_argdef = SimpleNamespace(
-        schema=None,
-        get_argument_definition=_no_argument_definition,
-    )
-    assert _resolve_argument_wire_name(_as_strawberry_info(info_no_argdef), "limit") == "limit"
-
-    # A definition, but no ``_raw_info`` carrying a published argument map.
-    info_no_schema = SimpleNamespace(
-        schema=None,
-        get_argument_definition=_python_named_argument,
-    )
-    assert _resolve_argument_wire_name(_as_strawberry_info(info_no_schema), "offset") == "offset"
-
-
 def test_require_orderset_class_rejects_a_target_without_one() -> None:
     """Ordering a target that declares no ``orderset_class`` is a configuration error.
 
@@ -2016,76 +1960,6 @@ def test_require_orderset_class_rejects_a_target_without_one() -> None:
         match=r"Field target Orderless has no orderset_class configured\.",
     ):
         require_orderset_class(Orderless, None)
-
-
-async def test_list_field_rejected_async_iterator_is_closed_when_building_the_rejection_fails() -> (
-    None
-):
-    """A failure while CONSTRUCTING the rejection still closes the async-only source.
-
-    Once the record says the source must be rejected, the close is owed on every
-    exit, including the error builder's own exception (here the
-    argument-definition lookup's), which propagates unchanged.
-    """
-
-    class InstrumentedAsyncSource:
-        def __init__(self, *, fail_close: bool = False) -> None:
-            self.fail_close = fail_close
-            self.anext_calls = 0
-            self.aclose_calls = 0
-
-        def __aiter__(self) -> Self:
-            return self
-
-        async def __anext__(self) -> NoReturn:
-            self.anext_calls += 1
-            raise StopAsyncIteration
-
-        async def aclose(self) -> None:
-            self.aclose_calls += 1
-            if self.fail_close:
-                raise RuntimeError("aclose error")
-
-    def _broken_definition_lookup(_name: str) -> NoReturn:
-        raise RuntimeError("simulated definition lookup failure")
-
-    info = SimpleNamespace(
-        context={},
-        schema=None,
-        get_argument_definition=_broken_definition_lookup,
-    )
-    args_record = _ListArguments(
-        offset=None,
-        limit=None,
-        order_by=[{"name": "ASC"}],
-        order_by_supplied=True,
-        any_argument_supplied=True,
-    )
-
-    src_clean = InstrumentedAsyncSource()
-    with pytest.raises(RuntimeError, match="simulated definition lookup failure"):
-        await _handle_non_queryset_rejections_async(
-            src_clean,
-            args_record,
-            _as_strawberry_info(info),
-        )
-    assert src_clean.anext_calls == 0
-    assert src_clean.aclose_calls == 1
-
-    src_fail = InstrumentedAsyncSource(fail_close=True)
-    with pytest.raises(RuntimeError, match="aclose error") as exc_fail:
-        await _handle_non_queryset_rejections_async(
-            src_fail,
-            args_record,
-            _as_strawberry_info(info),
-        )
-    assert "simulated definition lookup failure" in str(exc_fail.value.__context__)
-    assert src_fail.anext_calls == 0
-    assert src_fail.aclose_calls == 1
-
-    # A source that is not async-only owes no close on the same exit.
-    with pytest.raises(RuntimeError, match="simulated definition lookup failure"):
-        await _handle_non_queryset_rejections_async([1, 2], args_record, _as_strawberry_info(info))
 
 
 # =============================================================================
@@ -2272,5 +2146,4 @@ def test_normalize_list_arguments_treats_unset_as_omitted(
         limit=None,
         order_by=None,
         order_by_supplied=False,
-        any_argument_supplied=False,
     )

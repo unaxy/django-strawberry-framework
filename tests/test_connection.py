@@ -8,7 +8,6 @@ exposes. Shared consumer declarations live in ``tests/_connection_field_schemas.
 """
 
 import asyncio
-import copy
 import functools
 import gc
 import warnings
@@ -23,7 +22,6 @@ from apps.products.models import Category, Item
 from django.db import models
 from graphql import GraphQLError
 from strawberry import relay
-from strawberry.types.base import get_object_definition
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -40,12 +38,9 @@ from django_strawberry_framework.connection import (
     _connection_type_for,
     _finalize_queryset,
     _guard_first_and_last,
-    _guard_non_queryset_iterable,
     _pipeline_async,
     _pipeline_sync,
-    _resolve_awaited_source,
     _window_edge_class,
-    _window_rows_are_annotated,
     _WindowedConnectionRows,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -511,37 +506,6 @@ def test_connection_field_registers_sidecars_against_orphan_ledgers() -> None:
 # --- Four consumer-resolver cases --------------------------------------------
 
 
-def test_non_iterable_source_rejection_names_the_source_kind() -> None:
-    """The shape gate's message names the returned value's real class."""
-    with pytest.raises(GraphQLError) as exc_info:
-        _guard_non_queryset_iterable(42)
-    assert str(exc_info.value) == (
-        "A connection resolver returned int, which is neither a QuerySet (or a Manager) nor "
-        "a plain iterable. A connection field paginates by slicing or iterating its source, "
-        "so return a QuerySet (or a Manager), or an iterable of nodes, from the connection "
-        "resolver."
-    )
-
-
-@pytest.mark.django_db
-def test_guard_non_queryset_iterable_admits_getitem_only_sequence() -> None:
-    """A ``__getitem__``-only legacy sequence stays admitted by the shape gate.
-
-    ``isinstance(value, Iterable)`` is False for an object implementing only
-    the sequence protocol, yet Relay's slicer paginates it via the
-    slice-subscript path - so the guard must not reject it.
-    """
-
-    class LegacySequence:
-        def __getitem__(self, index: int) -> object:
-            empty: list[object] = []
-            return empty[index]
-
-    _guard_non_queryset_iterable(LegacySequence())  # does not raise
-    with pytest.raises(GraphQLError, match="plain iterable"):
-        _guard_non_queryset_iterable(None)
-
-
 async def test_attach_count_async_awaits_before_guard_raises() -> None:
     """``_attach_count_async`` awaits the connection coroutine BEFORE the non-queryset guard can raise.
 
@@ -803,32 +767,6 @@ async def test_connection_sync_resolver_returning_coroutine_refusal_is_a_sync_mi
     assert isinstance(result.errors[0].original_error, SyncMisuseError)
 
 
-async def test_an_awaited_connection_source_resolving_to_another_awaitable_fails_closed() -> None:
-    """One await is spent on an awaitable connection source; a second awaitable is refused.
-
-    ``connection.py::_resolve_awaited_source`` is the completion step both awaitable
-    sources share (``DjangoConnection.resolve_connection`` and the windowed
-    fallback). The nested awaitable is disposed, never awaited, so neither coroutine
-    is left unawaited and the consumer step is never reached.
-    """
-
-    async def _inner() -> list[object]:
-        return []
-
-    async def _outer() -> Awaitable[list[object]]:
-        return _inner()
-
-    def _never_reached(_value: object) -> DjangoConnection[DjangoType]:
-        raise AssertionError("a nested awaitable must not reach the connection step")
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        with pytest.raises(ConfigurationError, match="resolved to another awaitable"):
-            await _resolve_awaited_source(_outer(), _never_reached)
-        gc.collect()
-    assert [str(warning.message) for warning in caught] == []
-
-
 async def test_connection_residual_awaitable_refusal_is_a_configuration_error() -> None:
     """An async resolver resolving to a SECOND awaitable is refused with ``ConfigurationError``.
 
@@ -1079,19 +1017,6 @@ def test_connection_field_directives_iteration_error_propagates() -> None:
         DjangoConnectionField(node, directives=HostileAttr())
 
 
-@pytest.mark.parametrize("raised", [ValueError, KeyError])
-def test_window_rows_are_annotated_iteration_error_propagates(raised: type[Exception]) -> None:
-    """``_window_rows_are_annotated`` iterates the rows on their own terms; errors propagate."""
-
-    class HostileList(list[object]):
-        @override
-        def __iter__(self) -> NoReturn:
-            raise raised("hostile iter")
-
-    with pytest.raises(raised, match="hostile iter"):
-        _window_rows_are_annotated(HostileList([object()]))
-
-
 def test_keyset_order_ref_unparseable_entry_returns_none() -> None:
     """``_keyset_order_ref`` answers ``None`` for an entry with no resolvable name."""
     assert _keyset_order_ref(None) is None
@@ -1235,48 +1160,6 @@ def test_the_optimizer_plans_a_relation_without_reading_the_target_class(
         # The hook has to have RUN for its request to say anything about the
         # model the runner was handed.
         assert hook_calls == [Item, Item], hook_calls
-
-
-@pytest.mark.django_db
-def test_a_warm_connection_cache_refuses_alternate_metadata_for_its_target() -> None:
-    """A second definition for one target is rejected, not silently served the first shape.
-
-    The cache is keyed on target identity, so a warm hit returns a class whose
-    ``totalCount`` shape, SDL name and keyset vocabulary were fixed by whichever
-    definition arrived first. A caller holding different metadata would get its
-    own published arguments beside somebody else's return class - the exact
-    split answer the one-definition rule forbids. The entry therefore records
-    the definition it was generated from and refuses anything else.
-
-    Package-side for the same reason as the rest of this file's construction
-    rows: presenting two definitions for one target is something a schema author
-    does at construction and a request cannot express.
-    """
-
-    class CacheProvenanceNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-            name = "CacheProvenanceNode"
-            primary = False
-
-    real = CacheProvenanceNode.__django_strawberry_definition__
-    finalize_django_types()
-    _connection_type_cache.clear()
-
-    warm = _connection_type_for(CacheProvenanceNode, real)
-    assert _connection_type_for(CacheProvenanceNode, real) is warm
-    assert "total_count" not in {
-        field.python_name for field in get_object_definition(warm, strict=True).fields
-    }
-
-    replacement = copy.copy(real)
-    replacement.connection = {"total_count": True}
-    with pytest.raises(ConfigurationError, match="built from a different DjangoTypeDefinition"):
-        _connection_type_for(CacheProvenanceNode, replacement)
-    # And the rejection did not disturb the entry the real definition owns.
-    assert _connection_type_for(CacheProvenanceNode, real) is warm
 
 
 # --- Post-FilterSet seal at the connection field -----------------------------

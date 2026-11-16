@@ -14,7 +14,7 @@
 "django_strawberry_framework/auth/mutations.py::_django_http_login_establish" = { B904 = 1, BLE001 = 1 }
 "django_strawberry_framework/auth/mutations.py::bind_auth_mutations" = { PLC0415 = 1 }
 "django_strawberry_framework/connection.py::DjangoConnectionField" = { N802 = 1 }
-"django_strawberry_framework/connection.py::_synthesized_signature" = { PLC0415 = 2 }
+"django_strawberry_framework/connection.py::_synthesized_signature" = { PLC0415 = 1 }
 "django_strawberry_framework/consumers.py::DjangoWebSocketHostValidator.__call__" = { PLC0415 = 1, TRY401 = 1 }
 "django_strawberry_framework/consumers.py::_refreshed_actor" = { PLC0415 = 1 }
 "django_strawberry_framework/exceptions.py::LookupValidationError.__init__" = { PLC0415 = 1 }
@@ -44,7 +44,7 @@
 "django_strawberry_framework/forms/resolvers.py::_blank_type_errors" = { BLE001 = 1 }
 "django_strawberry_framework/keyset.py::_cursor_crypto_types" = { PLC0415 = 2 }
 "django_strawberry_framework/list_field.py::DjangoListField" = { N802 = 1 }
-"django_strawberry_framework/list_field.py::_synthesized_list_signature" = { PLC0415 = 1 }
+"django_strawberry_framework/list_field.py::_order_by_parameter" = { PLC0415 = 1 }
 "django_strawberry_framework/middleware/debug_toolbar.py::DebugToolbarMiddleware._postprocess" = { BLE001 = 1 }
 "django_strawberry_framework/middleware/debug_toolbar.py::_DebugToolbarMiddleware" = { E402 = 1 }
 "django_strawberry_framework/mutations/fields.py::DjangoMutationField" = { N802 = 1 }

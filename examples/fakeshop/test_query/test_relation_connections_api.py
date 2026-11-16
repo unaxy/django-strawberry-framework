@@ -1654,9 +1654,8 @@ def test_fast_path_count_less_window_serves_cheap_page() -> None:
 
     ``edges`` + ``hasPreviousPage`` + cursors derive from ``_dst_row_number``
     alone, so the walker drops ``_dst_total_count`` (spec-033 Decision 4) and the
-    relaxed row probe (``_window_rows_are_annotated``) still hands the rows to
-    the fast path - fixed two-query cost, correct page, no per-parent
-    fallback. The window SQL carries no count aggregate.
+    resolver still hands the rows to the fast path - fixed two-query cost,
+    correct page, no per-parent fallback. The window SQL carries no count aggregate.
     """
     _seed_window_books(["a", "b", "c"])
     schema = _genres_list_schema(optimizer=True)

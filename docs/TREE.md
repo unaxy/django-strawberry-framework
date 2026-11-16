@@ -528,7 +528,6 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_completion.py            # Completion source audits and window ownership that a wire response cannot inspect.
 ├── test_connection.py            # DjangoConnection construction, window internals, exception identity and optimizer short-circuit tests.
-├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
 ├── test_consumers.py             # Construction-time and handshake-projection units for the WebSocket consumer.
 ├── test_count_queries.py         # Script tests for the N+1 detector's verdict and comparison logic.
@@ -929,7 +928,6 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_clean_up.py              # Script tests for clean_up generated-artifact deletion boundaries.
 ├── test_completion.py            # Completion source audits and window ownership that a wire response cannot inspect.
 ├── test_connection.py            # DjangoConnection construction, window internals, exception identity and optimizer short-circuit tests.
-├── test_connection_window_rows.py  # The windowed-prefetch hand-off accepts only model rows as a connection window.
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
 ├── test_consumers.py             # Construction-time and handshake-projection units for the WebSocket consumer.
 ├── test_count_queries.py         # Script tests for the N+1 detector's verdict and comparison logic.

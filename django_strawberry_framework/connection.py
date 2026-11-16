@@ -59,9 +59,7 @@ from typing import (
     Any,
     ClassVar,
     Generic,
-    NamedTuple,
     Protocol,
-    TypeGuard,
     TypeVar,
     cast,
 )
@@ -77,7 +75,6 @@ from strawberry.utils.await_maybe import AwaitableOrValue, await_maybe
 from strawberry.utils.inspect import in_async_context
 from typing_extensions import override
 
-from .exceptions import ConfigurationError
 from .keyset import (
     CursorColumn,
     CursorState,
@@ -87,7 +84,11 @@ from .keyset import (
     encode_keyset_cursor,
     keyset_contract_error,
 )
-from .list_field import _validate_relay_djangotype_target
+from .list_field import (
+    _RESERVED_RESOLVER_PARAMETERS,
+    _order_by_parameter,
+    _validate_relay_djangotype_target,
+)
 from .optimizer._context import planned_window
 from .optimizer.extension import (
     _raw_resolve_info,
@@ -149,7 +150,6 @@ from .utils.connections import (
 from .utils.directives import validated_field_directives
 from .utils.execution_mode import async_execution, operation_is_async
 from .utils.querysets import (
-    _disposed_awaitable,
     apply_sidecar_async,
     apply_sidecar_sync,
     apply_type_visibility_async,
@@ -167,7 +167,6 @@ from .utils.typing import is_async_callable, object_result, peel_strawberry_cont
 if TYPE_CHECKING:
     from typing import TypeAlias
 
-    from strawberry.relay.types import NodeIterableType
     from typing_extensions import Self, TypeIs
 
     from .filters.sets import FilterSet
@@ -228,24 +227,38 @@ def _keyset_connection_context(cls: type[_ConnectionT]) -> CursorState | None:
     return require_instance(state, CursorState)
 
 
-def _set_total_count(
-    conn: _ConnectionT,
-    *,
-    want_count: bool,
-    value: int | Callable[[], int] | None,
-) -> _ConnectionT:
+def _set_total_count(conn: _ConnectionT, *, want_count: bool, value: int | None) -> _ConnectionT:
     """Attach the captured ``totalCount`` to ``conn`` when it was requested.
 
     The single writer of ``_TOTAL_COUNT_ATTR`` (the selection-gating contract:
     an unrequested count stays the ``None`` default the ``total_count``
-    resolver returns verbatim). ``value`` may be a zero-arg callable evaluated
-    only when the count IS wanted, so callers can pass a lazy ``.count()``
-    without spelling the guard themselves. Returns ``conn`` for tail-position
-    use.
+    resolver returns verbatim). Returns ``conn`` for tail-position use.
     """
     if want_count:
-        setattr(conn, _TOTAL_COUNT_ATTR, value() if callable(value) else value)
+        setattr(conn, _TOTAL_COUNT_ATTR, value)
     return conn
+
+
+def _page_connection(
+    cls: type[_ConnectionT],
+    edges: list[relay.Edge[relay.Node]],
+    *,
+    has_previous_page: bool,
+    has_next_page: bool,
+    want_count: bool,
+    total: int | None,
+) -> _ConnectionT:
+    """Build one page of ``cls`` over ``edges``, its cursors read off the first and last edge."""
+    conn = cls(
+        edges=edges,
+        page_info=relay.PageInfo(
+            start_cursor=edges[0].cursor if edges else None,
+            end_cursor=edges[-1].cursor if edges else None,
+            has_previous_page=has_previous_page,
+            has_next_page=has_next_page,
+        ),
+    )
+    return _set_total_count(conn, want_count=want_count, value=total)
 
 
 def _empty_page_connection(
@@ -268,16 +281,14 @@ def _empty_page_connection(
     domain, so its caller passes ``has_previous_page`` explicitly ("a cursor
     was supplied" - the same rule ``start > 0`` encodes for offset cursors).
     """
-    conn = cls(
-        edges=[],
-        page_info=relay.PageInfo(
-            start_cursor=None,
-            end_cursor=None,
-            has_previous_page=offset > 0 if has_previous_page is None else has_previous_page,
-            has_next_page=has_next_page,
-        ),
+    return _page_connection(
+        cls,
+        [],
+        has_previous_page=offset > 0 if has_previous_page is None else has_previous_page,
+        has_next_page=has_next_page,
+        want_count=want_count,
+        total=total,
     )
-    return _set_total_count(conn, want_count=want_count, value=total)
 
 
 @dataclass
@@ -306,7 +317,7 @@ class _WindowedConnectionRows:
     ``isinstance``-detect it after the ``first`` + ``last`` guard.
     """
 
-    rows: list[models.Model]
+    rows: Sequence[object]
     fallback: Callable[[], object] = dataclass_field(repr=False)
     #: The bounds the window was fetched under and, for a keyset window, the
     #: cursor vocabulary it was ordered and seeked under
@@ -407,30 +418,31 @@ def _window_edge_class(cls: type[_ConnectionT]) -> type[relay.Edge[relay.Node]]:
 register_subsystem_clear(_window_edge_class.cache_clear, owner="connection.edge_class")
 
 
-def _edge_over(
-    edge_class: type[relay.Edge[relay.Node]],
-    node: object,
-    cursor: str,
-) -> relay.Edge[relay.Node]:
-    """Build one edge over ``node`` under an already-minted ``cursor``.
+def _keyset_edges(
+    cls: type[_ConnectionT],
+    rows: Iterable[object],
+    columns: tuple[CursorColumn, ...],
+    fingerprint: str,
+    info: Info[object, object],
+    kwargs: dict[str, object],
+) -> list[relay.Edge[relay.Node]]:
+    """Build a keyset page's edges, each cursor the row's ordering-column values.
 
-    ``Edge`` annotates ``node`` with the GraphQL ``Node`` type the connection serves; the
-    Python value is the model row the type resolves, so it is handed over verbatim.
+    The cursors are minted through the canonical codec (opaque,
+    authenticated-encrypted), never the row number. Edges are constructed
+    directly: ``resolve_edge`` would re-encode the cursor under the edge class's
+    offset ``CURSOR_PREFIX``. ``Edge`` annotates ``node`` with the GraphQL
+    ``Node`` type the connection serves; the Python value is the model row the
+    type resolves, so it is handed over verbatim.
     """
-    # The cast is the annotation gap the docstring names: the row stands for its Node type.
-    return edge_class(node=cast("relay.Node", node), cursor=cursor)
-
-
-def _offset_edge_over(
-    edge_class: type[relay.Edge[relay.Node]],
-    node: object,
-    offset: int,
-) -> relay.Edge[relay.Node]:
-    """Build one edge over ``node`` at ``offset``, its cursor minted by the edge class itself.
-
-    The row stands for its Node type, as in :func:`_edge_over`.
-    """
-    return edge_class.resolve_edge(cast("relay.Node", node), cursor=offset)
+    edge_class = _window_edge_class(cls)
+    return [
+        edge_class(
+            node=cast("relay.Node", object_result(cls.resolve_node, row, info=info, **kwargs)),
+            cursor=encode_keyset_cursor(columns, row, fingerprint=fingerprint),
+        )
+        for row in rows
+    ]
 
 
 def _resolve_from_window(
@@ -687,30 +699,22 @@ def _resolve_from_window(
         # post-seek count its flag reads from - fall back per-parent rather
         # than serve a page-relative-vs-pre-seek comparison.
         return None
-    edge_class = _window_edge_class(cls)
     if keyset_state is not None:
-        # Keyset cursors are the rows' ordering-column VALUES, minted through
-        # the canonical codec (opaque, authenticated-encrypted) - never the
-        # row number. Edges are constructed directly (``resolve_edge`` would re-encode the
-        # cursor under the edge class's offset ``CURSOR_PREFIX``).
-        edges = [
-            _edge_over(
-                edge_class,
-                object_result(cls.resolve_node, node, info=info, **kwargs),
-                encode_keyset_cursor(
-                    keyset_state.columns,
-                    node,
-                    fingerprint=keyset_state.fingerprint,
-                ),
-            )
-            for node in page_rows
-        ]
+        edges = _keyset_edges(
+            cls,
+            page_rows,
+            keyset_state.columns,
+            keyset_state.fingerprint,
+            info,
+            kwargs,
+        )
     else:
+        edge_class = _window_edge_class(cls)
+        # The row stands for its Node type, as in ``_keyset_edges``.
         edges = [
-            _offset_edge_over(
-                edge_class,
-                object_result(cls.resolve_node, node, info=info, **kwargs),
-                require_instance(read_attr(node, WINDOW_ROW_NUMBER), int) - 1,
+            edge_class.resolve_edge(
+                cast("relay.Node", object_result(cls.resolve_node, node, info=info, **kwargs)),
+                cursor=require_instance(read_attr(node, WINDOW_ROW_NUMBER), int) - 1,
             )
             for node in page_rows
         ]
@@ -743,16 +747,14 @@ def _resolve_from_window(
         )
     else:
         has_next_page = False if total is None else getattr(last_row, WINDOW_ROW_NUMBER) < total
-    conn = cls(
-        edges=edges,
-        page_info=relay.PageInfo(
-            start_cursor=edges[0].cursor,
-            end_cursor=edges[-1].cursor,
-            has_previous_page=keyset_seek_supplied or first_rn > 1,
-            has_next_page=has_next_page,
-        ),
+    return _page_connection(
+        cls,
+        edges,
+        has_previous_page=keyset_seek_supplied or first_rn > 1,
+        has_next_page=has_next_page,
+        want_count=want_count,
+        total=total,
     )
-    return _set_total_count(conn, want_count=want_count, value=total)
 
 
 async def _resolve_awaited_source(
@@ -767,20 +769,8 @@ async def _resolve_awaited_source(
     recovers (``_consume_window``). ``resolve`` answers an awaitable for an
     async-iterable source (Strawberry's own ``ListConnection`` and the count step
     do), so its result is awaited when it is one.
-
-    Exactly one await is spent on the source. A value that is still awaitable after
-    it is neither a queryset nor an iterable, and an unbounded awaitable chain is
-    never consumed, so it is disposed and refused, as every other async runner in
-    the package refuses a nested awaitable.
     """
-    value = await source
-    if _disposed_awaitable(value):
-        raise ConfigurationError(
-            "A connection source resolved to another awaitable after being awaited; "
-            "a nested awaitable is neither a QuerySet nor an iterable. Return the "
-            "queryset (or iterable) directly.",
-        )
-    return await await_maybe(resolve(value))
+    return await await_maybe(resolve(await source))
 
 
 def _consume_window(
@@ -1010,8 +1000,7 @@ def _consume_fallback(
             return _attach_count_async(empty, nodes, want_count=want_count)
         return _attach_count_sync(empty, nodes, want_count=want_count)
     # The cast states the source as ``ListConnection`` takes it: it slices a ``__getitem__``-only
-    # source its iterable annotation leaves out. ``_pipeline_sync`` / ``_pipeline_async`` refuse
-    # a non-iterable first (``_guard_non_queryset_iterable``); a direct call passes it through.
+    # source its iterable annotation leaves out.
     conn = super(DjangoConnection, cls).resolve_connection(
         cast("NodeIterableType[relay.Node]", nodes),
         info=info,
@@ -1203,25 +1192,14 @@ def _resolve_keyset_connection(
         rows = page.rows[:page_size] if page.overfetched else page.rows
         if page.backward:
             rows = list(reversed(rows))
-        edge_class = _window_edge_class(cls)
-        edges = [
-            _edge_over(
-                edge_class,
-                object_result(cls.resolve_node, row, info=info, **kwargs),
-                encode_keyset_cursor(columns, row, fingerprint=fingerprint),
-            )
-            for row in rows
-        ]
-        conn = cls(
-            edges=edges,
-            page_info=relay.PageInfo(
-                start_cursor=edges[0].cursor if edges else None,
-                end_cursor=edges[-1].cursor if edges else None,
-                has_previous_page=page.has_previous_page,
-                has_next_page=page.has_next_page,
-            ),
+        return _page_connection(
+            cls,
+            _keyset_edges(cls, rows, columns, fingerprint, info, kwargs),
+            has_previous_page=page.has_previous_page,
+            has_next_page=page.has_next_page,
+            want_count=want_count,
+            total=total,
         )
-        return _set_total_count(conn, want_count=want_count, value=total)
 
     def _page(rows: list[object]) -> _KeysetPage:
         return _KeysetPage(
@@ -1465,30 +1443,14 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
         )
 
 
-class _CachedConnectionType(NamedTuple):
-    """One generated connection class beside the definition that generated it.
-
-    The cache is keyed on ``target_type`` identity, but the class SHAPE and the
-    keyset vocabulary baked into it come from a definition, so the entry
-    carries that definition as its provenance. A warm hit is served only to a
-    caller holding the same object; anything else is a target whose metadata
-    changed after a class was generated for it, which no cached shape can
-    honestly answer.
-    """
-
-    definition: DjangoTypeDefinition
-    connection_type: type[DjangoConnection[DjangoType]]
-
-
 # The per-target generated-connection-class cache. Cleared by ``registry.clear()``
 # (the documented test-only registry reset; production never reloads the schema) so a
 # registry-clearing test or fixture also drops the generated ``<TypeName>Connection``
-# classes. Each entry records the definition it was generated from and
-# ``_connection_type_for`` verifies that provenance on every warm hit, so a surviving
-# entry can only ever be served to the definition that produced it.
-_connection_type_cache: truth.IdentityMap[type[DjangoType], _CachedConnectionType] = (
-    truth.IdentityMap()
-)
+# classes.
+_connection_type_cache: truth.IdentityMap[
+    type[DjangoType],
+    type[DjangoConnection[DjangoType]],
+] = truth.IdentityMap()
 register_subsystem_clear(_connection_type_cache.clear, owner="connection.type_cache")
 
 
@@ -1621,7 +1583,7 @@ def _attach_count_sync(conn: _ConnectionT, nodes: object, *, want_count: bool) -
         # source without a ``.count`` attribute (a generator, a set, a one-shot
         # iterator - shapes the consumer-resolver contract admits) pages unchanged.
         return conn
-    return _set_total_count(conn, want_count=True, value=counted.count)
+    return _set_total_count(conn, want_count=True, value=counted.count())
 
 
 async def _attach_count_async(
@@ -1665,25 +1627,11 @@ def _connection_type_for(
     ``definition`` is the caller's captured read - the connection field factory's
     own (validated against the registry by
     ``list_field.py::_validate_djangotype_target``), or the finalizer's registry
-    lookup for a synthesized relation. A cold cache generates the class from it
-    and records it as the entry's provenance; a warm cache is served only when
-    the caller holds that SAME object. So the connection shape, the keyset
-    vocabulary baked into the class, and the field's published arguments can
-    never come from two different answers - not across one field, and not
-    across two fields over one target. A caller arriving with different
-    same-origin metadata is rejected at construction rather than silently
-    handed the first field's shape.
+    lookup for a synthesized relation. A cold cache generates the class from it.
     """
     cached = _connection_type_cache.get(target_type)
     if cached is not None:
-        if cached.definition is not definition:
-            raise ConfigurationError(
-                f"{truth.name(target_type)} already has a generated connection class "
-                "built from a different DjangoTypeDefinition. One node type has exactly one "
-                "connection shape; a second definition for the same target would publish "
-                "arguments that its connection class does not carry.",
-            )
-        return cached.connection_type
+        return cached
 
     connection_options = definition.connection
     if connection_options and connection_options.get("total_count"):
@@ -1705,7 +1653,7 @@ def _connection_type_for(
             # ``ListConnection``'s ``strawberry.type`` decoration is inherited here.
             description=get_object_definition(DjangoConnection, strict=True).description,
         )
-    _connection_type_cache[target_type] = _CachedConnectionType(definition, connection_type)
+    _connection_type_cache[target_type] = connection_type
     return connection_type
 
 
@@ -1741,37 +1689,6 @@ def _guard_sidecar_input_against_non_queryset(
             "and cannot apply to a plain iterable. Return a QuerySet (or a "
             f"Manager) from the connection resolver, or omit {sidecars}.",
         )
-
-
-def _guard_non_queryset_iterable(source: object) -> None:
-    """Raise ``GraphQLError`` when the connection resolver returned a non-iterable.
-
-    The consumer-``resolver=`` contract (spec-030 Decision 7) admits three
-    source shapes: a QuerySet / Manager and a plain iterable. A scalar
-    (``None``, an ``int``) is neither: Relay's ``ListConnection`` slicer first
-    tries a slice subscript, catches the ``TypeError``, and then trips its own
-    bare ``assert isinstance(nodes, (Iterable, Iterator))`` - a BLANK
-    ``AssertionError`` (empty message) at the GraphQL boundary. Failing closed
-    here names the contract instead - symmetric with the sidecar-input and
-    pre-sliced guards: a structural misuse of the connection ``resolver=``
-    contract surfaces as a package error, never a leaked engine internal.
-    Objects iterating only through ``__getitem__`` (no ``__iter__``) stay
-    admitted: the slicer's slice-subscript path paginates them, and so do the
-    async shapes (``AsyncIterator`` / ``AsyncIterable``) the async execution
-    color streams.
-    """
-    if (
-        isinstance(source, (Iterable, AsyncIterable))
-        or truth.mro_attr(type(source), "__getitem__") is not None
-    ):
-        return
-    raise GraphQLError(
-        f"A connection resolver returned {truth.kind(source)}, which is "
-        "neither a QuerySet (or a Manager) nor a plain iterable. A connection "
-        "field paginates by slicing or iterating its source, so return a "
-        "QuerySet (or a Manager), or an iterable of nodes, from the connection "
-        "resolver.",
-    )
 
 
 def _guard_source_not_pre_sliced(
@@ -1936,38 +1853,27 @@ def _prepare_pipeline_source(
     field's two runners - including the ORDER, because a value that slips past
     the async refusal lands in the non-queryset branch and is passed through
     with the ``get_queryset`` hook never run. What stays here are the
-    connection's own GraphQL-specific guards, one per branch: a value that is
-    neither QuerySet nor iterable is refused outright (Relay's slicer would
-    leak its blank ``AssertionError``), a non-queryset iterable cannot answer
-    ``filter:`` / ``orderBy:``, and a QuerySet must not arrive pre-sliced (the
-    connection reorders and slices it, both illegal on an already-sliced
-    query).
+    connection's own GraphQL-specific guards, one per branch: a non-queryset
+    iterable cannot answer ``filter:`` / ``orderBy:``, and a QuerySet must not
+    arrive pre-sliced (the connection reorders and slices it, both illegal on an
+    already-sliced query).
 
     Returns ``(source, is_queryset)`` rather than returning early itself so the
     sync and async pipelines keep their colored ``apply_type_visibility_*`` steps
     explicit, never hidden behind a maybe-await abstraction.
     """
-    has_sidecar_input = has_connection_sidecar_input(
-        filter_input=filter_input,
-        order_by_input=order_by_input,
-    )
-
-    def non_queryset_guard(value: object) -> None:
-        # The shape gate runs BEFORE the usage guards: a scalar is wrong
-        # regardless of any input supplied, while the sidecar rule reads
-        # naturally only once the value IS a plain iterable.
-        _guard_non_queryset_iterable(value)
-        _guard_sidecar_input_against_non_queryset(
-            value,
-            info,
-            has_sidecar_input=has_sidecar_input,
-        )
-
     return prepared_resolver_source(
         source,
         target_type,
         async_guard=async_guard,
-        non_queryset_guard=non_queryset_guard,
+        non_queryset_guard=functools.partial(
+            _guard_sidecar_input_against_non_queryset,
+            info=info,
+            has_sidecar_input=has_connection_sidecar_input(
+                filter_input=filter_input,
+                order_by_input=order_by_input,
+            ),
+        ),
         queryset_guard=functools.partial(_guard_source_not_pre_sliced, info=info),
     )
 
@@ -2227,18 +2133,11 @@ def _synthesized_signature(
     # signature, so a function-local import keeps the top-level package import
     # lazy while preserving the generated ``filter:`` / ``orderBy:`` arguments.
     from .filters import filter_input_type  # noqa: PLC0415 - keeps orders/filters out of the root graph
-    from .orders import order_input_type  # noqa: PLC0415 - keeps orders/filters out of the root graph
 
-    # ``root`` and ``info`` are Strawberry reserved parameter names: the engine
-    # binds the source value to ``root`` and the resolver ``Info`` to ``info``
-    # WITHOUT exposing either as a GraphQL argument. Declaring them in the
-    # synthesized signature means Strawberry passes both at call time (so the
-    # consumer-``resolver=`` path gets ``root`` / ``info``) while only the
-    # sidecar params below become real arguments.
-    params: list[inspect.Parameter] = [
-        inspect.Parameter("root", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=None),
-        inspect.Parameter("info", inspect.Parameter.KEYWORD_ONLY, annotation=Info),
-    ]
+    # Strawberry passes the reserved ``root`` / ``info`` at call time (so the
+    # consumer-``resolver=`` path gets both) while only the sidecar params below
+    # become real arguments.
+    params: list[inspect.Parameter] = [*_RESERVED_RESOLVER_PARAMETERS]
     annotations: dict[str, object] = {"info": Info}
     if definition.filterset_class is not None:
         # ``filter_input_type`` returns a ``strawberry.LazyType``, whose ``__or__`` widens
@@ -2254,16 +2153,10 @@ def _synthesized_signature(
         )
         annotations[CONNECTION_FILTER_KWARG] = filter_ann
     if definition.orderset_class is not None:
-        order_ann = GenericAlias(list, (order_input_type(definition.orderset_class),)) | None
-        params.append(
-            inspect.Parameter(
-                CONNECTION_ORDER_KWARG,
-                inspect.Parameter.KEYWORD_ONLY,
-                default=None,
-                annotation=order_ann,
-            ),
+        order_parameter, annotations[CONNECTION_ORDER_KWARG] = _order_by_parameter(
+            definition.orderset_class,
         )
-        annotations[CONNECTION_ORDER_KWARG] = order_ann
+        params.append(order_parameter)
     return_annotation = GenericAlias(Iterable, (target_type,))
     annotations["return"] = return_annotation
     return inspect.Signature(params, return_annotation=return_annotation), annotations
@@ -2383,31 +2276,6 @@ def _build_connection_resolver(
     return _resolve
 
 
-def _window_rows_are_annotated(rows: list[object]) -> TypeGuard[list[models.Model]]:
-    """Return whether every row is a model instance carrying the windowed-prefetch row number.
-
-    The rows are served as the page's nodes, so a row that is not a model instance
-    (an object a consumer wrote under the reserved ``to_attr`` that happens to carry
-    the attribute) disqualifies the list like a missing annotation does.
-
-    Upstream's own integrity probe (``resolve_optimized_connection_by_prefetch``
-    falls back on a missing annotation): a ``to_attr`` list whose rows lack
-    ``_dst_row_number`` is a consumer's own prefetch write, not the walker's
-    window, and must NOT be consumed as one. ``_dst_total_count`` is NOT
-    probed: the walker annotates it conditionally (spec-033 Decision 4 - only
-    when the window's ``utils/connections.py::FetchMode`` is ``COUNTED``:
-    ``totalCount`` observed, or the ``first: 0`` shape), so a
-    count-less page is still the walker's window. The collision probe stays
-    sound on the row number alone because the ``_dst_``
-    namespace is package-reserved (spec-033 Decision 4). An empty list has no
-    rows to probe and is still a conclusive planned window candidate: marker
-    shapes retain row 1 whenever the parent has children, so an empty list means
-    the parent genuinely has none. ``resolve_connection`` still owns the slice-
-    aware page and flag construction.
-    """
-    return all(isinstance(row, models.Model) and hasattr(row, WINDOW_ROW_NUMBER) for row in rows)
-
-
 def _build_relation_connection_resolver(
     target_type: type[DjangoType],
     accessor_name: str,
@@ -2518,7 +2386,7 @@ def _build_relation_connection_resolver(
             and _filter_step_runs(filterset_class, filter_input)
         )
         no_sidecar = not sidecar_input and not bound_filter
-        if is_list(window_rows) and no_sidecar and _window_rows_are_annotated(window_rows):
+        if is_list(window_rows) and no_sidecar:
             # Hand off the windowed page. The marker carries a fallback factory
             # (NOT a prebuilt connection - that would be fed back through
             # ``resolve_connection`` as the node iterable) so ``resolve_connection``
@@ -2546,8 +2414,8 @@ def _build_relation_connection_resolver(
                 ),
             )
         # Strictness (spec-033 Decision 8): this branch did not serve the
-        # windowed page (attr absent, not a list, rows without the window row
-        # number, a sidecar kwarg, or a target set with a required filter), so
+        # windowed page (attr absent or not a list, a sidecar kwarg, or a target
+        # set with a required filter), so
         # the per-parent pipeline below WILL query; ``_check_n1`` consults the
         # union-published sentinels before it runs. The reason names WHY the
         # fallback fired so a flagged connection reads as actionable: a sidecar

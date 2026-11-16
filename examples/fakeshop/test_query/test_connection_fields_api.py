@@ -321,30 +321,6 @@ def test_consumer_resolver_generator_paginates_without_total_count() -> None:
     assert json_at(result.data, "items", "pageInfo", "hasNextPage") is True
 
 
-@pytest.mark.django_db
-@pytest.mark.parametrize("bad_source", [None, 42])
-def test_consumer_resolver_non_iterable_source_raises_graphql_error(bad_source: object) -> None:
-    """A scalar source fails closed with a package error, not a blank AssertionError.
-
-    ``None`` / an ``int`` are neither QuerySet nor iterable; Relay's slicer
-    first slice-subscripts (``TypeError``), then trips its own bare
-    ``assert isinstance(nodes, (Iterable, Iterator))`` - an empty-message
-    ``AssertionError`` at the GraphQL boundary. The pipeline's shape gate
-    refuses the source instead.
-    """
-    services.seed_data(1)
-
-    def resolver(_root: object, _info: object) -> object:
-        return bad_source
-
-    schema = _field_schema(_make_sidecar_node_type("ScalarSourceNode"), resolver=resolver)
-    result = _post(schema, "{ items(first: 1) { edges { node { id } } } }")
-
-    assert result.errors is not None
-    messages = [str(json_str(err, "message")) for err in result.errors]
-    assert any("neither a QuerySet" in m and "plain iterable" in m for m in messages)
-
-
 @pytest.mark.django_db(transaction=True)
 async def test_async_consumer_resolver_set_source_paginates_without_total_count() -> None:
     """Async path: a set source paginates with ``totalCount`` unselected (no raw leak).
@@ -1264,7 +1240,7 @@ def test_a_root_connection_uses_only_the_definition_captured_at_construction() -
     _connection_type_cache.clear()
 
     field = DjangoConnectionField(node)
-    conn_type = _connection_type_cache[node].connection_type
+    conn_type = _connection_type_cache[node]
     node.__django_strawberry_definition__ = decoy.__django_strawberry_definition__
 
     query_cls = strawberry.type(

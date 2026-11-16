@@ -17,8 +17,8 @@
 "django_strawberry_framework/connection.py::DjangoConnectionField" = { cast = 1 }
 "django_strawberry_framework/connection.py::_ConnectionT" = { reportExplicitAny = 1 }
 "django_strawberry_framework/connection.py::_consume_fallback" = { cast = 1 }
-"django_strawberry_framework/connection.py::_edge_over" = { cast = 1 }
-"django_strawberry_framework/connection.py::_offset_edge_over" = { cast = 1 }
+"django_strawberry_framework/connection.py::_keyset_edges" = { cast = 1 }
+"django_strawberry_framework/connection.py::_resolve_from_window" = { cast = 1 }
 "django_strawberry_framework/consumers.py::DjangoWebSocketHostValidator.__call__" = { reportArgumentType = 1 }
 "django_strawberry_framework/consumers.py::RevalidatingGraphQLWSConsumer.__init__" = { reportMissingSuperCall = 1 }
 "django_strawberry_framework/consumers.py::RevalidatingGraphQLWSConsumer.graphql_transport_ws_handler_class" = { reportIncompatibleVariableOverride = 1 }

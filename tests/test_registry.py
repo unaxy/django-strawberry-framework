@@ -42,7 +42,6 @@ from typing_extensions import override
 from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.connection import (
     DjangoConnection,
-    _CachedConnectionType,
     _connection_type_cache,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -1946,14 +1945,8 @@ def test_unregister_evicts_connection_type_cache_entry(fresh_registry: TypeRegis
         pass
 
     fresh_registry.register(Item, ItemType)
-    _connection_type_cache[ItemType] = _CachedConnectionType(
-        _as_definition(object()),
-        DjangoConnection[DjangoType],
-    )
-    _connection_type_cache[CategoryType] = sentinel_kept = _CachedConnectionType(
-        _as_definition(object()),
-        DjangoConnection[DjangoType],
-    )
+    _connection_type_cache[ItemType] = DjangoConnection[DjangoType]
+    _connection_type_cache[CategoryType] = sentinel_kept = DjangoConnection[DjangoType]
     try:
         fresh_registry.unregister(ItemType)
         assert ItemType not in _connection_type_cache
