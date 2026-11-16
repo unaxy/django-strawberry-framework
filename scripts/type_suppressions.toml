@@ -254,19 +254,15 @@
 "tests/forms/test_inputs.py::test_form_basis_content_identity_propagates_a_raw_requiredness_read_failure._HostileRequiredField.required" = { reportIncompatibleVariableOverride = 1 }
 "tests/forms/test_inputs.py::test_get_form_fields_does_not_instantiate_kwarg_requiring_form" = { reportCallIssue = 1 }
 "tests/forms/test_resolvers.py::test_partial_update_reconstruct_with_extra_model_choice_field" = { reportAttributeAccessIssue = 1 }
-"tests/forms/test_sets.py::test_default_form_field_hook_rejects_a_class_without_form_metadata" = { reportArgumentType = 1 }
 "tests/forms/test_sets.py::test_modelform_mutation_rejects_non_class_meta.BadModelMeta" = { reportAssignmentType = 1 }
 "tests/forms/test_sets.py::test_modelform_non_model_meta_model_raises_at_class_creation" = { reportAttributeAccessIssue = 1, reportGeneralTypeIssues = 1 }
 "tests/middleware/test_debug_toolbar.py::test_streaming_response_gets_no_package_mutation" = { reportArgumentType = 1 }
-"tests/mutations/test_fields.py::test_classmethod_protocol_members_are_read_from_the_class_namespace" = { reportArgumentType = 1 }
 "tests/mutations/test_fields.py::test_inherited_meta_target_rejected_at_construction.CreateItemRedeclared.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/mutations/test_fields.py::test_non_class_target_raises_at_construction" = { reportArgumentType = 1 }
 "tests/mutations/test_fields.py::test_non_iterable_directives_raise_configuration_error" = { reportArgumentType = 1 }
 "tests/mutations/test_fields.py::test_non_mutation_target_raises_at_construction" = { reportArgumentType = 1 }
 "tests/mutations/test_inputs.py::test_editable_fields_never_carry_a_consumer_auto_field_key.ConsumerAutoField" = { reportIncompatibleMethodOverride = 1, reportIncompatibleVariableOverride = 1, reportUnsafeMultipleInheritance = 1 }
 "tests/mutations/test_operations.py::test_mutation_operation_descriptor_immutability" = { reportAttributeAccessIssue = 1 }
-"tests/mutations/test_permissions.py::test_walk_ignores_mid_request_pollution_of_the_class_permission_list" = { reportArgumentType = 1 }
-"tests/mutations/test_permissions.py::test_walk_ignores_mid_request_pollution_of_the_class_permission_list.AllowAndPollute.has_permission" = { reportAttributeAccessIssue = 1, reportUnknownMemberType = 1 }
 "tests/mutations/test_resolvers.py::KeyedDesk.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/mutations/test_resolvers.py::test_async_mutation_does_not_leak_into_later_read_optimizer_execution.Query" = { reportGeneralTypeIssues = 1 }
 "tests/mutations/test_write_transaction.py::_HygieneWebsocketCommunicator.receive_output" = { reportArgumentType = 1, reportUnknownVariableType = 1 }

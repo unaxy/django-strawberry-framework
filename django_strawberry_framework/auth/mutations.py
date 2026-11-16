@@ -441,8 +441,8 @@ def _make_auth_field(
     returned coroutine Strawberry awaits - so no native async work is hidden behind
     a nested ``async_to_sync`` inside a sync body. ``sync_body`` and ``async_body``
     are the per-surface injection points later stages specialize per transport; the
-    dispatch seam itself does not change. The injected ``__signature__`` /
-    ``__annotations__`` (the keyword-only GraphQL args + the ``strawberry.lazy``
+    dispatch seam itself does not change. The injected ``__signature__``
+    (the keyword-only GraphQL args + the ``strawberry.lazy``
     return forward-ref, unresolved at class-body time) ride the shared
     ``mutations/fields.py`` machinery - ``build_lazy_field_signature`` over
     ``_lazy_ref``-built refs - never a re-spelled copy. ``arguments`` is the ordered
@@ -467,9 +467,7 @@ def _make_auth_field(
             return async_body(info, **kwargs)
         return sync_body(info, **kwargs)
 
-    signature, annotations = build_lazy_field_signature(arguments, return_annotation)
-    _resolve.__signature__ = signature
-    _resolve.__annotations__ = annotations
+    _resolve.__signature__ = build_lazy_field_signature(arguments, return_annotation)
     return strawberry.field(
         resolver=_resolve,
         description=description,

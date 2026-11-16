@@ -79,7 +79,6 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.sets import iter_form_mutations
-from django_strawberry_framework.mutations.inputs import CREATE
 from django_strawberry_framework.mutations.inputs import (
     _materialized_names as mutation_materialized_names,
 )
@@ -100,7 +99,6 @@ from django_strawberry_framework.rest_framework.sets import (
 )
 from django_strawberry_framework.rest_framework.sets import (
     _checked_schema_field_map,
-    _serializer_input_shape_for,
     _validate_schema_field_map,
     _validate_serializer_nested_fields,
 )
@@ -116,7 +114,6 @@ from tests._idioms import (
     is_object_dict,
     module_binding,
     scrambled,
-    str_subclass_name,
 )
 from tests._info import unread_info
 
@@ -1222,21 +1219,6 @@ def test_update_over_only_the_primary_key_raises_at_class_creation() -> None:
                 permission_classes = []
 
 
-def test_serializer_input_shape_refuses_a_snapshot_with_no_serializer_class() -> None:
-    """The input build reads only a serializer-flavor snapshot; one without a class is a typed error."""
-    meta = _ValidatedMutationMeta(
-        model=None,
-        operation="create",
-        input_class=None,
-        partial_input_class=None,
-        fields=None,
-        exclude=None,
-        permission_classes=(),
-    )
-    with pytest.raises(TypeError, match="expected the type the source guarantees, got NoneType"):
-        _serializer_input_shape_for(meta, operation_kind=CREATE, field_map={})
-
-
 def _serializerless_meta(
     *,
     schema_fingerprint: tuple[tuple[object, ...], ...] | None = None,
@@ -2125,7 +2107,7 @@ _INVALID_FIELD_MAP_ROWS: list[tuple[Callable[[dict[str, DRFField]], object], str
     (lambda _fields: [], "must return a mapping"),
     (lambda _fields: {"name": object()}, "DRF serializers.Field"),
     (lambda fields: {"alias": fields["name"]}, "field-map key"),
-    (lambda fields: {1: fields["name"]}, "key must be a plain string"),
+    (lambda fields: {1: fields["name"]}, "field-map key 1"),
 ]
 
 
@@ -2232,23 +2214,6 @@ def test_schema_field_map_non_mapping_message_is_exact() -> None:
     )
 
 
-class _NameChoices(models.TextChoices):
-    """A ``TextChoices`` class whose members spell field-map keys."""
-
-    NAME = "name"
-    ITEMS = "items"
-
-
-_MEMBER_KEY_KINDS = ("str-enum-mixin", "str-enum", "text-choices")
-
-
-def _member_key(kind: str, text: str) -> str:
-    """``text`` as a ``(str, Enum)``, ``StrEnum`` or ``TextChoices`` member (``kind``)."""
-    if kind == "text-choices":
-        return _NameChoices(text)
-    return str_subclass_name(kind, text, [])
-
-
 class _RaisingIterationMapping(Mapping[object, object]):
     """A mapping whose own iteration raises ``error``."""
 
@@ -2265,62 +2230,6 @@ class _RaisingIterationMapping(Mapping[object, object]):
     @override
     def __len__(self) -> int:
         return 0
-
-
-class _UnhashableKeyMapping(Mapping[object, object]):
-    """A mapping whose one key is an unhashable list, so ``dict()`` cannot copy it."""
-
-    def __init__(self, value: object) -> None:
-        self._value = value
-
-    @override
-    def __getitem__(self, key: object) -> object:
-        return self._value
-
-    @override
-    def __iter__(self) -> Iterator[object]:
-        return iter([["boom"]])
-
-    @override
-    def __len__(self) -> int:
-        return 1
-
-
-@pytest.mark.parametrize("kind", _MEMBER_KEY_KINDS)
-def test_schema_field_map_admits_a_member_key_rekeyed_by_its_text(kind: str) -> None:
-    """A ``str``-enum / ``TextChoices`` member key is read as its text and re-keyed by it.
-
-    The returned map is keyed by the exact ``str``, so the downstream key-hashing consumers
-    run ``str``'s own hash and equality.
-    """
-    field = bind_unparented(serializers.CharField(), "name")
-    result = _validate_schema_field_map("M", {_member_key(kind, "name"): field})
-    assert result == {"name": field}
-    assert [type(key) for key in result] == [str]
-
-
-@pytest.mark.parametrize(
-    "key",
-    [b"name", gettext_lazy("name")],
-    ids=["bytes", "lazy"],
-)
-def test_schema_field_map_refuses_a_non_string_key(key: object) -> None:
-    """A ``bytes`` or lazy-translation key is not read as text: it is refused typed."""
-    field = bind_unparented(serializers.CharField(), "name")
-    with pytest.raises(ConfigurationError, match="key must be a plain string"):
-        _validate_schema_field_map("M", {key: field})
-
-
-def test_schema_field_map_refuses_a_mapping_dict_cannot_copy() -> None:
-    """An unhashable key ``dict()`` refuses is the typed field-map error, chained."""
-    field = bind_unparented(serializers.CharField(), "name")
-    with pytest.raises(ConfigurationError, match="key must be a plain string") as excinfo:
-        _validate_schema_field_map("M", _UnhashableKeyMapping(field))
-    assert str(excinfo.value) == (
-        "SerializerMutation M.get_serializer_for_schema() returned a mapping dict() could not "
-        "copy; a field-map key must be a plain string."
-    )
-    assert type(excinfo.value.__cause__) is TypeError
 
 
 _CLASS_READ_RAISES_FACTORIES: list[Callable[[type[BaseException]], object]] = [
@@ -3028,21 +2937,19 @@ def test_validate_nested_fields_mapping_iteration_error_propagates() -> None:
 @pytest.mark.parametrize(
     "nested_factory",
     [
-        # Unhashable: ``dict()`` cannot copy the mapping.
-        lambda: _UnhashableKeyMapping(NestedSerializerConfig()),
         # Not a string at all.
         lambda: {7: NestedSerializerConfig()},
         # A lazy translation string is not read as text.
         lambda: {gettext_lazy("items"): NestedSerializerConfig()},
     ],
-    ids=["unhashable-list", "int", "lazy"],
+    ids=["int", "lazy"],
 )
 def test_validate_nested_fields_rejects_non_plain_string_keys(
     nested_factory: Callable[[], object],
 ) -> None:
-    """Only a key read as an exact ``str`` may reach ``field_map.get()`` or the dict-set."""
+    """A non-``str`` key names no field in the schema-time field map."""
     serializer_cls, field_map = _category_field_map()
-    with pytest.raises(ConfigurationError, match="keys must be plain strings"):
+    with pytest.raises(ConfigurationError, match="not in the serializer's schema-time field map"):
         _validate_serializer_nested_fields(
             "M",
             serializer_cls,
@@ -3050,23 +2957,6 @@ def test_validate_nested_fields_rejects_non_plain_string_keys(
             field_map,
             nested_factory(),
         )
-
-
-@pytest.mark.parametrize("kind", _MEMBER_KEY_KINDS)
-def test_validate_nested_fields_admits_a_member_key_rekeyed_by_its_text(kind: str) -> None:
-    """A ``str``-enum / ``TextChoices`` member key is read as its text and re-keyed by it."""
-    serializer_cls, field_map = _category_field_map()
-    config = NestedSerializerConfig()
-    result = _validate_serializer_nested_fields(
-        "M",
-        serializer_cls,
-        "create",
-        field_map,
-        {_member_key(kind, "items"): config},
-    )
-    assert result is not None
-    assert result == {"items": config}
-    assert [type(key) for key in result] == [str]
 
 
 def test_validate_nested_fields_empty_mapping_requires_no_write_override() -> None:

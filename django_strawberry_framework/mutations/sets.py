@@ -57,7 +57,6 @@ from django_strawberry_framework.utils._narrowing import (
     is_str,
     read_attr,
     require,
-    require_instance,
 )
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
@@ -534,33 +533,22 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         # override. Without this guard, a valid customization is accepted and then
         # silently discarded at bind time. The same mapping selects the override in
         # ``_materialize_input_for``, so validation cannot drift from materialization.
+        overrides: dict[str, type[WithStrawberryObjectDefinition]] = {}
         for applies_to, override_key in _OPERATION_INPUT_OVERRIDE_ATTR.items():
-            if operation != applies_to and introspection.mro_attr(meta, override_key) is not None:
+            declared = introspection.mro_attr(meta, override_key)
+            if declared is None:
+                continue
+            if operation != applies_to:
                 raise ConfigurationError(
                     f"DjangoMutation {name}.Meta.{override_key} applies only to "
                     f"operation='{applies_to}' (it customizes the {applies_to} input); this "
                     f"mutation declares operation={operation!r}, so Meta.{override_key} would be "
                     "silently ignored at the bind. Remove it.",
                 )
-
-        input_class = introspection.mro_attr(meta, "input_class")
-        if input_class is not None:
-            input_class = _validate_input_class(
+            overrides[override_key] = _validate_input_class(
                 name,
-                input_class,
-                attr_name="input_class",
-                # The guard above admits a declared override only on its own operation.
-                operation_kind=NON_DELETE_OPERATION_INPUT_KIND[operation],
-                model=model,
-                fields=fields,
-                exclude=exclude,
-            )
-        partial_input_class = introspection.mro_attr(meta, "partial_input_class")
-        if partial_input_class is not None:
-            partial_input_class = _validate_input_class(
-                name,
-                partial_input_class,
-                attr_name="partial_input_class",
+                declared,
+                attr_name=override_key,
                 operation_kind=NON_DELETE_OPERATION_INPUT_KIND[operation],
                 model=model,
                 fields=fields,
@@ -576,8 +564,8 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         return _ValidatedMutationMeta(
             model=model,
             operation=operation,
-            input_class=input_class,
-            partial_input_class=partial_input_class,
+            input_class=overrides.get("input_class"),
+            partial_input_class=overrides.get("partial_input_class"),
             fields=fields,
             exclude=exclude,
             permission_classes=permission_classes,
@@ -635,26 +623,13 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
 
         ``mutations/fields.py::_synthesized_mutation_signature`` consults this
         seam, so this is the single source for the model ``data:``
-        lazy-ref name.
-
-        A validated ``delete`` raises the typed ``ConfigurationError`` (never the
-        raw ``KeyError`` a direct index leaked): a delete is id-only and
-        materializes no input, and the framework never consults this seam for one
-        (``operation_takes_data`` gates the ``data:`` ref at the field factory), so
-        only a direct consumer call can reach the reject - where it must still fail
-        loud as the package's typed error, mirroring ``_materialize_input_for``'s
-        ``.get()`` delete short-circuit.
+        lazy-ref name. A delete is id-only and materializes no input, so the field
+        factory never consults this seam for one (``operation_takes_data`` gates the
+        ``data:`` ref).
         """
-        operation_kind = NON_DELETE_OPERATION_INPUT_KIND.get(meta.operation)
-        if operation_kind is None:
-            raise ConfigurationError(
-                f"DjangoMutation {cls.__name__} declares operation='delete', which is "
-                "id-only and materializes no input; input_type_name applies only to "
-                "create / update mutations.",
-            )
         return mutation_input_shape(
             backing_model_of(meta),
-            operation_kind,
+            NON_DELETE_OPERATION_INPUT_KIND[meta.operation],
             fields=meta.fields,
             exclude=meta.exclude,
         ).type_name
@@ -784,19 +759,6 @@ def _materialize_input_for(
     if operation_kind is None:
         return None  # delete: id-only, no input.
 
-    # The operation table names the override slot this operation honors; the
-    # snapshot holds a validated input class or ``None`` there.
-    override_attr = _OPERATION_INPUT_OVERRIDE_ATTR[meta.operation]
-    consumer_input = read_attr(meta, override_attr)
-    if consumer_input is not None:
-        return _materialize_merged_input(
-            mutation_name,
-            meta,
-            operation_kind,
-            require(consumer_input, _is_input_type),
-            override_attr=override_attr,
-        )
-
     # Derive the shape ONCE: ``mutation_input_shape`` single-sources the
     # cache key (the EFFECTIVE field set, NOT the raw ``(fields, exclude)``
     # spelling - two narrowings to one effective shape must dedupe, spec-036
@@ -810,6 +772,20 @@ def _materialize_input_for(
         fields=meta.fields,
         exclude=meta.exclude,
     )
+    # The operation table names the override slot this operation honors; the
+    # snapshot holds a validated input class or ``None`` there.
+    override_attr = _OPERATION_INPUT_OVERRIDE_ATTR[meta.operation]
+    consumer_input = read_attr(meta, override_attr)
+    if consumer_input is not None:
+        return _materialize_merged_input(
+            mutation_name,
+            meta,
+            operation_kind,
+            require(consumer_input, _is_input_type),
+            shape,
+            override_attr=override_attr,
+        )
+
     input_cls = get_or_store_shape_build(
         _shape_build_cache,
         shape.cache_key,
@@ -834,6 +810,7 @@ def _materialize_merged_input(
     meta: _ValidatedMutationMeta,
     operation_kind: str,
     consumer_input: type[WithStrawberryObjectDefinition],
+    shape: MutationInputShape,
     *,
     override_attr: str,
 ) -> type[WithStrawberryObjectDefinition]:
@@ -872,12 +849,6 @@ def _materialize_merged_input(
     """
     consumer_attrs = frozenset(
         field.python_name for field in consumer_input.__strawberry_definition__.fields
-    )
-    shape = mutation_input_shape(
-        backing_model_of(meta),
-        operation_kind,
-        fields=meta.fields,
-        exclude=meta.exclude,
     )
     _validate_relation_override_types(
         mutation_name,
@@ -956,12 +927,9 @@ def _validate_relation_override_types(
     non-Relay target) generates a raw pk input already, and an override there is left
     alone.
     """
-    # A validated ``@strawberry.input`` class: its definition slot holds an input definition.
-    consumer_definition = require_instance(
-        introspection.mro_attr(consumer_input, "__strawberry_definition__"),
-        StrawberryObjectDefinition,
-    )
-    consumer_fields = {field.python_name: field for field in consumer_definition.fields}
+    consumer_fields = {
+        field.python_name: field for field in consumer_input.__strawberry_definition__.fields
+    }
     for field in shape.selected:
         if not getattr(field, "is_relation", False):
             continue

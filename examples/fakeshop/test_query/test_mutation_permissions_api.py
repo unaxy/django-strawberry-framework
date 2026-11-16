@@ -417,8 +417,7 @@ def test_async_check_permission_override_is_rejected_not_bypassed() -> None:
 def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
     """A hook reassigning the validated permission set fails the request closed (live tier).
 
-    The snapshot walk survives list pollution; a hook could also try to
-    REASSIGN the validated ``permission_classes`` slot on the shared
+    A hook could try to REASSIGN the validated ``permission_classes`` slot on the shared
     ``_ValidatedMutationMeta`` record, which would leave an empty posture on the
     class that authorizes every later request. The frozen record refuses the write with
     ``dataclasses.FrozenInstanceError``, so the hook fails the request loudly (a

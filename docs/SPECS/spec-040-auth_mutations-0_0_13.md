@@ -1307,8 +1307,8 @@ The return annotation is `<UserPrimaryType> | None` via a bind-materialized
 field family already uses**. At class-body time the
 user's primary type is not resolved, so — exactly as
 [`DjangoMutationField`][glossary-djangomutationfield] builds a per-resolver
-`inspect.Signature` + `__annotations__` whose return is a `strawberry.lazy` forward-ref
-and assigns them onto its dispatcher (`_resolve.__signature__` / `_resolve.__annotations__`,
+`inspect.Signature` whose return is a `strawberry.lazy` forward-ref
+and assigns it onto its dispatcher (`_resolve.__signature__`,
 [`mutations/fields.py`][mutations-fields]) — the `current_user()` factory injects a
 return annotation of
 `Optional[Annotated["CurrentUserAlias", strawberry.lazy("django_strawberry_framework.auth.queries")]]`
@@ -1317,7 +1317,7 @@ built by the shared [`_lazy_ref`][mutations-fields]`(type_name, module_path)` he
 the same builder [`DjangoMutationField`][glossary-djangomutationfield] uses for its
 `<Name>Payload` refs — not a hand-spelled `Annotated[...]`. What is **single-sited in
 ONE auth field-construction helper** (`_make_auth_field`) the three fixed factories share is the
-sync-vs-async **dispatch seam** plus the signature / annotation injection, never
+sync-vs-async **dispatch seam** plus the signature injection, never
 copied per field (Helper-reuse D12 / P1 / P2); the
 per-surface request resolution, permission gate and session work live in the sync and
 async resolver **bodies** that helper is handed, which is what makes them the
@@ -1325,7 +1325,7 @@ per-transport specialization point without the dispatch seam changing
 ([Decision 10](#decision-10--sync--async-session-work-through-one-sync_to_asyncthread_sensitivetrue-boundary)).
 To keep that single copy
 honest across `mutations/` and `auth/`, [`_lazy_ref`][mutations-fields] and
-`build_lazy_field_signature` (which builds the `__signature__` / `__annotations__` pair
+`build_lazy_field_signature` (which builds the `__signature__`
 each dispatcher is assigned) are shared machinery in
 [`mutations/fields.py`][mutations-fields] rather than re-spelled in `auth/`.
 **The `"CurrentUserAlias"` slot is owned by a
@@ -1447,10 +1447,9 @@ factories cannot resolve types eagerly; they follow the exact
   same ones the model / form / serializer flavors use — (**surface-keyed**: which of
   `login` / `logout` / `register` / `current_user` was declared, with which
   `permission_classes`) and returns a field whose
-  dispatcher resolver carries an **injected `__signature__` / `__annotations__`** — the
+  dispatcher resolver carries an **injected `__signature__`** — the
   same mechanism [`DjangoMutationField`][glossary-djangomutationfield] uses
-  ([`mutations/fields.py`][mutations-fields] `_resolve.__signature__` /
-  `_resolve.__annotations__`) — with the return annotation a `strawberry.lazy`
+  ([`mutations/fields.py`][mutations-fields] `_resolve.__signature__`) — with the return annotation a `strawberry.lazy`
   forward-ref into the package namespaces: `"LoginPayload"` / `"LogoutPayload"` in the
   `mutations.inputs` module path (where `build_payload_type` materializes), and the
   `current_user` `"CurrentUserAlias"` in `auth.queries` (set to the resolved primary
@@ -1828,7 +1827,7 @@ so each carries a source comment at its site.
 - [ ] **D12 / P1 / P2** — the lazy return refs are built by [`_lazy_ref`][mutations-fields];
   the field-dispatcher construction is single-sited in ONE auth helper
   (`_make_auth_field`); `_lazy_ref` + `build_lazy_field_signature` (the
-  `__signature__` / `__annotations__` pair) are shared machinery in
+  `__signature__`) are shared machinery in
   [`mutations/fields.py`][mutations-fields]
   ([Decision 7](#decision-7--current_user-returns-the-session-actor-nullable-and-does-not-re-run-get_queryset) / [Decision 9](#decision-9--bind-lifecycle-a-declaration-ledger--bind_auth_mutations-at-phase-25--registered-clear-rows)).
 - [ ] **D13** — the `CurrentUserAlias` namespace is owned by a

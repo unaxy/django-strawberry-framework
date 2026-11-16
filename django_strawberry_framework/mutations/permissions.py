@@ -146,19 +146,8 @@ def run_permission_classes(
     denial, ``True`` only when all allow.
     """
     meta = type(mutation_self)._mutation_meta
-    # The validated permission set is iterated as a SNAPSHOT (a tuple captured
-    # before the walk), never live: a ``has_permission`` hook receives the
-    # mutation class and could otherwise mutate the very list this loop iterates
-    # - clearing it would short-circuit the in-flight loop to "all allowed" (the
-    # configured deniers never run) and the emptied list would persist on the
-    # class, authorizing every later request: a persistent cross-request
-    # authorization bypass. The AND contract (every entry must allow) is sound
-    # only over the validated set captured at class creation, never over
-    # whatever a hook leaves behind. The storage side backs that: the validated
-    # snapshot is a frozen record (see
-    # ``write_mixins.py::_ValidatedMutationMeta``) - the permission set is an
-    # immutable tuple and the record refuses reassignment or deletion of its fields.
-    for permission_class in tuple(meta.permission_classes):
+    # The validated permission set is the frozen record's immutable tuple.
+    for permission_class in meta.permission_classes:
         allowed = _require_sync_bool_auth_result(
             permission_class().has_permission(
                 info,

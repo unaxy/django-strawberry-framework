@@ -42,7 +42,6 @@ consumer overrides the construction hook), and the reverse-map
 
 from __future__ import annotations
 
-import types
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from django import forms
@@ -51,10 +50,7 @@ from typing_extensions import override
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import PARTIAL
 from django_strawberry_framework.mutations.operations import NON_DELETE_OPERATION_INPUT_KIND
-from django_strawberry_framework.mutations.permissions import (
-    DenyAll,
-    run_permission_classes,
-)
+from django_strawberry_framework.mutations.permissions import DenyAll
 from django_strawberry_framework.mutations.sets import DjangoMutation
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils import introspection
@@ -75,7 +71,6 @@ from django_strawberry_framework.write_mixins import (
     _ValidatedMutationMeta,
     bind_write_declarations,
     build_and_stash_input,
-    construction_kwargs,
     dispatch_resolver_entry,
     make_declaration_registry,
     make_meta_validating_metaclass,
@@ -207,49 +202,9 @@ _form_shape_build_cache, clear_form_shape_build_cache = make_shape_build_cache()
 register_subsystem_clear(clear_form_shape_build_cache, owner="forms.shape_cache")
 
 
-def _default_mutation_get_form_fields(
-    cls: type[DjangoModelFormMutation | DjangoFormMutation],
-) -> dict[str, forms.Field]:
-    """Return the mutation's stable field basis from its declared ``form_class``."""
-    return get_form_fields(require(own_backing_class(cls, "form_class"), _is_form_class))
-
-
 def _is_form_class(value: object) -> TypeIs[FormClass]:
     """Whether ``value`` is a ``Form`` or ``ModelForm`` subclass, asked of its real MRO."""
     return is_class(value) and issubclass(value, (forms.Form, forms.ModelForm))
-
-
-def _require_zero_arg_form_fields_declaration(mutation_cls: type) -> None:
-    """Reject a ``get_form_fields`` declared as a function that cannot be called zero-arg.
-
-    The hook is read from the class, so a classmethod receives the mutation class
-    and a plain function or ``staticmethod`` receives nothing. A plain function or
-    ``staticmethod`` whose own signature requires a positional parameter (the
-    forgotten ``@classmethod`` over ``def get_form_fields(cls)``) can never be
-    called; that is decided from the declaration in the class namespace
-    (``introspection.mro_attr``) and the function's code object, before the hook runs.
-    Any other declaration (a classmethod, a zero-arg function, another callable)
-    passes; what it raises when called is its own.
-    """
-    declared = introspection.mro_attr(mutation_cls, "get_form_fields", None)
-    if type(declared) is staticmethod:
-        function, declared_as = declared.__func__, "a staticmethod"
-    elif type(declared) is types.FunctionType:
-        function, declared_as = declared, "a plain function"
-    else:
-        return
-    code = function.__code__
-    required = code.co_argcount - len(function.__defaults__ or ())
-    if required <= 0:
-        return
-    names = ", ".join(repr(parameter) for parameter in code.co_varnames[:required])
-    noun = "parameter" if required == 1 else "parameters"
-    raise ConfigurationError(
-        f"{mutation_cls.__name__}.get_form_fields must be a callable classmethod "
-        "returning a mapping of form field names to forms.Field instances; it is declared "
-        f"as {declared_as} requiring the positional {noun} {names}, but the hook is called "
-        "with no arguments. Decorate it with @classmethod.",
-    )
 
 
 def _mutation_form_fields(
@@ -259,23 +214,11 @@ def _mutation_form_fields(
     """Resolve a mutation's overridable form-field hook for one build pass.
 
     Both flavors' ``_validate_meta`` and ``build_input`` route through this one
-    call site, so the checks below run at class creation, before the hook is ever
-    called. The contract: ``get_form_fields`` is a callable classmethod (a zero-arg
-    function or ``staticmethod`` is accepted too) returning a mapping of form field
-    names to ``forms.Field`` instances. A non-callable hook, and a function
-    declaration that requires a positional argument, are rejected typed. The hook
-    itself is consumer behaviour, so whatever a well-declared hook raises
+    call site, so the hook runs at class creation. Whatever the hook raises
     propagates unchanged, and its return is validated by
     ``normalize_form_field_basis``.
     """
-    hook = getattr(mutation_cls, "get_form_fields", None)
-    if not callable(hook):
-        raise ConfigurationError(
-            f"{mutation_cls.__name__}.get_form_fields must be a callable classmethod "
-            "returning a mapping of form field names to forms.Field instances.",
-        )
-    _require_zero_arg_form_fields_declaration(mutation_cls)
-    return normalize_form_field_basis(form_class, hook())
+    return normalize_form_field_basis(form_class, mutation_cls.get_form_fields())
 
 
 def _cached_build_form_input(
@@ -374,32 +317,6 @@ def _cached_build_form_input(
     return get_or_store_shape_build(_form_shape_build_cache, cache_key, _build)
 
 
-def _resolve_effective_form_field_names(
-    form_class: FormClass,
-    *,
-    fields: tuple[str, ...] | None,
-    exclude: tuple[str, ...] | None,
-    form_fields: Mapping[str, forms.Field] | None = None,
-    operation_kind: str | None = None,
-) -> tuple[str, ...]:
-    """Return the effective form-field names after ``Meta.fields`` / ``Meta.exclude``.
-
-    Routes through ``resolve_effective_form_fields`` (the narrowing
-    fail-loud machinery: mutual exclusion, bare-string / duplicate rejection,
-    unknown-name rejection against ``form_class.base_fields``, empty-set guard) so
-    the form ``_validate_meta`` does not re-spell that validation. Returns the
-    ordered effective name tuple the snapshot's input-name derivation consults.
-    """
-    effective = resolve_effective_form_fields(
-        form_class,
-        fields=fields,
-        exclude=exclude,
-        form_fields=form_fields,
-        operation_kind=operation_kind,
-    )
-    return tuple(effective)
-
-
 def _normalized_form_field_selection(
     meta: type[object],
     form_class: FormClass,
@@ -417,7 +334,7 @@ def _normalized_form_field_selection(
         meta,
         flavor="DjangoFormMutation / DjangoModelFormMutation",
     )
-    _ = _resolve_effective_form_field_names(
+    _ = resolve_effective_form_fields(
         form_class,
         fields=fields,
         exclude=exclude,
@@ -425,38 +342,6 @@ def _normalized_form_field_selection(
         operation_kind=operation_kind,
     )
     return fields, exclude
-
-
-def _form_kwargs_overridden(
-    cls: type[DjangoModelFormMutation | DjangoFormMutation],
-    base: type[DjangoModelFormMutation | DjangoFormMutation],
-) -> bool:
-    """Return whether ``cls`` overrides ``get_form_kwargs`` / ``get_form`` (the waiver detection).
-
-    The ``get_form_kwargs`` / ``get_form`` waiver (spec-038 Decision 7):
-    True when the concrete mutation re-defines EITHER construction hook relative to
-    its framework ``base``. When a consumer overrides the form-construction hook to
-    inject fields the generated input does not carry (a ``user``, a tenant, a
-    defaulted column), the create-required-narrowing guard cannot know WHICH fields
-    the override supplies, so it trusts the override and waives the guard.
-
-    Asks ``utils/introspection.py::overrides`` about both hooks, which compares the
-    stored functions by identity.
-    Serializer mutations do not ride this waiver (they subtract via
-    ``Meta.injected_fields`` only).
-
-    **Caveat (deliberate trade-off, spec-038 Decision 7).** The waiver is COARSE: it
-    trusts that the override supplies any required field a ``Meta.fields`` /
-    ``Meta.exclude`` narrowing dropped, but does NOT verify it. An override taken for
-    an UNRELATED reason (scoping a ``ModelChoiceField.queryset``, injecting a
-    ``request``) while ALSO narrowing a required field away therefore silently
-    re-opens the "schema looks valid but can never validate" hole the guard exists to
-    catch. The strict alternative (only waive for fields the override demonstrably
-    injects) would reject legitimate kwarg-injection forms, so the spec accepts the
-    trust; a consumer who hits the hole keeps the narrowed-away field in the input
-    instead.
-    """
-    return introspection.overrides(cls, base, "get_form_kwargs", "get_form")
 
 
 def _default_get_form_kwargs(
@@ -477,10 +362,10 @@ def _default_get_form_kwargs(
     module-level function both bases reference so the default body never drifts.
     """
     del info  # the default ignores ``info``; an override may consult it.
-    # The "add ``instance`` only on update" clause is single-sited in
-    # ``write_mixins.py::construction_kwargs``, shared with the
-    # serializer ``get_serializer_kwargs`` default.
-    return construction_kwargs(data=data, files=files, instance=instance)
+    kwargs: dict[str, object] = {"data": data, "files": files}
+    if instance is not None:
+        kwargs["instance"] = instance
+    return kwargs
 
 
 def _default_get_form(
@@ -552,6 +437,12 @@ def _build_and_stash_form_input(
     """
     form_class = require(meta.form_class, _is_form_class)
     form_fields = _mutation_form_fields(cls, form_class)
+    # The ``get_form_kwargs`` / ``get_form`` waiver (spec-038 Decision 7): an override of
+    # either construction hook may inject fields the generated input does not carry, so the
+    # create-required guard trusts it. The waiver is coarse by design: an override taken for
+    # an unrelated reason while narrowing a required field away re-opens the "schema looks
+    # valid but can never validate" hole; the strict alternative would reject legitimate
+    # kwarg-injection forms. Serializer mutations subtract via ``Meta.injected_fields`` only.
     return build_and_stash_input(
         cls,
         build=lambda: _cached_build_form_input(
@@ -559,7 +450,7 @@ def _build_and_stash_form_input(
             operation_kind=operation_kind,
             fields=meta.fields,
             exclude=meta.exclude,
-            guard_required=not _form_kwargs_overridden(cls, base),
+            guard_required=not introspection.overrides(cls, base, "get_form_kwargs", "get_form"),
             binds_class_fields=(
                 not introspection.overrides(cls, base, "get_form")
                 and form_binds_class_fields(form_class)
@@ -588,19 +479,23 @@ def _form_input_type_name_for(
     """
     form_class = require(meta.form_class, _is_form_class)
     form_fields = _mutation_form_fields(mutation_cls, form_class)
-    effective = _resolve_effective_form_field_names(
-        form_class,
-        fields=meta.fields,
-        exclude=meta.exclude,
-        form_fields=form_fields,
-        operation_kind=operation_kind,
+    effective = tuple(
+        resolve_effective_form_fields(
+            form_class,
+            fields=meta.fields,
+            exclude=meta.exclude,
+            form_fields=form_fields,
+            operation_kind=operation_kind,
+        ),
     )
-    full = _resolve_effective_form_field_names(
-        form_class,
-        fields=None,
-        exclude=None,
-        form_fields=form_fields,
-        operation_kind=operation_kind,
+    full = tuple(
+        resolve_effective_form_fields(
+            form_class,
+            fields=None,
+            exclude=None,
+            form_fields=form_fields,
+            operation_kind=operation_kind,
+        ),
     )
     return form_input_type_name(form_class, operation_kind, effective, full_field_names=full)
 
@@ -608,7 +503,7 @@ def _form_input_type_name_for(
 # The form construction hooks (and the plain flavor's resolver seams) as a type checker
 # reads them. Each class installs the shared defaults at run time - ``get_form_kwargs`` /
 # ``get_form`` are ``_default_get_form_kwargs`` / ``_default_get_form``, which
-# ``_form_kwargs_overridden`` compares by identity - and a checker would read those
+# the build's waiver check compares by identity - and a checker would read those
 # assignments as plain attributes, so it reads these typing-only bases instead: a consumer's
 # override is checked against a method signature, and each body states what the default
 # does. At run time the bases are ``object`` / ``DjangoMutation``, so neither form base's
@@ -734,7 +629,7 @@ class DjangoModelFormMutation(_ModelFormMutationBase):
         form. An override must return a request-independent mapping of form field
         names to ``forms.Field`` instances.
         """
-        return _default_mutation_get_form_fields(cls)
+        return get_form_fields(require(own_backing_class(cls, "form_class"), _is_form_class))
 
     @classmethod
     @override
@@ -890,7 +785,7 @@ class DjangoModelFormMutation(_ModelFormMutationBase):
             base=DjangoModelFormMutation,
         )
 
-    # The shared construction defaults ``_form_kwargs_overridden`` compares by identity; a
+    # The shared construction defaults the build's waiver check compares by identity; a
     # type checker reads the hooks from ``_ModelFormConstructionHooks``.
     if not TYPE_CHECKING:
         get_form_kwargs = _default_get_form_kwargs
@@ -972,7 +867,7 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         form. An override must return a request-independent mapping of form field
         names to ``forms.Field`` instances.
         """
-        return _default_mutation_get_form_fields(cls)
+        return get_form_fields(require(own_backing_class(cls, "form_class"), _is_form_class))
 
     # The validated ``Meta`` snapshot the metaclass stashes on a concrete subclass.
     # ``None`` on the abstract base (no ``Meta``); a type checker sees the
@@ -1163,7 +1058,7 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
             base=DjangoFormMutation,
         )
 
-    # The shared construction defaults ``_form_kwargs_overridden`` compares by identity; a
+    # The shared construction defaults the build's waiver check compares by identity; a
     # type checker reads the hooks from ``_FormConstructionHooks``.
     if not TYPE_CHECKING:
         get_form_kwargs = _default_get_form_kwargs
@@ -1190,31 +1085,10 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         if callable(save):
             _ = save()
 
-    def check_permission(
-        self,
-        info: Info[object, object],
-        operation: str,
-        data: object,
-        instance: models.Model | None = None,
-    ) -> bool:
-        """Return whether the request is authorized (the plain-flavor write-auth seam).
-
-        The plain ``DjangoFormMutation`` is NOT a ``DjangoMutation`` subclass, so it
-        carries its own ``check_permission`` mirroring the ``036`` default: delegate
-        to every ``Meta.permission_classes`` entry, denying as soon as one denies.
-        ``forms/resolvers.py`` calls this through the reused
-        ``authorize_or_raise`` gate (which maps ``False`` to a top-level
-        ``GraphQLError``). An ``async def has_permission`` entry returns a truthy
-        coroutine, which ``reject_async_in_sync_context`` closes + raises as a
-        ``SyncMisuseError`` (an authorization bypass otherwise - the same discipline
-        the model flavor applies).
-
-        The walk body is single-sited in
-        ``mutations/permissions.py::run_permission_classes``,
-        shared with ``DjangoMutation.check_permission``, so the authorization
-        seam cannot fork between the flavors.
-        """
-        return run_permission_classes(self, info, operation, data, instance)
+    # The plain-flavor write-auth seam: the model flavor's default walk over
+    # ``Meta.permission_classes`` (``mutations/permissions.py::run_permission_classes``),
+    # bound here because the plain flavor is not a ``DjangoMutation`` subclass.
+    check_permission: ClassVar[Callable[..., bool]] = DjangoMutation.check_permission
 
     @classmethod
     def input_type_name(cls, meta: _ValidatedMutationMeta) -> str:

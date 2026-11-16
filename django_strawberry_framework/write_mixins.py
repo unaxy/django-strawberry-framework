@@ -20,7 +20,7 @@ ledger, metaclass instance, allowed-key set and bind entry point in its own
   (``make_declaration_registry`` / ``make_meta_validating_metaclass``);
 - the resolver-seam factory (``resolver_seams`` / ``dispatch_resolver_entry``);
 - the input build / stash helpers and the phase-2.5 drain
-  (``build_and_stash_input`` / ``construction_kwargs`` / ``bind_write_declarations``).
+  (``build_and_stash_input`` / ``bind_write_declarations``).
 
 The ``Meta``-key typo guard each ``_validate_meta`` opens with
 (``utils/inputs.py::reject_unknown_meta_keys``) is not here: the set
@@ -172,27 +172,6 @@ def build_and_stash_input(
     )
     cls._input_field_specs = specs_of(payload)
     return input_cls
-
-
-def construction_kwargs(
-    *,
-    instance: models.Model | None = None,
-    **base: object,
-) -> dict[str, object]:
-    """Build a construction-hook kwargs dict, adding ``instance`` only when non-``None``.
-
-    The default construction-kwargs hooks share the ``{...base...}`` +
-    ``if instance is not None: kwargs["instance"] = instance`` shape: the form
-    ``_default_get_form_kwargs`` passes ``base={"data": ..., "files": ...}``, the
-    serializer ``get_serializer_kwargs`` passes ``base={"data": ...}``. Single-sites
-    the "add ``instance`` only for update" clause (create / plain pass
-    ``instance=None`` so no ``instance=`` key is emitted) so a new flavor's default
-    hook reuses it rather than re-spelling the guard.
-    """
-    kwargs = dict(base)
-    if instance is not None:
-        kwargs["instance"] = instance
-    return kwargs
 
 
 def require_backing_class(

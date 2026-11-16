@@ -100,8 +100,7 @@ vocabulary used throughout the spec:
   [`DjangoMutationField`][glossary-djangomutationfield] — the
   [`spec-036`][spec-036] foundation. The serializer flavor reuses the
   [`DjangoMutationField`][glossary-djangomutationfield] exposure factory (which
-  accepts any member of the mutation family via a duck-typed `_has_mutation_protocol`
-  check), the
+  accepts any member of the mutation family a declaration ledger records), the
   generated-payload lifecycle, and the [`DjangoMutation`][glossary-djangomutation]
   base outright; the input *generation*, by contrast, is **serializer-derived here**
   ([Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth)).
@@ -610,8 +609,8 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     `036` / `038` set.
   - [ ] [`mutations/fields.py`][mutations-fields]:
     [`DjangoMutationField`][glossary-djangomutationfield] needs nothing serializer-specific
-    — it is generic along its three axes (target check via the duck-typed
-    `_has_mutation_protocol`, `_resolve` dispatch via `mutation_cls.resolve_sync` /
+    — it is generic along its three axes (target check via the declaration
+    ledgers, `_resolve` dispatch via `mutation_cls.resolve_sync` /
     `resolve_async`, the `data:` lazy-ref via `mutation_cls.input_type_name` +
     `input_module_path`); `tests/mutations/test_fields.py` pins it for
     `SerializerMutation`
@@ -784,8 +783,8 @@ replaces.
   [`_resolve_model(meta)`][spec-036] / `_validate_meta` / `build_input` /
   `input_type_name` / `input_module_path` / `resolve_sync` / `resolve_async`, and rides
   `bind_mutations()`. [`mutations/fields.py`][mutations-fields]'s
-  [`DjangoMutationField`][glossary-djangomutationfield] serves it unchanged (duck-typed
-  `_has_mutation_protocol` target check, `resolve_sync` / `resolve_async` dispatch,
+  [`DjangoMutationField`][glossary-djangomutationfield] serves it unchanged (declaration-ledger
+  target check, `resolve_sync` / `resolve_async` dispatch,
   `input_type_name` + `input_module_path` lazy ref).
 - **`djangorestframework` is a dev-group dependency only.**
   [`pyproject.toml`][pyproject] `[dependency-groups].dev` pins
@@ -1204,11 +1203,10 @@ No serializer-specific field factory or error type: the flavor is exposed throug
 write family on three axes:
 
 1. **Target check.** [`mutations/fields.py`][mutations-fields]'s
-   `_validate_mutation_target` accepts any member of the mutation family via
-   the duck-typed `_has_mutation_protocol` (`_mutation_meta` attribute + callable
-   `resolve_sync` / `resolve_async` + callable `input_type_name` + an
-   `input_module_path`), not `issubclass(DjangoMutation)`. `SerializerMutation`, a
-   `DjangoMutation` subclass, passes trivially.
+   `_validate_mutation_target` accepts any member of the mutation family with its
+   own `_mutation_meta` that a declaration ledger records, not
+   `issubclass(DjangoMutation)`. `SerializerMutation`, a `DjangoMutation` subclass,
+   passes trivially.
 2. **Resolver dispatch.** `DjangoMutationField._resolve` calls
    `mutation_cls.resolve_sync` / `resolve_async`, so a serializer flavor routes to
    [`rest_framework/resolvers.py`][rf-resolvers] through its
@@ -2592,7 +2590,7 @@ held by the identity ratchet where a symbol is shared:
   [`DjangoModelPermission`][glossary-djangomodelpermission] write-auth seam.
 - **The field factory:**
   [`mutations/fields.py`][mutations-fields]'s [`DjangoMutationField`][glossary-djangomutationfield]
-  is duck-typed (`_has_mutation_protocol`), so the serializer base needs nothing
+  checks declaration-ledger membership, so the serializer base needs nothing
   serializer-specific there (Decision 5).
 - **No bespoke declaration registry / factory call.** `mutations/sets.py::make_declaration_registry`
   is a **shared factory** the model path itself instantiates (the model-less plain
@@ -2661,8 +2659,7 @@ held by the identity ratchet where a symbol is shared:
   [Decision 6](#decision-6--base-class-strategy-serializermutation-rides-the-djangomutation-base-modelserializer-driven)
   enumerates. ([Decision 6](#decision-6--base-class-strategy-serializermutation-rides-the-djangomutation-base-modelserializer-driven) / Slice 2.)
 - **Constructor-hook ownership stays narrow.** The `get_serializer_kwargs` default body
-  parallels `forms/sets.py::_default_get_form_kwargs` (both over
-  `write_mixins.py::construction_kwargs`), but the serializer hook does not
+  parallels `forms/sets.py::_default_get_form_kwargs`, but the serializer hook does not
   participate in required-field guard decisions. The serializer flavor has **only** the
   finer `get_serializer_kwargs` hook — **no** coarse `get_serializer` constructor hook
   (unlike the form flavor's `get_form`): its framework-owned invariants (`partial` and
@@ -2731,7 +2728,7 @@ the Slice-1 DRY bullet enumerates, and that one is executable
 | --- | --- | --- |
 | [`serializer_converter.py`][rf-converter] | `exceptions`, `registry`, `scalars`, `mutations/inputs.py`, `types/converters.py`, `utils/converters.py`, `utils/inputs.py` | the shared fail-loud dispatch skeleton, the shared conversion base + field spec, the four input-kind constants, the read-side scalar / enum core (`convert_scalar`, `scalar_for_field`, `build_enum_from_choices`, `choice_enum_name`), the model-column relation classifiers (`model_column_write_kind`, `model_column_write_annotation`, `annotate_queryset_relation`), the [`Upload`][glossary-upload-scalar] scalar, `predicted_input_field_name`, the `register_subsystem_clear` seam |
 | [`inputs.py`][rf-inputs] | `exceptions`, `registry`, `mutations/inputs.py`, `utils/inputs.py`, `.serializer_converter` | the input-namespace one-ledger trio, the shape-build cache pair, `build_strawberry_input_class`, `generated_input_type_name`, `guard_dropped_required`, `iter_input_field_collisions`, `optional_input_field`, `resolve_effective_fields`, `normalize_field_name_sequence`, `pascalize_token`, `InputFieldSpec`, `predicted_input_field_name`, the `CREATE` / `PARTIAL` kinds, the `register_subsystem_clear` seam |
-| [`sets.py`][rf-sets] | `exceptions`, `mutations/inputs.py`, `mutations/operations.py`, `mutations/sets.py`, `utils/inputs.py`, `write_mixins.py`, `.inputs`, `.serializer_converter` | `DjangoMutation`, `_ValidatedMutationMeta`, `_validate_permission_classes`, `reject_unknown_meta_keys`, `MODEL_BACKED_WRITE_META_KEYS`, `NON_DELETE_OPERATION_INPUT_KIND` + `require_non_delete_operation`, `build_and_stash_input`, `construction_kwargs`, `normalize_meta_field_selection`, `own_backing_class`, `require_backing_class` / `require_subclass`, `resolve_backed_model_or_raise` (the no-model raise + `require_model_class`) / `resolve_meta_model`, `resolver_seams`, `validate_select_for_update`, `normalize_field_name_sequence` |
+| [`sets.py`][rf-sets] | `exceptions`, `mutations/inputs.py`, `mutations/operations.py`, `mutations/sets.py`, `utils/inputs.py`, `write_mixins.py`, `.inputs`, `.serializer_converter` | `DjangoMutation`, `_ValidatedMutationMeta`, `_validate_permission_classes`, `reject_unknown_meta_keys`, `MODEL_BACKED_WRITE_META_KEYS`, `NON_DELETE_OPERATION_INPUT_KIND` + `require_non_delete_operation`, `build_and_stash_input`, `normalize_meta_field_selection`, `own_backing_class`, `require_backing_class` / `require_subclass`, `resolve_backed_model_or_raise` (the no-model raise + `require_model_class`) / `resolve_meta_model`, `resolver_seams`, `validate_select_for_update`, `normalize_field_name_sequence` |
 | [`resolvers.py`][rf-resolvers] | `exceptions`, `mutations/inputs.py`, `mutations/resolvers.py`, `utils/errors.py`, `utils/inputs.py`, `utils/permissions.py`, `utils/querysets.py`, `utils/relations.py`, `utils/write_transaction.py`, `utils/write_values.py`, `.hook_context`, `.inputs`, `.serializer_converter` | the shared sync-pipeline skeleton `run_write_pipeline_sync` + `make_resolver_entries`, the shared decode primitives in `utils/write_values.py` — `decode_visible_relation`, `decode_visible_relation_ids`, `decode_provided_fields`, `decode_field_handlers`, `decoded_into` — the shared leaf-error constructors in `utils/errors.py`, the `NON_FIELD_ERROR_KEY` sentinel and `FieldError`, the write-transaction substrate (`require_write_pipeline`, `pipeline_write_phase`, `pin_write_queryset`, `base_locked_queryset`, `pks_match`, `make_cross_alias_save_guard`), `related_visibility_queryset`, `request_from_info` |
 | [`__init__.py`][rf-init] | `utils/imports.py` | the shared `require_optional_module` core behind `require_drf()` (Decision 12) |
 | [`hook_context.py`][rf-hook-context] | nothing | — (one frozen dataclass, no framework dependency) |

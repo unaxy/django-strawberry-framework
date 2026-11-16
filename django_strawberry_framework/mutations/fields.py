@@ -58,7 +58,6 @@ from strawberry.types import Info
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.sets import iter_form_mutations
-from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import class_namespace, is_class
 from django_strawberry_framework.utils.directives import validated_field_directives
 from django_strawberry_framework.utils.execution_mode import async_execution
@@ -85,20 +84,14 @@ def _validate_mutation_target(mutation_cls: object) -> None:
     """Reject a bad ``DjangoMutationField`` target at the construction line (spec-036 / spec-038 Decision 5).
 
     The target must be a **concrete, validated** member of the mutation / form
-    family: a class (not an instance / arbitrary value) carrying the mutation
-    protocol - a ``_mutation_meta`` attribute and the ``resolve_sync`` /
-    ``resolve_async`` + ``input_type_name`` / ``input_module_path`` seams - plus a
-    non-``None`` ``_mutation_meta`` (the metaclass stamps it at class creation for a
-    concrete subclass; an abstract base carries ``None``).
+    family: a class (not an instance / arbitrary value) with its own non-``None``
+    ``_mutation_meta`` (the metaclass stamps it at class creation for a concrete
+    subclass; an abstract base carries ``None``) that a declaration ledger records.
 
-    The check is **duck-typed**, NOT ``issubclass(DjangoMutation)`` (spec-038
+    The family is NOT recognized by ``issubclass(DjangoMutation)`` (spec-038
     Decision 5): the plain ``DjangoFormMutation`` is model-less and is NOT a
-    ``DjangoMutation`` subclass, and importing the form bases here would close a
-    load cycle (``forms/sets.py`` imports ``mutations/sets.py``). So the family is
-    recognized by the protocol attrs every flavor carries - the ``036``
-    ``DjangoMutation`` (and so ``DjangoModelFormMutation``) and the plain
-    ``DjangoFormMutation`` all pass (``DjangoMutation`` carries every protocol
-    attr).
+    ``DjangoMutation`` subclass. Only the mutation metaclasses register a class in
+    the two declaration ledgers, so ledger membership is the family test.
 
     It does NOT require ``_input_class`` / ``_payload_type_name`` - those are BIND
     outputs populated at ``finalize_django_types``, and the field is constructed at
@@ -115,10 +108,10 @@ def _validate_mutation_target(mutation_cls: object) -> None:
     materialize, so this guard requires an own snapshot and current ledger entry.
 
     The class check reads the candidate's real type (``utils/_narrowing.py::is_class``),
-    the protocol probe and the own-namespace snapshot read run no descriptor, and the
-    ledger check compares by identity.
+    the own-namespace snapshot read runs no descriptor, and the ledger check compares by
+    identity.
     """
-    if not is_class(mutation_cls) or not _has_mutation_protocol(mutation_cls):
+    if not is_class(mutation_cls):
         raise ConfigurationError(
             f"DjangoMutationField requires a concrete DjangoMutation / DjangoFormMutation / "
             f"DjangoModelFormMutation subclass; got {mutation_cls!r}.",
@@ -126,8 +119,9 @@ def _validate_mutation_target(mutation_cls: object) -> None:
     if class_namespace(mutation_cls).get("_mutation_meta") is None:
         raise ConfigurationError(
             "DjangoMutationField requires a concrete mutation subclass with its own nested "
-            f"Meta; {mutation_cls.__name__} is an abstract base or only inherits Meta and "
-            f"is not registered for finalization. Redeclare Meta on {mutation_cls.__name__}.",
+            f"Meta; {mutation_cls.__name__} is not a mutation, is an abstract base, or only "
+            "inherits Meta, and is not registered for finalization. Declare Meta on "
+            f"{mutation_cls.__name__}.",
         )
     if not _is_registered_mutation_target(mutation_cls):
         raise ConfigurationError(
@@ -135,36 +129,6 @@ def _validate_mutation_target(mutation_cls: object) -> None:
             "finalization in the current registry lifecycle. Declare the mutation after the "
             "most recent registry.clear().",
         )
-
-
-_ABSENT = object()
-
-
-def _is_callable_member(value: object) -> bool:
-    """Return whether a class-namespace entry is callable once bound (function or classmethod)."""
-    return callable(value) or isinstance(value, classmethod)
-
-
-def _has_mutation_protocol(mutation_cls: type[object]) -> bool:
-    """Return whether a class carries the duck-typed mutation / form-mutation protocol.
-
-    The protocol every dispatchable flavor exposes: a
-    ``_mutation_meta`` attribute (present even as ``None`` on an abstract base, so
-    the next guard can distinguish "abstract base" from "not a mutation at all"),
-    callable ``resolve_sync`` / ``resolve_async`` (the dispatch seams ``_resolve``
-    calls), and callable ``input_type_name`` + an ``input_module_path`` (the
-    ``data:`` lazy-ref seams). A class missing any is not a mutation family member.
-    Each member is read statically (``utils/introspection.py::mro_attr``), so the stored
-    ``classmethod`` object is what the callable check sees.
-    """
-    if introspection.mro_attr(mutation_cls, "_mutation_meta", _ABSENT) is _ABSENT:
-        return False
-    return (
-        _is_callable_member(introspection.mro_attr(mutation_cls, "resolve_sync"))
-        and _is_callable_member(introspection.mro_attr(mutation_cls, "resolve_async"))
-        and _is_callable_member(introspection.mro_attr(mutation_cls, "input_type_name"))
-        and introspection.mro_attr(mutation_cls, "input_module_path") is not None
-    )
 
 
 def _is_registered_mutation_target(mutation_cls: type[object]) -> bool:
@@ -201,13 +165,14 @@ def _lazy_ref(type_name: str, module_path: str) -> object:
 def build_lazy_field_signature(
     arguments: list[tuple[str, object]],
     return_ref: object,
-) -> tuple[inspect.Signature, dict[str, object]]:
-    """Build the ``(__signature__, __annotations__)`` a fixed root-field dispatcher needs.
+) -> inspect.Signature:
+    """Build the ``__signature__`` a fixed root-field dispatcher needs.
 
     The signature-injection idiom as shared machinery: a root field whose return
     type only materializes at phase 2.5 cannot annotate its class attribute, so its
-    synthesized resolver carries an injected ``inspect.Signature`` +
-    ``__annotations__`` with a ``strawberry.lazy`` return forward-ref.
+    synthesized resolver carries an injected ``inspect.Signature`` with a
+    ``strawberry.lazy`` return forward-ref (Strawberry's resolver reads its arguments
+    and return type from the signature).
     ``DjangoMutationField`` (via
     ``_synthesized_mutation_signature``) AND the auth fixed-field factories both use
     this ONE builder so the reserved ``info`` + the keyword-only GraphQL argument shape
@@ -218,26 +183,20 @@ def build_lazy_field_signature(
     mutation's ``id`` / ``data`` lazy refs; auth's ``username`` / ``password``; an
     empty list for ``logout`` / ``me``); ``return_ref`` is the resolver's return
     annotation (a ``_lazy_ref(...)`` payload ref, or an ``Optional[...]`` of one).
-    The caller assigns the returned pair onto its dispatcher
-    (``_resolve.__signature__`` / ``_resolve.__annotations__``).
+    The caller assigns it as its dispatcher's ``__signature__``.
     """
     params: list[inspect.Parameter] = [
         inspect.Parameter("info", inspect.Parameter.KEYWORD_ONLY, annotation=Info),
     ]
-    annotations: dict[str, object] = {"info": Info}
-    for name, annotation in arguments:
-        params.append(
-            inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=annotation),
-        )
-        annotations[name] = annotation
-    annotations["return"] = return_ref
-    return inspect.Signature(params, return_annotation=return_ref), annotations
+    params.extend(
+        inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=annotation)
+        for name, annotation in arguments
+    )
+    return inspect.Signature(params, return_annotation=return_ref)
 
 
-def _synthesized_mutation_signature(
-    mutation_cls: WriteMutationClass,
-) -> tuple[inspect.Signature, dict[str, object]]:
-    """Build the per-operation resolver ``__signature__`` + ``__annotations__`` (spec-036 Decision 14 / 7).
+def _synthesized_mutation_signature(mutation_cls: WriteMutationClass) -> inspect.Signature:
+    """Build the per-operation resolver ``__signature__`` (spec-036 Decision 14 / 7).
 
     ``info`` is Strawberry-reserved (bound without becoming a GraphQL arg); the
     operation's GraphQL args follow:
@@ -323,9 +282,7 @@ def DjangoMutationField(  # noqa: N802 - PascalCase like the other field factori
             return mutation_cls.resolve_async(info, **call_kwargs)
         return mutation_cls.resolve_sync(info, **call_kwargs)
 
-    signature, annotations = _synthesized_mutation_signature(mutation_cls)
-    _resolve.__signature__ = signature
-    _resolve.__annotations__ = annotations
+    _resolve.__signature__ = _synthesized_mutation_signature(mutation_cls)
     # The mutation-atomicity marker: ``DjangoMutationExecutionContext`` finds this
     # through the built field's ``strawberry-definition`` extension and wraps the field's
     # execution in the completion-spanning transaction.

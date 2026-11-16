@@ -1909,29 +1909,3 @@ def test_django_mutation_validate_meta_reads_a_hostile_hash_operation_as_its_tex
     operation = HashOpMutation._mutation_meta.operation
     assert operation == "create"
     assert type(operation) is str
-
-
-def test_django_mutation_input_type_name_delete_operation_raises_typed_reject() -> None:
-    """DjangoMutation.input_type_name on a validated delete raises ConfigurationError.
-
-    A direct consumer call to input_type_name on a delete mutation (unusual,
-    as the framework gates the data: ref at the field factory) must fail loud
-    as a typed ConfigurationError, not a raw KeyError from indexing
-    NON_DELETE_OPERATION_INPUT_KIND. The reject mirrors _materialize_input_for's
-    .get() delete short-circuit.
-    """
-    declare_products_primaries()
-
-    class DeleteItem(DjangoMutation):
-        class Meta:
-            model = product_models.Item
-            operation = "delete"
-
-    with pytest.raises(
-        ConfigurationError,
-        match=(
-            r"DjangoMutation DeleteItem declares operation='delete', which is id-only "
-            r"and materializes no input"
-        ),
-    ):
-        DeleteItem.input_type_name(DeleteItem._mutation_meta)

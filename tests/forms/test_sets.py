@@ -74,8 +74,6 @@ from django_strawberry_framework.forms.inputs import (
 from django_strawberry_framework.forms.sets import (
     _cached_build_form_input,
     _default_get_form,
-    _default_mutation_get_form_fields,
-    _form_kwargs_overridden,
     _form_shape_build_cache,
     clear_form_shape_build_cache,
     iter_form_mutations,
@@ -88,6 +86,7 @@ from django_strawberry_framework.mutations.inputs import (
 from django_strawberry_framework.mutations.permissions import DenyAll
 from django_strawberry_framework.mutations.sets import iter_mutations
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils.typing import call_forwarded
 from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._idioms import definition_raises, module_binding
@@ -272,14 +271,8 @@ def test_modelform_non_model_meta_model_raises_at_class_creation() -> None:
 
 def test_default_form_field_hook_rejects_a_class_without_form_metadata() -> None:
     """The default field-basis hook fails loudly when neither snapshot nor Meta names a form."""
-
-    class MissingFormMetadata:
-        pass
-
     with pytest.raises(ConfigurationError, match=r"cannot resolve Meta\.form_class"):
-        # basedpyright: the class without form metadata is the hostile input under test;
-        # _default_mutation_get_form_fields types the parameter as a form-mutation class
-        _default_mutation_get_form_fields(MissingFormMetadata)  # pyright: ignore[reportArgumentType]
+        _ = DjangoFormMutation.get_form_fields()
 
 
 # ---------------------------------------------------------------------------
@@ -723,7 +716,7 @@ def test_get_form_only_override_trips_the_construction_hook_waiver(
 ) -> None:
     """Overriding ONLY ``get_form`` counts as a construction-hook override on both flavors.
 
-    ``_form_kwargs_overridden`` tests BOTH construction hooks, and every other
+    The waiver check tests BOTH construction hooks, and every other
     consumer in the trees overrides the finer ``get_form_kwargs`` - which
     short-circuits the check - so the coarser ``get_form`` is the operand that
     only ever decides for a mutation overriding it ALONE. Both flavors are driven
@@ -764,8 +757,9 @@ def test_get_form_only_override_trips_the_construction_hook_waiver(
     assert issubclass(Overriding, mutation_base)
     assert issubclass(Inheriting, mutation_base)
 
-    assert _form_kwargs_overridden(Overriding, mutation_base) is True
-    assert _form_kwargs_overridden(Inheriting, mutation_base) is False
+    hooks = ("get_form_kwargs", "get_form")
+    assert introspection.overrides(Overriding, mutation_base, *hooks) is True
+    assert introspection.overrides(Inheriting, mutation_base, *hooks) is False
 
 
 # ---------------------------------------------------------------------------
@@ -1145,27 +1139,6 @@ def test_get_form_fields_hook_basis_drives_required_guard() -> None:
 
 
 @pytest.mark.parametrize("mutation_base", [DjangoFormMutation, DjangoModelFormMutation])
-@pytest.mark.parametrize("bad_hook", [None, "not-callable"])
-def test_non_callable_get_form_fields_is_configuration_error(
-    mutation_base: type[DjangoFormMutation | DjangoModelFormMutation],
-    bad_hook: str | None,
-) -> None:
-    """A malformed hook declaration fails as typed configuration, not raw ``TypeError``."""
-    form_cls = _contact_form() if mutation_base is DjangoFormMutation else _item_model_form()
-    meta_attrs: dict[str, object] = (
-        {"form_class": form_cls, "permission_classes": []}
-        if mutation_base is DjangoFormMutation
-        else {"form_class": form_cls, "operation": "create"}
-    )
-    with pytest.raises(ConfigurationError, match=r"get_form_fields.*callable classmethod"):
-        type(
-            "NonCallableHookMutation",
-            (mutation_base,),
-            {"get_form_fields": bad_hook, "Meta": type("Meta", (), meta_attrs)},
-        )
-
-
-@pytest.mark.parametrize("mutation_base", [DjangoFormMutation, DjangoModelFormMutation])
 def test_raising_get_form_fields_body_propagates(
     mutation_base: type[DjangoFormMutation | DjangoModelFormMutation],
 ) -> None:
@@ -1193,65 +1166,6 @@ def test_raising_get_form_fields_body_propagates(
                 "Meta": type("Meta", (), meta_attrs),
             },
         )
-
-
-def _uncalled_hook_cls(cls: type) -> NoReturn:
-    del cls
-    raise AssertionError("the hook body must not run")
-
-
-def _uncalled_hook_self_info(self: object, info: object) -> NoReturn:
-    del self, info
-    raise AssertionError("the hook body must not run")
-
-
-def _uncalled_hook_self_default_info(self: object, info: object = None) -> NoReturn:
-    del self, info
-    raise AssertionError("the hook body must not run")
-
-
-@pytest.mark.parametrize("mutation_base", [DjangoFormMutation, DjangoModelFormMutation])
-@pytest.mark.parametrize(
-    ("hook", "declared_as", "required"),
-    [
-        (_uncalled_hook_cls, "a plain function", "parameter 'cls'"),
-        (staticmethod(_uncalled_hook_cls), "a staticmethod", "parameter 'cls'"),
-        (_uncalled_hook_self_info, "a plain function", "parameters 'self', 'info'"),
-        (_uncalled_hook_self_default_info, "a plain function", "parameter 'self'"),
-    ],
-)
-def test_argument_requiring_get_form_fields_function_is_rejected_at_declaration(
-    mutation_base: type[DjangoFormMutation | DjangoModelFormMutation],
-    hook: object,
-    declared_as: str,
-    required: str,
-) -> None:
-    """A function hook that needs a positional argument is rejected before it is ever called.
-
-    The hook is read from the class, so only a classmethod receives an argument.
-    The declaration check runs at class creation and names the fix; the hook body
-    (which would raise ``AssertionError``) never runs.
-    """
-    form_cls = _contact_form() if mutation_base is DjangoFormMutation else _item_model_form()
-    meta_attrs: dict[str, object] = (
-        {"form_class": form_cls, "permission_classes": []}
-        if mutation_base is DjangoFormMutation
-        else {"form_class": form_cls, "operation": "create"}
-    )
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        type(
-            "ArgumentRequiringHookMutation",
-            (mutation_base,),
-            {"get_form_fields": hook, "Meta": type("Meta", (), meta_attrs)},
-        )
-    assert str(excinfo.value) == (
-        "ArgumentRequiringHookMutation.get_form_fields must be a callable classmethod "
-        "returning a mapping of form field names to forms.Field instances; it is declared "
-        f"as {declared_as} requiring the positional {required}, but the hook is called "
-        "with no arguments. Decorate it with @classmethod."
-    )
-    assert excinfo.value.__cause__ is None
 
 
 def test_get_form_fields_hook_raising_configuration_error_reraises_unchanged() -> None:
@@ -1288,9 +1202,7 @@ def test_zero_arg_and_staticmethod_get_form_fields_hooks_are_accepted(
 ) -> None:
     """A zero-arg plain function / ``@staticmethod`` hook still binds (permissive posture).
 
-    Both are callable zero-arg, so the declaration check accepts them and the
-    returned mapping drives the input; only a function requiring a positional
-    argument is rejected.
+    Both are callable zero-arg, and the returned mapping drives the input.
     """
     _declare_products_primaries()
     form_cls = _contact_form() if mutation_base is DjangoFormMutation else _item_model_form()
@@ -2026,24 +1938,3 @@ def test_two_distinct_form_classes_sharing_name_still_collide() -> None:
 
     with pytest.raises(ConfigurationError, match="materialized by two distinct"):
         finalize_django_types()
-
-
-def test_non_callable_get_form_fields_hook_message_is_pinned() -> None:
-    """A non-callable hook is rejected typed, naming the mutation class."""
-    with pytest.raises(ConfigurationError) as exc_info:
-        type(
-            "NonCallableHookMutation",
-            (DjangoFormMutation,),
-            {
-                "get_form_fields": 42,
-                "Meta": type(
-                    "Meta",
-                    (),
-                    {"form_class": _contact_form(), "permission_classes": []},
-                ),
-            },
-        )
-    assert str(exc_info.value) == (
-        "NonCallableHookMutation.get_form_fields must be a callable classmethod "
-        "returning a mapping of form field names to forms.Field instances."
-    )

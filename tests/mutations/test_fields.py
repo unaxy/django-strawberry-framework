@@ -178,37 +178,6 @@ def test_non_class_target_raises_at_construction() -> None:
         DjangoMutationField(object())  # pyright: ignore[reportArgumentType]
 
 
-def test_classmethod_protocol_members_are_read_from_the_class_namespace() -> None:
-    """A class carrying the protocol as plain functions still passes the protocol probe.
-
-    ``resolve_sync`` / ``resolve_async`` / ``input_type_name`` are normally
-    ``classmethod`` objects in the class namespace; a plain function in their place
-    is callable too, so the target reaches the own-``Meta`` check instead of the
-    not-a-mutation reject.
-    """
-
-    class PlainProtocol:
-        _mutation_meta = None
-        input_module_path = INPUTS_MODULE_PATH
-
-        def resolve_sync(self, info: object) -> None:
-            del info
-            raise AssertionError("never called")
-
-        def resolve_async(self, info: object) -> None:
-            del info
-            raise AssertionError("never called")
-
-        def input_type_name(self, meta: object) -> None:
-            del meta
-            raise AssertionError("never called")
-
-    with pytest.raises(ConfigurationError, match="abstract base"):
-        # basedpyright: a class carrying the protocol as plain functions is the input under
-        # test; DjangoMutationField types the parameter as WriteMutationClass
-        DjangoMutationField(PlainProtocol)  # pyright: ignore[reportArgumentType]
-
-
 def test_abstract_base_target_raises_at_construction() -> None:
     """The abstract ``DjangoMutation`` base (no ``Meta`` -> no ``_mutation_meta``) is rejected."""
     with pytest.raises(ConfigurationError, match="abstract base"):
@@ -377,11 +346,10 @@ def test_registered_target_with_raising_metaclass_eq_constructs() -> None:
 
 
 def test_generalized_target_accepts_modelform_and_plain_form_family() -> None:
-    """``DjangoMutationField`` accepts both form-mutation flavors (the duck-typed target check).
+    """``DjangoMutationField`` accepts both form-mutation flavors (the ledger-based target check).
 
-    The generalization recognizes the mutation / form family by the
-    duck-typed ``_mutation_meta`` + ``resolve_sync`` / ``resolve_async`` +
-    ``input_type_name`` / ``input_module_path`` protocol, NOT
+    The generalization recognizes the mutation / form family by an own
+    ``_mutation_meta`` and declaration-ledger membership, NOT
     ``issubclass(DjangoMutation)`` - so a ``DjangoModelFormMutation`` (a
     ``DjangoMutation`` subclass) AND a plain ``DjangoFormMutation`` (NOT a
     ``DjangoMutation`` subclass) both construct without raising.
