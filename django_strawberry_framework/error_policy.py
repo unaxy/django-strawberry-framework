@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING
 
 from .conf import error_policy_setting
 from .exceptions import ConfigurationError
-from .utils import truth
+from .utils import introspection
 from .utils._narrowing import read_attr
 from .utils.policies import resolve_policy
 
@@ -102,13 +102,13 @@ class ErrorPolicy:
         """
         if type(self.enabled) is not bool:
             raise ConfigurationError(
-                f"ErrorPolicy.enabled must be a bool; got {truth.describe(self.enabled)}.",
+                f"ErrorPolicy.enabled must be a bool; got {introspection.describe(self.enabled)}.",
             )
         for name in ("message", "correlation_extension_key"):
             value = read_attr(self, name)
             if type(value) is not str or not value:
                 raise ConfigurationError(
-                    f"ErrorPolicy.{name} must be a non-empty string; got {truth.describe(value)}.",
+                    f"ErrorPolicy.{name} must be a non-empty string; got {introspection.describe(value)}.",
                 )
 
 

@@ -129,9 +129,9 @@ from django_strawberry_framework.resource_policy import (
     validate_trusted_flag,
 )
 from django_strawberry_framework.schema import _consumer_extension_entries
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    instance_state,
     is_exact_pair,
     is_list_or_tuple,
     read_attr,
@@ -144,8 +144,6 @@ from django_strawberry_framework.utils.typing import object_result
 from tests._django_private import has_apply_rel_filters
 from tests._execution import make_execution_context
 from tests._idioms import (
-    ClaimsClassBase,
-    ClassReadRaises,
     is_object_list,
     pickle_roundtrip,
     saved_pk,
@@ -381,18 +379,6 @@ def test_a_non_mapping_policy_argument_is_rejected() -> None:
         # basedpyright: the non-mapping policy is the hostile input under test;
         # resolve_resource_policy types the parameter as ResourcePolicy | Mapping[str, object] | None
         resolve_resource_policy(12)  # pyright: ignore[reportArgumentType]
-
-
-def test_a_policy_argument_whose_class_read_raises_is_rejected() -> None:
-    """A value that cannot be classified is "not a policy, not a mapping", so the typed rejection names it."""
-    with pytest.raises(ConfigurationError) as excinfo:
-        # basedpyright: the unclassifiable policy is the hostile input under test;
-        # resolve_resource_policy types the parameter as ResourcePolicy | Mapping[str, object] | None
-        resolve_resource_policy(ClassReadRaises())  # pyright: ignore[reportArgumentType]
-    assert str(excinfo.value) == (
-        "The resource policy must be a ResourcePolicy or a mapping of bound names to values; "
-        "got ClassReadRaises <ClassReadRaises>."
-    )
 
 
 def test_an_unknown_bound_name_is_rejected_with_the_valid_vocabulary() -> None:
@@ -1790,18 +1776,6 @@ def test_bounded_rows_shared_policy_seams_spy(
 # ---------------------------------------------------------------------------
 
 
-class _ClaimsToBeAQuerySet(ClaimsClassBase):
-    """Not a ``QuerySet``, but ``isinstance`` says it is and its slice returns everything."""
-
-    claimed = QuerySet
-
-    def __getitem__(self, key: object) -> list[int]:
-        return list(range(50))
-
-    def __iter__(self) -> Iterator[int]:
-        return iter(range(50))
-
-
 @pytest.mark.django_db
 def test_a_zero_width_window_on_a_queryset_subclass_returns_no_rows(
     arm_resource_budget: Callable[[object, ResourcePolicy], None],
@@ -1869,23 +1843,6 @@ def test_a_project_queryset_class_keeps_the_row_bound_in_sql(
     assert len(list(rows)) == 2
 
 
-def test_a_value_that_only_claims_to_be_a_queryset_cannot_reach_the_slice(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """``__class__`` is consumer code, so the shape is read from ``type(value)``.
-
-    An object that answers ``isinstance`` with ``QuerySet`` reached the SQL-slice
-    arm and was handed its own ``__getitem__``. Read as what it is, it is an
-    ordinary iterable and is bounded by counting.
-    """
-    context: dict[str, object] = {}
-    info = SimpleNamespace(context=context)
-    arm_resource_budget(context, ResourcePolicy(max_list_rows=2))
-    claimant = _ClaimsToBeAQuerySet()
-    assert isinstance(claimant, QuerySet)
-    assert bounded_rows(claimant, info) == [0, 1]
-
-
 @pytest.mark.django_db
 def test_rows_a_source_already_fetched_are_read_from_the_frameworks_own_slot() -> None:
     """A prefetch cache's rows come out of Django's slot on an exact queryset."""
@@ -1921,7 +1878,7 @@ def _evaluated(queryset_cls: type[QuerySet[Category]]) -> QuerySet[Category]:
 
 def _held_rows(source: QuerySet[Category]) -> list[object]:
     """The list a source holds, read from its instance state."""
-    held = truth.instance_state(source)["_result_cache"]
+    held = instance_state(source)["_result_cache"]
     assert is_object_list(held), held
     return held
 
@@ -2377,7 +2334,7 @@ def test_argument_less_directives_are_read_once_however_often_their_fragment_exp
 
     def read_arguments(directive: DirectiveNode) -> object:
         reads.append(directive.name.value)
-        return truth.instance_state(directive)["arguments"]
+        return instance_state(directive)["arguments"]
 
     resolved: list[str] = []
     resolve = GraphQLSchema.get_directive

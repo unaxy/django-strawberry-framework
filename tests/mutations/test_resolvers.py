@@ -87,9 +87,10 @@ from django_strawberry_framework.mutations.inputs import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.converters import SCALAR_MAP
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    instance_state,
     pk_of,
     read_attr,
     require,
@@ -2187,7 +2188,7 @@ def test_locate_instance_loads_the_row_under_the_hook_fetch_mode(
             select_for_update=select_for_update,
         )
     assert located is not None
-    assert truth.instance_state(located._state).get("fetch_mode") is mode
+    assert instance_state(located._state).get("fetch_mode") is mode
 
 
 @pytest.mark.django_db
@@ -2691,7 +2692,7 @@ def test_pipeline_rejects_pk_drift_during_authorization(
             write_step=_write_located,
         )
     assert str(exc.value) == (
-        f"{truth.name(mutation_cls)}: the located instance's pk changed from 7 to 8 during "
+        f"{introspection.name(mutation_cls)}: the located instance's pk changed from 7 to 8 during "
         "authorization; an update must write the row that was authorized, never a "
         "substituted one."
     )
@@ -2703,7 +2704,7 @@ def test_pipeline_pk_drift_hostile_repr_propagates(
     """A pk forged by a hook renders through its own ``__repr__``; what that raises propagates.
 
     The drift is still refused before the write; the diagnostic names the forged pk
-    through ``truth.render``, so the forged object's own exception surfaces in place of
+    through its ``repr``, so the forged object's own exception surfaces in place of
     the ``ConfigurationError``.
     """
 
@@ -2805,7 +2806,7 @@ def test_delete_pipeline_pk_drift_hostile_repr_propagates(
     """A delete-path pk forged by a hook renders through its own ``__repr__``; it propagates.
 
     The drift is still refused before any delete; the diagnostic names the forged pk
-    through ``truth.render``, so the forged object's own exception surfaces in place of
+    through its ``repr``, so the forged object's own exception surfaces in place of
     the ``ConfigurationError``.
     """
 

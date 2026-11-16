@@ -67,7 +67,7 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import CREATE
 from django_strawberry_framework.mutations.operations import NON_DELETE_OPERATION_INPUT_KIND
 from django_strawberry_framework.mutations.sets import DjangoMutation
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import dict_of, is_mapping, require
 from django_strawberry_framework.utils.inputs import (
     normalize_field_name_sequence,
@@ -162,7 +162,7 @@ def _validate_schema_field_map(name: str, field_map: object) -> dict[str, DRFFie
 
     The map and each value are class-tested with ``isinstance``, so a ``Mapping`` /
     ``serializers.Field`` subclass and a faithful proxy (``SimpleLazyObject``) pass. A key is
-    read as its text (``truth.plain_str``): a ``StrEnum`` / ``TextChoices`` member is admitted
+    read as its text (``introspection.plain_str``): a ``StrEnum`` / ``TextChoices`` member is admitted
     and re-keyed by the exact ``str`` it spells; any other non-string key (``int``, ``bytes``,
     a lazy translation string) is refused. A key is not held to the identifier rule here:
     only the KEPT input set is (``rest_framework/inputs.py::resolve_effective_serializer_fields``),
@@ -171,7 +171,7 @@ def _validate_schema_field_map(name: str, field_map: object) -> dict[str, DRFFie
     if not is_mapping(field_map):
         raise ConfigurationError(
             f"SerializerMutation {name}.get_serializer_for_schema() must return a mapping of "
-            f"field name -> DRF serializers.Field; got {truth.render(field_map)}.",
+            f"field name -> DRF serializers.Field; got {field_map!r}.",
         )
     try:
         snapshot = dict_of(field_map)
@@ -186,22 +186,22 @@ def _validate_schema_field_map(name: str, field_map: object) -> dict[str, DRFFie
     for key, field in snapshot.items():
         # A member key is read as its text, so the downstream ``normalized[...] = field``
         # dict-set and comparisons run ``str``'s own hash and equality.
-        field_name = truth.plain_str(key)
+        field_name = introspection.plain_str(key)
         if type(field_name) is not str:
             errors.append(
-                f"a field-map key must be a plain string; got {truth.render(field_name)}",
+                f"a field-map key must be a plain string; got {field_name!r}",
             )
             continue
         if not isinstance(field, serializers.Field):
             errors.append(
-                f"field {field_name!r} must be a DRF serializers.Field; got {truth.render(field)}",
+                f"field {field_name!r} must be a DRF serializers.Field; got {field!r}",
             )
             continue
         bound_name = field.field_name
         if bound_name != field_name:
             errors.append(
                 f"field-map key {field_name!r} does not match the DRF field's bound name "
-                f"{truth.render(bound_name)}",
+                f"{bound_name!r}",
             )
             continue
         normalized[field_name] = field
@@ -236,7 +236,7 @@ def _checked_schema_field_map(
     passed at class validation, so both windows fingerprint the identical opt-in structure and an
     unopted nested field is never descended into.
     """
-    field_map = _validate_schema_field_map(truth.name(cls), cls.get_serializer_for_schema())
+    field_map = _validate_schema_field_map(cls.__name__, cls.get_serializer_for_schema())
     if meta.schema_fingerprint is not None:
         effective = resolve_effective_serializer_fields(
             # The serializer flavor's ``_validate_meta`` stored a validated serializer class.
@@ -251,7 +251,7 @@ def _checked_schema_field_map(
             != meta.schema_fingerprint
         ):
             raise ConfigurationError(
-                f"SerializerMutation {truth.name(cls)}.get_serializer_for_schema() returned a "
+                f"SerializerMutation {cls.__name__}.get_serializer_for_schema() returned a "
                 "DIFFERENT field shape at bind than at class validation; the hook must be "
                 "deterministic and request-independent (the input is generated once at "
                 "finalization). Return a stable field map (do not read request state or "
@@ -296,7 +296,7 @@ def _validate_serializer_nested_fields(
     ``{field_name: NestedSerializerConfig}`` map. Validated all at class creation:
 
     - it must be a mapping of ``str -> NestedSerializerConfig`` (a wrong container /
-      wrong value type fails loud); a key is read as its text (``truth.plain_str``), so a
+      wrong value type fails loud); a key is read as its text (``introspection.plain_str``), so a
       ``StrEnum`` / ``TextChoices`` member is re-keyed by the exact ``str`` it spells and any
       other non-string key is refused;
     - each key must name a field in the schema-time ``field_map`` that IS a nested
@@ -329,11 +329,11 @@ def _validate_serializer_nested_fields(
     for key, config in snapshot.items():
         # A member key is read as its text, so ``field_map.get()`` and the ``normalized``
         # dict-set run ``str``'s own hash and equality.
-        field_name = truth.plain_str(key)
+        field_name = introspection.plain_str(key)
         if type(field_name) is not str:
             raise ConfigurationError(
                 f"SerializerMutation {name}.Meta.nested_fields keys must be plain strings; "
-                f"got {truth.render(field_name)}.",
+                f"got {field_name!r}.",
             )
         nested_config = require_nested_serializer_config(name, field_name, config)
         field = field_map.get(field_name)
@@ -346,7 +346,7 @@ def _validate_serializer_nested_fields(
         if not is_nested_serializer_field(field):
             raise ConfigurationError(
                 f"SerializerMutation {name}.Meta.nested_fields names {field_name!r}, but it is a "
-                f"{truth.name(type(field))}, not a nested serializer. nested_fields is only for "
+                f"{type(field).__name__}, not a nested serializer. nested_fields is only for "
                 "nested Serializer / ListSerializer fields (a relation is a "
                 "PrimaryKeyRelatedField).",
             )
@@ -361,10 +361,10 @@ def _validate_serializer_nested_fields(
     # DRF write method shares the operation's name, so the method IS the operation (DRF's
     # default asserts via ``raise_errors_on_nested_writes`` unless overridden - hence the check).
     write_method = operation
-    if not truth.overrides(serializer_class, serializers.ModelSerializer, write_method):
+    if not introspection.overrides(serializer_class, serializers.ModelSerializer, write_method):
         raise ConfigurationError(
             f"SerializerMutation {name}.Meta.nested_fields is declared, but "
-            f"{truth.name(serializer_class)} "
+            f"{serializer_class.__name__} "
             f"does not override {write_method}(); DRF's default ModelSerializer.{write_method}() "
             "raises on writable nested data (an AssertionError that would escape the error "
             f"envelope). Implement {write_method}() to perform the nested write yourself (the "
@@ -535,7 +535,7 @@ class SerializerMutation(DjangoMutation):
         requiredness + the descriptor identity (re-validated at bind via
         ``resolve_optional_fields``).
         """
-        name = truth.name(cls)
+        name = cls.__name__
         meta = reject_unknown_meta_keys(
             f"SerializerMutation {name}",
             meta,
@@ -560,10 +560,10 @@ class SerializerMutation(DjangoMutation):
             expected=serializers.Serializer,
             expected_label="DRF serializers.Serializer",
         )
-        if not truth.is_subclass(serializer_class, serializers.ModelSerializer):
+        if not issubclass(serializer_class, serializers.ModelSerializer):
             raise ConfigurationError(
                 f"SerializerMutation {name}.Meta.serializer_class "
-                f"{truth.name(serializer_class)} "
+                f"{serializer_class.__name__} "
                 "must be a serializers.ModelSerializer with a concrete Meta.model; a plain "
                 "serializers.Serializer has no backing model + no DjangoType to return.",
             )
@@ -613,7 +613,7 @@ class SerializerMutation(DjangoMutation):
         # identity. (The bind re-validates names via ``resolve_optional_fields``; this
         # is the earliest class-creation check.)
         optional_fields = normalize_field_name_sequence(
-            truth.static_attr(meta, "optional_fields"),
+            introspection.mro_attr(meta, "optional_fields"),
             label="optional_fields",
             flavor="SerializerMutation",
             ordered=False,
@@ -624,7 +624,7 @@ class SerializerMutation(DjangoMutation):
         # ``build_input`` subtracts these from the create-required guard and the resolver
         # verifies they reach the serializer's data.
         injected_fields = normalize_field_name_sequence(
-            truth.static_attr(meta, "injected_fields"),
+            introspection.mro_attr(meta, "injected_fields"),
             label="injected_fields",
             flavor="SerializerMutation",
             ordered=False,
@@ -670,7 +670,7 @@ class SerializerMutation(DjangoMutation):
             serializer_class,
             operation,
             field_map,
-            truth.static_attr(meta, "nested_fields"),
+            introspection.mro_attr(meta, "nested_fields"),
         )
         # A runtime write ``source`` must be UNIQUE across EVERY field that can
         # contribute to ``validated_data``, not merely the generated input + injected
@@ -691,7 +691,7 @@ class SerializerMutation(DjangoMutation):
 
         permission_classes = _validate_mutation_permission_classes(
             f"SerializerMutation {name}.Meta.permission_classes",
-            truth.static_attr(meta, "permission_classes"),
+            introspection.mro_attr(meta, "permission_classes"),
         )
 
         return _ValidatedMutationMeta(

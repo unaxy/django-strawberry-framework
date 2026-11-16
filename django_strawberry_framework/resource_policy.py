@@ -62,7 +62,7 @@ from typing_extensions import override
 
 from .conf import resource_policy_setting
 from .exceptions import ConfigurationError, DjangoStrawberryFrameworkError
-from .utils import truth
+from .utils import introspection
 from .utils._narrowing import iter_of, read_attr, require_instance
 from .utils.context import get_context_value, stash_on_context
 from .utils.errors import coded_error_extensions
@@ -162,7 +162,7 @@ class ResourceLimitExceeded(GraphQLError, DjangoStrawberryFrameworkError):  # py
                 self.charged,
                 self.detail,
             ),
-            self.__dict__,  # truth: ok the exception's own pickle state, read by its own __reduce__
+            self.__dict__,
         )
 
 
@@ -218,7 +218,7 @@ def _require_positive_int(value: object, label: str) -> None:
     """
     if type(value) is not int or value < 1:
         raise ConfigurationError(
-            f"{label} must be a positive integer; got {truth.describe(value)}.",
+            f"{label} must be a positive integer; got {introspection.describe(value)}.",
         )
     if value > MAX_RESOURCE_BOUND:
         raise ConfigurationError(
@@ -403,7 +403,7 @@ class ResourcePolicy:
                     continue
                 raise ConfigurationError(
                     "ResourcePolicy.execution_deadline_seconds must be None or a "
-                    f"positive number of seconds; got {truth.describe(value)}.",
+                    f"positive number of seconds; got {introspection.describe(value)}.",
                 )
             _require_positive_int(value, f"ResourcePolicy.{field.name}")
 
@@ -1234,7 +1234,7 @@ def validate_trusted_flag(declared: object, *, field: str) -> None:
     """
     if type(declared) is not bool:
         raise ConfigurationError(
-            f"{field} must be exactly True or False; got {truth.describe(declared)}.",
+            f"{field} must be exactly True or False; got {introspection.describe(declared)}.",
         )
 
 

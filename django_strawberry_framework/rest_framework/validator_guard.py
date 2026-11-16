@@ -13,7 +13,7 @@ from rest_framework.validators import (
     UniqueValidator,
 )
 
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     is_queryset,
     read_attr,
@@ -128,12 +128,12 @@ def _guarded_condition(
         return checked
 
     guarded_type = type(
-        f"_Guarded{truth.name(condition_type)}",
+        f"_Guarded{introspection.name(condition_type)}",
         (condition_type,),
         {"check": _check},
     )
     guarded = condition.copy()
-    guarded.__class__ = guarded_type  # truth: ok instance-local conditional query guard subtype
+    guarded.__class__ = guarded_type
     return guarded
 
 

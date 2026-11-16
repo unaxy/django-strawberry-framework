@@ -14,7 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
 
 from .inputs import CREATE, PARTIAL
 
@@ -152,7 +151,7 @@ def non_delete_operation_error(base_label: str, name: str, got: object) -> Confi
     """
     return ConfigurationError(
         f"{base_label} {name}.Meta.operation must be one of "
-        f"{sorted(NON_DELETE_WRITE_OPERATIONS)}; got {truth.render(got)}. "
+        f"{sorted(NON_DELETE_WRITE_OPERATIONS)}; got {got!r}. "
         "(This flavor has no delete pipeline - declare a 036 DjangoMutation with "
         "operation='delete' instead.)",
     )

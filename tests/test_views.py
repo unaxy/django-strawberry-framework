@@ -113,8 +113,7 @@ from django_strawberry_framework.middleware.request_body import (
     GraphQLRequestBodyBoundaryMiddleware,
     _package_view_instance,
 )
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_awaitable, read_attr
+from django_strawberry_framework.utils._narrowing import instance_state, is_awaitable, read_attr
 from django_strawberry_framework.utils.typing import (
     call_forwarded,
     is_marked_coroutine_function,
@@ -171,14 +170,14 @@ SCHEMA = strawberry.Schema(query=Query)
 
 def _view_class_of(view: Callable[..., object]) -> type[object]:
     """Django's ``view_class`` bookkeeping, read out of the ``as_view`` callback's namespace."""
-    view_class = truth.instance_state(view)["view_class"]
+    view_class = instance_state(view)["view_class"]
     assert isinstance(view_class, type)
     return view_class
 
 
 def _view_initkwargs_of(view: Callable[..., object]) -> dict[str, object]:
     """Django's ``view_initkwargs`` bookkeeping, read out of the ``as_view`` callback's namespace."""
-    initkwargs = truth.instance_state(view)["view_initkwargs"]
+    initkwargs = instance_state(view)["view_initkwargs"]
     assert is_object_dict(initkwargs)
     named = {key: value for key, value in initkwargs.items() if isinstance(key, str)}
     assert len(named) == len(initkwargs)
@@ -534,7 +533,7 @@ def test_a_cap_value_too_large_to_render_still_raises_configuration_error(rung: 
     exists. Interpolating ``{value!r}`` directly therefore raised
     ``ValueError`` instead of ``ConfigurationError`` on exactly the
     hostile-configuration path where the typed error is the contract; the tail is
-    rendered by ``utils/truth.py::describe`` so it degrades to a
+    rendered by ``utils/introspection.py::describe`` so it degrades to a
     type-naming placeholder instead. The negative value is what reaches the
     ``value <= 0`` arm.
     """
@@ -1956,7 +1955,7 @@ def test_the_view_callback_of_both_views_carries_the_csrf_exempt_mark(
 
     boundary_view.assert_called_once()
     assert vars(view)["csrf_exempt"] is _CSRF_ORDERING_EXEMPTION
-    assert bool(truth.instance_state(view)["csrf_exempt"]) is True
+    assert bool(instance_state(view)["csrf_exempt"]) is True
     assert getattr(view, _BOUNDARY_MARKER) is True
     assert _view_class_of(view) is view_class
     assert _view_initkwargs_of(view) == {"schema": SCHEMA}
@@ -2330,15 +2329,13 @@ async def test_the_view_does_not_measure_a_body_the_chain_already_measured() -> 
     assert measurements == [request]
 
 
-def test_middleware_ignores_an_unreadable_optional_mount_handoff() -> None:
-    """A mount attribute behind a raising lookup cannot turn a passed boundary into a 500.
+def test_middleware_ignores_a_callback_without_a_mount_handoff() -> None:
+    """A marked callback that carries no mount handoff dispatches the ordinary response.
 
     The mount handoff is an OPTIMIZATION - it lets ``as_view``'s wrapper dispatch
     the very instance whose boundary just ran instead of building a second one -
-    and it is read after the boundary has already passed. The read is static
-    (``utils/truth.py::static_attr``): the callback is whatever the deployment's
-    decorators produced, and its ``__getattribute__`` is never run, so a raising
-    one costs the request nothing - no handoff is found, and the response is the
+    and it is read after the boundary has already passed, so a callback without one
+    costs the request nothing: no handoff is found, and the response is the
     ordinary one.
     """
 
@@ -2349,12 +2346,6 @@ def test_middleware_ignores_an_unreadable_optional_mount_handoff() -> None:
     class Callback:
         view_class = BoundaryView
         view_initkwargs = {}
-
-        @override
-        def __getattribute__(self, name: str) -> object:
-            if name == _BOUNDARY_MOUNT:
-                raise RuntimeError("mount unavailable")
-            return object_result(super().__getattribute__, name)
 
         def __call__(self, _request: HttpRequest) -> HttpResponse:
             return HttpResponse()

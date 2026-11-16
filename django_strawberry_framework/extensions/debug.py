@@ -109,7 +109,7 @@ from typing_extensions import override
 from django_strawberry_framework import logger
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import list_of, read_attr
 
 from .operation_state import OperationState, _OperationBoundExtension
@@ -601,7 +601,7 @@ def _required_acknowledgement(value: object) -> bool:
     if type(value) is not bool:
         raise ConfigurationError(
             "DjangoDebugExtension(allow_unsafe_production=...) must be a bool; got "
-            f"{truth.describe(value)}. A truthy non-bool would arm "
+            f"{introspection.describe(value)}. A truthy non-bool would arm "
             "the production disclosure, so it is refused rather than interpreted.",
         )
     return value

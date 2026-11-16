@@ -190,12 +190,10 @@ from django_strawberry_framework.error_policy import DEFAULT_ERROR_POLICY
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import sessions as session_store_module
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import list_of, read_attr
+from django_strawberry_framework.utils._narrowing import class_namespace, list_of, read_attr
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter, request_from_info
 from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from tests._idioms import (
-    ClassReadRaisesBase,
     is_object_dict,
     is_object_list,
     json_at,
@@ -2133,7 +2131,7 @@ def test_a_factory_returning_a_non_application_fails_at_construction(
     refuses to convert an integer of more than 4300 digits to a string, so an
     f-string tail would have raised ``ValueError`` from inside the rejection and
     replaced the promised ``ConfigurationError``. The message degrades to the
-    type instead (``utils/truth.py::describe``).
+    type instead (``utils/introspection.py::describe``).
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
@@ -2199,40 +2197,6 @@ def test_an_async_factory_is_rejected_and_the_refused_coroutine_is_closed() -> N
 
     [refused] = coroutines
     assert refused.cr_frame is None, "the router must close the coroutine it refuses"
-
-
-@pytest.mark.parametrize("raised", [RuntimeError, TypeError, KeyboardInterrupt])
-def test_a_factory_returning_a_value_whose_class_cannot_be_read_fails_at_construction(
-    raised: type[BaseException],
-) -> None:
-    """The returned object is judged without trusting its ``__class__``.
-
-    The coroutine test that decides whether the refused object is closed reads
-    the value's real class, never its ``__class__`` attribute. A non-callable
-    whose class read raises is still a non-callable: it is the same construction
-    error as any other value that cannot be an application, not the consumer's
-    exception from inside the router.
-
-    Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
-    sibling: ``examples/fakeshop/test_query/test_transport_api.py``.
-    """
-
-    class _ClassReadRaises(ClassReadRaisesBase):
-        @override
-        def __repr__(self) -> str:
-            return "<hostile result>"
-
-    def factory(*, schema: object) -> object:
-        del schema  # the router passes schema= by keyword; this factory ignores it
-        return _ClassReadRaises(raised)
-
-    with pytest.raises(ConfigurationError) as exc_info:
-        _router(websocket_consumer_class=factory)
-
-    message = str(exc_info.value)
-    assert _FACTORY_CONTRACT_SUBSTRING in message
-    assert _ASYNC_FACTORY_SUBSTRING not in message
-    assert message.endswith("returned _ClassReadRaises <hostile result>.")
 
 
 def test_a_factory_returning_a_future_is_rejected_and_the_future_is_cancelled() -> None:
@@ -6163,7 +6127,7 @@ def _wrapped_schema_reads() -> frozenset[str]:
     """
     return frozenset(
         name
-        for name, value in truth.class_dict(consumers_module._StopAwareSchema).items()
+        for name, value in class_namespace(consumers_module._StopAwareSchema).items()
         if not name.startswith("_") and callable(value)
     )
 

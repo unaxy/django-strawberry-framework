@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, NamedTuple, ParamSpec, TypeVar
 from strawberry.schema.schema import StrawberryGraphQLCoreExecutionContext
 from typing_extensions import override
 
-from .utils import truth
+from .utils import introspection
 from .utils._narrowing import is_list_or_tuple
 
 if TYPE_CHECKING:
@@ -254,7 +254,7 @@ def _syntax_shape(node: object) -> object:
         # since none is interpreted here.
         fields: list[tuple[str, object]] = list(ast.iter_fields(node))
         return (
-            truth.name(type(node)),
+            type(node).__name__,
             tuple(
                 (name, _syntax_shape(value))
                 for name, value in fields
@@ -295,7 +295,7 @@ def _completion_method(method: "Callable[_P, _R]") -> "Callable[_P, _R]":
             "install a supported source-bearing release. Queries and synchronous execution "
             "do not require this adapter",
         ) from error
-    method_name = truth.name(method)
+    method_name = introspection.name(method)
     function = ast.parse(source).body[0]
     for node in ast.walk(function):
         if (

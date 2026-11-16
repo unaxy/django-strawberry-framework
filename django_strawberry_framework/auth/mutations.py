@@ -69,10 +69,12 @@ from django_strawberry_framework.mutations.sets import (
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.resource_policy import check_deadline
 from django_strawberry_framework.types.base import _is_django_type_class
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
+    is_list,
     is_str,
+    is_tuple,
     list_iter,
     read_attr,
     require,
@@ -386,8 +388,8 @@ def _reject_conflicting_permission_classes(
         factory = _SURFACE_FACTORY_NAMES[surface]
         raise ConfigurationError(
             f"auth {factory} is already declared in this process with permission_classes="
-            f"{[truth.name(cls) for cls in declared]!r}; a second call with a different "
-            f"permission_classes ({[truth.name(cls) for cls in permission_classes]!r}) cannot mint "
+            f"{[cls.__name__ for cls in declared]!r}; a second call with a different "
+            f"permission_classes ({[cls.__name__ for cls in permission_classes]!r}) cannot mint "
             "a second fixed-name auth payload. Declare each auth surface once per process with "
             "one permission set (registry.clear() resets the declaration).",
         )
@@ -1139,7 +1141,7 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
     activation state server-owned instead of silently turning an unusual
     user-model declaration into public registration input.
     """
-    model_name = truth.name(user_model)
+    model_name = user_model.__name__
     # Django reads ``USERNAME_FIELD`` / ``REQUIRED_FIELDS`` as field names but never checks
     # their types when the model class is built, and django-stubs declares them only on
     # ``AbstractUser`` / ``AbstractBaseUser`` (its ``ModelBase.__getattr__`` admits only
@@ -1151,26 +1153,26 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
     if not is_str(username_field):
         raise ConfigurationError(
             f"register_mutation() needs {model_name}.USERNAME_FIELD to be a field "
-            f"name string; got {truth.render(username_field)}.",
+            f"name string; got {username_field!r}.",
         )
     required_fields = read_attr(user_model, "REQUIRED_FIELDS")
-    if truth.is_instance(required_fields, list):
+    if is_list(required_fields):
         entries = list_iter(required_fields)
-    elif truth.is_instance(required_fields, tuple):
+    elif is_tuple(required_fields):
         entries = tuple_iter(required_fields)
     else:
         raise ConfigurationError(
             f"register_mutation() needs {model_name}.REQUIRED_FIELDS to be a list or "
-            f"tuple; got {truth.render(required_fields)}.",
+            f"tuple; got {required_fields!r}.",
         )
-    names = [truth.text(username_field)]
+    names = [introspection.text(username_field)]
     for entry in entries:
         if not is_str(entry):
             raise ConfigurationError(
                 f"register_mutation() needs every {model_name}.REQUIRED_FIELDS entry to be "
-                f"a field name string; got {truth.render(entry)}.",
+                f"a field name string; got {entry!r}.",
             )
-        names.append(truth.text(entry))
+        names.append(introspection.text(entry))
     names.append("password")
     deduped = tuple(dict.fromkeys(names))
     # Every name is a plain ``str``, so the matched entries sort and render as plain text.
@@ -1230,7 +1232,7 @@ def _register_decode_step(
     # the four-tuple carrying the captured values.
     if len(decoded) != _REGISTER_DECODED_ARITY:
         raise ValueError(
-            f"{truth.name(mutation_cls)}: the register decode answers the "
+            f"{mutation_cls.__name__}: the register decode answers the "
             "(user, m2m_assignments, exclude, excluded_values) four-tuple; a bind without "
             "the EXCLUDED password spec cannot register a user.",
         )
@@ -1431,7 +1433,7 @@ def _synthesize_register_rider(
                 shape=pinned,
             )
             materialize_mutation_input_class(
-                truth.name(input_cls),
+                input_cls.__name__,
                 input_cls,
                 "the input of the auth register mutation",
             )
@@ -1531,13 +1533,13 @@ def _resolve_user_primary_or_raise(
     factories = " / ".join(_SURFACE_FACTORY_NAMES[surface] for surface in surfaces)
     if registry.types_for(user_model):
         raise ConfigurationError(
-            f"auth {factories} declared, but the user model {truth.name(user_model)} has multiple "
+            f"auth {factories} declared, but the user model {user_model.__name__} has multiple "
             "registered DjangoTypes and no declared primary; set Meta.primary = True on one of "
             "them so the auth user type is unambiguous.",
         )
     raise ConfigurationError(
         f"auth {factories} declared with no registered DjangoType for the user model "
-        f"{truth.name(user_model)}; declare a DjangoType with Meta.model = get_user_model() "
+        f"{user_model.__name__}; declare a DjangoType with Meta.model = get_user_model() "
         "(mark it Meta.primary = True if the model has several types) so the auth surface "
         "has a user type to return.",
     )
@@ -1576,14 +1578,14 @@ def bind_auth_mutations() -> None:
     if login_holder is not None:
         login_holder._primary_type = primary
         payload_cls = build_payload_type("Login", object_type=primary)
-        materialize_mutation_input_class(truth.name(payload_cls), payload_cls)
-        login_holder._payload_type_name = truth.name(payload_cls)
+        materialize_mutation_input_class(payload_cls.__name__, payload_cls)
+        login_holder._payload_type_name = payload_cls.__name__
 
     logout_holder = by_surface.get("logout")
     if logout_holder is not None:
         payload_cls = build_payload_type("Logout", object_type=None)
-        materialize_mutation_input_class(truth.name(payload_cls), payload_cls)
-        logout_holder._payload_type_name = truth.name(payload_cls)
+        materialize_mutation_input_class(payload_cls.__name__, payload_cls)
+        logout_holder._payload_type_name = payload_cls.__name__
 
     current_user_holder = by_surface.get("current_user")
     if current_user_holder is not None:

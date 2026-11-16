@@ -64,8 +64,12 @@ from rest_framework.fields import empty
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import CREATE, PARTIAL
 from django_strawberry_framework.registry import register_subsystem_clear
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_mapping
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import (
+    is_class,
+    is_mapping,
+    read_attr,
+)
 from django_strawberry_framework.utils.inputs import (
     GeneratedFieldSources,
     InputFieldSpec,
@@ -117,7 +121,7 @@ SERIALIZER_INPUTS_MODULE_PATH: str = "django_strawberry_framework.rest_framework
 
 def _is_serializer_class(value: object) -> TypeIs[type[DRFSerializer]]:
     """Whether ``value`` is a DRF ``Serializer`` subclass, asked of its real MRO."""
-    return truth.is_subclass(value, serializers.Serializer)
+    return is_class(value) and issubclass(value, serializers.Serializer)
 
 
 # The serializer-input namespace lifecycle trio, single-sited via
@@ -183,7 +187,7 @@ def serializer_input_slot(mutation_cls: type[object]) -> str:
     ends in ``Input``, so no generated input class name can claim it. A plain identifier,
     because ``Annotated["<name>", ...]`` compiles the name as a forward reference.
     """
-    return f"{truth.name(mutation_cls)}Data"
+    return f"{mutation_cls.__name__}Data"
 
 
 def clear_serializer_input_namespace() -> None:
@@ -306,7 +310,7 @@ def read_nested_serializer_fields(
     return _schema_time_fields(
         serializer,
         f"Could not read .fields from nested serializer "
-        f"{truth.name(truth.class_of(serializer))!r} under no-arg construction",
+        f"{type(serializer).__name__!r} under no-arg construction",
         "Nested serializer fields are read at schema build, where no request exists and the "
         "serializer context is empty. A nested serializer opted in via Meta.nested_fields "
         "must expose a stable, request-independent no-arg .fields (override "
@@ -331,7 +335,7 @@ def _schema_time_fields(
         fields = serializer.fields
     except KeyError as exc:
         raise ConfigurationError(
-            f"{failure}: {truth.kind(exc)}: {truth.text(exc)}. {remedy}",
+            f"{failure}: {introspection.kind(exc)}: {introspection.text(exc)}. {remedy}",
         ) from exc
     return dict(fields)
 
@@ -351,7 +355,7 @@ def require_nested_fields_mapping(
     if not is_mapping(nested_fields):
         raise ConfigurationError(
             f"SerializerMutation {owner_name}.Meta.nested_fields must be a mapping of "
-            f"{{field_name: NestedSerializerConfig}}; got {truth.render(nested_fields)}.",
+            f"{{field_name: NestedSerializerConfig}}; got {nested_fields!r}.",
         )
     return nested_fields
 
@@ -369,7 +373,7 @@ def require_nested_serializer_config(
     if not isinstance(config, NestedSerializerConfig):
         raise ConfigurationError(
             f"SerializerMutation {owner_name}.Meta.nested_fields[{field_name!r}] must be a "
-            f"NestedSerializerConfig; got {truth.render(config)}.",
+            f"NestedSerializerConfig; got {config!r}.",
         )
     return config
 
@@ -398,7 +402,7 @@ def get_serializer_for_schema(
     return _schema_time_fields(
         serializer_class(),
         "Could not materialize the schema-time field set for serializer "
-        f"{truth.name(serializer_class)!r}",
+        f"{serializer_class.__name__!r}",
         "The default discovery constructs the serializer with no args and reads `.fields` at "
         "schema build, where no request exists and the serializer context is empty; a "
         "serializer whose get_fields() reads the request or other context must override "
@@ -418,7 +422,7 @@ def _fingerprint_relation_target(field: DRFField) -> str | None:
         # drf-stubs: ``RelatedField.queryset`` is a ``QuerySet`` / ``Manager`` (or ``None``).
         model: type[models.Model] | None = getattr(getattr(field, "queryset", None), "model", None)
         if model is not None:
-            return truth.label(model)
+            return f"{model.__module__}.{model.__qualname__}"
     return None
 
 
@@ -448,10 +452,10 @@ def _fingerprint_converter_extra(field: DRFField) -> tuple[object, ...] | None:
     nested child is not read.
     """
     if isinstance(field, serializers.ModelField):
-        return (truth.name(truth.class_of(getattr(field, "model_field", None))),)
+        return (type(read_attr(field, "model_field", None)).__name__,)
     if isinstance(field, serializers.ListField):
         child: object = getattr(field, "child", None)
-        return truth.name(type(child)), bool(getattr(child, "allow_null", False))
+        return type(child).__name__, bool(getattr(child, "allow_null", False))
     return None
 
 
@@ -498,9 +502,9 @@ def _fingerprint_nested(
         # Not opted in: no nested input is built (opt-in only), so the child shape cannot affect
         # the SDL and the field walk raises the canonical opt-in error. Record a shallow marker
         # WITHOUT reading child.fields (an unopted context-sensitive child may raise).
-        return ("<unopted-nested>", truth.name(child_class), many)
-    if truth.is_among(child_class, seen):
-        return ("<cycle>", truth.name(child_class), many)
+        return ("<unopted-nested>", child_class.__name__, many)
+    if child_class in seen:
+        return ("<cycle>", child_class.__name__, many)
     child_field_map = read_nested_serializer_fields(child)
     child_fingerprint = _fingerprint_field_map(
         child_field_map,
@@ -540,7 +544,7 @@ def _fingerprint_field_map(
     return tuple(
         (
             name,
-            truth.name(type(field)),
+            type(field).__name__,
             field.source,
             bool(getattr(field, "write_only", False)),
             bool(field.required),
@@ -607,7 +611,7 @@ def _serializer_meta_value(serializer_class: type[DRFBaseSerializer], name: str)
     A serializer with no ``Meta`` (a bare ``Serializer``)
     yields ``None`` for every key.
     """
-    return truth.static_attr(truth.static_attr(serializer_class, "Meta"), name)
+    return introspection.mro_attr(introspection.mro_attr(serializer_class, "Meta"), name)
 
 
 def serializer_model(serializer_class: type[DRFBaseSerializer]) -> type[models.Model] | None:
@@ -624,7 +628,7 @@ def serializer_model(serializer_class: type[DRFBaseSerializer]) -> type[models.M
     model = _serializer_meta_value(serializer_class, "model")
     if model is None:
         return None
-    return require_model_class(truth.name(serializer_class), model, base_label="Serializer")
+    return require_model_class(serializer_class.__name__, model, base_label="Serializer")
 
 
 def write_source_key(model: type[models.Model] | None, source: str) -> str:
@@ -867,11 +871,11 @@ def resolve_effective_serializer_fields(
         writable,
         fields=fields,
         exclude=exclude,
-        subject=f"SerializerMutation for {truth.name(serializer_class)}",
+        subject=f"SerializerMutation for {serializer_class.__name__}",
         seq_flavor="SerializerMutation",
         unknown_noun="unknown or non-writable serializer field(s)",
         empty_message=(
-            f"SerializerMutation input for {truth.name(serializer_class)} has no fields; "
+            f"SerializerMutation input for {serializer_class.__name__} has no fields; "
             "Meta.fields / Meta.exclude narrowed the writable serializer field set to empty "
             "(or the serializer declares no writable fields). A serializer input must define "
             "at least one field."
@@ -887,8 +891,8 @@ def resolve_effective_serializer_fields(
     unusable = [name for name in effective if not is_input_attribute_name(name)]
     if unusable:
         raise ConfigurationError(
-            f"SerializerMutation for {truth.name(serializer_class)} keeps input field name(s) "
-            f"[{', '.join(truth.render(name) for name in unusable)}] that cannot be "
+            f"SerializerMutation for {serializer_class.__name__} keeps input field name(s) "
+            f"[{', '.join(repr(name) for name in unusable)}] that cannot be "
             "attributes of the generated input class: each must be a Python identifier that is "
             "not a keyword. Rename the field, make it read_only, or narrow it out with "
             "Meta.fields / Meta.exclude (NestedSerializerConfig.fields / exclude for a nested "
@@ -926,7 +930,7 @@ def resolve_optional_fields(
     unknown = [name for name in names if name not in set(effective_field_names)]
     if unknown:
         raise ConfigurationError(
-            f"SerializerMutation for {truth.name(serializer_class)} declares `optional_fields` "
+            f"SerializerMutation for {serializer_class.__name__} declares `optional_fields` "
             f"naming field(s) not in the effective input set: {sorted(unknown)!r}.",
         )
     return frozenset(names)
@@ -967,7 +971,7 @@ def resolve_injected_field_specs(
     for name in injected_fields:
         if name not in field_map:
             raise ConfigurationError(
-                f"SerializerMutation {truth.name(serializer_class)}.Meta.injected_fields names "
+                f"SerializerMutation {serializer_class.__name__}.Meta.injected_fields names "
                 f"{name!r}, which is not in the serializer's schema-time field map.",
             )
         _python_attr, _annotation, spec = resolve_serializer_field(
@@ -1070,7 +1074,7 @@ def describe_serializer_input(name: str) -> str | None:
     )
     lines = [
         f"SerializerMutation input {name!r}:",
-        f"  serializer: {truth.label(shape.serializer_class)}",
+        f"  serializer: {shape.serializer_class.__module__}.{shape.serializer_class.__qualname__}",
         f"  operation: {shape.operation_kind}",
         f"  name: {name_note}",
         "  fields:",
@@ -1086,7 +1090,7 @@ def describe_serializer_input(name: str) -> str | None:
         if spec.source is not None:
             extra += f", source={spec.source!r}"
         if spec.related_model is not None:
-            extra += f", relation_target={truth.name(spec.related_model)}"
+            extra += f", relation_target={spec.related_model.__name__}"
         if description is not None:
             extra += f", description={description!r}"
         if spec.nested_specs is not None:
@@ -1117,7 +1121,7 @@ def _related_model_token(related_model: type[models.Model] | None) -> str:
     """
     if related_model is None:
         return "None"
-    return truth.label(related_model)
+    return f"{related_model.__module__}.{related_model.__qualname__}"
 
 
 def _shape_token(
@@ -1196,7 +1200,7 @@ def serializer_canonical_input_name(
     descriptor-derived name ``serializer_input_type_name`` computes after the field walk.
     """
     return generated_input_type_name(
-        truth.name(serializer_class),
+        serializer_class.__name__,
         is_partial=is_partial,
         is_full_shape=True,
         token="",
@@ -1244,7 +1248,7 @@ def serializer_input_type_name(
         )
     )
     return generated_input_type_name(
-        truth.name(serializer_class),
+        serializer_class.__name__,
         is_partial=operation_kind == PARTIAL,
         is_full_shape=is_full_shape,
         token=token,
@@ -1311,7 +1315,7 @@ def guard_create_required_serializer_fields(
         effective_field_names,
         waived=injected_fields or (),
         make_error=lambda dropped: ConfigurationError(
-            f"SerializerMutation create input for {truth.name(serializer_class)} drops required "
+            f"SerializerMutation create input for {serializer_class.__name__} drops required "
             f"serializer field(s) {dropped!r} via Meta.fields / Meta.exclude; the "
             "serializer can never validate without them. Keep them in the input, or declare them "
             "in Meta.injected_fields and supply them from a get_serializer_injected_data "
@@ -1326,7 +1330,7 @@ def _serializer_input_sources(
 ) -> GeneratedFieldSources:
     """Name the serializer a generated input is built from, and each field's serializer field."""
     return GeneratedFieldSources(
-        subject=f"SerializerMutation for {truth.name(serializer_class)!r}",
+        subject=f"SerializerMutation for {serializer_class.__name__!r}",
         field_noun="serializer fields",
         rename_clause="Rename one,",
         members={spec.input_attr: spec.target_name for spec in field_specs},
@@ -1401,7 +1405,7 @@ def _aggregate_field_problems(
         return ConfigurationError(messages[0])
     bullets = "\n".join(f"  - {message}" for message in messages)
     return ConfigurationError(
-        f"SerializerMutation input for {truth.name(serializer_class)} has "
+        f"SerializerMutation input for {serializer_class.__name__} has "
         f"{len(messages)} schema-time problem(s):\n{bullets}",
     )
 
@@ -1555,9 +1559,9 @@ def guard_nested_recursion(
     ``_NESTED_MAX_DEPTH`` is the DEPTH cap (an absurdly deep but acyclic nesting). Both are
     class-creation / bind-time configuration errors, not silent truncation.
     """
-    if truth.is_among(nested_class, nested_path):
+    if nested_class in nested_path:
         raise ConfigurationError(
-            f"Nested serializer field {field_name!r} re-enters {truth.name(nested_class)}, which is "
+            f"Nested serializer field {field_name!r} re-enters {nested_class.__name__}, which is "
             "already on the nesting path (a nested-serializer cycle); the recursive input build "
             "would never terminate. Break the cycle, or drop the field from Meta.nested_fields.",
         )
@@ -1669,7 +1673,7 @@ def _resolve_nested_field(
     nested_cls, nested_shape = _dedupe_and_materialize_nested(
         nested_cls,
         nested_shape,
-        f"the nested input of serializer {truth.label(nested_class)}",
+        f"the nested input of serializer {nested_class.__module__}.{nested_class.__qualname__}",
     )
     kind = NESTED_MULTI if many else NESTED_SINGLE
     annotation: object = GenericAlias(list, (nested_cls,)) if many else nested_cls
@@ -1701,20 +1705,20 @@ def validate_nested_config_keys(
     nested: dict[str, DRFBaseSerializer] = {}
     if not nested_configs:
         return nested
-    _ = require_nested_fields_mapping(truth.name(serializer_class), nested_configs)
+    _ = require_nested_fields_mapping(serializer_class.__name__, nested_configs)
     for name, config in nested_configs.items():
-        _ = require_nested_serializer_config(truth.name(serializer_class), name, config)
+        _ = require_nested_serializer_config(serializer_class.__name__, name, config)
         field = effective.get(name)
         if field is None:
             raise ConfigurationError(
-                f"SerializerMutation for {truth.name(serializer_class)} declares nested_fields for "
+                f"SerializerMutation for {serializer_class.__name__} declares nested_fields for "
                 f"{name!r}, which is not in the effective input set (unknown, read-only, or "
                 "narrowed away by Meta.fields / Meta.exclude).",
             )
         if not is_nested_serializer_field(field):
             raise ConfigurationError(
-                f"SerializerMutation for {truth.name(serializer_class)} declares nested_fields for "
-                f"{name!r}, but it is a {truth.name(type(field))}, not a nested serializer. "
+                f"SerializerMutation for {serializer_class.__name__} declares nested_fields for "
+                f"{name!r}, but it is a {type(field).__name__}, not a nested serializer. "
                 "nested_fields is only for nested Serializer / ListSerializer fields.",
             )
         nested[name] = field

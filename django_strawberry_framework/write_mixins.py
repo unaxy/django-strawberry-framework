@@ -41,8 +41,17 @@ from .mutations.inputs import build_payload_type, materialize_mutation_input_cla
 from .mutations.operations import NON_DELETE_WRITE_OPERATIONS, non_delete_operation_error
 from .mutations.permissions import DjangoModelPermission, is_permission_class
 from .registry import registry
-from .utils import truth
-from .utils._narrowing import is_text_atom, list_of, optional_instance, read_attr, require
+from .utils import introspection
+from .utils._narrowing import (
+    class_namespace,
+    is_class,
+    is_str,
+    is_text_atom,
+    list_of,
+    optional_instance,
+    read_attr,
+    require,
+)
 from .utils.imports import import_attr
 from .utils.inputs import get_or_store_shape_build, normalize_field_name_sequence
 from .utils.lazy import unwrap_lazy_object
@@ -97,10 +106,10 @@ def require_non_delete_operation(base_label: str, name: str, meta: type[object])
     verb cannot leave one flavor still spelling the membership test. The
     model-less plain form does NOT call this (it rejects ANY ``operation`` key).
     """
-    raw_operation = truth.static_attr(meta, "operation")
+    raw_operation = introspection.mro_attr(meta, "operation")
     if (
-        not truth.is_instance(raw_operation, str)
-        or (operation := truth.text(raw_operation)) not in NON_DELETE_WRITE_OPERATIONS
+        not is_str(raw_operation)
+        or (operation := introspection.text(raw_operation)) not in NON_DELETE_WRITE_OPERATIONS
     ):
         raise non_delete_operation_error(base_label, name, raw_operation)
     return operation
@@ -122,13 +131,13 @@ def normalize_meta_field_selection(
     ``resolve_effective_form_fields`` walk are different jobs.
     """
     fields = normalize_field_name_sequence(
-        truth.static_attr(meta, "fields"),
+        introspection.mro_attr(meta, "fields"),
         label="fields",
         flavor=flavor,
         ordered=True,
     )
     exclude = normalize_field_name_sequence(
-        truth.static_attr(meta, "exclude"),
+        introspection.mro_attr(meta, "exclude"),
         label="exclude",
         flavor=flavor,
         ordered=False,
@@ -184,7 +193,7 @@ def build_and_stash_input(
 
     The materialize-then-stash tail the form + serializer ``build_input`` seams
     share: ``build()`` returns ``(input_cls, payload)`` (the per-flavor stash value),
-    ``materialize(truth.name(input_cls), input_cls, owner)`` pins it as a module global
+    ``materialize(input_cls.__name__, input_cls, owner)`` pins it as a module global
     of the flavor's input namespace (``owner`` names ``cls`` for the cross-family
     type-name claim's collision message), ``cls._input_field_specs = specs_of(payload)`` records
     the reverse map for the decode, and the class is returned.
@@ -193,7 +202,11 @@ def build_and_stash_input(
     which ``shape.field_specs`` is read), so the one tail serves both flavors.
     """
     input_cls, payload = build()
-    materialize(truth.name(input_cls), input_cls, f"the input of {truth.label(cls)}")
+    materialize(
+        input_cls.__name__,
+        input_cls,
+        f"the input of {cls.__module__}.{cls.__qualname__}",
+    )
     cls._input_field_specs = specs_of(payload)
     return input_cls
 
@@ -237,12 +250,12 @@ def require_backing_class(
     ``SerializerMutation``); ``expected_label`` is the base type named in the message
     (``forms.ModelForm`` / ``forms.Form`` / ``serializers.ModelSerializer``). The
     per-flavor TYPE-gate is ``require_subclass`` (shared ``must be a <label>
-    subclass; got <value>`` template + ``truth.render``); call it AFTER this
+    subclass; got <value>`` template); call it AFTER this
     presence check. The serializer's second, ModelSerializer-specific gate stays
     at that call site - its message names ``Meta.model``, not the shared
     subclass template. This helper owns only the shared presence clause.
     """
-    backing: object = truth.static_attr(meta, key)
+    backing: object = introspection.mro_attr(meta, key)
     if backing is None:
         raise ConfigurationError(
             f"{base_label} {name}.Meta declares no {key}; set Meta.{key} to a "
@@ -268,15 +281,12 @@ def require_subclass(
     ``require_backing_class`` (a missing key names the flavor's *contract* class,
     which can be narrower than this type-gate - serializer missing-key names
     ``ModelSerializer`` while this gate first names ``Serializer``). The subclass
-    check reads the real MRO (``truth.is_subclass``). ``note`` is an optional second sentence
-    (the ModelForm-vs-plain-Form redirect).
+    check asks the value's real type first (``utils/_narrowing.py::is_class``). ``note`` is an
+    optional second sentence (the ModelForm-vs-plain-Form redirect).
     """
-    if truth.is_subclass(value, expected):
+    if is_class(value) and issubclass(value, expected):
         return value
-    message = (
-        f"{base_label} {name}.Meta.{key} must be a {expected_label} subclass; "
-        f"got {truth.render(value)}."
-    )
+    message = f"{base_label} {name}.Meta.{key} must be a {expected_label} subclass; got {value!r}."
     if note:
         message = f"{message} {note}"
     raise ConfigurationError(message)
@@ -294,10 +304,10 @@ def require_model_class(name: str, model: object, *, base_label: str) -> type[mo
     ``DjangoMutation {name} resolved model must be a Django model class``
     message stays byte-identical.
     """
-    if truth.is_subclass(model, models.Model):
+    if is_class(model) and issubclass(model, models.Model):
         return model
     raise ConfigurationError(
-        f"{base_label} {name} resolved model must be a Django model class; got {truth.render(model)}.",
+        f"{base_label} {name} resolved model must be a Django model class; got {model!r}.",
     )
 
 
@@ -323,14 +333,14 @@ def own_backing_class(cls: type[object], key: str) -> object:
     class's own namespace, never up the MRO, where a subclass still validating would find
     its parent's. A class neither arm answers for raises ``ConfigurationError``.
     """
-    meta = optional_instance(truth.class_dict(cls).get("_mutation_meta"), _ValidatedMutationMeta)
+    meta = optional_instance(class_namespace(cls).get("_mutation_meta"), _ValidatedMutationMeta)
     backing = (
-        truth.static_attr(truth.static_attr(cls, "Meta"), key)
+        introspection.mro_attr(introspection.mro_attr(cls, "Meta"), key)
         if meta is None
         else read_attr(meta, key)
     )
     if backing is None:
-        raise ConfigurationError(f"{truth.name(cls)} cannot resolve Meta.{key}.")
+        raise ConfigurationError(f"{cls.__name__} cannot resolve Meta.{key}.")
     return backing
 
 
@@ -338,7 +348,7 @@ def resolve_meta_model(meta: type[object], *, key: str, meta_attr: str) -> objec
     """Resolve a backing class's ``Meta.model`` via the shared three-getattr chain.
 
     The ``meta.<key> -> backing.<meta_attr> -> backing_meta.model`` chain (each link a
-    ``truth.static_attr`` read) both flavors' ``_resolve_model`` overrides walk, differing only
+    ``introspection.mro_attr`` read) both flavors' ``_resolve_model`` overrides walk, differing only
     in ``key`` (``form_class`` / ``serializer_class``) and ``meta_attr`` (a
     ``ModelForm``'s ``_meta`` vs a serializer's ``Meta``). Returns ``None`` for any
     missing link (no backing class, no meta, no model), so the caller's base
@@ -346,9 +356,9 @@ def resolve_meta_model(meta: type[object], *, key: str, meta_attr: str) -> objec
     ``AttributeError``. Any other value is the consumer's declaration as written,
     which ``require_model_class`` type-gates.
     """
-    backing = truth.static_attr(meta, key)
-    backing_meta = truth.static_attr(backing, meta_attr)
-    return truth.static_attr(backing_meta, "model")
+    backing = introspection.mro_attr(meta, key)
+    backing_meta = introspection.mro_attr(backing, meta_attr)
+    return introspection.mro_attr(backing_meta, "model")
 
 
 def resolve_backed_model_or_raise(
@@ -370,12 +380,12 @@ def resolve_backed_model_or_raise(
     """
     model = cls._resolve_model(meta)
     if model is None:
-        backing: object = truth.static_attr(meta, key)
+        backing: object = introspection.mro_attr(meta, key)
         raise ConfigurationError(
-            f"{base_label} {truth.name(cls)}.Meta.{key} {truth.name(backing)} resolves no model; "
+            f"{base_label} {cls.__name__}.Meta.{key} {introspection.name(backing)} resolves no model; "
             f"a {noun} must set Meta.model so the mutation has a model + a DjangoType to return.",
         )
-    return require_model_class(truth.name(cls), model, base_label=base_label)
+    return require_model_class(cls.__name__, model, base_label=base_label)
 
 
 def resolver_seams(
@@ -527,11 +537,11 @@ def make_declaration_registry(label: str) -> DeclarationRegistry[_DeclarationT]:
     def register(declaration_cls: _DeclarationT) -> None:
         if registry.is_finalized():
             raise ConfigurationError(
-                f"Cannot declare {label} {truth.name(declaration_cls)} after finalization; "
+                f"Cannot declare {label} {introspection.name(declaration_cls)} after finalization; "
                 "mutation declarations are import-time only (call registry.clear() first).",
             )
         # The ledger contract is idempotence by identity.
-        if not truth.is_among(declaration_cls, store):
+        if not any(entry is declaration_cls for entry in store):
             store.append(declaration_cls)
 
     def clear() -> None:
@@ -626,9 +636,9 @@ def make_meta_validating_metaclass(
             at the slot level). The write at class creation is honored; a later
             assignment through this ``__setattr__`` raises typed ``ConfigurationError``.
             """
-            if name == "_mutation_meta" and "_mutation_meta" in truth.class_dict(cls):
+            if name == "_mutation_meta" and "_mutation_meta" in vars(cls):
                 raise ConfigurationError(
-                    f"{truth.name(cls)}._mutation_meta is sealed and cannot be rebound; the "
+                    f"{cls.__name__}._mutation_meta is sealed and cannot be rebound; the "
                     "validated authorization snapshot is captured once at class creation.",
                 )
             super().__setattr__(name, value)
@@ -636,18 +646,18 @@ def make_meta_validating_metaclass(
         @override
         def __delattr__(cls, name: str) -> None:
             """Refuse deleting the validated ``Meta`` snapshot off a mutation class."""
-            if name == "_mutation_meta" and "_mutation_meta" in truth.class_dict(cls):
+            if name == "_mutation_meta" and "_mutation_meta" in vars(cls):
                 raise ConfigurationError(
-                    f"{truth.name(cls)}._mutation_meta is sealed and cannot be deleted; the "
+                    f"{cls.__name__}._mutation_meta is sealed and cannot be deleted; the "
                     "validated authorization snapshot is captured once at class creation.",
                 )
             super().__delattr__(name)
 
     # Stores naming the framework's own freshly built metaclass, not reads of a consumer object.
     built = MetaValidatingMetaclass
-    built.__name__ = name  # truth: ok framework-built class renamed at creation
-    built.__qualname__ = name  # truth: ok framework-built class renamed at creation
-    built.__module__ = module  # truth: ok framework-built class renamed at creation
+    built.__name__ = name
+    built.__qualname__ = name
+    built.__module__ = module
     return MetaValidatingMetaclass
 
 
@@ -846,28 +856,28 @@ def _validate_permission_classes(
     # behaviour.
     if (
         is_text_atom(unwrap_lazy_object(value))
-        or truth.is_type(value)
-        or truth.mro_attr(truth.class_of(value), "__iter__") is None
+        or is_class(value)
+        or introspection.class_mro_attr(type(value), "__iter__") is None
     ):
         raise ConfigurationError(
-            f"{site} must be a sequence of permission classes; got {truth.render(value)}.",
+            f"{site} must be a sequence of permission classes; got {value!r}.",
         )
     classes = list_of(value)
     validated: list[WritePermissionClass] = []
     for entry in classes:
         if not is_permission_class(entry):
             raise ConfigurationError(
-                f"{site} entry {truth.render(entry)} is not a permission class exposing "
+                f"{site} entry {entry!r} is not a permission class exposing "
                 "has_permission; each entry must be a class with a "
                 "has_permission(info, mutation, operation, data, instance) method.",
             )
         if (
             model_less
-            and truth.is_subclass(entry, DjangoModelPermission)
-            and not truth.overrides(entry, DjangoModelPermission, "has_permission")
+            and issubclass(entry, DjangoModelPermission)
+            and not introspection.overrides(entry, DjangoModelPermission, "has_permission")
         ):
             raise ConfigurationError(
-                f"{site} includes {truth.name(entry)}, a DjangoModelPermission that does not "
+                f"{site} includes {introspection.name(entry)}, a DjangoModelPermission that does not "
                 "override has_permission; it requires a model and this surface has none. "
                 "Override has_permission without calling the base hook, omit permission_classes "
                 "for this surface's "
@@ -901,11 +911,11 @@ def validate_select_for_update(flavor: str, mutation_name: str, meta: type[objec
     safe to leave in place regardless of backend. A non-bool is a clear
     class-creation error.
     """
-    select_for_update = truth.static_attr(meta, "select_for_update", default=True)
-    if not truth.is_instance(select_for_update, bool):
+    select_for_update = introspection.mro_attr(meta, "select_for_update", default=True)
+    if not isinstance(select_for_update, bool):
         raise ConfigurationError(
             f"{flavor} {mutation_name}.Meta.select_for_update must be a bool; got "
-            f"{truth.render(select_for_update)}.",
+            f"{select_for_update!r}.",
         )
     return select_for_update
 
@@ -927,7 +937,7 @@ def model_backed_permission_and_lock(
     """
     permission_classes = _validate_permission_classes(
         f"{flavor} {name}.Meta.permission_classes",
-        truth.static_attr(meta, "permission_classes"),
+        introspection.mro_attr(meta, "permission_classes"),
     )
     return permission_classes, validate_select_for_update(flavor, name, meta)
 
@@ -1003,13 +1013,13 @@ def bind_mutation_outputs(
     ledger, one collision check, one ``registry.clear()`` co-clear).
     """
     payload_cls = build_payload_type(
-        truth.name(mutation_cls),
+        mutation_cls.__name__,
         object_type=object_type,
     )
-    materialize_mutation_input_class(truth.name(payload_cls), payload_cls)
+    materialize_mutation_input_class(payload_cls.__name__, payload_cls)
     mutation_cls._primary_type = object_type
     mutation_cls._input_class = input_cls
-    mutation_cls._payload_type_name = truth.name(payload_cls)
+    mutation_cls._payload_type_name = payload_cls.__name__
 
 
 def bind_write_declarations(

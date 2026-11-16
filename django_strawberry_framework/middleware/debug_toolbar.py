@@ -71,8 +71,12 @@ from django.utils.encoding import force_str
 from strawberry.django.views import BaseView
 from typing_extensions import override
 
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import call_method, is_dict
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_class,
+    is_dict,
+)
 from django_strawberry_framework.utils.imports import DEBUG_TOOLBAR_FLOOR, require_optional_module
 
 if TYPE_CHECKING:
@@ -254,8 +258,8 @@ class DebugToolbarMiddleware(_DebugToolbarMiddleware):
 
         ``view_class`` is the attribute Django's ``View.as_view()`` sets on the
         returned callable (and ``functools.wraps``-copying decorators such as
-        ``ensure_csrf_cookie`` preserve). Both reads are truthful
-        (``utils/truth.py::static_attr`` / ``is_subclass``), the module's first
+        ``ensure_csrf_cookie`` preserve). The attribute is read statically and the
+        class test asks the real type (``utils/_narrowing.py::is_class``), the module's first
         deliberate divergence from upstream (spec-042 Decision 7): this
         middleware runs for ALL global traffic, and a non-class ``view_class``
         attached by an unrelated decorator answers ``False`` where a bare
@@ -263,8 +267,8 @@ class DebugToolbarMiddleware(_DebugToolbarMiddleware):
         ``super()`` chain: the stock toolbar middleware defines no
         ``process_view`` hook to preserve.
         """
-        view = truth.static_attr(view_func, "view_class", None)
-        setattr(request, _IS_GRAPHIQL, truth.is_subclass(view, BaseView))
+        view = introspection.mro_attr(view_func, "view_class", None)
+        setattr(request, _IS_GRAPHIQL, is_class(view) and issubclass(view, BaseView))
 
     @override
     def _postprocess(

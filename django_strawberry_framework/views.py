@@ -103,7 +103,7 @@ from django_strawberry_framework._multipart import _MULTIPART_CONTROL_FIELDS
 from django_strawberry_framework._request_body import body_exceeds_limit
 from django_strawberry_framework.conf import django_setting, max_request_body_bytes_setting
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     is_awaitable,
     is_dict,
@@ -240,7 +240,7 @@ def _resolved_max_request_body_bytes(value: object) -> int | None:
     then evaluate consumer code INSIDE this boundary and escape it with a raw
     exception in place of the promised ``ConfigurationError``.
 
-    The ``got`` tail is rendered by ``utils/truth.py::describe`` rather than
+    The ``got`` tail is rendered by ``utils/introspection.py::describe`` rather than
     interpolated directly, because the f-string runs at the RAISE SITE: a
     negative integer too large to convert to a string (CPython 3.11+ refuses
     beyond ``sys.get_int_max_str_digits()``) reaches the ``value <= 0`` arm and
@@ -255,7 +255,7 @@ def _resolved_max_request_body_bytes(value: object) -> int | None:
     if type(value) is not int or value <= 0:
         raise ConfigurationError(
             f"max_request_body_bytes must be a positive int of bytes or None to disable "
-            f"the package request-body cap; got {truth.describe(value)}.",
+            f"the package request-body cap; got {introspection.describe(value)}.",
         )
     return value
 
@@ -1267,8 +1267,8 @@ class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context
         upstream_view = super().as_view(**initkwargs)
         if not is_marked_coroutine_function(upstream_view):
             raise ConfigurationError(
-                f"{truth.qualname(cls)}.as_view() needs a coroutine view callback, but the "
-                f"as_view it extends returned {truth.describe(upstream_view)}; keep "
+                f"{cls.__qualname__}.as_view() needs a coroutine view callback, but the "
+                f"as_view it extends returned {introspection.describe(upstream_view)}; keep "
                 "AsyncGraphQLView.as_view's coroutine marking on the callback.",
             )
         return _boundary_view(upstream_view)

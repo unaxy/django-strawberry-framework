@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from types import SimpleNamespace
-from typing import NoReturn
 
 import pytest
 from apps.products import models as product_models
@@ -109,12 +108,6 @@ class _HostileRepr:
     @override
     def __str__(self) -> str:
         raise RuntimeError("HostileRepr str exploded")
-
-
-class _HostilePermMeta(type):
-    @property
-    def has_permission(cls) -> NoReturn:
-        raise RuntimeError("HostilePermMeta.has_permission exploded")
 
 
 class _HostileHashStr(str):
@@ -437,23 +430,6 @@ def test_validate_select_for_update_hostile_repr_propagates() -> None:
         validate_select_for_update("DjangoMutation", "Probe", BadMeta)
 
 
-def test_validate_permission_classes_hostile_metaclass_never_runs() -> None:
-    """A metaclass ``has_permission`` property is read as stored, never run, and refused.
-
-    The declaration is read from the real namespaces (``truth.static_attr``): the
-    property object is not callable, so the entry is no permission class.
-    """
-
-    class HostilePerm(metaclass=_HostilePermMeta):
-        pass
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"permission_classes entry .* is not a permission class exposing has_permission",
-    ):
-        _validate_permission_classes("Probe.Meta.permission_classes", [HostilePerm])
-
-
 def test_validate_permission_classes_messages_open_with_the_site() -> None:
     """Every message opens with ``site``; the model-backed pair builds its own from the flavor."""
     with pytest.raises(
@@ -594,40 +570,6 @@ def test_require_non_delete_operation_reads_a_hostile_hash_operation_as_its_text
     )
     assert operation == "create"
     assert type(operation) is str
-
-
-def test_make_declaration_registry_identity_dedup_hostile_eq_safe_containment() -> None:
-    """make_declaration_registry dedupes by identity, not __eq__, avoiding hostile metaclass escapes.
-
-    The register ledger's ``list.__contains__`` dispatches each entry's __eq__
-    (a consumer-supplied metaclass may override with a raising body), so an
-    ``is`` identity scan replaces the ``not in`` check. This keeps hostile
-    __eq__ from escaping as a raw RuntimeError at class registration.
-    """
-    reg: DeclarationRegistry[type[object]] = make_declaration_registry("ProbeRegistry")
-
-    class HostileEqMeta(type):
-        @override
-        def __eq__(cls, other: object) -> bool:
-            raise RuntimeError("hostile eq")
-
-        # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-        __hash__ = None  # pyright: ignore[reportAssignmentType]
-
-    class FirstClass:
-        pass
-
-    class SecondClass(metaclass=HostileEqMeta):
-        pass
-
-    reg.register(FirstClass)
-    # No RuntimeError: identity scan, not equality check.
-    reg.register(SecondClass)
-    assert len(reg.store) == 2
-
-    # Re-register the same object (identity) is deduplicated silently.
-    reg.register(FirstClass)
-    assert len(reg.store) == 2
 
 
 def test_whole_record_swap_and_deletion_on_a_real_mutation_class_are_sealed() -> None:

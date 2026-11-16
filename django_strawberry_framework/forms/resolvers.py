@@ -246,9 +246,11 @@ from django_strawberry_framework.mutations.resolvers import (
     save_new_row,
     save_or_field_errors,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    instance_state,
+    is_class,
     list_of,
     read_attr,
     require,
@@ -944,18 +946,18 @@ def _assert_bound_choice_agreement(
         bound_model = queryset.model
         if not issubclass(bound_model, target):
             raise ConfigurationError(
-                f"{truth.name(mutation_cls)}: the bound form's field {name!r} looks its "
-                f"choice up among {truth.name(bound_model)} rows, but the input decodes "
-                f"{name!r} ids against {truth.name(target)}. The queryset get_form or the "
+                f"{mutation_cls.__name__}: the bound form's field {name!r} looks its "
+                f"choice up among {bound_model.__name__} rows, but the input decodes "
+                f"{name!r} ids against {introspection.name(target)}. The queryset get_form or the "
                 "form's __init__ assigns must be over the model get_form_fields() declares.",
             )
         basis_key = _choice_key_identity(target, basis_field.to_field_name)
         bound_key = _choice_key_identity(bound_model, bound_field.to_field_name)
         if bound_key != basis_key:
             raise ConfigurationError(
-                f"{truth.name(mutation_cls)}: the bound form's field {name!r} resolves its "
+                f"{mutation_cls.__name__}: the bound form's field {name!r} resolves its "
                 f"choice by {_choice_key_label(bound_key)}, but the input binds "
-                f"{truth.name(target)} rows by {_choice_key_label(basis_key)}. The "
+                f"{introspection.name(target)} rows by {_choice_key_label(basis_key)}. The "
                 "to_field_name get_form or the form's __init__ sets must name the column "
                 "get_form_fields() declares.",
             )
@@ -1179,7 +1181,7 @@ def _bind_form_values(
         merged = bound.copy()
         for name, (key, parts) in bindings.items():
             value = values[name]
-            listed = truth.is_instance(value, list) or truth.is_instance(value, tuple)
+            listed = isinstance(value, (list, tuple))
             _set_field_entries(merged, key, parts, list_of(value) if listed else [value])
         form.data = merged
     else:
@@ -1413,7 +1415,7 @@ def _require_backing_row(
     A ``ModelForm`` saves whatever row its ``instance`` holds, so a form ``get_form``
     builds over another model would write that model's table: a coincident pk then
     answers success with another row's data. The instance must be an instance of the
-    mutation's backing model (``truth.is_instance``: an MTI child or a proxy subclass
+    mutation's backing model (``isinstance``: an MTI child or a proxy subclass
     passes; a concrete base of a proxy-backed mutation, a sibling proxy and an MTI parent
     do not), the truth the save writes by, never the form class's ``Meta.model`` (a
     ``ModelForm`` over another model handed the located row writes the located row's
@@ -1426,25 +1428,27 @@ def _require_backing_row(
     """
     model = backing_model_of(mutation_cls._mutation_meta)
     instance = read_attr(form, "instance", None)
-    if truth.is_instance(instance, model):
+    if isinstance(instance, model):
         return instance
     # The class names the refused instance, never the row: an unsaved row's ``__str__``
     # may read a relation it does not hold yet and raise.
-    model_name = truth.name(model)
+    model_name = model.__name__
     if saved:
-        held = "no instance" if instance is None else f"its instance a {truth.name(instance)}"
+        held = (
+            "no instance" if instance is None else f"its instance a {introspection.name(instance)}"
+        )
         raise ConfigurationError(
-            f"{truth.name(mutation_cls)}: the form's save() left {held}, not a "
+            f"{mutation_cls.__name__}: the form's save() left {held}, not a "
             f"{model_name} instance; the save must write the mutation's model (or a "
             "subclass) and leave the written row on form.instance.",
         )
     held = (
         "a form with no instance"
         if instance is None
-        else f"a form whose instance is a {truth.name(instance)}"
+        else f"a form whose instance is a {introspection.name(instance)}"
     )
     raise ConfigurationError(
-        f"{truth.name(mutation_cls)}: get_form() returned {held}, not a {model_name} "
+        f"{mutation_cls.__name__}: get_form() returned {held}, not a {model_name} "
         f"instance; the form's instance must be a {model_name} row (or a subclass's): a "
         f"ModelForm over {model_name}, given the located row on update, or its save would "
         "write another table.",
@@ -1566,7 +1570,7 @@ def _unstorable_values_kept_from_checks(
     ``OverflowError``. The instance's own attributes are put back after ``is_valid()``.
     """
     instance = form.instance
-    namespace = truth.instance_state(instance)
+    namespace = instance_state(instance)
     held = {name: namespace[name] for name in _BINDING_CHECKS if name in namespace}
     refused: set[str] = set()
     instance.clean_fields = _storability_checked(form, kept, refused, instance.clean_fields)
@@ -1904,8 +1908,8 @@ def _is_unstorable_blank(field: _FieldAny, value: object) -> bool:
         value == ""
         and not field.null
         and not field.empty_strings_allowed
-        and not truth.is_instance(field, models.JSONField)
-        and not (truth.is_type(_HSTORE_FIELD) and truth.is_instance(field, _HSTORE_FIELD))
+        and not isinstance(field, models.JSONField)
+        and not (is_class(_HSTORE_FIELD) and isinstance(field, _HSTORE_FIELD))
     )
 
 

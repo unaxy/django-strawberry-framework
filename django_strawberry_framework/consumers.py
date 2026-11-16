@@ -306,8 +306,8 @@ it above its own guard: the module level reaches only for the standard library,
 Django's own ``ASGIRequest`` / ``DisallowedHost`` (a HARD dependency, and the whole
 point of the Host boundary below), this package's logger, the decode helper in
 ``_json_decode.py`` (whose own imports add ``strawberry.http.base``, a HARD
-dependency), ``exceptions.ConfigurationError``, the truthful readers in
-``utils/truth.py`` and ``utils/_narrowing.py``, the error-policy masking helpers
+dependency), ``exceptions.ConfigurationError``, the readers in
+``utils/introspection.py`` and ``utils/_narrowing.py``, the error-policy masking helpers
 from ``extensions/error_policy.py`` (whose own imports add ``strawberry`` and
 ``graphql``, both HARD dependencies), and the connection-actor-lease helpers from
 ``utils/sessions.py`` - a module whose own imports are ``__future__``, ``asyncio``,
@@ -399,8 +399,13 @@ from .extensions.error_policy import (
     masking_is_active,
     schema_error_policy,
 )
-from .utils import truth
-from .utils._narrowing import optional_instance, read_attr, require
+from .utils import introspection
+from .utils._narrowing import (
+    is_class,
+    optional_instance,
+    read_attr,
+    require,
+)
 from .utils.sessions import (
     actor_lease,
     connection_was_authenticated,
@@ -665,8 +670,8 @@ def _unusable_window_error(value: object) -> ConfigurationError:
 
     A single message for a single domain: the arms below differ in *how* they
     detect an unusable value, not in what the deployment has to change. The
-    value's tail goes through ``utils/truth.py::describe``, which renders the
-    admitted numbers through their builtin slots, so an integer too large for
+    value's tail goes through ``utils/introspection.py::describe``, which renders an
+    integer through the builtin ``int`` slot, so an integer too large for
     CPython to render reads as unprintable instead of raising (see
     ``resolved_revalidation_window``).
     """
@@ -674,7 +679,7 @@ def _unusable_window_error(value: object) -> ConfigurationError:
         "websocket_revalidation_window must be a finite number of seconds >= 0.0 that "
         "converts to a float (0.0 revalidates the session actor at every operation "
         "admission and before every information-bearing operation frame); got "
-        f"{truth.describe(value)}.",
+        f"{introspection.describe(value)}.",
     )
 
 
@@ -770,7 +775,7 @@ if TYPE_CHECKING:
 
 def _is_attempt_task(value: object, /) -> TypeIs[asyncio.Task[object]]:
     """Return whether ``value`` is an ``asyncio.Task`` by its real class: a close attempt."""
-    return truth.is_instance(value, asyncio.Task)
+    return isinstance(value, asyncio.Task)
 
 
 class _ConnectionRevocation:
@@ -1493,7 +1498,7 @@ def _declares_hooks(base: object, hooks: tuple[str, ...]) -> bool:
     from one through ``__mro_entries__``, so the proof reads the alias's origin class.
     """
     origin: object = get_origin(base) or base
-    return truth.is_type(origin) and all(callable(getattr(origin, hook, None)) for hook in hooks)
+    return is_class(origin) and all(callable(getattr(origin, hook, None)) for hook in hooks)
 
 
 def _is_consumer_base(base: object) -> TypeIs[type[RevalidatingGraphQLWSConsumer]]:
@@ -1561,7 +1566,7 @@ def build_revalidating_consumer_class(
         and _is_websocket_adapter_base(websocket_adapter_base)
     ):
         raise ConfigurationError(
-            f"{truth.describe(base_consumer_cls)} is not a Strawberry Channels GraphQLWSConsumer: "
+            f"{introspection.describe(base_consumer_cls)} is not a Strawberry Channels GraphQLWSConsumer: "
             "its graphql_transport_ws_handler_class, graphql_ws_handler_class and "
             "websocket_adapter_class must be the classes whose hooks the revalidating "
             "consumer overrides.",

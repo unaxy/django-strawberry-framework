@@ -105,7 +105,7 @@ from strawberry.extensions.runner import SchemaExtensionsRunner
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils.execution_mode import OperationMode, bind_operation_mode
 from django_strawberry_framework.utils.typing import call_forwarded
 
@@ -336,10 +336,10 @@ def _bound_state(extension: _OperationBoundExtension[_StateT_co]) -> _StateT_co 
 def _is_operation_bound(extension: object) -> TypeIs[_OperationBoundExtension[OperationState]]:
     """Whether ``extension`` is one of this package's operation-bound extensions.
 
-    The class test is ``utils/truth.py::is_subclass`` of the real
-    ``type()``, since this predicate decides whose state the runner binds.
+    The class test reads the real ``type()``, since this predicate decides whose
+    state the runner binds.
     """
-    return truth.is_subclass(type(extension), _OperationBoundExtension)
+    return issubclass(type(extension), _OperationBoundExtension)
 
 
 def _binds_operation_state(execution_context: object) -> bool:
@@ -354,7 +354,7 @@ def _binds_operation_state(execution_context: object) -> bool:
     from django_strawberry_framework.schema import DjangoSchema  # noqa: PLC0415 - import cycle
 
     schema = getattr(execution_context, "schema", None)
-    return truth.is_subclass(truth.class_of(schema), DjangoSchema)
+    return issubclass(type(schema), DjangoSchema)
 
 
 class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
@@ -401,7 +401,7 @@ class _OperationBoundExtension(SchemaExtension, Generic[_StateT_co]):
         context = self.execution_context
         if context is None:
             raise ConfigurationError(
-                f"{truth.kind(self)} read its operation context outside an operation; "
+                f"{introspection.kind(self)} read its operation context outside an operation; "
                 "only its hooks run inside one.",
             )
         return context

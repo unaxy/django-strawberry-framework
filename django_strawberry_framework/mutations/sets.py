@@ -51,8 +51,14 @@ from strawberry.types.base import StrawberryObjectDefinition
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import read_attr, require, require_instance
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import (
+    is_class,
+    is_str,
+    read_attr,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     get_or_store_shape_build,
@@ -178,10 +184,10 @@ def _is_input_type(value: object) -> TypeGuard[type[WithStrawberryObjectDefiniti
     ``TypeGuard``: a decorated OUTPUT type is a ``WithStrawberryObjectDefinition`` too,
     and answers ``False``.
     """
-    if not truth.is_type(value):
+    if not is_class(value):
         return False
-    definition = truth.static_attr(value, "__strawberry_definition__")
-    return truth.is_instance(definition, StrawberryObjectDefinition) and definition.is_input
+    definition = introspection.mro_attr(value, "__strawberry_definition__")
+    return isinstance(definition, StrawberryObjectDefinition) and definition.is_input
 
 
 def _validate_input_class(
@@ -217,7 +223,7 @@ def _validate_input_class(
     if not _is_input_type(input_class):
         raise ConfigurationError(
             f"DjangoMutation {mutation_name}.Meta.{attr_name} must be a "
-            f"@strawberry.input-decorated type; got {truth.render(input_class)}.",
+            f"@strawberry.input-decorated type; got {input_class!r}.",
         )
 
     expected = _expected_input_attr_names(
@@ -411,7 +417,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         classmethod to change the resolved model. The answer is the declaration
         as written (``None`` when absent); ``_validate_meta`` type-gates it.
         """
-        return truth.static_attr(meta, "model")
+        return introspection.mro_attr(meta, "model")
 
     @classmethod
     def _validate_meta(cls, meta: object) -> _ValidatedMutationMeta:
@@ -454,7 +460,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         (spec-036 Decision 15 - the write-auth seam; the enforcement runs in
         the resolver).
         """
-        name = truth.name(cls)
+        name = cls.__name__
         meta = reject_unknown_meta_keys(
             f"DjangoMutation {name}",
             meta,
@@ -475,14 +481,14 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         # ``require_model_class`` so those overrides cannot skip the gate.
         model = require_model_class(name, model, base_label="DjangoMutation")
 
-        raw_operation = truth.static_attr(meta, "operation")
+        raw_operation = introspection.mro_attr(meta, "operation")
         if (
-            not truth.is_instance(raw_operation, str)
-            or (operation := truth.text(raw_operation)) not in _VALID_OPERATIONS
+            not is_str(raw_operation)
+            or (operation := introspection.text(raw_operation)) not in _VALID_OPERATIONS
         ):
             raise ConfigurationError(
                 f"DjangoMutation {name}.Meta.operation must be one of "
-                f"{sorted(_VALID_OPERATIONS)}; got {truth.render(raw_operation)}.",
+                f"{sorted(_VALID_OPERATIONS)}; got {raw_operation!r}.",
             )
 
         # The model-flavor field-sequence pair routes through the shared
@@ -529,7 +535,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         # silently discarded at bind time. The same mapping selects the override in
         # ``_materialize_input_for``, so validation cannot drift from materialization.
         for applies_to, override_key in _OPERATION_INPUT_OVERRIDE_ATTR.items():
-            if operation != applies_to and truth.static_attr(meta, override_key) is not None:
+            if operation != applies_to and introspection.mro_attr(meta, override_key) is not None:
                 raise ConfigurationError(
                     f"DjangoMutation {name}.Meta.{override_key} applies only to "
                     f"operation='{applies_to}' (it customizes the {applies_to} input); this "
@@ -537,7 +543,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
                     "silently ignored at the bind. Remove it.",
                 )
 
-        input_class = truth.static_attr(meta, "input_class")
+        input_class = introspection.mro_attr(meta, "input_class")
         if input_class is not None:
             input_class = _validate_input_class(
                 name,
@@ -549,7 +555,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
                 fields=fields,
                 exclude=exclude,
             )
-        partial_input_class = truth.static_attr(meta, "partial_input_class")
+        partial_input_class = introspection.mro_attr(meta, "partial_input_class")
         if partial_input_class is not None:
             partial_input_class = _validate_input_class(
                 name,
@@ -602,7 +608,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         ``forms/inputs.py`` instead (spec-038 Decision 13). Returning ``None`` means "no
         input for this operation" (the model ``delete`` case).
         """
-        input_cls = _materialize_input_for(truth.name(cls), meta, primary_type)
+        input_cls = _materialize_input_for(cls.__name__, meta, primary_type)
         if input_cls is not None:
             # The decode's bind-time hand-off: total-coverage specs (merged
             # dataclass, consumer overrides included) + the Django-field index
@@ -641,7 +647,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         operation_kind = NON_DELETE_OPERATION_INPUT_KIND.get(meta.operation)
         if operation_kind is None:
             raise ConfigurationError(
-                f"DjangoMutation {truth.name(cls)} declares operation='delete', which is "
+                f"DjangoMutation {cls.__name__} declares operation='delete', which is "
                 "id-only and materializes no input; input_type_name applies only to "
                 "create / update mutations.",
             )
@@ -735,14 +741,14 @@ def _resolve_primary_type(
         return primary
     if registry.types_for(model):
         raise ConfigurationError(
-            f"DjangoMutation {truth.name(mutation_cls)} targets {truth.name(model)}, which has "
+            f"DjangoMutation {mutation_cls.__name__} targets {model.__name__}, which has "
             "multiple registered DjangoTypes and no declared primary; set Meta.primary on "
             "one of them so the mutation return type is unambiguous.",
         )
     raise ConfigurationError(
-        f"DjangoMutation {truth.name(mutation_cls)} targets {truth.name(model)}, which has no "
+        f"DjangoMutation {mutation_cls.__name__} targets {model.__name__}, which has no "
         "registered DjangoType; the mutation has no type to return. Declare a "
-        f"DjangoType for {truth.name(model)}.",
+        f"DjangoType for {model.__name__}.",
     )
 
 
@@ -818,7 +824,7 @@ def _materialize_input_for(
         ),
     )
     materialize_mutation_input_class(
-        truth.name(input_cls),
+        input_cls.__name__,
         input_cls,
         f"the input of DjangoMutation {mutation_name!r}",
     )
@@ -956,7 +962,7 @@ def _validate_relation_override_types(
     """
     # A validated ``@strawberry.input`` class: its definition slot holds an input definition.
     consumer_definition = require_instance(
-        truth.static_attr(consumer_input, "__strawberry_definition__"),
+        introspection.mro_attr(consumer_input, "__strawberry_definition__"),
         StrawberryObjectDefinition,
     )
     consumer_fields = {field.python_name: field for field in consumer_definition.fields}
@@ -982,7 +988,7 @@ def _validate_relation_override_types(
             raise ConfigurationError(
                 f"DjangoMutation {mutation_name}.Meta.{attr_name} overrides relation field "
                 f"{python_attr!r} with an id type/shape that diverges from the generated input. "
-                f"{truth.name(field.related_model)} has a primary Relay-Node type, so the {kind} "
+                f"{introspection.name(field.related_model)} has a primary Relay-Node type, so the {kind} "
                 f"relation input is {expected} - the raw id string, decoded, type- and "
                 "visibility-checked by the package (spec-036 Decision 10). Another core type "
                 "either cannot carry the id string (every id is an invalid relation) or, as "

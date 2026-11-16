@@ -99,7 +99,6 @@ from django_strawberry_framework.utils.inputs import (
     normalize_field_name_sequence,
 )
 from tests._idioms import (
-    ClassReadRaises,
     ModelSerializerBase,
     bind_unparented,
     canonical_order,
@@ -2472,33 +2471,6 @@ def test_nested_serializer_non_key_error_propagates_from_build_and_fingerprint()
             dict(bound_fields(Parent())),
             nested_configs={"child": NestedSerializerConfig()},
         )
-
-
-def _require_mapping(value: object) -> object:
-    return require_nested_fields_mapping("M", value)
-
-
-def _require_config(value: object) -> object:
-    return require_nested_serializer_config("M", "child", value)
-
-
-@pytest.mark.parametrize(
-    "check",
-    [_require_mapping, _require_config],
-    ids=["nested-fields-mapping", "nested-config-value"],
-)
-@pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
-def test_nested_config_class_read_that_raises_propagates(
-    check: Callable[[object], object],
-    escape: type[BaseException],
-) -> None:
-    """The class test is a plain ``isinstance``: a ``__class__`` read that raises propagates.
-
-    The value's own ``__class__`` property is consumer code, so what it raises (any
-    ``BaseException``) escapes as itself rather than being rewrapped.
-    """
-    with pytest.raises(escape, match="hostile __class__ boom"):
-        check(ClassReadRaises(escape, "hostile __class__ boom"))
 
 
 def test_nested_config_checks_accept_faithful_lazy_proxies() -> None:

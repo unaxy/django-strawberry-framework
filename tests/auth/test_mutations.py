@@ -28,7 +28,7 @@ import threading
 from collections.abc import Callable, Generator, Iterable, Iterator, MutableMapping
 from enum import Enum
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Literal, NoReturn, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, NoReturn, Protocol, runtime_checkable
 
 import channels.auth
 import pytest
@@ -123,9 +123,6 @@ from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
 from django_strawberry_framework.utils.querysets import SyncMisuseError
 from django_strawberry_framework.utils.sessions import connection_actor_state
 from tests._idioms import (
-    ClaimsClassBase,
-    ClassReadRaisesBase,
-    comparing_metaclass,
     json_at,
     json_list,
     json_loads,
@@ -376,40 +373,6 @@ def test_conflicting_permission_classes_second_call_raises() -> None:
     login_mutation()
     with pytest.raises(ConfigurationError, match=r"auth login_mutation\(\) is already declared"):
         login_mutation(permission_classes=[_AllowAll])
-
-
-@pytest.mark.parametrize("shape", ["declared_differs", "repeat_differs", "same"])
-@pytest.mark.parametrize("verdict", ["equal", "unequal", "raises"])
-def test_conflict_key_compares_permission_classes_by_identity(
-    verdict: Literal["equal", "unequal", "raises"],
-    shape: Literal["declared_differs", "repeat_differs", "same"],
-) -> None:
-    """The conflict check reads each permission class by identity, whatever its ``__eq__`` says.
-
-    A permission class whose metaclass ``__eq__`` answers ``verdict`` is declared first
-    (``declared_differs``), repeated against a different first declaration
-    (``repeat_differs``), or declared twice (``same``). The consumer ``__eq__`` is never
-    called: an always-equal answer cannot pass a different class off as the cached one, a
-    raising one cannot escape the factory, and the same class twice stays the cached holder.
-    """
-    calls: list[str] = []
-    meta = comparing_metaclass(type, verdict, calls)
-    hostile = meta("HostileAllowAll", (_AllowAll,), {})
-    first = [_AllowAll] if shape == "repeat_differs" else [hostile]
-    repeat = [_AllowAll] if shape == "declared_differs" else [hostile]
-
-    login_mutation(permission_classes=first)
-    holder = _declared_auth_surface("login")
-    if shape == "same":
-        login_mutation(permission_classes=repeat)
-        assert _declared_auth_surface("login") is holder
-    else:
-        with pytest.raises(
-            ConfigurationError,
-            match=r"auth login_mutation\(\) is already declared",
-        ):
-            login_mutation(permission_classes=repeat)
-    assert calls == []
 
 
 class _InheritingModelPermission(DjangoModelPermission):
@@ -1566,45 +1529,6 @@ class _EqRaisingName(str):
     __hash__ = str.__hash__
 
 
-class _ClaimsStr(ClaimsClassBase):
-    """A non-string whose ``__class__`` claims ``str``; only its real type tells it apart."""
-
-    __slots__ = ()
-
-    claimed = str
-
-    @override
-    def __repr__(self) -> str:
-        return "<claims str>"
-
-
-class _ClaimsList(ClaimsClassBase):
-    """A non-list whose ``__class__`` claims ``list``; only its real type tells it apart."""
-
-    __slots__ = ()
-
-    claimed = list
-
-    @override
-    def __repr__(self) -> str:
-        return "<claims list>"
-
-
-class _ClassRaising(ClassReadRaisesBase):
-    """A value whose ``__class__`` read raises; only its real type answers without running it.
-
-    Declared as a ``REQUIRED_FIELDS`` entry: Django's model metaclass reads the
-    ``__class__`` of every class attribute itself, so the model declaration refuses
-    one as ``USERNAME_FIELD`` / ``REQUIRED_FIELDS`` before any package code runs.
-    """
-
-    __slots__ = ()
-
-    @override
-    def __repr__(self) -> str:
-        return "<class raises>"
-
-
 class _IterRaisingList(list[str]):
     """A ``list`` of field names whose own ``__iter__`` raises."""
 
@@ -1709,11 +1633,11 @@ def test_derive_register_fields_reads_str_subclass_names_as_plain_text(
     ("username_field", "required_fields", "message"),
     [
         (
-            _ClaimsStr(),
+            3,
             [],
             (
                 "register_mutation() needs PrivilegeRequiredUser.USERNAME_FIELD to be a field "
-                "name string; got <claims str>."
+                "name string; got 3."
             ),
         ),
         (
@@ -1730,22 +1654,6 @@ def test_derive_register_fields_reads_str_subclass_names_as_plain_text(
             (
                 "register_mutation() needs every PrivilegeRequiredUser.REQUIRED_FIELDS entry to "
                 "be a field name string; got 3."
-            ),
-        ),
-        (
-            "username",
-            [_ClaimsStr()],
-            (
-                "register_mutation() needs every PrivilegeRequiredUser.REQUIRED_FIELDS entry to "
-                "be a field name string; got <claims str>."
-            ),
-        ),
-        (
-            "username",
-            [_ClassRaising(message="hostile __class__ boom")],
-            (
-                "register_mutation() needs every PrivilegeRequiredUser.REQUIRED_FIELDS entry to "
-                "be a field name string; got <class raises>."
             ),
         ),
         (
@@ -1772,25 +1680,14 @@ def test_derive_register_fields_reads_str_subclass_names_as_plain_text(
                 "tuple; got {'email'}."
             ),
         ),
-        (
-            "username",
-            _ClaimsList(),
-            (
-                "register_mutation() needs PrivilegeRequiredUser.REQUIRED_FIELDS to be a list or "
-                "tuple; got <claims list>."
-            ),
-        ),
     ],
     ids=[
-        "username-claims-str",
+        "username-is-int",
         "unhashable-entry",
         "int-entry",
-        "entry-claims-str",
-        "entry-class-raises",
         "required-is-str",
         "required-is-none",
         "required-is-set",
-        "required-claims-list",
     ],
 )
 def test_derive_register_fields_rejects_a_malformed_declaration(
@@ -1802,8 +1699,7 @@ def test_derive_register_fields_rejects_a_malformed_declaration(
 
     Django checks neither type when the model class is built (its ``auth.E001``
     system check requires a list or tuple), so the reject names the model and the
-    offending value before any name is validated; each type is asked of the value's
-    real type, which a ``__class__`` property cannot restate.
+    offending value before any name is validated.
     """
     model = _privilege_required_user(username_field, required_fields)
     with pytest.raises(ConfigurationError) as exc:

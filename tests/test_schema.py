@@ -64,7 +64,6 @@ from django_strawberry_framework.schema import (
     DjangoSchema,
     _consumer_extension_entries,
 )
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import (
     ModelSerializerBase,
@@ -340,8 +339,8 @@ def test_get_extensions_resolves_one_authority_of_each_kind_for_a_bare_class_ent
     resolved = schema.get_extensions(sync=True)
 
     assert schema.extensions == ()
-    assert sum(truth.is_instance(e, DjangoResourcePolicyExtension) for e in resolved) == 1
-    assert sum(truth.is_instance(e, DjangoErrorPolicyExtension) for e in resolved) == 1
+    assert sum(isinstance(e, DjangoResourcePolicyExtension) for e in resolved) == 1
+    assert sum(isinstance(e, DjangoErrorPolicyExtension) for e in resolved) == 1
 
 
 def test_get_extensions_sync_and_async() -> None:
@@ -666,8 +665,8 @@ def test_every_supported_entry_spelling_still_resolves_into_one_chain(entry: obj
     resolved = schema.get_extensions(sync=True)
 
     assert schema.execute_sync("{ hello }").data == {"hello": "world"}
-    assert sum(truth.is_instance(e, DjangoErrorPolicyExtension) for e in resolved) == 1
-    assert sum(truth.is_instance(e, DjangoResourcePolicyExtension) for e in resolved) == 1
+    assert sum(isinstance(e, DjangoErrorPolicyExtension) for e in resolved) == 1
+    assert sum(isinstance(e, DjangoResourcePolicyExtension) for e in resolved) == 1
     assert len(resolved) == 4
 
 

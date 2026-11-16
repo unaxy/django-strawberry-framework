@@ -107,7 +107,7 @@ from .extensions.resource_policy import DjangoResourcePolicyExtension
 from .mutations.fields import MUTATION_CLASS_MARKER
 from .relay import refuse_unreturnable_node_targets
 from .resource_policy import ResourcePolicy, resolve_resource_policy
-from .utils import truth
+from .utils import introspection
 from .utils.execution_mode import OperationMode, async_execution
 from .utils.inputs import field_name_collision_remedy, generated_type_name_collision
 from .utils.typing import call_forwarded, wrapped_resolver
@@ -232,7 +232,7 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         if mutation_cls is None:
             return execute()
 
-        mutation_meta = truth.static_attr(mutation_cls, "_mutation_meta", None)
+        mutation_meta = introspection.mro_attr(mutation_cls, "_mutation_meta", None)
         model = getattr(mutation_meta, "model", None)
         alias = resolve_write_alias(model)
         if async_execution():
@@ -548,7 +548,7 @@ class DjangoSchema(strawberry.Schema):
                     "Every entry in DjangoSchema(extensions=[...]) has to be something "
                     "Strawberry can resolve into an extension for an operation - a "
                     "SchemaExtension subclass, an instance of one, or a callable that "
-                    f"returns one. {truth.describe(entry)} is none of those.",
+                    f"returns one. {introspection.describe(entry)} is none of those.",
                 )
         self._resource_policy: ResourcePolicy = resolved_resource
         self._error_policy: ErrorPolicy = resolved_error
@@ -746,7 +746,7 @@ class DjangoSchema(strawberry.Schema):
         # basedpyright: Strawberry types ``_stream``'s ``execution_context_class`` as graphql-core's
         # bare generic ``Executor``, so the method reads as partially Unknown
         source = call_forwarded(super()._stream, upstream_args, kwargs)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-        if truth.is_instance(extensions_runner, DjangoExtensionsRunner):
+        if isinstance(extensions_runner, DjangoExtensionsRunner):
             return extensions_runner.resumed_stream(source)
         return source
 
@@ -756,10 +756,9 @@ def _is_resolvable_extension_entry(entry: object) -> bool:
 
     Its resolution is ``entry if isinstance(entry, SchemaExtension) else
     entry()``, so an instance answers for itself and everything else has to be
-    callable - which a class and a factory both are. The instance test is
-    ``utils/truth.py::is_instance``, which reads the entry's real class.
+    callable - which a class and a factory both are.
     """
-    return truth.is_instance(entry, SchemaExtension) or callable(entry)
+    return isinstance(entry, SchemaExtension) or callable(entry)
 
 
 def _admitted_chain(resolved: list[SchemaExtension], *, sync: bool) -> list[SchemaExtension]:
@@ -819,7 +818,7 @@ def _refuse_field_name_collisions(schema: strawberry.Schema) -> None:
     name_converter = schema.config.name_converter
     for type_name, concrete in schema.schema_converter.type_map.items():
         definition = concrete.definition
-        if not truth.is_instance(definition, StrawberryObjectDefinition):
+        if not isinstance(definition, StrawberryObjectDefinition):
             continue
         published: dict[str, StrawberryField] = {}
         for field in schema.get_fields(definition):
@@ -831,8 +830,8 @@ def _refuse_field_name_collisions(schema: strawberry.Schema) -> None:
                 continue
             raise ConfigurationError(
                 f"{type_name}: fields {prior.python_name!r} and {field.python_name!r} both "
-                f"publish the GraphQL field name {truth.text(graphql_name)!r} under this schema's name "
-                "converter, so one would silently replace the other. "
+                f"publish the GraphQL field name {introspection.text(graphql_name)!r} under this "
+                "schema's name converter, so one would silently replace the other. "
                 f"{field_name_collision_remedy(prior, field)}",
             )
 

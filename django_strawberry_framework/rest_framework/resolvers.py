@@ -174,7 +174,7 @@ from django_strawberry_framework.mutations.resolvers import (
     run_write_pipeline_sync,
     save_or_field_errors,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     is_dict,
     is_list,
@@ -330,7 +330,7 @@ else:
 _ValidatorT = TypeVar("_ValidatorT")
 
 
-# The default ``truth.static_attr`` returns for an absent attribute, distinct from
+# The default ``introspection.mro_attr`` returns for an absent attribute, distinct from
 # any value the attribute could hold.
 class _Omitted(enum.Enum):
     """The absent-attribute default's type: one member, so an ``is _OMITTED`` test narrows it away."""
@@ -445,7 +445,7 @@ def _decode_input_object(
     """
     if data is None:
         return {}, None
-    if truth.static_attr(data, "__strawberry_definition__", _OMITTED) is _OMITTED:
+    if introspection.mro_attr(data, "__strawberry_definition__", _OMITTED) is _OMITTED:
         return {}, field_error(
             path_prefix or NON_FIELD_ERROR_KEY,
             "Invalid input object.",
@@ -820,7 +820,7 @@ def _validation_tree(serializer: DRFField, *, path: str = "") -> Iterator[tuple[
     parent's field and as the root of its own level. These are the per-request instances DRF
     deep-copies from the declared fields, never shared class state.
     """
-    serializer_name = truth.name(type(serializer))
+    serializer_name = type(serializer).__name__
     yield serializer, f"{serializer_name}{f'.{path}' if path else ''}"
     if not isinstance(serializer, serializers.Serializer):
         # A plain ``BaseSerializer`` (a read-only ``source="*"`` renderer, a list
@@ -874,7 +874,7 @@ def _pin_validator_querysets(serializer: DRFField, alias: str) -> None:
             local_validator.queryset = pin_write_queryset(
                 queryset.all(),
                 alias,
-                owner=f"{owner} {truth.kind(validator)} queryset",
+                owner=f"{owner} {introspection.kind(validator)} queryset",
             )
             pinned.append(local_validator)
         return pinned
@@ -1131,7 +1131,7 @@ def _scope_specs_over_serializer(
             # composes onto the field's own ``queryset``, so that spelling has nothing to pin.
             raise ConfigurationError(
                 f"SerializerMutation: relation field {spec.target_name!r} has no queryset at "
-                f"runtime (got {truth.kind(author_queryset)}); a writable relation is scoped "
+                f"runtime (got {introspection.kind(author_queryset)}); a writable relation is scoped "
                 "through its own queryset attribute. Declare queryset= on the field instead "
                 "of overriding get_queryset().",
             )
@@ -1141,15 +1141,15 @@ def _scope_specs_over_serializer(
         if author_queryset.model is not spec.related_model:
             raise ConfigurationError(
                 f"SerializerMutation: relation field {spec.target_name!r} targets "
-                f"{truth.name(author_queryset.model)} at runtime but "
-                f"{truth.name(spec.related_model)} in the schema field map; the decoded id "
+                f"{author_queryset.model.__name__} at runtime but "
+                f"{introspection.name(spec.related_model)} in the schema field map; the decoded id "
                 "would be validated against a different model. Align the runtime relation's "
                 "queryset with get_serializer_for_schema().",
             )
         scoped = pin_write_queryset(
             author_queryset.all(),
             pipeline.alias,
-            owner=(f"{truth.name(type(serializer))}.{spec.target_name} relation queryset"),
+            owner=(f"{type(serializer).__name__}.{spec.target_name} relation queryset"),
         )
         # ``related_visibility_queryset`` single-sites the ``registry.get`` resolve +
         # the visibility-scoping call; ``None`` = raw-pk relation with
@@ -1254,7 +1254,7 @@ def _write_witness(
     # actor / recourse message halves are serializer-specific.
     _block_cross_alias = make_cross_alias_save_guard(
         alias,
-        actor=(f"SerializerMutation {truth.name(mutation_cls)}: the serializer write phase"),
+        actor=(f"SerializerMutation {mutation_cls.__name__}: the serializer write phase"),
         recourse="context['write_alias']",
     )
 
@@ -1328,11 +1328,11 @@ def _checked_saved_result(mutation_cls: type[SerializerMutation], saved: object)
     unsaved return has no row to re-fetch).
     """
     model = backing_model_of(mutation_cls._mutation_meta)
-    if not truth.is_instance(saved, model) or pk_of(saved) is None or saved._state.adding:
+    if not isinstance(saved, model) or pk_of(saved) is None or saved._state.adding:
         raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: save() returned "
-            f"{truth.render(saved)}; the serializer's create()/update() must persist and "
-            f"return the written {truth.name(model)} row.",
+            f"SerializerMutation {mutation_cls.__name__}: save() returned "
+            f"{saved!r}; the serializer's create()/update() must persist and "
+            f"return the written {model.__name__} row.",
         )
     return saved
 

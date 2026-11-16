@@ -95,9 +95,11 @@ from django_strawberry_framework._boundary_ordering import (
 )
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     is_awaitable,
+    is_class,
+    is_dict,
     is_str,
     list_of,
     require,
@@ -199,7 +201,7 @@ class GraphQLRequestBodyBoundaryMiddleware:
             if not is_awaitable(response):
                 raise TypeError(
                     "an async middleware chain's get_response must return an awaitable, "
-                    f"got {truth.kind(response)}",
+                    f"got {introspection.kind(response)}",
                 )
             return await response
         finally:
@@ -248,7 +250,7 @@ class GraphQLRequestBodyBoundaryMiddleware:
                 status=exc.status_code,
                 content_type="text/plain",
             )
-        mount = truth.static_attr(view_func, _BOUNDARY_MOUNT, None)
+        mount = introspection.mro_attr(view_func, _BOUNDARY_MOUNT, None)
         if mount is not None:
             stamp_prepared_view(request, mount, view)
         setattr(request, _BOUNDARY_ENFORCED, True)
@@ -257,7 +259,7 @@ class GraphQLRequestBodyBoundaryMiddleware:
 
 def _is_initkwargs(value: object) -> TypeIs[dict[str, object]]:
     """Whether ``value`` is a ``dict`` of keyword arguments: every key a ``str``."""
-    return truth.is_instance(value, dict) and all(is_str(key) for key in value)
+    return is_dict(value) and all(is_str(key) for key in value)
 
 
 def _package_view_instance(view_func: object) -> View | None:
@@ -272,10 +274,9 @@ def _package_view_instance(view_func: object) -> View | None:
     A package callback carries the marker ``views.py::_boundary_view`` stamps, a
     ``view_class`` that is a class and a ``view_initkwargs`` mapping - Django's own
     ``as_view`` bookkeeping, and what makes the built instance carry the mount's
-    own ``max_request_body_bytes``. The reads are truthful static reads
-    (``utils/truth.py::static_attr``, ``is_type``, ``is_instance``): they walk the
-    real namespaces and never run a ``__getattr__``, a metaclass property or a
-    descriptor. There is deliberately no ``or {}`` default: an absent attribute
+    own ``max_request_body_bytes``. The attributes are read statically
+    (``utils/introspection.py::mro_attr``), so no ``__getattr__``, property or
+    descriptor runs. There is deliberately no ``or {}`` default: an absent attribute
     means "not ours", never "ours, with nothing configured". Forging the marker is
     outside the threat model.
 
@@ -285,11 +286,11 @@ def _package_view_instance(view_func: object) -> View | None:
     schema per request; that class cannot be built from the copied kwargs, and
     the view it builds supplies the ordering itself.
     """
-    if truth.static_attr(view_func, _BOUNDARY_MARKER, default=False) is not True:
+    if introspection.mro_attr(view_func, _BOUNDARY_MARKER, default=False) is not True:
         return None
-    view_class = truth.static_attr(view_func, "view_class", None)
-    initkwargs = truth.static_attr(view_func, "view_initkwargs", None)
-    if not truth.is_type(view_class) or not _is_initkwargs(initkwargs):
+    view_class = introspection.mro_attr(view_func, "view_class", None)
+    initkwargs = introspection.mro_attr(view_func, "view_initkwargs", None)
+    if not is_class(view_class) or not _is_initkwargs(initkwargs):
         return None
     try:
         return require_instance(object_result(view_class, **initkwargs), View)
@@ -317,14 +318,11 @@ def _require_boundary_before_csrf() -> None:
     boundary_index = csrf_index = None
     for index, path in enumerate(list_of(django_setting("MIDDLEWARE"))):
         entry = _import_entry(require(path, is_str))
-        if not truth.is_type(entry):
+        if not is_class(entry):
             continue
-        if (
-            truth.is_subclass(entry, GraphQLRequestBodyBoundaryMiddleware)
-            and boundary_index is None
-        ):
+        if issubclass(entry, GraphQLRequestBodyBoundaryMiddleware) and boundary_index is None:
             boundary_index = index
-        elif truth.is_subclass(entry, CsrfViewMiddleware) and csrf_index is None:
+        elif issubclass(entry, CsrfViewMiddleware) and csrf_index is None:
             csrf_index = index
     if boundary_index is None or csrf_index is None or csrf_index > boundary_index:
         return

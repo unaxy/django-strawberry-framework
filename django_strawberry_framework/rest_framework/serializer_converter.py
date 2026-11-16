@@ -91,10 +91,11 @@ from django_strawberry_framework.types.converters import (
     convert_scalar,
     scalar_for_field,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._array_field import array_element_field
 from django_strawberry_framework.utils._narrowing import (
     enum_value,
+    is_class,
     is_concrete_field,
     optional_annotation,
     require,
@@ -127,6 +128,7 @@ from django_strawberry_framework.utils.relations import (
     non_pk_relation_key_attname,
     written_model_field,
 )
+from django_strawberry_framework.utils.typing import object_result
 
 from .accessors import (
     child_relation_of,
@@ -280,7 +282,7 @@ _CONVERT_MULTIPLE_CHOICE: SerializerFieldConverter = make_kind_converter(
 
 def _is_field_class(value: object) -> TypeGuard[type[DRFField]]:
     """Whether ``value`` is a ``serializers.Field`` subclass."""
-    return truth.is_subclass(value, serializers.Field)
+    return is_class(value) and issubclass(value, serializers.Field)
 
 
 def _registered_field_class(field_class: object, converter: object) -> type[DRFField]:
@@ -294,13 +296,13 @@ def _registered_field_class(field_class: object, converter: object) -> type[DRFF
     if not _is_field_class(field_class):
         raise ConfigurationError(
             "register_serializer_field_converter: field_class must be a serializers.Field "
-            f"subclass; got {truth.render(field_class)}.",
+            f"subclass; got {field_class!r}.",
         )
     if not callable(converter):
         raise ConfigurationError(
-            f"register_serializer_field_converter: converter for {truth.name(field_class)!r} "
+            f"register_serializer_field_converter: converter for {field_class.__name__!r} "
             f"must be a callable(field) -> SerializerFieldConversion; got "
-            f"{truth.render(converter)}.",
+            f"{converter!r}.",
         )
     return field_class
 
@@ -330,7 +332,7 @@ def register_serializer_field_converter(
     field_class = _registered_field_class(field_class, converter)
     if field_class in _SERIALIZER_FIELD_CONVERTERS and not override:
         raise ConfigurationError(
-            f"A serializer-field converter is already registered for {truth.name(field_class)!r}; "
+            f"A serializer-field converter is already registered for {field_class.__name__!r}; "
             "pass override=True to replace it, or register a distinct subclass.",
         )
     _SERIALIZER_FIELD_CONVERTERS[field_class] = converter
@@ -404,7 +406,7 @@ def _reject_nested_serializer(field: DRFField) -> None:
     if isinstance(field, serializers.BaseSerializer):
         raise ConfigurationError(
             f"Serializer field {field.field_name!r} is a nested "
-            f"{truth.name(type(field))}; nested serializer writes are opt-in only. Declare it in "
+            f"{type(field).__name__}; nested serializer writes are opt-in only. Declare it in "
             f"the mutation's Meta.nested_fields ({{{field.field_name!r}: "
             "NestedSerializerConfig(...)}) - the serializer must implement create()/update() "
             "for the nested write - drop it via Meta.fields / Meta.exclude, or model the "
@@ -433,7 +435,7 @@ def _reject_unsupported_relation_field(field: DRFField) -> None:
         if not isinstance(child, serializers.PrimaryKeyRelatedField):
             raise ConfigurationError(
                 f"Serializer field {field_name!r} is a ManyRelatedField wrapping a "
-                f"{truth.name(type(child))}; only PrimaryKeyRelatedField(many=True) is supported "
+                f"{type(child).__name__}; only PrimaryKeyRelatedField(many=True) is supported "
                 "(the relation input decodes to a primary key). A slug / URL / custom related "
                 "field has no pk-based input shape - drop it via Meta.fields / Meta.exclude, or "
                 "model the relation with PrimaryKeyRelatedField(many=True).",
@@ -441,7 +443,7 @@ def _reject_unsupported_relation_field(field: DRFField) -> None:
         return
     if not isinstance(field, serializers.PrimaryKeyRelatedField):
         raise ConfigurationError(
-            f"Serializer relation field {field_name!r} is a {truth.name(type(field))}; only "
+            f"Serializer relation field {field_name!r} is a {type(field).__name__}; only "
             "PrimaryKeyRelatedField is supported (the relation input decodes to a primary key). "
             "A slug / URL / custom related field has no pk-based input shape - drop it via "
             "Meta.fields / Meta.exclude, or use a PrimaryKeyRelatedField.",
@@ -463,7 +465,7 @@ def _list_child_conversion(field: serializers.ListField) -> SerializerFieldConve
     field_name = getattr(field, "field_name", None)
     # drf-stubs: ``ListField.child: Field``.
     child: DRFField | None = getattr(field, "child", None)
-    if child is None or truth.name(type(child)) == "_UnvalidatedField":
+    if child is None or type(child).__name__ == "_UnvalidatedField":
         raise ConfigurationError(
             f"Serializer field {field_name!r} is a ListField with no explicit child field; "
             "a GraphQL list input requires a typed scalar child "
@@ -473,14 +475,14 @@ def _list_child_conversion(field: serializers.ListField) -> SerializerFieldConve
     if isinstance(child, (serializers.RelatedField, serializers.ManyRelatedField)):
         raise ConfigurationError(
             f"Serializer field {field_name!r} is a ListField whose child is a "
-            f"{truth.name(type(child))} (a relation); only a scalar child is supported. "
+            f"{type(child).__name__} (a relation); only a scalar child is supported. "
             "Express a list of relation ids with PrimaryKeyRelatedField(many=True).",
         )
     child_conversion = convert_serializer_field(child)
     if child_conversion.kind != SCALAR or child_conversion.annotation is None:
         raise ConfigurationError(
             f"Serializer field {field_name!r} is a ListField whose child "
-            f"{truth.name(type(child))} does not resolve to a scalar annotation; only a "
+            f"{type(child).__name__} does not resolve to a scalar annotation; only a "
             "scalar child is supported.",
         )
     return SerializerFieldConversion(
@@ -520,17 +522,17 @@ def _finish_serializer_conversion(
     if isinstance(result, SerializerFieldConversion):
         return result
     # The registered converter is consumer code: what it raises propagates.
-    conversion = finish_field_conversion(result, field)
-    if not truth.is_instance(conversion, SerializerFieldConversion):
+    conversion = object_result(finish_field_conversion, result, field)
+    if not isinstance(conversion, SerializerFieldConversion):
         raise ConfigurationError(
-            f"Registered serializer-field converter for {truth.name(type(field))!r} on field "
-            f"{truth.render(getattr(field, 'field_name', None))} must return "
-            f"SerializerFieldConversion; got {truth.kind(conversion)}.",
+            f"Registered serializer-field converter for {type(field).__name__!r} on field "
+            f"{getattr(field, 'field_name', None)!r} must return "
+            f"SerializerFieldConversion; got {introspection.kind(conversion)}.",
         )
     if conversion.kind != SCALAR:
         raise ConfigurationError(
-            f"Registered serializer-field converter for {truth.name(type(field))!r} on field "
-            f"{truth.render(getattr(field, 'field_name', None))} must return a scalar "
+            f"Registered serializer-field converter for {type(field).__name__!r} on field "
+            f"{getattr(field, 'field_name', None)!r} must return a scalar "
             f"conversion; got kind {conversion.kind!r}.",
         )
     return conversion
@@ -647,8 +649,8 @@ def _unsupported_serializer_field(field: DRFField) -> ConfigurationError:
     coerce to ``String`` - lives in this wording.
     """
     return ConfigurationError(
-        f"Unsupported serializer field type {truth.name(type(field))!r} on serializer "
-        f"field {truth.render(getattr(field, 'field_name', None))}. convert_serializer_field has "
+        f"Unsupported serializer field type {type(field).__name__!r} on serializer "
+        f"field {getattr(field, 'field_name', None)!r}. convert_serializer_field has "
         "no mapping for it "
         "and no supported ancestor; register a converter for it with "
         "register_serializer_field_converter, or drop it via "
@@ -679,7 +681,7 @@ def _reject_relation_cardinality_mismatch(field: DRFField, column: ModelField) -
     actual = "many=True" if serializer_many else "a single related object"
     raise ConfigurationError(
         f"Serializer relation field {field.field_name!r} has a cardinality mismatch: it declares "
-        f"{actual}, but its backing model relation {truth.name(column.model)}.{column.name} "
+        f"{actual}, but its backing model relation {column.model.__name__}.{column.name} "
         f"requires {expected}. Align the "
         "serializer relation's many= shape with the model relation, or map the field to a "
         "serializer-only target with an explicit queryset.",
@@ -714,7 +716,7 @@ def _reject_relation_column_source(field: DRFField, column: ModelField) -> None:
     )
     raise ConfigurationError(
         f"Serializer relation field {field.field_name!r} binds source {source!r}, {spelling} "
-        f"of relation {truth.name(column.model)}.{column.name}. A "
+        f"of relation {column.model.__name__}.{column.name}. A "
         "PrimaryKeyRelatedField validates to the related instance, which DRF writes under the "
         f"source as spelled: Django cannot insert an instance into {source!r} (every create "
         "fails) and an update leaves the instance in that attribute. Bind the relation "
@@ -787,7 +789,7 @@ def _reject_kind_mismatch(field: DRFField, column: ModelField, kind: str) -> Non
         return
     field_kind = _serializer_kind_noun(field)
     column_kind = _KIND_NOUNS[kind]
-    field_class = truth.name(type(field))
+    field_class = type(field).__name__
     consequence = (
         f"whose input is an Upload the {field_class} cannot validate"
         if kind == FILE
@@ -796,7 +798,7 @@ def _reject_kind_mismatch(field: DRFField, column: ModelField, kind: str) -> Non
     raise ConfigurationError(
         f"Serializer field {field.field_name!r} ({field_class}, source "
         f"{field.source or _bound_field_name(field)!r}) is a {field_kind} field, but the model "
-        f"column it writes, {truth.name(column.model)}.{column.name}, is a {column_kind} column, "
+        f"column it writes, {column.model.__name__}.{column.name}, is a {column_kind} column, "
         f"{consequence}. Declare a {column_kind} field for that column, or point source at a "
         f"{field_kind} column.",
     )
@@ -968,7 +970,7 @@ def _require_relation_primary(
     if primary is None:
         raise ConfigurationError(
             f"Serializer relation field {field_name!r} targets model "
-            f"{truth.name(related_model)!r}, which has no registered primary DjangoType. "
+            f"{related_model.__name__!r}, which has no registered primary DjangoType. "
             "A serializer relation needs a typed target to decode its id; register a "
             "primary DjangoType for the target model, or drop the field via "
             "Meta.fields / Meta.exclude.",
@@ -1047,14 +1049,14 @@ def _scalar_name(scalar: object) -> str:
     A parameterized builtin generic (the ``list[<child>]`` a ``ListField`` converts
     to) is named by its origin class, so ``list[str]`` reads ``list``.
     """
-    if truth.is_type(scalar):
-        return truth.name(scalar)
-    if truth.is_exact(scalar, types.GenericAlias):
-        return truth.name(typing.get_origin(scalar))
-    declared = truth.static_attr(scalar, "__name__")
-    if truth.is_instance(declared, str) and truth.text(declared):
-        return truth.text(declared)
-    return truth.render(scalar)
+    if is_class(scalar):
+        return introspection.name(scalar)
+    if type(scalar) is types.GenericAlias:
+        return introspection.name(typing.get_origin(scalar))
+    declared = introspection.mro_attr(scalar, "__name__")
+    if isinstance(declared, str) and introspection.text(declared):
+        return introspection.text(declared)
+    return repr(scalar)
 
 
 def _stored_choice_value(column: ConcreteField, value: object) -> object:
@@ -1152,7 +1154,7 @@ def _reject_choice_values_the_column_does_not_list(field: DRFField, column: Conc
     field_fixes: list[str] = []
     missing_declared = [value for value in missing if value in declared]
     if missing_declared:
-        rendered = ", ".join(truth.render(value) for value in missing_declared)
+        rendered = ", ".join(repr(value) for value in missing_declared)
         field_fixes.append(f"remove {rendered} from the serializer field's choices")
     if choice.allow_blank and "" in missing:
         field_fixes.append("drop allow_blank from the serializer field")
@@ -1162,12 +1164,12 @@ def _reject_choice_values_the_column_does_not_list(field: DRFField, column: Conc
         remedy = f"Set blank=True on the column, or {field_remedy}."
     else:
         remedy = f"{field_remedy[0].upper()}{field_remedy[1:]}."
-    serializer_name = truth.kind(getattr(field, "parent", None))
-    rendered_missing = ", ".join(truth.render(value) for value in missing)
+    serializer_name = introspection.kind(getattr(field, "parent", None))
+    rendered_missing = ", ".join(repr(value) for value in missing)
     them = "it" if len(missing) == 1 else "them"
     raise ConfigurationError(
         f"Serializer {serializer_name} field {field.field_name!r} admits {rendered_missing} "
-        f"over the choice column {truth.name(column.model)}.{column.name}, which does not list "
+        f"over the choice column {column.model.__name__}.{column.name}, which does not list "
         f"{them}. {remedy}",
     )
 
@@ -1192,10 +1194,10 @@ def _multiple_choice_element_column(field: DRFField, column: ConcreteField) -> C
         return element
     if not column.choices:
         return column
-    serializer_name = truth.kind(getattr(field, "parent", None))
+    serializer_name = introspection.kind(getattr(field, "parent", None))
     raise ConfigurationError(
-        f"Serializer {serializer_name} field {field.field_name!r} is a {truth.name(type(field))} "
-        f"over the single-value choice column {truth.name(column.model)}.{column.name}: it writes "
+        f"Serializer {serializer_name} field {field.field_name!r} is a {type(field).__name__} "
+        f"over the single-value choice column {column.model.__name__}.{column.name}: it writes "
         "a list, which is not one of the column's choices. Declare a ChoiceField to write one "
         "value, or store many values in an ArrayField column whose base_field declares the "
         "choices.",
@@ -1222,10 +1224,10 @@ def _reject_read_enum_over_grouped_column(field: DRFField, column: ConcreteField
     declared = (
         "ChoiceField" if element is None else "MultipleChoiceField or ListField(child=ChoiceField)"
     )
-    serializer_name = truth.kind(getattr(field, "parent", None))
+    serializer_name = introspection.kind(getattr(field, "parent", None))
     raise ConfigurationError(
         f"Serializer {serializer_name} field {field.field_name!r} takes the read enum of the "
-        f"choice column {truth.name(column.model)}.{column.name}, which uses Django's grouped-choices "
+        f"choice column {column.model.__name__}.{column.name}, which uses Django's grouped-choices "
         "form (nested tuples for option groups). Only the flat (value, label) form has a read "
         "enum; flatten the choices source, split into separate fields, or declare a flat "
         f"{declared} on the serializer.",
@@ -1303,7 +1305,7 @@ def _model_backed_scalar_annotation(
         raise ConfigurationError(
             f"Serializer field {field.field_name!r} (source {column.name!r}) declares a GraphQL "
             f"scalar {_scalar_name(serializer_scalar)} that disagrees with the backing model "
-            f"column {truth.name(column.model)}.{column.name}'s scalar {_scalar_name(model_scalar)}. "
+            f"column {column.model.__name__}.{column.name}'s scalar {_scalar_name(model_scalar)}. "
             "A consumer-declared serializer field is an explicit contract; the framework will not "
             "silently pick the model column. Align the serializer field's type with the column, "
             "declare it as a serializer-only field (no backing column), or drop it via "

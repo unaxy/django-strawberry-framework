@@ -132,7 +132,7 @@ from django_strawberry_framework.optimizer.extension import (
 from django_strawberry_framework.relay import GlobalIDDecode, decode_model_global_id
 from django_strawberry_framework.resource_policy import check_deadline
 from django_strawberry_framework.types.relay import implements_relay_node
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     is_concrete_field,
@@ -505,7 +505,7 @@ def run_write_pipeline_sync(
         # non-pinned connection - read or write, signal-ful or signal-less -
         # raises before it executes, so a hook cannot write (or probe) through
         # another database and escape the pinned transaction.
-        with pipeline_alias_guard(truth.name(mutation_cls), using):
+        with pipeline_alias_guard(mutation_cls.__name__, using):
             # The authorization phase permits read-only auth-alias queries for
             # exactly this call, then closes: decode / hooks / validation cannot
             # reach the auth alias, and resolving permissions here fills the
@@ -524,8 +524,8 @@ def run_write_pipeline_sync(
                         pk_of(located.row),
                         authorized_pk,
                         message=(
-                            f"{truth.name(mutation_cls)}: the located instance's pk changed from "
-                            f"{truth.render(authorized_pk)} to {truth.render(pk_of(located.row))} during "
+                            f"{mutation_cls.__name__}: the located instance's pk changed from "
+                            f"{authorized_pk!r} to {pk_of(located.row)!r} during "
                             "authorization; an update must "
                             "write the row that was authorized, never a substituted one."
                         ),
@@ -582,9 +582,9 @@ def run_write_pipeline_sync(
                     pk_of(saved_row),
                     authorized_pk,
                     message=(
-                        f"{truth.name(mutation_cls)}: the write step returned "
-                        f"{truth.name(target.model)} pk={truth.render(pk_of(saved_row))}, but the located, "
-                        f"authorized row is pk={truth.render(authorized_pk)}; an update must write "
+                        f"{mutation_cls.__name__}: the write step returned "
+                        f"{target.model.__name__} pk={pk_of(saved_row)!r}, but the located, "
+                        f"authorized row is pk={authorized_pk!r}; an update must write "
                         "the row that was "
                         "authorized, never a substituted one."
                     ),
@@ -1120,7 +1120,7 @@ def _constraint_members(declarer: type[models.Model], constraint: BaseConstraint
         str(name) for name in list_of(read_attr(constraint, "fields", None) or ())
     ]
     for entry in list_of(read_attr(constraint, "expressions", None) or ()):
-        expression = entry[0] if truth.is_instance(entry, tuple) else entry
+        expression = entry[0] if is_tuple(entry) else entry
         if is_str(expression):
             references.append(expression.split(LOOKUP_SEP, 1)[0])
         else:
@@ -1158,7 +1158,7 @@ def _member_field_names(declarer: type[models.Model], names: Iterable[str]) -> s
         if field.name in members:
             continue
         members.add(field.name)
-        if truth.is_instance(field, GeneratedField):
+        if isinstance(field, GeneratedField):
             pending.extend(_expression_references(declarer, read_attr(field, "expression")))
     return members
 
@@ -1710,8 +1710,8 @@ def _delete_write_step(
         pk_of(instance),
         authorized_pk,
         message=(
-            f"{truth.name(mutation_cls)}: the located instance's pk changed from "
-            f"{truth.render(authorized_pk)} to {truth.render(pk_of(instance))} during "
+            f"{mutation_cls.__name__}: the located instance's pk changed from "
+            f"{authorized_pk!r} to {pk_of(instance)!r} during "
             "authorization; a delete must "
             "remove the row that was located and authorized, never a substituted one."
         ),
@@ -1816,7 +1816,7 @@ def authorize_or_raise(
     """
     allowed = _require_sync_bool_auth_result(
         mutation_cls().check_permission(info, operation, data, instance),
-        owner=truth.name(mutation_cls),
+        owner=mutation_cls.__name__,
         method="check_permission",
     )
     if not allowed:
@@ -1826,7 +1826,7 @@ def authorize_or_raise(
         # keeping ONE auth gate for both flavors (spec-038 plain-form auth-message
         # discretion).
         primary_type = mutation_cls._primary_type
-        target_name = truth.name(mutation_cls if primary_type is None else primary_type)
+        target_name = introspection.name(mutation_cls if primary_type is None else primary_type)
         raise GraphQLError(f"Not authorized to {operation} {target_name}.")
 
 
@@ -1930,7 +1930,7 @@ def _bound_model_fields(mutation_cls: type[DjangoMutation]) -> ModelFieldIndex:
     model_fields = mutation_cls._model_fields_by_attr
     if model_fields is None:
         raise TypeError(
-            f"{truth.name(mutation_cls)} holds no bound model-field index; "
+            f"{mutation_cls.__name__} holds no bound model-field index; "
             "only a bound create or update mutation decodes input.",
         )
     return model_fields

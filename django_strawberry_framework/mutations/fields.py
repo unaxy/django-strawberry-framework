@@ -58,7 +58,8 @@ from strawberry.types import Info
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.sets import iter_form_mutations
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import class_namespace, is_class
 from django_strawberry_framework.utils.directives import validated_field_directives
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.input_values import UNSET
@@ -113,25 +114,24 @@ def _validate_mutation_target(mutation_cls: object) -> None:
     shapes would create lazy references to payloads that finalization cannot
     materialize, so this guard requires an own snapshot and current ledger entry.
 
-    Every fact about the candidate is a truthful read (``utils/truth.py``): the
-    class check, the protocol probe, and the own-namespace snapshot read never
-    dispatch into the candidate's metaclass, and the ledger check compares by
-    identity.
+    The class check reads the candidate's real type (``utils/_narrowing.py::is_class``),
+    the protocol probe and the own-namespace snapshot read run no descriptor, and the
+    ledger check compares by identity.
     """
-    if not truth.is_type(mutation_cls) or not _has_mutation_protocol(mutation_cls):
+    if not is_class(mutation_cls) or not _has_mutation_protocol(mutation_cls):
         raise ConfigurationError(
             f"DjangoMutationField requires a concrete DjangoMutation / DjangoFormMutation / "
-            f"DjangoModelFormMutation subclass; got {truth.render(mutation_cls)}.",
+            f"DjangoModelFormMutation subclass; got {mutation_cls!r}.",
         )
-    if truth.class_dict(mutation_cls).get("_mutation_meta") is None:
+    if class_namespace(mutation_cls).get("_mutation_meta") is None:
         raise ConfigurationError(
             "DjangoMutationField requires a concrete mutation subclass with its own nested "
-            f"Meta; {truth.name(mutation_cls)} is an abstract base or only inherits Meta and "
-            f"is not registered for finalization. Redeclare Meta on {truth.name(mutation_cls)}.",
+            f"Meta; {mutation_cls.__name__} is an abstract base or only inherits Meta and "
+            f"is not registered for finalization. Redeclare Meta on {mutation_cls.__name__}.",
         )
     if not _is_registered_mutation_target(mutation_cls):
         raise ConfigurationError(
-            f"DjangoMutationField target {truth.name(mutation_cls)} is not registered for "
+            f"DjangoMutationField target {mutation_cls.__name__} is not registered for "
             "finalization in the current registry lifecycle. Declare the mutation after the "
             "most recent registry.clear().",
         )
@@ -142,7 +142,7 @@ _ABSENT = object()
 
 def _is_callable_member(value: object) -> bool:
     """Return whether a class-namespace entry is callable once bound (function or classmethod)."""
-    return callable(value) or truth.is_instance(value, classmethod)
+    return callable(value) or isinstance(value, classmethod)
 
 
 def _has_mutation_protocol(mutation_cls: type[object]) -> bool:
@@ -154,16 +154,16 @@ def _has_mutation_protocol(mutation_cls: type[object]) -> bool:
     callable ``resolve_sync`` / ``resolve_async`` (the dispatch seams ``_resolve``
     calls), and callable ``input_type_name`` + an ``input_module_path`` (the
     ``data:`` lazy-ref seams). A class missing any is not a mutation family member.
-    Each member is read from the class's real namespaces (``truth.static_attr``),
-    so the stored ``classmethod`` object is what the callable check sees.
+    Each member is read statically (``utils/introspection.py::mro_attr``), so the stored
+    ``classmethod`` object is what the callable check sees.
     """
-    if truth.static_attr(mutation_cls, "_mutation_meta", _ABSENT) is _ABSENT:
+    if introspection.mro_attr(mutation_cls, "_mutation_meta", _ABSENT) is _ABSENT:
         return False
     return (
-        _is_callable_member(truth.static_attr(mutation_cls, "resolve_sync"))
-        and _is_callable_member(truth.static_attr(mutation_cls, "resolve_async"))
-        and _is_callable_member(truth.static_attr(mutation_cls, "input_type_name"))
-        and truth.static_attr(mutation_cls, "input_module_path") is not None
+        _is_callable_member(introspection.mro_attr(mutation_cls, "resolve_sync"))
+        and _is_callable_member(introspection.mro_attr(mutation_cls, "resolve_async"))
+        and _is_callable_member(introspection.mro_attr(mutation_cls, "input_type_name"))
+        and introspection.mro_attr(mutation_cls, "input_module_path") is not None
     )
 
 
@@ -173,7 +173,7 @@ def _is_registered_mutation_target(mutation_cls: type[object]) -> bool:
     Membership is by identity, the contract both ledgers record under
     (``django_strawberry_framework/write_mixins.py::make_declaration_registry``).
     """
-    return truth.is_among(mutation_cls, (*iter_mutations(), *iter_form_mutations()))
+    return any(entry is mutation_cls for entry in (*iter_mutations(), *iter_form_mutations()))
 
 
 def _lazy_ref(type_name: str, module_path: str) -> object:
@@ -279,7 +279,7 @@ def _synthesized_mutation_signature(
         data_ann = _lazy_ref(mutation_cls.input_type_name(meta), mutation_cls.input_module_path)
         arguments.append(("data", data_ann))
 
-    return_annotation = _lazy_ref(payload_type_name(truth.name(mutation_cls)), INPUTS_MODULE_PATH)
+    return_annotation = _lazy_ref(payload_type_name(mutation_cls.__name__), INPUTS_MODULE_PATH)
     return build_lazy_field_signature(arguments, return_annotation)
 
 

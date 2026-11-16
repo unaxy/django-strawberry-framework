@@ -54,7 +54,6 @@ from django_strawberry_framework.types.relay import (
     encode_typename,
     published_node_type_name,
 )
-from django_strawberry_framework.utils import truth
 
 if TYPE_CHECKING:
     from strawberry.schema import Schema
@@ -84,7 +83,7 @@ def global_id_for(
     definition = registry.get_definition(type_cls)
     if definition is None:
         raise ConfigurationError(
-            f"global_id_for: {truth.render(type_cls)} is not a registered "
+            f"global_id_for: {type_cls!r} is not a registered "
             "DjangoType subclass; "
             "pass the DjangoType class whose emitted id you want to mint.",
         )

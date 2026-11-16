@@ -112,7 +112,6 @@ from io import BytesIO
 from typing import TYPE_CHECKING
 
 from . import logger
-from .utils import truth
 from .utils._narrowing import call_method, read_attr
 
 if TYPE_CHECKING:
@@ -260,7 +259,7 @@ def _bounded_read_exceeds_limit(request: HttpRequest, stream: object, limit: int
     try:
         return _measured_by_bounded_read(request, stream, limit)
     except Exception:
-        logger.warning(_UNREADABLE_STREAM_LOG_MESSAGE, truth.name(type(stream)), exc_info=True)
+        logger.warning(_UNREADABLE_STREAM_LOG_MESSAGE, type(stream).__name__, exc_info=True)
         return True
 
 

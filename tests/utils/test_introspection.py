@@ -21,6 +21,7 @@ from typing_extensions import override
 
 from django_strawberry_framework.utils.introspection import (
     class_mro_attr,
+    describe,
     kind,
     mro_attr,
     mro_entry,
@@ -381,3 +382,45 @@ def test_name_of_a_callable_instance_is_its_stored_name_unless_empty() -> None:
     assert name(instance) == "stored"
     vars(instance)["__name__"] = ""
     assert name(instance) == "_Callable"
+
+
+class _Level(enum.IntEnum):
+    LOW = 1
+
+
+class _LoudStr(str):
+    @override
+    def __repr__(self) -> str:
+        raise RuntimeError("repr boom")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (-3, "int -3"),
+        (True, "bool True"),
+        (_Level.LOW, "_Level 1"),
+        (_LoudStr("x"), "_LoudStr 'x'"),
+        (None, "NoneType None"),
+        (int, "int <class 'int'>"),
+        (-(10**10000), "an unprintable int"),
+    ],
+    ids=[
+        "int",
+        "bool",
+        "int-enum",
+        "str-subclass",
+        "none",
+        "class",
+        "unprintable-int",
+    ],
+)
+def test_describe_names_the_kind_then_the_repr(value: object, expected: str) -> None:
+    assert describe(value) == expected
+
+
+def test_describe_never_evaluates_a_lazy_proxy() -> None:
+    def factory() -> str:
+        raise AssertionError("evaluated")
+
+    assert describe(SimpleLazyObject(factory)).startswith("SimpleLazyObject <SimpleLazyObject:")

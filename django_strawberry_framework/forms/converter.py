@@ -56,7 +56,8 @@ import strawberry
 from django import forms
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import is_class
 from django_strawberry_framework.utils.converters import (
     MRO_CONTINUE,
     MroContinue,
@@ -122,12 +123,12 @@ def form_field_kind(field: forms.Field) -> str:
     gives a column-less field and the kind
     ``forms/inputs.py::require_column_kind_agreement`` compares with a backing column's.
     """
-    if truth.is_instance(field, forms.ModelMultipleChoiceField):
+    if isinstance(field, forms.ModelMultipleChoiceField):
         return RELATION_MULTI
-    if truth.is_instance(field, forms.ModelChoiceField):
+    if isinstance(field, forms.ModelChoiceField):
         return RELATION_SINGLE
-    if truth.is_instance(field, forms.FileField) or truth.is_instance(
-        truth.static_attr(field, "widget", None),
+    if isinstance(field, forms.FileField) or isinstance(
+        introspection.mro_attr(field, "widget", None),
         forms.FileInput,
     ):
         return FILE
@@ -232,11 +233,11 @@ def form_field_scalar(field: object) -> object | None:
     """Return the scalar one value ``field`` cleans is published as, ``None`` for no row.
 
     The row of the first class in ``field``'s real MRO the table keys
-    (``utils/truth.py::mro_entry``), so a subclass answers through its nearest
+    (``utils/introspection.py::mro_entry``), so a subclass answers through its nearest
     registered ancestor and a registered subclass through its own row. ``None`` for a
     bare ``forms.Field``, a ``forms.Field`` subclass no row covers, and a non-field.
     """
-    entry = truth.mro_entry(FORM_FIELD_SCALARS, truth.class_of(field))
+    entry = introspection.mro_entry(FORM_FIELD_SCALARS, type(field))
     return None if entry is None else entry[1]
 
 
@@ -348,7 +349,7 @@ def _postgres_form_field_class(name: str) -> type[forms.Field] | None:
     consumer form can declare the class either.
     """
     cls = import_attr_if_importable("django.contrib.postgres.forms", name)
-    return cls if truth.is_subclass(cls, forms.Field) else None
+    return cls if is_class(cls) and issubclass(cls, forms.Field) else None
 
 
 # The form field classes that read a list (``form_field_reads_list``), each matched with its
@@ -379,7 +380,7 @@ def form_field_reads_list(field: forms.Field) -> bool:
     published annotation is not that fact either (it types a ``SimpleArrayField`` as the
     ``CharField`` it subclasses, and has no row for a ``SplitArrayField``).
     """
-    return truth.is_one_of(field, _LIST_READING_FORM_FIELDS)
+    return isinstance(field, _LIST_READING_FORM_FIELDS)
 
 
 # The registered scalar form-field classes (``_SCALAR_FORM_FIELDS``), as one tuple for
@@ -398,7 +399,7 @@ def form_field_reads_one_value(field: forms.Field) -> bool:
     answer ``False``: their ``to_python`` may read anything, a list included, so nothing
     states they read one value.
     """
-    return not form_field_reads_list(field) and truth.is_one_of(
+    return not form_field_reads_list(field) and isinstance(
         field,
         _SCALAR_FORM_FIELD_CLASSES,
     )
@@ -413,11 +414,10 @@ def _unsupported_form_field(field: forms.Field) -> ConfigurationError:
     ``ImproperlyConfigured`` parity, raised as the package's own
     ``ConfigurationError``). Spelt as a factory so the no-catch-all contract -
     raise, never silently coerce to ``str`` - stays in this module's wording.
-    The field's kind and repr are read through ``truth.kind`` / ``truth.render``.
     """
     return ConfigurationError(
-        f"Unsupported form field type {truth.kind(field)!r} on form "
-        f"field {truth.render(field)}. convert_form_field has no mapping "
+        f"Unsupported form field type {introspection.kind(field)!r} on form "
+        f"field {field!r}. convert_form_field has no mapping "
         "for it and no supported ancestor; subclass a supported form field, or "
         "drop it via Meta.fields / Meta.exclude.",
     )

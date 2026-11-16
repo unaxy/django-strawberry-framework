@@ -257,7 +257,6 @@
 "tests/forms/test_inputs.py::test_form_basis_content_identity_propagates_a_raw_requiredness_read_failure._HostileRequiredField.required" = { reportIncompatibleVariableOverride = 1 }
 "tests/forms/test_inputs.py::test_form_basis_content_identity_reraises_the_basis_typed_reject_verbatim" = { reportAttributeAccessIssue = 1 }
 "tests/forms/test_inputs.py::test_get_form_fields_does_not_instantiate_kwarg_requiring_form" = { reportCallIssue = 1 }
-"tests/forms/test_inputs.py::test_hostile_class_base_fields_value_raises_typed_on_default_path" = { reportAttributeAccessIssue = 1 }
 "tests/forms/test_resolvers.py::test_is_empty_form_value_handles_unhashable_and_typeerror" = { reportArgumentType = 1 }
 "tests/forms/test_resolvers.py::test_partial_update_reconstruct_with_extra_model_choice_field" = { reportAttributeAccessIssue = 1 }
 "tests/forms/test_sets.py::test_default_form_field_hook_rejects_a_class_without_form_metadata" = { reportArgumentType = 1 }
@@ -367,7 +366,6 @@
 "tests/test_error_policy.py::test_a_non_mapping_policy_argument_is_rejected" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::test_a_non_string_or_empty_correlation_key_is_rejected_at_construction" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::test_a_non_string_or_empty_message_is_rejected_at_construction" = { reportArgumentType = 1 }
-"tests/test_error_policy.py::test_a_policy_argument_whose_class_read_raises_is_rejected" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::test_the_enabled_rejection_message_names_the_value" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::test_the_policy_is_frozen_so_a_plain_assignment_raises" = { reportAttributeAccessIssue = 1 }
 "tests/test_keyset.py::_as_seek_nodes" = { reportReturnType = 1 }
@@ -406,7 +404,6 @@
 "tests/test_resource_policy.py::test_a_non_mapping_policy_argument_is_rejected" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::test_a_non_positive_integer_bound_is_rejected_at_construction" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::test_a_non_string_query_is_declined_not_scanned" = { reportArgumentType = 1 }
-"tests/test_resource_policy.py::test_a_policy_argument_whose_class_read_raises_is_rejected" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::test_a_policy_is_frozen" = { reportAttributeAccessIssue = 1 }
 "tests/test_resource_policy.py::test_an_invalid_execution_deadline_is_rejected" = { reportArgumentType = 1 }
 "tests/test_resource_policy.py::test_only_the_literal_true_widens_a_declared_bound_past_the_request_policy" = { reportArgumentType = 1 }
@@ -425,7 +422,6 @@
 "tests/test_views_async_callback.py::_UnmarkedAsView.as_view" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_views_async_callback.py::test_async_view_refuses_an_unmarked_upstream_callback._Unmarked" = { reportIncompatibleMethodOverride = 1 }
 "tests/test_workspace.py::test_runs_started_during_the_first_sync_reuse_its_copy_and_every_edit_since" = { cast = 2 }
-"tests/test_write_mixins.py::test_make_declaration_registry_identity_dedup_hostile_eq_safe_containment.HostileEqMeta" = { reportAssignmentType = 1 }
 "tests/test_write_mixins.py::test_whole_record_swap_and_deletion_on_a_real_mutation_class_are_sealed" = { reportAttributeAccessIssue = 1 }
 "tests/testing/test_client.py::test_export_surface_is_the_testing_root_not_the_package_root" = { reportAny = 1 }
 "tests/testing/test_wrap.py::test_safe_wrap_connection_method_keeps_type_error_boundary_for_hostile_repr" = { reportArgumentType = 1 }

@@ -10,7 +10,7 @@ classified).
 ``request_from_info`` (``utils/permissions.py::request_from_info``) resolves a
 Django ``HttpRequest`` or a ``ChannelsRequestAdapter``; this module classifies
 that object into ONE explicit transport mode before any credential or session
-work. Classification begins with a real-class check (``utils/truth.py::is_instance``)
+work. Classification begins with a real-class check (``utils/_narrowing.py::is_real_instance``)
 against ``ChannelsRequestAdapter`` rather than sniffing for scope-like attributes,
 because the adapter's ``__getattr__`` delegation
 (``utils/permissions.py::ChannelsRequestAdapter.__getattr__``) makes
@@ -56,7 +56,8 @@ from django.contrib.sessions.backends.signed_cookies import (
 from django.http import HttpRequest
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import is_real_instance
 from django_strawberry_framework.utils.imports import CHANNELS_FLOOR, require_optional_module
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
 from django_strawberry_framework.utils.sessions import (
@@ -107,7 +108,7 @@ class Transport(enum.Enum):
 def classify_transport(request: object) -> Transport:
     """Resolve the ``request_from_info`` result to one explicit ``Transport`` mode.
 
-    Begins with ``truth.is_instance`` against ``ChannelsRequestAdapter``
+    Begins with ``is_real_instance`` against ``ChannelsRequestAdapter``
     (attribute-presence sniffing is unreliable under the adapter's ``__getattr__``
     delegation). The request is classified by its real class, so a stand-in that
     only forwards ``__class__`` (a Django lazy proxy included) is rejected. A
@@ -121,7 +122,7 @@ def classify_transport(request: object) -> Transport:
     missing / unrecognized scope type, is rejected with an
     actionable ``ConfigurationError``.
     """
-    if truth.is_instance(request, ChannelsRequestAdapter):
+    if is_real_instance(request, ChannelsRequestAdapter):
         _ = require_optional_module("channels", install_hint=_CHANNELS_INSTALL_HINT)
         scope_type = request.scope.get("type")
         if type(scope_type) is str and scope_type == "http":
@@ -130,16 +131,16 @@ def classify_transport(request: object) -> Transport:
             return Transport.CHANNELS_WEBSOCKET
         raise ConfigurationError(
             "The auth session boundary received a Channels request scope with an "
-            f'unsupported `type` ({truth.render(scope_type)}); expected `"http"` or '
+            f'unsupported `type` ({scope_type!r}); expected `"http"` or '
             '`"websocket"`. Serve GraphQL over HTTP through DjangoGraphQLView in your '
             "URLconf, and over WebSocket through DjangoGraphQLProtocolRouter, so the scope "
             "carries a recognized protocol type.",
         )
-    if truth.is_instance(request, HttpRequest):
+    if is_real_instance(request, HttpRequest):
         return Transport.DJANGO_HTTP
     raise ConfigurationError(
         "The auth session boundary could not classify the request transport (got "
-        f"{truth.kind(request)}); expected a Django HttpRequest or a Strawberry "
+        f"{introspection.kind(request)}); expected a Django HttpRequest or a Strawberry "
         "Channels request adapter.",
     )
 
@@ -184,7 +185,7 @@ def require_mutable_scope(adapter: ChannelsRequestAdapter) -> MutableChannelsSco
     if not isinstance(scope, MutableMapping):
         raise ConfigurationError(
             "The auth session boundary requires a mutable Channels scope to serialize "
-            f"same-scope session mutations, but got a {truth.kind(scope)}; real ASGI "
+            f"same-scope session mutations, but got a {introspection.kind(scope)}; real ASGI "
             "scopes are dictionaries. Do not route auth through an immutable scope.",
         )
     return scope
@@ -237,7 +238,7 @@ def uses_signed_cookie_sessions() -> bool:
     signed-cookie store so a deployment subclassing that engine (which shares its
     no-server-side-record limitation) is recognized too.
     """
-    return truth.is_subclass(session_store_class(), SignedCookieSessionStore)
+    return issubclass(session_store_class(), SignedCookieSessionStore)
 
 
 def login_supported(transport: Transport) -> bool:

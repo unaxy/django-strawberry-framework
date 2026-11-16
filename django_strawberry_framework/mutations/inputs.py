@@ -50,7 +50,6 @@ from django_strawberry_framework.registry import register_subsystem_clear, regis
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_scalar, scalar_for_field
 from django_strawberry_framework.types.relay import implements_relay_node
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_text_atom,
@@ -161,7 +160,7 @@ def _frozenset_of_attr_names(value: Iterable[str] | None, *, parameter: str) -> 
     if is_text_atom(unwrap_lazy_object(value)):
         raise ConfigurationError(
             f"DjangoMutation input {parameter} must be a collection of python attribute "
-            f"names, not a bare string: {truth.render(value)}. A bare string would "
+            f"names, not a bare string: {value!r}. A bare string would "
             "iterate as characters, silently matching no input attribute.",
         )
     return frozenset(value or ())
@@ -323,12 +322,12 @@ def editable_input_fields(
         by_name,
         fields=fields,
         exclude=exclude,
-        subject=f"DjangoMutation for {truth.name(model)}",
+        subject=f"DjangoMutation for {model.__name__}",
         seq_flavor="DjangoMutation",
         unknown_noun="non-editable or unknown field(s)",
         empty_message=(
             f"DjangoMutation {_operation_kind_display_word(operation_kind)} input for "
-            f"{truth.name(model)} has no fields; Meta.fields / Meta.exclude narrowed the "
+            f"{model.__name__} has no fields; Meta.fields / Meta.exclude narrowed the "
             "editable column set to empty (or the model declares no editable columns). "
             "A mutation input must define at least one field."
         ),
@@ -376,7 +375,7 @@ def _carrier_backed_link_error(
     """
     carriers = ", ".join(link.carrier_attnames)
     targets = ", ".join(link.target_attnames)
-    related = truth.name(link.targets[0].model)
+    related = link.targets[0].model.__name__
     writable = [carrier.name for carrier in link.carriers if carrier.name in input_names]
     unwritable = [carrier.name for carrier in link.carriers if carrier.name not in input_names]
     if key == "exclude":
@@ -393,8 +392,8 @@ def _carrier_backed_link_error(
                 f" Its other carrier field(s) ({', '.join(unwritable)}) are not mutation inputs."
             )
     return ConfigurationError(
-        f"DjangoMutation for {truth.name(model)} declares `{key}` naming "
-        f"{truth.name(model)}.{name}, a ForeignObject that targets {related} ({targets}) "
+        f"DjangoMutation for {model.__name__} declares `{key}` naming "
+        f"{model.__name__}.{name}, a ForeignObject that targets {related} ({targets}) "
         f"through the carrier column(s) ({carriers}). It has no column of its own and "
         f"cannot be generated as a mutation input. {remedy}",
     )
@@ -679,7 +678,7 @@ def mutation_input_field_specs(
             if django_field is None or getattr(django_field, "is_relation", False):
                 raise ConfigurationError(
                     f"DjangoMutation input field {python_name!r} does not map to a "
-                    f"concrete column of {truth.name(model)}.",
+                    f"concrete column of {model.__name__}.",
                 )
         # Past the guard above, a non-indexed attr resolved to a concrete non-relation
         # column, i.e. a ``Field`` (every reverse ``*Rel`` is a relation).
@@ -788,7 +787,7 @@ def mutation_input_type_name(
     name and the create-vs-partial decision (``operation_kind != CREATE``).
     """
     return name_set_input_type_name(
-        truth.name(model),
+        model.__name__,
         is_partial=operation_kind != CREATE,
         effective_field_names=effective_field_names,
         full_field_names=full_field_names,
@@ -893,7 +892,7 @@ def _generated_input_sources(
     """Name the model and operation a generated input is built for, and each field's column."""
     kind = _operation_kind_display_word(operation_kind)
     return GeneratedFieldSources(
-        subject=f"DjangoMutation {kind} input for {truth.name(model)}",
+        subject=f"DjangoMutation {kind} input for {model.__name__}",
         field_noun="model fields",
         rename_clause="Rename one of the model fields,",
         # A ``Meta.input_class`` field over one column replaces its generated field and

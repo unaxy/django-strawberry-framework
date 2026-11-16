@@ -90,7 +90,7 @@ from django_strawberry_framework.mutations.sets import iter_mutations
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils.typing import call_forwarded
 from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
-from tests._idioms import ClassReadRaises, definition_raises, module_binding
+from tests._idioms import definition_raises, module_binding
 from tests._info import unread_info
 
 if TYPE_CHECKING:
@@ -1348,16 +1348,13 @@ def test_malformed_get_form_fields_return_is_configuration_error(
 
 
 @pytest.mark.parametrize("mutation_base", [DjangoFormMutation, DjangoModelFormMutation])
-@pytest.mark.parametrize("raised", [RuntimeError, TypeError, KeyboardInterrupt])
-def test_hostile_class_hook_value_is_configuration_error(
+def test_non_field_hook_value_is_configuration_error(
     mutation_base: type[DjangoFormMutation | DjangoModelFormMutation],
-    raised: type[BaseException],
 ) -> None:
-    """A hook value whose ``__class__`` raises fails declaration typed for both bases.
+    """A hook value that is no ``forms.Field`` fails declaration typed for both bases.
 
-    The hook's basis is validated at class creation; a value that cannot even be
-    asked ``isinstance(value, forms.Field)`` is listed under invalid fields in the
-    typed ``ConfigurationError`` instead of escaping the declaration raw.
+    The hook's basis is validated at class creation; the value is listed under invalid
+    fields in the typed ``ConfigurationError``.
     """
     form_cls = _contact_form() if mutation_base is DjangoFormMutation else _item_model_form()
     meta_attrs: dict[str, object] = (
@@ -1366,16 +1363,16 @@ def test_hostile_class_hook_value_is_configuration_error(
         else {"form_class": form_cls, "operation": "create"}
     )
 
-    def get_hostile_form_fields(cls: type) -> dict[str, object]:
+    def get_non_field_form_fields(cls: type) -> dict[str, object]:
         del cls
-        return {"message": ClassReadRaises(raised)}
+        return {"message": 3}
 
     with pytest.raises(ConfigurationError) as exc:
         type(
-            "HostileClassHookMutation",
+            "NonFieldHookMutation",
             (mutation_base,),
             {
-                "get_form_fields": classmethod(get_hostile_form_fields),
+                "get_form_fields": classmethod(get_non_field_form_fields),
                 "Meta": type("Meta", (), meta_attrs),
             },
         )

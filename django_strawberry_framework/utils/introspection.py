@@ -10,6 +10,7 @@
 - ``kind`` and ``text`` spell a value for an error message: a class names itself, any other
   value names its type, and a ``str`` subclass such as a ``(str, Enum)`` member spells as
   its own text. ``plain_str`` passes any other value through unchanged.
+- ``describe`` spells the ``got`` tail of a refusal: the kind, then the value's ``repr``.
 - ``name`` names a C callable or a callable instance, which may carry no ``__name__`` of its
   own.
 
@@ -27,6 +28,7 @@ from typing import TYPE_CHECKING, TypeVar
 from django_strawberry_framework.utils._narrowing import (
     class_namespace,
     is_class,
+    is_real_instance,
     is_str,
     read_attr,
 )
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "class_mro_attr",
+    "describe",
     "kind",
     "mro_attr",
     "mro_entry",
@@ -121,6 +124,23 @@ def kind(value: object) -> str:
     if is_class(value):
         return value.__name__ or type(value).__name__ or "object"
     return type(value).__name__ or "object"
+
+
+def describe(value: object) -> str:
+    """Return an error message's ``got`` tail for ``value``: its ``kind``, then its ``repr``.
+
+    An ``int`` or ``str`` subclass other than ``bool`` renders through the builtin's own
+    ``__repr__`` slot, so no subclass ``__repr__`` runs, and an int too long for CPython to
+    print reads ``an unprintable int`` instead of raising.
+    """
+    if is_real_instance(value, int) and type(value) is not bool:
+        try:
+            return f"{kind(value)} {int.__repr__(value)}"
+        except ValueError:
+            return f"an unprintable {kind(value)}"
+    if is_str(value):
+        return f"{kind(value)} {str.__repr__(value)}"
+    return f"{kind(value)} {value!r}"
 
 
 def text(value: object, fallback: str = "") -> str:

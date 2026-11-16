@@ -139,7 +139,7 @@ from django_strawberry_framework.resource_policy import (
     end_resource_budget,
     record_admission_rejection,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     is_list_or_tuple,
     is_mapping,
@@ -1518,10 +1518,10 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
         A ``policy`` that is no ``ResourcePolicy`` is refused here, at construction.
         """
         super().__init__()
-        if policy is not None and not truth.is_one_of(policy, (ResourcePolicy,)):
+        if policy is not None and ResourcePolicy not in type(policy).__mro__:
             raise ConfigurationError(
                 "DjangoResourcePolicyExtension(policy=...) takes a ResourcePolicy; "
-                f"got {truth.describe(policy)}.",
+                f"got {introspection.describe(policy)}.",
             )
         self._explicit_policy: ResourcePolicy | None = policy
 

@@ -80,8 +80,10 @@ from django_strawberry_framework.types.converters import (
     generated_output_field,
     scalar_route,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
+    class_namespace,
+    is_class,
     is_concrete_field,
     is_str,
     optional_instance,
@@ -173,13 +175,13 @@ class Command(BaseCommand):
 
         type_name = str(options["type"])
         target = self._resolve_type(type_name, name_converter)
-        if not truth.is_subclass(target, DjangoType):
+        if not (is_class(target) and issubclass(target, DjangoType)):
             raise CommandError(f"{type_name} is not a DjangoType subclass")
 
         definition = registry.get_definition(target)
         if definition is None:
             raise CommandError(
-                f"{truth.name(target)} is not a registered DjangoType "
+                f"{introspection.name(target)} is not a registered DjangoType "
                 "(a Meta-less abstract base never registers a definition)",
             )
         if definition.finalized is False:
@@ -206,7 +208,7 @@ class Command(BaseCommand):
         """
         matches: list[type[DjangoType]] = []
         for type_cls, definition in registry.iter_definitions():
-            surfaces = (_sdl_type_name(type_cls, definition, name_converter), truth.name(type_cls))
+            surfaces = (_sdl_type_name(type_cls, definition, name_converter), type_cls.__name__)
             if name in surfaces:
                 matches.append(type_cls)
         if not matches:
@@ -215,9 +217,12 @@ class Command(BaseCommand):
                 "(pass --schema <your project schema dotted path>) or use a fully-dotted path.",
             )
         if len(matches) > 1:
+            labels = {
+                type_cls: f"{type_cls.__module__}.{type_cls.__qualname__}" for type_cls in matches
+            }
             candidates = "\n".join(
-                f"  - {truth.label(type_cls)} (model {_model_name(registry.model_for_type(type_cls))})"
-                for type_cls in sorted(matches, key=truth.label)
+                f"  - {labels[type_cls]} (model {_model_name(registry.model_for_type(type_cls))})"
+                for type_cls in sorted(matches, key=labels.__getitem__)
             )
             raise CommandError(
                 f"{name} is ambiguous - {len(matches)} registered types share this name.\n"
@@ -237,7 +242,7 @@ class Command(BaseCommand):
         # name (custom ``NameConverter`` + ``Meta.name``), not the Python class
         # ``__name__`` - so it matches the schema surface the operator inspects.
         sdl_name = _sdl_type_name(definition.origin, definition, name_converter)
-        title = f"{sdl_name}  (model: {truth.label(model)})"
+        title = f"{sdl_name}  (model: {model.__module__}.{model.__qualname__})"
         self.stdout.write(title)
         header = (
             f"  {'field':<20} {'django field type':<20} "
@@ -251,7 +256,7 @@ class Command(BaseCommand):
                 field,
                 scalar_namer,
             )
-            django_field_type = truth.name(type(field))
+            django_field_type = type(field).__name__
             self.stdout.write(
                 f"  {field.name:<20} {django_field_type:<20} "
                 f"{graphql_type:<32} {nullable:<10} {converter}",
@@ -433,7 +438,7 @@ class Command(BaseCommand):
         # produced (``DjangoFilePathType`` for a path opt-in) and the two
         # columns cannot disagree.
         if _field_output_type_for(field) is not None:
-            output_name = _render_annotation(annotation, truth.name).rstrip("!")
+            output_name = _render_annotation(annotation, introspection.name).rstrip("!")
             return graphql_type, nullable, f"convert_field_output -> {output_name}"
         return graphql_type, nullable, _scalar_route_label(field)
 
@@ -473,7 +478,7 @@ class Command(BaseCommand):
             return _NOT_A_FIELD_ROW
         if field_type is UNRESOLVED:
             raise CommandError(
-                f"{truth.name(definition.origin)}.{field.name} is a consumer-authored field whose "
+                f"{introspection.name(definition.origin)}.{field.name} is a consumer-authored field whose "
                 "annotation is an unresolved Strawberry forward reference; "
                 "finalize_django_types() does not force forward-reference resolution. Pass "
                 "--schema <your project schema dotted path> so the schema is constructed (which "
@@ -517,7 +522,7 @@ def _yes_no(*, value: bool) -> str:
 def _annotation_is_optional(annotation: object) -> bool:
     """Return whether ``annotation`` is a ``T | None`` union."""
     if is_union(annotation):
-        return truth.is_among(type(None), typing.get_args(annotation))
+        return type(None) in typing.get_args(annotation)
     return False
 
 
@@ -539,7 +544,7 @@ def _scalar_route_label(field: "ConcreteField") -> str:
         return f"ArrayField -> list[{_scalar_route_label(route.element)}]"
     if isinstance(route, HStoreRoute):
         return "HStoreField -> JSON"
-    return "choice enum" if route.choices else f"SCALAR_MAP[{truth.name(route.key)}]"
+    return "choice enum" if route.choices else f"SCALAR_MAP[{introspection.name(route.key)}]"
 
 
 def _render_strawberry_type(field_type: object, scalar_namer: _ScalarNamer) -> str:
@@ -647,7 +652,7 @@ def _sdl_type_name(
     # Only ``strawberry.type`` (``strawberry/types/object_type.py::_process_type``)
     # writes this class-dict key, and it writes a ``StrawberryObjectDefinition``.
     strawberry_definition = optional_instance(
-        truth.class_dict(type_cls).get("__strawberry_definition__"),
+        class_namespace(type_cls).get("__strawberry_definition__"),
         StrawberryObjectDefinition,
     )
     if strawberry_definition is None:
@@ -657,7 +662,7 @@ def _sdl_type_name(
 
 def _model_name(model: object) -> str:
     """Return the registered model's class name for the ambiguity listing, or ``?`` if none."""
-    return truth.name(model) if truth.is_type(model) else "?"
+    return model.__name__ if is_class(model) else "?"
 
 
 def _scalar_converter(schema: object) -> GraphQLCoreConverter:
@@ -700,7 +705,7 @@ def _scalar_name(scalar: object, *, converter: GraphQLCoreConverter) -> str:
     """
     if is_scalar(scalar, converter.scalar_registry):
         return _from_scalar(converter, scalar).name
-    strawberry_type: object = truth.static_attr(scalar, "__strawberry_definition__", None)
+    strawberry_type: object = introspection.mro_attr(scalar, "__strawberry_definition__", None)
     if strawberry_type is None and isinstance(
         scalar,
         (
@@ -713,10 +718,10 @@ def _scalar_name(scalar: object, *, converter: GraphQLCoreConverter) -> str:
         strawberry_type = scalar
     if isinstance(strawberry_type, StrawberryType):
         return _converter_type_name(converter.config.name_converter, strawberry_type)
-    if truth.is_type(scalar):
-        return truth.name(scalar)
-    declared = truth.static_attr(scalar, "__name__", None)
-    return declared if type(declared) is str and declared else truth.text(scalar)
+    if is_class(scalar):
+        return introspection.name(scalar)
+    declared = introspection.mro_attr(scalar, "__name__", None)
+    return declared if type(declared) is str and declared else introspection.text(scalar)
 
 
 def _render_annotation(annotation: object, scalar_namer: _ScalarNamer) -> str:

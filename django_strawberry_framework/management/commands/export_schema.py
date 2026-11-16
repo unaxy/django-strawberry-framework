@@ -10,7 +10,7 @@ from typing_extensions import override
 from django_strawberry_framework.management.commands._imports import (
     import_module_symbol_or_command_error,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 
 
 class Command(BaseCommand):
@@ -45,7 +45,7 @@ class Command(BaseCommand):
         schema_location = options["schema"]
         if not isinstance(schema_location, str):
             raise CommandError(
-                f"The schema location must be a string; got {truth.kind(schema_location)}.",
+                f"The schema location must be a string; got {introspection.kind(schema_location)}.",
             )
         schema_symbol = import_module_symbol_or_command_error(
             schema_location,

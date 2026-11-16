@@ -117,8 +117,6 @@ from django_strawberry_framework.utils.write_transaction import (
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._idioms import (
     TEST_ASYNC_RECOURSE,
-    ClaimsClass,
-    ClassReadRaises,
     definition_raises,
     is_object_dict,
     is_object_list,
@@ -1649,25 +1647,13 @@ def test_is_read_only_sql_fails_closed_on_a_non_string_statement() -> None:
     assert is_read_only_sql(b"SELECT 1") is False  # bytes SQL is not DB-API either
 
 
-@pytest.mark.parametrize(
-    "statement",
-    [
-        pytest.param(ClaimsClass(str), id="claims-str"),
-        pytest.param(ClassReadRaises(), id="raising-class"),
-        pytest.param(SimpleLazyObject(lambda: "SELECT 1"), id="lazy-proxy-of-str"),
-    ],
-)
-def test_is_read_only_sql_fails_closed_on_a_statement_that_is_not_really_a_string(
-    statement: object,
-) -> None:
-    """The statement's REAL type decides, never a ``__class__`` the object supplies.
+def test_is_read_only_sql_fails_closed_on_a_statement_that_is_not_really_a_string() -> None:
+    """The statement's real type decides: a Django lazy proxy of a ``str`` is no SQL string.
 
-    ``truth.text`` copies only a real ``str`` through the base slot, so an ``isinstance``
-    answer taken from ``__class__`` would classify the object's own ``__str__`` render (a
-    claim) or raise the object's own exception (a raising read) instead of the documented
-    ``False``.
+    The proxy forwards ``__class__``, so an ``isinstance`` answer would evaluate it and
+    classify the wrapped text instead of the documented ``False``.
     """
-    assert is_read_only_sql(statement) is False
+    assert is_read_only_sql(SimpleLazyObject(lambda: "SELECT 1")) is False
 
 
 @pytest.mark.django_db

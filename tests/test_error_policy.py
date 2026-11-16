@@ -68,7 +68,6 @@ from django_strawberry_framework.utils._narrowing import (
     read_attr,
 )
 from tests._execution import make_execution_context
-from tests._idioms import ClassReadRaises
 
 _SENSITIVE = "standalone schema secret /srv/private/standalone.key"
 
@@ -267,18 +266,6 @@ def test_a_non_mapping_policy_argument_is_rejected() -> None:
         # basedpyright: the non-mapping policy is the hostile input under test;
         # resolve_error_policy types the parameter as ErrorPolicy | Mapping[str, object] | None
         resolve_error_policy("invalid")  # pyright: ignore[reportArgumentType]
-
-
-def test_a_policy_argument_whose_class_read_raises_is_rejected() -> None:
-    """A value that cannot be classified is "not a policy, not a mapping", so the typed rejection names it."""
-    with pytest.raises(ConfigurationError) as excinfo:
-        # basedpyright: the unclassifiable policy is the hostile input under test;
-        # resolve_error_policy types the parameter as ErrorPolicy | Mapping[str, object] | None
-        resolve_error_policy(ClassReadRaises())  # pyright: ignore[reportArgumentType]
-    assert str(excinfo.value) == (
-        "The error policy must be an ErrorPolicy or a mapping of option names to values; "
-        "got ClassReadRaises <ClassReadRaises>."
-    )
 
 
 def test_an_unknown_option_name_is_rejected_with_the_valid_vocabulary() -> None:

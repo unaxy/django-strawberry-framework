@@ -2799,9 +2799,7 @@ control asserting the SQL `high_mark` is the effective ceiling
 sliced as itself with that `high_mark` rather than counted in Python
 (`test_a_project_queryset_class_keeps_the_row_bound_in_sql`), a zero-width window on one
 (`test_a_zero_width_window_on_a_queryset_subclass_returns_no_rows` and its `_when_awaited`
-twin), a class-spoofing non-queryset asserting it reaches the counting arm
-(`test_a_value_that_only_claims_to_be_a_queryset_cannot_reach_the_slice`), and an exact
-queryset's fetched rows read out of Django's slot
+twin), and an exact queryset's fetched rows read out of Django's slot
 (`test_rows_a_source_already_fetched_are_read_from_the_frameworks_own_slot`).
 
 Evaluation state is pinned beside them: an evaluated exact queryset and an evaluated project

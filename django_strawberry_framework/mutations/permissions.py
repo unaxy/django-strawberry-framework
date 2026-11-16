@@ -31,8 +31,12 @@ from typing import TYPE_CHECKING, Any
 from django.contrib.auth import get_permission_codename
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import call_method, read_attr
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    is_class,
+    read_attr,
+)
 from django_strawberry_framework.utils.permissions import request_from_info
 from django_strawberry_framework.utils.querysets import reject_async_in_sync_context
 
@@ -100,9 +104,9 @@ def _require_sync_bool_auth_result(value: object, *, owner: str, method: str) ->
         context="mutation",
         recourse=_PERMISSION_ASYNC_RECOURSE,
     )
-    if not truth.is_instance(allowed, bool):
+    if type(allowed) is not bool:
         raise ConfigurationError(
-            f"{owner}.{method} must return a bool; got {truth.render(allowed)}. "
+            f"{owner}.{method} must return a bool; got {allowed!r}. "
             "Authorization results are never coerced from truthiness.",
         )
     return allowed
@@ -111,14 +115,13 @@ def _require_sync_bool_auth_result(value: object, *, owner: str, method: str) ->
 def is_permission_class(value: object) -> TypeIs[WritePermissionClass]:
     """Whether ``value`` is a permission class: a class with a callable ``has_permission``.
 
-    Both reads are truthful (``truth.is_type`` / ``truth.static_attr``), so no
-    metaclass hook runs; the declared hook comes back as stored, so a
-    ``classmethod`` (not itself callable) counts as the callable it binds to.
+    The hook is read statically (``utils/introspection.py::mro_attr``), so it comes back as
+    stored and a ``classmethod`` (not itself callable) counts as the callable it binds to.
     """
-    if not truth.is_type(value):
+    if not is_class(value):
         return False
-    has_perm = truth.static_attr(value, "has_permission")
-    return callable(has_perm) or truth.is_instance(has_perm, classmethod)
+    has_perm = introspection.mro_attr(value, "has_permission")
+    return callable(has_perm) or isinstance(has_perm, classmethod)
 
 
 def run_permission_classes(
@@ -165,7 +168,7 @@ def run_permission_classes(
                 data,
                 instance,
             ),
-            owner=truth.name(permission_class),
+            owner=permission_class.__name__,
             method="has_permission",
         )
         if not allowed:
@@ -227,7 +230,7 @@ class DjangoModelPermission:
         # closes for ``has_permission`` / ``check_permission``.
         return _require_sync_bool_auth_result(
             call_method(user, "has_perm", codename),
-            owner=truth.name(truth.class_of(user)),
+            owner=type(user).__name__,
             method="has_perm",
         )
 

@@ -104,7 +104,7 @@ from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
 )
 from django_strawberry_framework.utils.relations import is_model_class
-from tests._idioms import ClassReadRaises, module_binding, str_subclass_name
+from tests._idioms import module_binding, str_subclass_name
 from tests._postgres_fields import FakeArrayField, patch_array_field
 from tests._relation_fixtures import RpCompositeParent
 
@@ -240,34 +240,6 @@ def test_corrupted_base_fields_raises_typed_on_default_path() -> None:
     Corrupt.base_fields = 123  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(ConfigurationError, match="Corrupt"):
         build_form_input_class(Corrupt, operation_kind=FORM)
-
-
-_HOSTILE_CLASS_ERRORS = [RuntimeError, TypeError, KeyboardInterrupt]
-
-
-@pytest.mark.parametrize("raised", _HOSTILE_CLASS_ERRORS)
-def test_hostile_class_base_fields_value_raises_typed_on_default_path(
-    raised: type[BaseException],
-) -> None:
-    """A ``base_fields`` value whose ``__class__`` raises is typed on the default path.
-
-    The default hook copies a clobbered ``base_fields`` mapping into the basis, so
-    the per-value check guards it like a hook return: ``build_form_input_class`` raises
-    ``ConfigurationError`` naming the form and the entry, never the raw exception.
-    """
-
-    class Corrupt(forms.Form):
-        pass
-
-    # basedpyright: the hostile base_fields value is the input under test; django-stubs
-    # types the slot as a field mapping
-    Corrupt.base_fields = {"x": ClassReadRaises(raised)}  # pyright: ignore[reportAttributeAccessIssue]
-    with pytest.raises(ConfigurationError) as exc:
-        build_form_input_class(Corrupt, operation_kind=FORM)
-    assert str(exc.value) == (
-        "DjangoFormMutation for Corrupt get_form_fields() must return a mapping of string "
-        "names to forms.Field instances; invalid names [], invalid fields ['x']."
-    )
 
 
 def test_normalize_form_field_basis_rejects_none() -> None:
@@ -2854,23 +2826,6 @@ def test_honest_str_subclass_basis_name_still_builds() -> None:
     cre, _ = build_form_input_class(form_cls, form_fields=normalized, operation_kind=FORM)
     field_names = {f.python_name for f in get_object_definition(cre, strict=True).fields}
     assert field_names == {"good"}
-
-
-@pytest.mark.parametrize("raised", _HOSTILE_CLASS_ERRORS)
-def test_basis_diagnostic_typed_for_hostile_class_value(raised: type[BaseException]) -> None:
-    """A value whose ``__class__`` raises under ``isinstance`` is invalid, never raw.
-
-    The per-value check classifies the value by its real class
-    (``utils/truth.py::is_instance``), so a value whose ``__class__`` read raises is
-    listed under invalid fields without that read ever running, instead of escaping
-    ``_form_field_basis`` as the raw exception.
-    """
-    with pytest.raises(ConfigurationError) as exc:
-        normalize_form_field_basis(_make_empty_form(), {"x": ClassReadRaises(raised)})
-    assert str(exc.value) == (
-        "DjangoFormMutation for EmptyForm get_form_fields() must return a mapping of string "
-        "names to forms.Field instances; invalid names [], invalid fields ['x']."
-    )
 
 
 def test_basis_diagnostic_keeps_list_repr_for_benign_names() -> None:

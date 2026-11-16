@@ -60,7 +60,11 @@ from .consumers import (
     resolved_revalidation_window,
 )
 from .exceptions import ConfigurationError
-from .utils import truth
+from .utils import introspection
+from .utils._narrowing import (
+    is_class,
+    is_instance,
+)
 from .utils.imports import CHANNELS_FLOOR, STRAWBERRY_FLOOR, require_optional_module
 from .utils.querysets import _dispose_sync_awaitable
 
@@ -248,13 +252,13 @@ def _validated_websocket_url_pattern(value: object) -> str:
     """
     if type(value) is not str:
         raise ConfigurationError(
-            f"{_INVALID_WEBSOCKET_URL_PATTERN_HINT}{truth.describe(value)}.",
+            f"{_INVALID_WEBSOCKET_URL_PATTERN_HINT}{introspection.describe(value)}.",
         )
     try:
         _ = re.compile(value)
     except (re.error, OverflowError, RecursionError) as exc:
         raise ConfigurationError(
-            f"{_INVALID_WEBSOCKET_URL_PATTERN_HINT}{truth.describe(value)}.",
+            f"{_INVALID_WEBSOCKET_URL_PATTERN_HINT}{introspection.describe(value)}.",
         ) from exc
     return value
 
@@ -292,7 +296,7 @@ def _require_factory_calling_convention(
         _ = signature.bind(schema=schema)
     except TypeError as exc:
         raise ConfigurationError(
-            f"{_FACTORY_CONTRACT_HINT} The factory {truth.describe(factory)} cannot accept "
+            f"{_FACTORY_CONTRACT_HINT} The factory {introspection.describe(factory)} cannot accept "
             f"that call: {exc}.",
         ) from exc
 
@@ -308,15 +312,10 @@ def _refused_coroutine(application: object) -> bool:
     of at the factory, and a hard error in any consumer running under
     ``-W error``.
 
-    Both tests read the real class (``utils/truth.py::is_instance``), so a
-    ``__class__`` that raises or lies is never consulted and the construction
-    error is what the caller sees. Anything else, a Django lazy proxy included, is
-    disposed of by nobody: the disposal helper's own tests are ``isinstance``
-    checks that would read a hostile ``__class__``, so it is reached only with a
-    real coroutine or future.
+    Anything but a coroutine or a future is disposed of by nobody.
     """
-    is_coroutine = truth.is_instance(application, _COROUTINE)
-    if is_coroutine or truth.is_instance(application, _FUTURE):
+    is_coroutine = isinstance(application, _COROUTINE)
+    if is_coroutine or is_instance(application, _FUTURE):
         _dispose_sync_awaitable(application)
     return is_coroutine
 
@@ -375,10 +374,10 @@ def _factory_application(
     if callable(application):
         return application
 
-    received = truth.describe(application)
+    received = introspection.describe(application)
     addendum = _ASYNC_FACTORY_HINT if _refused_coroutine(application) else ""
     raise ConfigurationError(
-        f"{_FACTORY_CONTRACT_HINT}{addendum} The factory {truth.describe(factory)} returned "
+        f"{_FACTORY_CONTRACT_HINT}{addendum} The factory {introspection.describe(factory)} returned "
         f"{received}.",
     )
 
@@ -404,9 +403,8 @@ def _websocket_application(
     The class test comes first on purpose: a class IS callable, so testing
     ``callable`` first would route a non-consumer class into the factory branch
     and call it with an unexpected keyword instead of naming the real mistake.
-    The class and subclass tests read the candidate's real metaclass chain and
-    MRO (``utils/truth.py``), and ``callable`` reads the type's call slot, so no
-    candidate-side hook is consulted.
+    The class test reads the candidate's real type (``utils/_narrowing.py::is_class``),
+    so a Django lazy proxy of a class is not taken for the class.
     Lives here rather than inline in ``__init__`` so the class builder does not
     grow a four-branch selector, and takes ``base_consumer_class`` as an argument
     because ``GraphQLWSConsumer`` is only in scope inside that builder.
@@ -416,13 +414,13 @@ def _websocket_application(
             schema=schema,
             revalidation_window=revalidation_window,
         )
-    if truth.is_type(candidate):
-        if truth.is_subclass(candidate, base_consumer_class):
+    if is_class(candidate):
+        if issubclass(candidate, base_consumer_class):
             return candidate.as_asgi(schema=schema)
     elif callable(candidate):
         return _factory_application(candidate, schema=schema)
     raise ConfigurationError(
-        f"{_UNUSABLE_WEBSOCKET_CONSUMER_HINT} Got {truth.describe(candidate)}.",
+        f"{_UNUSABLE_WEBSOCKET_CONSUMER_HINT} Got {introspection.describe(candidate)}.",
     )
 
 

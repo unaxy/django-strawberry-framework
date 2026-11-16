@@ -40,7 +40,7 @@ from strawberry.relay import types as _relay_types
 
 from .conf import upstream_patches_enabled
 from .connection import _page_requested
-from .utils import truth
+from .utils._narrowing import class_namespace, read_attr
 
 if TYPE_CHECKING:
     from strawberry.types import Info
@@ -65,9 +65,8 @@ def apply() -> None:
     """
     if not upstream_patches_enabled("strawberry"):
         return
-    resolver = truth.stored_function(
-        truth.class_dict(_relay_types.ListConnection).get("resolve_connection"),
-    )
+    stored = class_namespace(_relay_types.ListConnection).get("resolve_connection")
+    resolver = read_attr(stored, "__func__", stored)
     if not isinstance(resolver, FunctionType) or _EDGES_CHECK not in resolver.__code__.co_names:
         raise RuntimeError(
             "Cannot apply django-strawberry-framework's Strawberry patch: "
