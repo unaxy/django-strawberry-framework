@@ -257,7 +257,6 @@
 "tests/forms/test_inputs.py::test_form_basis_content_identity_propagates_a_raw_requiredness_read_failure._HostileRequiredField.required" = { reportIncompatibleVariableOverride = 1 }
 "tests/forms/test_inputs.py::test_form_basis_content_identity_reraises_the_basis_typed_reject_verbatim" = { reportAttributeAccessIssue = 1 }
 "tests/forms/test_inputs.py::test_get_form_fields_does_not_instantiate_kwarg_requiring_form" = { reportCallIssue = 1 }
-"tests/forms/test_resolvers.py::test_is_empty_form_value_handles_unhashable_and_typeerror" = { reportArgumentType = 1 }
 "tests/forms/test_resolvers.py::test_partial_update_reconstruct_with_extra_model_choice_field" = { reportAttributeAccessIssue = 1 }
 "tests/forms/test_sets.py::test_default_form_field_hook_rejects_a_class_without_form_metadata" = { reportArgumentType = 1 }
 "tests/forms/test_sets.py::test_modelform_mutation_rejects_non_class_meta.BadModelMeta" = { reportAssignmentType = 1 }

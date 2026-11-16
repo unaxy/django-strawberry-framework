@@ -3282,27 +3282,6 @@ def test_flattener_truncates_past_the_node_budget() -> None:
     assert len(flattened) <= serializer_resolvers._ERROR_FLATTEN_NODE_BUDGET + 1
 
 
-def test_decode_nested_multi_non_iterable_returns_field_error() -> None:
-    """Passing a non-iterable to _decode_nested for NESTED_MULTI returns a field-keyed error."""
-    spec = InputFieldSpec(
-        input_attr="shelves",
-        graphql_name="shelves",
-        target_name="shelves",
-        kind=NESTED_MULTI,
-        nested_specs=(),
-    )
-    result, error = serializer_resolvers._decode_nested(
-        spec,
-        12345,
-        info=unread_info(),
-        path_prefix="shelves",
-    )
-    assert result is None
-    assert error is not None
-    assert error.field == "shelves"
-    assert error.codes == ["invalid"]
-
-
 def test_serializer_kwargs_preserves_custom_context_keys() -> None:
     """`get_serializer_kwargs` custom `context` keys are preserved alongside request and write_alias."""
     mutation_cls = _bind_item_serializer_mutation(_basic_item_serializer())
@@ -3372,21 +3351,11 @@ def test_serializer_errors_to_field_errors_formats_scalar_integers_and_booleans(
     assert by_field["score"] == ["9.5"]
 
 
-def test_decode_input_object_handles_none_and_invalid_dataclass() -> None:
-    """_decode_input_object safely handles None and non-dataclass values."""
+def test_decode_input_object_handles_none() -> None:
+    """_decode_input_object decodes a ``None`` input object to no values."""
     data_none, err_none = serializer_resolvers._decode_input_object([], None, info=unread_info())
     assert data_none == {}
     assert err_none is None
-
-    data_bad, err_bad = serializer_resolvers._decode_input_object(
-        [],
-        "invalid_object",
-        info=unread_info(),
-    )
-    assert data_bad == {}
-    assert err_bad is not None
-    assert err_bad.field == NON_FIELD_ERROR_KEY
-    assert err_bad.messages == ["Invalid input object."]
 
 
 @pytest.mark.django_db
@@ -3530,7 +3499,7 @@ def test_decode_nested_multi_decodes_items_and_handles_item_error() -> None:
     assert err is None
     assert decoded == [{"name": "item1"}, {"name": "item2"}]
 
-    val_bad = [ChildInput(name="item1"), "not_an_input_object"]
+    val_bad = [ChildInput(name="item1"), ChildInput(name="bad\x00")]
     decoded_bad, err_bad = serializer_resolvers._decode_nested(
         spec,
         val_bad,
@@ -3539,8 +3508,7 @@ def test_decode_nested_multi_decodes_items_and_handles_item_error() -> None:
     )
     assert decoded_bad is None
     assert err_bad is not None
-    assert err_bad.field == "items.1"
-    assert err_bad.messages == ["Invalid input object."]
+    assert err_bad.field == "items.1.name"
 
 
 def test_serializer_errors_to_field_errors_direct_leaf() -> None:
@@ -3555,6 +3523,11 @@ def test_serializer_errors_to_field_errors_direct_leaf() -> None:
 
 def test_serializer_decode_step_returns_field_errors_on_decode_failure() -> None:
     """_serializer_decode_step wraps a decode error into a ``StepFailure``."""
+
+    @strawberry.input
+    class NameInput:
+        name: str
+
     specs = [
         InputFieldSpec(
             input_attr="name",
@@ -3564,11 +3537,14 @@ def test_serializer_decode_step_returns_field_errors_on_decode_failure() -> None
         ),
     ]
 
-    res = serializer_resolvers._serializer_decode_step("not_a_dataclass", make_info(), specs=specs)
+    res = serializer_resolvers._serializer_decode_step(
+        NameInput(name="bad\x00"),
+        make_info(),
+        specs=specs,
+    )
     assert isinstance(res, StepFailure)
     assert len(res.errors) == 1
-    assert res.errors[0].field == NON_FIELD_ERROR_KEY
-    assert res.errors[0].messages == ["Invalid input object."]
+    assert res.errors[0].field == "name"
 
 
 # ===========================================================================

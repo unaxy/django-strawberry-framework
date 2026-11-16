@@ -1879,7 +1879,7 @@ write flavor rides.
    field, code `null` and path the model flavor answers the same input with, and the
    column's Django `error_messages["null"]` as the message, and nothing is written.
    **A `null=True` such column stores `NULL`**
-   ([`forms/resolvers.py`][forms-resolvers]`::_store_nulls`): the model field's
+   ([`forms/resolvers.py`][forms-resolvers]`::_modelform_write_step`): the model field's
    `save_form_data(instance, None)` replaces the cleaned value on the instance before the
    save, so the column keeps the `NULL` the client sent, as the model
    flavor writes it on a `blank=True` column and Django's own form field cleans to there,

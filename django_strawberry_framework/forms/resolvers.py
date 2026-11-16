@@ -249,6 +249,7 @@ from django_strawberry_framework.mutations.resolvers import (
 from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    dict_items,
     instance_state,
     is_class,
     list_of,
@@ -257,11 +258,10 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.errors import (
-    FIELD_ERROR_CODE_INVALID,
-    UNBINDABLE_TEMPORAL_MESSAGE,
     build_error_key_map,
+    field_error,
     save_time_error_key_map,
-    unstorable_value,
+    unstorable_value_errors,
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
@@ -400,15 +400,6 @@ def _stored_key_is_form_key(link: ForeignKeyField, form_field: _ModelChoiceField
     return key == target.name or (key == "pk" and target.primary_key)
 
 
-def _is_empty_form_value(candidate: object, form_field: forms.Field) -> bool:
-    """Return whether ``candidate`` matches the form field's empty values safely."""
-    empty_values: Container[object] = form_field.empty_values
-    try:
-        return candidate in empty_values
-    except TypeError:
-        return False
-
-
 def _unrepresentable_choice(
     form_field: forms.Field,
     form_key: object,
@@ -430,7 +421,7 @@ def _unrepresentable_choice(
     ``ModelMultipleChoiceField`` looks every member key up, an empty-valued key included,
     so ``_decode_form_relation_multi`` binds a member keyed ``""`` as is.
     """
-    if not _is_model_choice_field(form_field) or not _is_empty_form_value(form_key, form_field):
+    if not _is_model_choice_field(form_field) or form_key not in form_field.empty_values:
         return None
     return ValidationError(
         form_field.error_messages["invalid_choice"],
@@ -491,7 +482,7 @@ def _decode_form_relation_single(
     """
 
     def skip(candidate: object) -> bool:
-        return _is_empty_form_value(candidate, form_field)
+        return candidate in form_field.empty_values
 
     form_key, error = decode_visible_relation(
         value,
@@ -508,15 +499,8 @@ def _decode_form_relation_single(
         return form_key, error
     choice_error = _unrepresentable_choice(form_field, form_key, value=value)
     if choice_error is not None:
-        return None, validation_error_to_field_errors(
-            ValidationError({graphql_name: [choice_error]}),
-        )[0]
+        return None, field_error(graphql_name, choice_error.messages, codes=[choice_error.code])
     return form_key, None
-
-
-def _never_a_clear(_candidate: object) -> bool:
-    """Skip nothing: a relation-id list element is always an id to decode."""
-    return False
 
 
 def _decode_form_relation_multi(
@@ -554,13 +538,13 @@ def _decode_form_relation_multi(
 
     This DIVERGES, deliberately, from the model ``DjangoMutation`` path, which
     rejects an explicit ``null`` M2M with a field-keyed error
-    (``mutations/resolvers.py::_relation_null_error`` - "use ``[]`` to clear, not
+    (``mutations/resolvers.py::_decode_relation_id_list`` - "use ``[]`` to clear, not
     ``null``"). A bound ``ModelForm`` follows Django form semantics, where an empty
     value clears an optional M2M (and a required one errors), so the form flavor
     honors the form's own required-ness rather than imposing the model path's
     stricter "null is never a valid replace-set" stance (spec-038 Decision 7).
     """
-    if _is_empty_form_value(values, form_field):
+    if values in form_field.empty_values:
         return [], None
     container = materialize_relation_id_container(values, graphql_name)
     if container[1] is not None:
@@ -573,7 +557,8 @@ def _decode_form_relation_multi(
             related_model=related_model,
             info=info,
             async_recourse=_FORM_ASYNC_RECOURSE,
-            skip=_never_a_clear,
+            # A relation-id list element is always an id to decode.
+            skip=lambda _candidate: False,
             project=form_field.prepare_value,
             key_attname=key_attname,
             index=index,
@@ -771,7 +756,7 @@ def _reconstruct_partial_data(
         if _is_model_multiple_choice_field(form_field) and name in m2m_field_names:
             try:
                 related_objs = call_method(read_attr(instance, name), "all")
-                m2m_data[name] = [form_field.prepare_value(obj) for obj in list_of(related_objs)]
+                m2m_data[name] = form_field.prepare_value(related_objs)
             except (AttributeError, ObjectDoesNotExist):
                 pass
         elif (
@@ -1255,9 +1240,11 @@ def _bind_under_form_keys(form: forms.BaseForm) -> dict[str, list[ValidationErro
     if isinstance(files, MultiValueDict):
         form.files = _renamed_multi_value_dict(form.files, renamed)
         return errors
-    # A plain ``dict``'s ``copy()`` is a ``dict``: its entries read each value as bound,
-    # never a value list, and the bound mapping is left untouched.
-    form.files = _multi_value_dict_of(form.files.copy(), renamed)
+    # A plain ``dict``'s items read each value as bound, never a value list: each becomes
+    # its key's one entry, so ``get`` answers it unchanged.
+    form.files = MultiValueDict(
+        {renamed.get(name, name): [value] for name, value in dict_items(form.files)},
+    )
     return errors
 
 
@@ -1348,20 +1335,6 @@ def _rekeyed_data(
             errors[name] = [parts]
             continue
         rekeyed.update({parts[0]: value, **parts[1]})
-    return rekeyed
-
-
-def _multi_value_dict_of(
-    entries: dict[str, _ValueT],
-    renamed: Mapping[str, str],
-) -> MultiValueDict[str, _ValueT]:
-    """Return a ``MultiValueDict`` holding each value of ``entries`` as its one entry, renamed keys moved.
-
-    ``get`` on it answers each value exactly as ``entries`` holds it.
-    """
-    rekeyed: MultiValueDict[str, _ValueT] = MultiValueDict()
-    for name, value in entries.items():
-        rekeyed.setlist(renamed.get(name, name), [value])
     return rekeyed
 
 
@@ -2019,21 +1992,6 @@ def _coerced_null_fields(form: _ModelFormAny, *, creating: bool) -> list[_FieldA
     return coerced_fields
 
 
-def _store_nulls(form: _ModelFormAny, fields: list[_FieldAny]) -> None:
-    """Store ``NULL`` in each ``null=True`` column of ``fields`` on the instance the save writes.
-
-    Each is a column ``_coerced_null_fields`` named: an explicit ``null``, a create
-    omitting the field, or an update omitting it over a stored ``NULL`` whose restore
-    (``_keep_omitted_columns``) a consumer-set value skipped. The form field's own cleaning
-    of the bound ``None`` or absent key is written as ``None``, through
-    ``Field.save_form_data``, the call ``construct_instance`` made with the cleaned value.
-    A consumer ``save()`` runs after it and may still write another value.
-    """
-    instance = form.instance
-    for field in fields:
-        field.save_form_data(instance, None)
-
-
 def _unstorable_value_errors(
     form: _ModelFormAny,
     *,
@@ -2065,17 +2023,15 @@ def _unstorable_value_errors(
     """
     instance = form.instance
     cleaned_data: Mapping[str, object] = form.cleaned_data
-    return {
-        field.name: [ValidationError(UNBINDABLE_TEMPORAL_MESSAGE, code=FIELD_ERROR_CODE_INVALID)]
-        for field in instance._meta.concrete_fields
-        if field.name in cleaned_data
-        and field.name not in skip
-        and unstorable_value(
-            field,
-            read_attr(instance, field.attname),
-            pinned_write_alias,
-        )
-    }
+    return unstorable_value_errors(
+        ValidationError,
+        (
+            (field.name, field, read_attr(instance, field.attname))
+            for field in instance._meta.concrete_fields
+            if field.name in cleaned_data and field.name not in skip
+        ),
+        pinned_write_alias,
+    )
 
 
 def _file_clears(provided_files: dict[str, object]) -> dict[str, object]:
@@ -2291,7 +2247,9 @@ def _modelform_write_step(
     value as that column's field-keyed ``null`` error (``_coerced_null_fields``), stores
     ``NULL`` in a ``null=True`` column whose explicit ``null``, create omission (no
     ``default``) or omitted stored ``NULL`` whose restore a consumer-set value skipped its
-    own form field cleaned to a value (``_store_nulls``), refuses a
+    own form field cleaned to a value (through ``Field.save_form_data``, the call
+    ``construct_instance`` made with the cleaned value; a consumer ``save()`` may still
+    write another value), refuses a
     date, datetime, time, duration or decimal the write alias cannot store as that column's
     ``invalid`` error (``_unstorable_value_errors``), then writes through
     ``_modelform_save_or_field_errors`` (the form's save, split around
@@ -2315,7 +2273,7 @@ def _modelform_write_step(
     )
     if bound[1] is not None:
         return StepFailure(bound[1])
-    form = bound[0]
+    form: _ModelFormAny = bound[0]
     kept_files = _required_file_clears(form)
     if kept_files:
         return StepFailure(_form_errors_to_field_errors(kept_files, specs))
@@ -2325,7 +2283,8 @@ def _modelform_write_step(
         return StepFailure(
             _form_errors_to_field_errors(_column_null_errors(refused_fields), specs),
         )
-    _store_nulls(form, coerced_fields)
+    for field in coerced_fields:
+        field.save_form_data(form.instance, None)
     storability_errors = _unstorable_value_errors(form)
     if storability_errors:
         return StepFailure(_form_errors_to_field_errors(storability_errors, specs))

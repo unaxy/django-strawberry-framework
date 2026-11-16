@@ -102,7 +102,6 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms import resolvers as form_resolvers
 from django_strawberry_framework.forms.resolvers import (
     _decode_form_relation_multi,
-    _is_empty_form_value,
     _reconstruct_partial_data,
 )
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
@@ -2018,24 +2017,6 @@ def test_partial_update_reconstruct_reports_an_unresolvable_stored_key(
             == ProfileForm.base_fields["favorite_genre"].error_messages["invalid_choice"]
         )
         assert error.params == {"value": genre.name}
-
-
-def test_is_empty_form_value_handles_unhashable_and_typeerror() -> None:
-    class FakeField:
-        empty_values = {None, ""}
-
-    class UnhashableValue:
-        @override
-        def __hash__(self) -> int:
-            raise TypeError("unhashable")
-
-        @override
-        def __eq__(self, other: object) -> bool:
-            raise TypeError("cannot compare")
-
-    # basedpyright: a stand-in form field carrying only the slots the code under test reads;
-    # _is_empty_form_value types the parameter as forms.Field
-    assert not _is_empty_form_value(UnhashableValue(), FakeField())  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.parametrize(

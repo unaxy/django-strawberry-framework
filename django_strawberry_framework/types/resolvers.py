@@ -297,8 +297,8 @@ def _check_n1(
     Connection contract (spec-033 Decision 8): the synthesized
     relation-connection resolver calls this with ``kind="connection_to_attr"``
     on its per-parent branch, after it refused to serve whatever sits under
-    the windowed-prefetch ``to_attr`` (absent, not a list, rows without the
-    window row number, or a sidecar ``filter`` / ``order_by`` kwarg), and the
+    the windowed-prefetch ``to_attr`` (absent, not a list, or a sidecar
+    ``filter`` / ``order_by`` kwarg), and the
     handed-off window's fallback calls it with ``force_unplanned`` when
     ``resolve_connection`` refuses the window
     (``connection.py::_build_windowed_fallback``). Both always query, so the

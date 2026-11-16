@@ -195,12 +195,11 @@ from django_strawberry_framework.utils.errors import (
     build_error_key_map,
     empty_validation_error,
     field_error,
-    integrity_error_field_errors,
     join_error_path,
-    null_field_error,
     rekey_error_segment,
     save_time_error_key_map,
     unstorable_value,
+    unstorable_value_errors,
 )
 from django_strawberry_framework.utils.inputs import (
     RELATION_MULTI,
@@ -236,9 +235,9 @@ from django_strawberry_framework.utils.write_values import (
     decode_visible_relation,
     decode_visible_relation_ids,
     decoded_into,
+    refused_null_errors,
     refused_save,
     saves_rows_of,
-    unstorable_columns,
 )
 from django_strawberry_framework.write_mixins import backing_model_of
 
@@ -262,7 +261,7 @@ from .validator_guard import guard_uniqueness_validator
 
 if TYPE_CHECKING:
     import datetime
-    from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
     from typing import Protocol, TypeAlias
 
     from django.db import models
@@ -296,17 +295,6 @@ if TYPE_CHECKING:
         """A field's ``to_internal_value``, as the storability hold wraps it."""
 
         def __call__(self, data: object) -> object: ...
-
-    class _Refuses(Protocol):
-        """A storability rule: whether the alias ``using()`` names refuses a column's value."""
-
-        def __call__(
-            self,
-            column: object,
-            value: object,
-            using: Callable[[], str],
-            /,
-        ) -> bool: ...
 
     class _RowSource(Protocol):
         """A validator's ``queryset``: a queryset or a manager, either of which ``all()`` re-reads."""
@@ -445,12 +433,6 @@ def _decode_input_object(
     """
     if data is None:
         return {}, None
-    if introspection.mro_attr(data, "__strawberry_definition__", _OMITTED) is _OMITTED:
-        return {}, field_error(
-            path_prefix or NON_FIELD_ERROR_KEY,
-            "Invalid input object.",
-            codes=FIELD_ERROR_CODE_INVALID,
-        )
     provided_data: dict[str, object] = {}
 
     def _field_path(spec: InputFieldSpec) -> str:
@@ -500,16 +482,8 @@ def _decode_nested(
     if value is None:
         return None, None
     if spec.kind == NESTED_MULTI:
-        try:
-            items = list_of(value)
-        except TypeError:
-            return None, field_error(
-                path_prefix,
-                "Expected a list of items.",
-                codes=FIELD_ERROR_CODE_INVALID,
-            )
         decoded_items: list[dict[str, object] | None] = []
-        for index, item in enumerate(items):
+        for index, item in enumerate(list_of(value)):
             item_path = join_error_path(path_prefix, str(index))
             if item is None:
                 decoded_items.append(None)
@@ -955,11 +929,7 @@ def _hold_serializer_values(
     for name, field in bound_fields(serializer).items():
         entry = written.get(name)
         if entry is not None:
-            field.to_internal_value = _storability_failing(
-                entry[1],
-                field.to_internal_value,
-                unstorable_value,
-            )
+            field.to_internal_value = _storability_failing(entry[1], field.to_internal_value)
         # A nested Serializer owns its serializer-level validators. It appears here
         # as a parent field and is visited again as its own validation-tree node.
         if not field.read_only and not isinstance(field, serializers.Serializer):
@@ -1016,44 +986,16 @@ def _hold_serializer_values(
     ]
 
 
-def _storability_failing(
-    column: _FieldAny,
-    original: _ToInternal,
-    refuses: _Refuses,
-) -> _ToInternal:
+def _storability_failing(column: _FieldAny, original: _ToInternal) -> _ToInternal:
     """Fail a converted root writable value the pinned alias cannot save to ``column``."""
 
     def _to_internal_value(data: object) -> object:
         value = original(data)
-        if refuses(column, value, pinned_write_alias):
+        if unstorable_value(column, value, pinned_write_alias):
             raise DRFValidationError(UNBINDABLE_TEMPORAL_MESSAGE, code=FIELD_ERROR_CODE_INVALID)
         return value
 
     return _to_internal_value
-
-
-def _unstorable_written_values(
-    columns: Mapping[str, tuple[DRFField, _FieldAny]],
-    values: object,
-    refuses: _Refuses,
-) -> dict[str, list[ErrorDetail]]:
-    """Map each field of ``columns`` whose value in ``values`` ``refuses`` refuses for its column.
-
-    ``values`` is the serializer's final ``validated_data``, keyed by each writable
-    field's ``source`` and asked on the pinned alias after ``is_valid()``. A refused field answers the
-    ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` ``ErrorDetail`` under its field name, the
-    shape ``serializer.errors`` carries. A value that is no mapping (what a
-    ``to_internal_value`` or ``validate()`` override returns in its place, which DRF passes
-    on and its own ``save()`` refuses) holds no column value to read.
-    """
-    if not is_mapping(values):
-        return {}
-    return {
-        name: [ErrorDetail(UNBINDABLE_TEMPORAL_MESSAGE, code=FIELD_ERROR_CODE_INVALID)]
-        for name, (field, column) in columns.items()
-        if (source := field.source or name) in values
-        and refuses(column, values[source], pinned_write_alias)
-    }
 
 
 def _overflow_failing(
@@ -1440,19 +1382,29 @@ def _unstorable_value_errors(
     ``source`` is a top-level ``validated_data`` key naming a concrete column of ``model``
     (``utils/relations.py::written_model_field``) is held to
     ``utils/errors.py::unstorable_value`` on the pinned alias
-    (``_unstorable_written_values``); a refused one answers
+    (``utils/errors.py::unstorable_value_errors``); a refused one answers
     the ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` ``ErrorDetail`` under its field name,
     the shape ``serializer.errors`` carries, so the flattener keys it to the input the
     client sent. A converted root input is also checked inside ``is_valid()`` by
     ``_hold_unstorable_values``; this final check catches changes from
     ``validate_<field>`` and ``validate()``. Its uniqueness queries are separately
     guarded at Django's lookup/compiler seams. A nested serializer's values are written
-    by the consumer's own ``create()`` / ``update()`` and are not read here.
+    by the consumer's own ``create()`` / ``update()`` and are not read here. A
+    ``validated_data`` that is no mapping (what a ``to_internal_value`` or ``validate()``
+    override returns in its place, which DRF passes on and its own ``save()`` refuses)
+    holds no column value to read.
     """
-    return _unstorable_written_values(
-        _written_columns(serializer, model),
-        validated_data_of(serializer),
-        unstorable_value,
+    values = validated_data_of(serializer)
+    if not is_mapping(values):
+        return {}
+    return unstorable_value_errors(
+        ErrorDetail,
+        (
+            (name, column, values[source])
+            for name, (field, column) in _written_columns(serializer, model).items()
+            if (source := field.source or name) in values
+        ),
+        pinned_write_alias,
     )
 
 
@@ -1472,30 +1424,17 @@ def _attempted_row_integrity_errors(
     empty value, so a ``ModelSerializer`` field DRF generates ``required=False`` over it,
     left out, and a declared ``allow_null=True`` field sent ``null`` both reach the
     database's ``NOT NULL`` refusal as an ``IntegrityError`` naming no field. Each such
-    input column the row holds ``None`` on (``utils/write_values.py::unstorable_columns``,
-    read from the in-memory row, so no query runs on the failed connection) answers
-    ``null_field_error`` under its published input name, the model flavor's answer
-    (``mutations/resolvers.py::_created_row_integrity_errors``). Only a column the refused
-    save writes counts: a save with ``update_fields`` (a consumer ``save()`` narrowing its
-    write, or a deferred-load row's loaded fields) leaves every column outside it
-    untouched, so its ``None`` cannot be what the database refused; Django accepts a
-    column there by its name or its ``attname``. The columns and their names are the
-    save-time key map (``utils/errors.py::save_time_error_key_map``), keyed by model field
-    name. No backing-model save that raised ``error`` (a custom ``create()`` /
-    ``update()`` whose failing write is another model's, the concrete base's under a
-    proxy model or a multi-table parent's included, an M2M row, raw SQL, or no write at
-    all), or one no such column explains, is the ``"__all__"`` ``constraint`` envelope.
-    Read after the failed save, never before, so a consumer ``save()`` that fills the
-    value in still writes.
+    input column the row holds ``None`` on answers the model flavor's ``null_field_error``
+    (``utils/write_values.py::refused_null_errors``), named through the save-time key map
+    (``utils/errors.py::save_time_error_key_map``). Only a column the refused save writes
+    counts: a save with ``update_fields`` (a consumer ``save()`` narrowing its write, or a
+    deferred-load row's loaded fields) leaves every column outside it untouched, so its
+    ``None`` cannot be what the database refused. No backing-model save that raised
+    ``error`` (a custom ``create()`` / ``update()`` whose failing write is another
+    model's, the concrete base's under a proxy model or a multi-table parent's included,
+    an M2M row, raw SQL, or no write at all) is the ``"__all__"`` ``constraint`` envelope.
     """
-    refused = refused_save(attempted, error)
-    if refused is None:
-        return integrity_error_field_errors()
-    row, update_fields = refused
-    columns = unstorable_columns(row, error_key_map, update_fields=update_fields)
-    if not columns:
-        return integrity_error_field_errors()
-    return [null_field_error(error_key_map[column.name][0], column) for column in columns]
+    return refused_null_errors(refused_save(attempted, error), error_key_map)
 
 
 def _guarded_serializer_write(

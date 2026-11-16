@@ -68,7 +68,9 @@ from .errors import (
     FIELD_ERROR_CODE_INVALID,
     UNBINDABLE_TEMPORAL_MESSAGE,
     field_error,
+    integrity_error_field_errors,
     join_error_path,
+    null_field_error,
     relation_field_error,
     unstorable_text,
     unstorable_value,
@@ -95,7 +97,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.relay import _RelayDjangoType
-    from django_strawberry_framework.utils.errors import FieldError
+    from django_strawberry_framework.utils.errors import ErrorKeyMap, FieldError
 
     from .inputs import InputFieldSpec
     from .typing import ModelField
@@ -973,3 +975,23 @@ def refused_save(
         if sender in frames:
             return instance, update_fields
     return None
+
+
+def refused_null_errors(
+    refused: tuple[models.Model, frozenset[str] | None] | None,
+    error_key_map: ErrorKeyMap,
+    *,
+    row: models.Model | None = None,
+) -> list[FieldError]:
+    """Map ``refused`` (``refused_save``; with ``row``, only that row's save) to its null columns.
+
+    Each ``unstorable_columns`` column of the refused row, read in memory after the failed
+    save (no query runs on the failed connection), answers ``null_field_error`` under its
+    ``error_key_map`` input name; none, or no such refusal, is the ``"__all__"`` envelope.
+    """
+    if refused is None or (row is not None and refused[0] is not row):
+        return integrity_error_field_errors()
+    columns = unstorable_columns(refused[0], error_key_map, update_fields=refused[1])
+    if not columns:
+        return integrity_error_field_errors()
+    return [null_field_error(error_key_map[column.name][0], column) for column in columns]

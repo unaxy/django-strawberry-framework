@@ -14084,10 +14084,12 @@ def _plain_books_under_window_attr(queryset: QuerySet[models.Genre]) -> QuerySet
 
 
 #: How a ``GenreType`` hook can put a value under the reserved shared window
-#: attribute that the ``booksConnection`` resolver refuses to serve: the hook,
+#: attribute that the ``booksConnection`` page refuses to serve: the hook,
 #: the ``booksConnection`` arguments, and whether ``BookType.get_queryset``
 #: adds ``.distinct()`` so the walker leaves the relation unplanned (the
-#: sidecar ``filter:`` or ``orderBy:`` leaves it unplanned by itself).
+#: sidecar ``filter:`` or ``orderBy:`` leaves it unplanned by itself). A list
+#: with no published plan is refused by ``connection.py::_consume_window``; a
+#: value that is no list, or a sidecar argument, by the resolver itself.
 _REFUSED_WINDOW_SHAPES: dict[str, tuple[_GenreQuerysetHook, str, bool]] = {
     "rows-without-row-number": (_plain_books_under_window_attr, "first: 2", True),
     "not-a-list": (
@@ -14181,8 +14183,8 @@ def test_strictness_raise_reports_a_refused_window_attribute_as_unplanned(
     """A value under the window attribute that the resolver does not serve is a per-parent query.
 
     The walker leaves the relation unplanned, and the hook's value under
-    ``_dst_books_connection`` is not a window the resolver serves (rows without
-    ``_dst_row_number``, not a list, or a ``filter:`` / ``orderBy:`` the window cannot carry),
+    ``_dst_books_connection`` is not a window the page serves (a list with no
+    published plan, not a list, or a ``filter:`` / ``orderBy:`` the window cannot carry),
     so the per-parent pipeline runs and ``strictness="raise"`` reports it: the
     attribute's presence alone does not make the access served.
     """
@@ -14239,15 +14241,11 @@ def test_genre_books_connection_refuses_unnumbered_rows_under_the_window_attribu
     """Rows a hook prefetched under the window attribute without a row number are not a page.
 
     The hook plants only ``c`` under ``_dst_books_connection``, so a resolver that
-    served the reserved attribute would answer ``c``; the resolver requires the
-    window row number on every row, refuses the list, and a fresh per-parent query
-    serves ``a`` and ``b``. ``BookType`` returns ``.distinct()`` so the walker
-    leaves the relation to that pipeline instead of planning its own window under
-    the same attribute. Two guards refuse the list in series: the resolver's
-    row-number check (``connection.py::_build_relation_connection_resolver``) and
-    the page's own refusal of a window with no published plan
-    (``connection.py::_consume_window``); removing either alone leaves the page
-    served by the other.
+    served the reserved attribute would answer ``c``. ``BookType`` returns
+    ``.distinct()`` so the walker leaves the relation unplanned instead of planning
+    its own window under the same attribute; with no published plan the page refuses
+    the handed-off list (``connection.py::_consume_window``), and a fresh per-parent
+    query serves ``a`` and ``b``.
     """
     _seed_genre_books("a", "b", "c")
     _patch_genre_books_hooks(

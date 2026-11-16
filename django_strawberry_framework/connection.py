@@ -2306,7 +2306,7 @@ def _build_relation_connection_resolver(
     response-key vocabulary the walker planned under (the resolver cannot see
     the pagination arguments to re-derive the window;
     ``ConnectionExtension`` consumes them) - then falls back to the shared
-    attr. When the found rows carry the window annotations AND the
+    attr. When the found value is a list AND the
     resolver's own ``filter`` / ``order_by`` kwargs are absent and the target's
     filter set has no ``required`` own filter (``_filter_step_runs``), it returns a
     ``_WindowedConnectionRows`` marker handing the rows to the generated

@@ -498,7 +498,7 @@ def _named_argument(name: str) -> SimpleNamespace:
     return SimpleNamespace(name=name)
 
 
-def test_resolve_argument_wire_name_never_runs_the_schema_name_converter(
+def test_published_page_argument_name_never_runs_the_schema_name_converter(
     arm_resource_budget: Callable[[object, ResourcePolicy], None],
 ) -> None:
     """Neither a valid normalization nor a rejection invokes ``name_converter``.

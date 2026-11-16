@@ -719,7 +719,7 @@ third call site. Invoking a shared, possibly stateful consumer object from the e
 run it concurrently across simultaneous rejections and could report a spelling the built schema
 does not use, so the error path reads the published argument map instead
 (`django_strawberry_framework/utils/typing.py::published_argument`).
-`tests/test_list_field.py::test_resolve_argument_wire_name_never_runs_the_schema_name_converter`
+`tests/test_list_field.py::test_published_page_argument_name_never_runs_the_schema_name_converter`
 asserts zero converter calls on a valid normalization and on a rejection; the live rows
 `examples/fakeshop/test_query/test_list_field_api.py::test_holder_naming_converters` and
 `examples/fakeshop/test_query/test_list_field_async_api.py::test_async_rejection_reports_the_published_name_without_extra_converter_calls`
@@ -2567,7 +2567,7 @@ sync or async HTTP request cannot isolate:
   (`test_list_field_direct_call_schema_name_fallback_and_definition_lookup`);
 - error-lazy wire-name resolution: neither a valid normalization nor a rejection invokes the
   schema's `NameConverter`
-  (`test_resolve_argument_wire_name_never_runs_the_schema_name_converter`), and malformed
+  (`test_published_page_argument_name_never_runs_the_schema_name_converter`), and malformed
   published-argument metadata is a `ConfigurationError`
   (`tests/utils/test_typing.py::test_published_argument_reads_the_executable_schemas_argument_map`); the live converter-counting
   rows are row 16's counting converter and
@@ -3129,7 +3129,7 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       is stated as the guarantee this package adds (Decisions 19 and 20).
 - [ ] The type registry is the one canonical metadata source: every field factory accepts only
       the definition it holds for the target (by identity), the generated-connection cache
-      proves each warm entry's provenance, and the optimizer plans a relation from the child
+      generates each entry from its caller's definition, and the optimizer plans a relation from the child
       definition it resolved the relation through - leaving no request-time
       `__django_strawberry_definition__` read keyed by a target class on the planned path.
 

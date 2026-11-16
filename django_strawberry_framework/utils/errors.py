@@ -97,7 +97,7 @@ from __future__ import annotations
 import datetime
 import zoneinfo
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import strawberry
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
@@ -136,6 +136,8 @@ if TYPE_CHECKING:
     #: serializer field or serializer ``source``) -> (the GraphQL input field name,
     #: the nested level's own map or ``None``). Built by ``build_error_key_map``.
     ErrorKeyMap: TypeAlias = "dict[str, tuple[str, ErrorKeyMap | None]]"
+
+_ErrorT = TypeVar("_ErrorT")
 
 __all__ = [
     "FIELD_ERROR_CODE_CONFLICT",
@@ -179,6 +181,7 @@ __all__ = [
     "unstorable_temporal",
     "unstorable_text",
     "unstorable_value",
+    "unstorable_value_errors",
     "validation_error_to_field_errors",
 ]
 
@@ -1187,6 +1190,23 @@ def unstorable_value(column: object, value: object, using: Callable[[], str]) ->
     other column answers ``False`` without calling ``using``.
     """
     return unstorable_temporal(column, value, using) or unstorable_decimal(column, value, using)
+
+
+def unstorable_value_errors(
+    error: Callable[..., _ErrorT],
+    entries: Iterable[tuple[str, object, object]],
+    using: Callable[[], str],
+) -> dict[str, list[_ErrorT]]:
+    """Map the name of each ``(name, column, value)`` entry ``unstorable_value`` refuses to its error.
+
+    The error is ``error(UNBINDABLE_TEMPORAL_MESSAGE, code="invalid")``, built by the
+    flavor's own error type (a Django ``ValidationError``, a DRF ``ErrorDetail``).
+    """
+    return {
+        name: [error(UNBINDABLE_TEMPORAL_MESSAGE, code=FIELD_ERROR_CODE_INVALID)]
+        for name, column, value in entries
+        if unstorable_value(column, value, using)
+    }
 
 
 def _converted_kinds(column: object) -> tuple[tuple[type[object], ...], type[object]] | None:
