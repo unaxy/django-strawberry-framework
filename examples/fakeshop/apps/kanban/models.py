@@ -7,9 +7,9 @@ resulting schema is the example tree's most FK-dense / O2O-dense graph.
 
 Two foundations every model leans on:
 
-* :class:`TimeStampedModel` -- an abstract base adding ``created_date`` /
-  ``updated_date`` to every table (the products app inlines the same two
-  fields; an abstract base is the DRY equivalent for this many models).
+* :class:`TimeStampedModel` -- the glossary app's abstract base adding
+  ``created_date`` / ``updated_date`` to every table (the products app inlines
+  the same two fields; an abstract base is the DRY equivalent for this many models).
 * :class:`UUIDModel` -- a single side-table whose UUID primary key is the
   stable, opaque identifier for whichever model row its (one non-null)
   one-to-one link points at. This is NOT a ``uuid`` column on each model; each
@@ -27,6 +27,8 @@ from django.db.models.lookups import Exact
 from django.utils import timezone
 from django.utils.text import slugify
 from typing_extensions import override
+
+from apps.glossary.models import TimeStampedModel
 
 from .constraints import OneHotLinkCount
 
@@ -159,20 +161,6 @@ def manager(
 # ---------------------------------------------------------------------------
 # Abstract bases
 # ---------------------------------------------------------------------------
-
-
-class TimeStampedModel(models.Model):
-    """Audit timestamps inherited by every kanban model."""
-
-    # The auto ``id`` primary key, declared for the type checker (django-stubs types
-    # ``Model.pk`` as ``Any``); ``None`` until the row is saved.
-    pk: int | None
-
-    created_date: _DateTime = models.DateTimeField(auto_now_add=True, editable=False)
-    updated_date: _DateTime = models.DateTimeField(auto_now=True, editable=False)
-
-    class Meta:
-        abstract = True
 
 
 class LookupBase(TimeStampedModel):
@@ -1327,6 +1315,17 @@ def _exactly_one_link_constraint() -> models.CheckConstraint:
     )
 
 
+def _uuid_link(to: type[_M]) -> _NullOneToOne[_M]:
+    """Return one nullable ``UUIDModel`` link to ``to``, reached back as ``instance.uuid``."""
+    return models.OneToOneField(
+        to,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="uuid",
+    )
+
+
 class UUIDModel(TimeStampedModel):
     """Central UUID registry: one row per object, linked O2O to every model.
 
@@ -1341,195 +1340,33 @@ class UUIDModel(TimeStampedModel):
 
     id: _UUIDPrimaryKey = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
-    milestone: _NullOneToOne[Milestone] = models.OneToOneField(
-        "Milestone",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    status: _NullOneToOne[Status] = models.OneToOneField(
-        "Status",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    priority: _NullOneToOne[Priority] = models.OneToOneField(
-        "Priority",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    relativesize: _NullOneToOne[RelativeSize] = models.OneToOneField(
-        "RelativeSize",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    upstream: _NullOneToOne[Upstream] = models.OneToOneField(
-        "Upstream",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    paritylevel: _NullOneToOne[ParityLevel] = models.OneToOneField(
-        "ParityLevel",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    section: _NullOneToOne[Section] = models.OneToOneField(
-        "Section",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    cardreferencekind: _NullOneToOne[CardReferenceKind] = models.OneToOneField(
-        "CardReferenceKind",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    boarddockind: _NullOneToOne[BoardDocKind] = models.OneToOneField(
-        "BoardDocKind",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    targetversion: _NullOneToOne[TargetVersion] = models.OneToOneField(
-        "TargetVersion",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    specdoc: _NullOneToOne[SpecDoc] = models.OneToOneField(
-        "SpecDoc",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    trackedpath: _NullOneToOne[TrackedPath] = models.OneToOneField(
-        "TrackedPath",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    card: _NullOneToOne[Card] = models.OneToOneField(
-        "Card",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    cardreference: _NullOneToOne[CardReference] = models.OneToOneField(
-        "CardReference",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    cardglossaryterm: _NullOneToOne[CardGlossaryTerm] = models.OneToOneField(
-        "CardGlossaryTerm",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    parityclaim: _NullOneToOne[ParityClaim] = models.OneToOneField(
-        "ParityClaim",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    cardpathlink: _NullOneToOne[CardPathLink] = models.OneToOneField(
-        "CardPathLink",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    carditem: _NullOneToOne[CardItem] = models.OneToOneField(
-        "CardItem",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    label: _NullOneToOne[Label] = models.OneToOneField(
-        "Label",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    boarddoc: _NullOneToOne[BoardDoc] = models.OneToOneField(
-        "BoardDoc",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    boarddoccardreference: _NullOneToOne[BoardDocCardReference] = models.OneToOneField(
-        "BoardDocCardReference",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    attemptoutcome: _NullOneToOne[AttemptOutcome] = models.OneToOneField(
-        "AttemptOutcome",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    verificationkind: _NullOneToOne[VerificationKind] = models.OneToOneField(
-        "VerificationKind",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    actor: _NullOneToOne[Actor] = models.OneToOneField(
-        "Actor",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    cardtransition: _NullOneToOne[CardTransition] = models.OneToOneField(
-        "CardTransition",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    workattempt: _NullOneToOne[WorkAttempt] = models.OneToOneField(
-        "WorkAttempt",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
-    decision: _NullOneToOne[Decision] = models.OneToOneField(
-        "Decision",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="uuid",
-    )
+    milestone: _NullOneToOne[Milestone] = _uuid_link(Milestone)
+    status: _NullOneToOne[Status] = _uuid_link(Status)
+    priority: _NullOneToOne[Priority] = _uuid_link(Priority)
+    relativesize: _NullOneToOne[RelativeSize] = _uuid_link(RelativeSize)
+    upstream: _NullOneToOne[Upstream] = _uuid_link(Upstream)
+    paritylevel: _NullOneToOne[ParityLevel] = _uuid_link(ParityLevel)
+    section: _NullOneToOne[Section] = _uuid_link(Section)
+    cardreferencekind: _NullOneToOne[CardReferenceKind] = _uuid_link(CardReferenceKind)
+    boarddockind: _NullOneToOne[BoardDocKind] = _uuid_link(BoardDocKind)
+    targetversion: _NullOneToOne[TargetVersion] = _uuid_link(TargetVersion)
+    specdoc: _NullOneToOne[SpecDoc] = _uuid_link(SpecDoc)
+    trackedpath: _NullOneToOne[TrackedPath] = _uuid_link(TrackedPath)
+    card: _NullOneToOne[Card] = _uuid_link(Card)
+    cardreference: _NullOneToOne[CardReference] = _uuid_link(CardReference)
+    cardglossaryterm: _NullOneToOne[CardGlossaryTerm] = _uuid_link(CardGlossaryTerm)
+    parityclaim: _NullOneToOne[ParityClaim] = _uuid_link(ParityClaim)
+    cardpathlink: _NullOneToOne[CardPathLink] = _uuid_link(CardPathLink)
+    carditem: _NullOneToOne[CardItem] = _uuid_link(CardItem)
+    label: _NullOneToOne[Label] = _uuid_link(Label)
+    boarddoc: _NullOneToOne[BoardDoc] = _uuid_link(BoardDoc)
+    boarddoccardreference: _NullOneToOne[BoardDocCardReference] = _uuid_link(BoardDocCardReference)
+    attemptoutcome: _NullOneToOne[AttemptOutcome] = _uuid_link(AttemptOutcome)
+    verificationkind: _NullOneToOne[VerificationKind] = _uuid_link(VerificationKind)
+    actor: _NullOneToOne[Actor] = _uuid_link(Actor)
+    cardtransition: _NullOneToOne[CardTransition] = _uuid_link(CardTransition)
+    workattempt: _NullOneToOne[WorkAttempt] = _uuid_link(WorkAttempt)
+    decision: _NullOneToOne[Decision] = _uuid_link(Decision)
 
     class Meta(TimeStampedModel.Meta):
         verbose_name = "UUID"

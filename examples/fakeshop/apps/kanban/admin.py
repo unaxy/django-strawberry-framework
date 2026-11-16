@@ -12,7 +12,6 @@ from apps.kanban import models
 class _LookupAdmin(admin.ModelAdmin[models.LookupBase]):
     list_display = ("key", "label", "order")
     search_fields = ("key", "label")
-    ordering = ("order",)
 
 
 for _model in (
@@ -43,7 +42,6 @@ class ActorAdmin(admin.ModelAdmin[models.Actor]):
     )
     list_filter = ("kind",)
     search_fields = ("key", "label")
-    ordering = ("order",)
 
 
 @admin.register(models.CardTransition)

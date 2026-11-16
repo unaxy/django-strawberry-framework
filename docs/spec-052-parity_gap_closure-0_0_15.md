@@ -506,8 +506,8 @@ on card `TODO-ALPHA-059-0.1.0` (the beta cut) true rather than asserted.
   and `createShelfViaForm`, `Book.genres` by `updateBookViaForm` and
   `updateBookGenresViaSerializer`; kanban `Card.labels` is auto-created too,
   with no timestamps; every custom through model inherits
-  `created_date` (`auto_now_add`) and `updated_date` (`auto_now`) from its
-  app's `TimeStampedModel` — kanban `Card.glossary_terms`
+  `created_date` (`auto_now_add`) and `updated_date` (`auto_now`) from the
+  glossary app's `TimeStampedModel` — kanban `Card.glossary_terms`
   (`CardGlossaryTerm`: `raw_text` and `order` defaulted, unique on
   `(card, order)`), `Card.parity` (`ParityClaim`: required `level` foreign
   key), `Card.changed_files` (`CardPathLink`: `kind` defaulted), glossary

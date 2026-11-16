@@ -10,7 +10,6 @@ class _LookupAdmin(admin.ModelAdmin[models.LookupBase]):
 
     list_display = ("key", "label", "order")
     search_fields = ("key", "label", "description")
-    ordering = ("order", "label")
 
 
 admin.site.register(models.GlossaryStatus, _LookupAdmin)

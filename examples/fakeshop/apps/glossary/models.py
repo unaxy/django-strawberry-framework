@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 class TimeStampedModel(models.Model):
-    """Audit timestamps inherited by every glossary model."""
+    """Audit timestamps inherited by every glossary and kanban model."""
 
     # The auto ``id`` primary key, declared for the type checker (django-stubs types
     # ``Model.pk`` as ``Any``); ``None`` until the row is saved.
