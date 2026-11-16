@@ -3,7 +3,8 @@
 The helpers are checked on the shapes the package passes them: plain, metaclass and enum
 classes, the ``classmethod``, ``staticmethod`` and ``property`` entries of a class namespace,
 C callables, bound methods, ``functools`` wrappers and callable instances. Each expectation is
-the answer the interpreter gives for that shape.
+the answer the interpreter gives for that shape. A Django ``SimpleLazyObject`` is answered as
+itself and its factory never runs.
 """
 
 from __future__ import annotations
@@ -15,9 +16,11 @@ import functools
 
 import pytest
 from django.db import models
+from django.utils.functional import SimpleLazyObject
 from typing_extensions import override
 
 from django_strawberry_framework.utils.introspection import (
+    class_mro_attr,
     kind,
     mro_attr,
     mro_entry,
@@ -139,6 +142,41 @@ def test_mro_attr_reads_the_static_attribute() -> None:
     assert mro_attr(_Sub, "absent", sentinel) is sentinel
     assert mro_attr(Unsupported, "__iter__", sentinel) is None
     assert mro_attr(_Callable, "__call__") is _Callable.__call__
+
+
+class _StoresMro(_Base):
+    mro = "stored"
+
+
+def _unevaluated(value: object) -> object:
+    """A lazy proxy of ``value`` whose factory fails the test if anything evaluates it."""
+
+    def setup() -> object:
+        pytest.fail(f"the lazy proxy of {value!r} was evaluated")
+
+    return SimpleLazyObject(setup)
+
+
+def test_class_mro_attr_reads_the_class_mro_and_never_the_metaclass() -> None:
+    """``mro`` only ``type`` carries is absent; a class or ancestor storing it answers."""
+    sentinel = object()
+    assert class_mro_attr(_Sub, "mro", sentinel) is sentinel
+    assert class_mro_attr(_Sub, "__call__", sentinel) is sentinel
+    assert mro_attr(_Sub, "mro", sentinel) is not sentinel
+    assert class_mro_attr(type("_Child", (_StoresMro,), {}), "mro") == "stored"
+    assert class_mro_attr(_Sub, "marker") == "base"
+    assert class_mro_attr(_Sub, "prop") is vars(_Base)["prop"]
+    assert class_mro_attr(_Base(), "marker", sentinel) is sentinel
+
+
+def test_the_class_reads_answer_a_lazy_proxy_of_a_class_as_no_class() -> None:
+    """A lazy proxy forwards ``__class__``; each class read asks the proxy's real class instead."""
+    lazy = _unevaluated(_Sub)
+    assert kind(lazy) == "SimpleLazyObject"
+    assert name(lazy) == "SimpleLazyObject"
+    assert mro_entry({_Base: "base", object: "object"}, lazy) is None
+    assert overrides(lazy, _Base, "meth") is False
+    assert class_mro_attr(lazy, "marker") is None
 
 
 @pytest.mark.parametrize(

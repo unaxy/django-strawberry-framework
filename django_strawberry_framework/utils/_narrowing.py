@@ -26,8 +26,9 @@ the real type can do neither, so these are the predicates for a value whose answ
 gates an operation that itself checks the real type (``str.__eq__`` refuses a value
 that is not really a ``str``).
 
-``is_class`` asks the same of ``type``: a Django lazy proxy forwards ``__class__`` and
-passes ``isinstance(proxy, type)``, yet ``issubclass`` refuses it. ``class_namespace`` and
+``is_class`` asks the same of ``type``, and ``is_real_instance`` of any class handed to it: a
+Django lazy proxy forwards ``__class__`` and passes ``isinstance(proxy, type)``, yet
+``issubclass`` refuses it. ``class_namespace`` and
 ``instance_state`` are ``vars``, typed ``Mapping[str, object]`` for a class's own namespace
 and ``dict[str, object]`` for an instance's ``__dict__``.
 
@@ -336,6 +337,7 @@ __all__ = (
     "is_options",
     "is_queryset",
     "is_real_collection",
+    "is_real_instance",
     "is_real_mapping",
     "is_set_or_frozenset",
     "is_str",
@@ -437,6 +439,15 @@ def is_str(value: object) -> TypeIs[str]:
 def is_class(value: object) -> TypeIs[type[object]]:
     """Return whether ``value`` IS a class, asked of its real type."""
     return issubclass(type(value), type)
+
+
+def is_real_instance(value: object, cls: type[_InstanceT], /) -> TypeIs[_InstanceT]:
+    """Return whether ``value`` is an instance of ``cls`` (subclasses included), asked of its real type.
+
+    A Django lazy proxy forwards ``__class__``, so ``isinstance`` would run its factory
+    and answer for the wrapped value; the real type answers for the proxy itself.
+    """
+    return issubclass(type(value), cls)
 
 
 def is_char_wise(value: object) -> TypeIs[str | bytes | bytearray | memoryview]:

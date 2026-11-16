@@ -13,7 +13,7 @@ import pytest
 from django.db import models
 from django.db.models.lookups import Exact
 from django.db.models.sql.where import WhereNode
-from django.utils.functional import Promise, lazy
+from django.utils.functional import Promise, SimpleLazyObject, lazy
 from django.utils.translation import gettext_lazy
 
 from django_strawberry_framework.utils._narrowing import (
@@ -25,6 +25,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_lookup,
     is_queryset,
     is_real_collection,
+    is_real_instance,
     is_real_mapping,
     is_str,
     is_text_atom,
@@ -224,6 +225,18 @@ def test_is_real_collection_asks_the_real_class() -> None:
     assert is_real_collection(iter([1])) is False
     assert is_real_collection(1) is False
     assert is_real_collection(_ClaimsCollection()) is False
+
+
+def test_is_real_instance_asks_the_real_class_and_never_evaluates_a_lazy_proxy() -> None:
+    """A subclass instance passes; a lazy proxy of one is judged as itself, its factory unrun."""
+
+    def setup() -> object:
+        pytest.fail("the lazy proxy was evaluated")
+
+    assert is_real_instance(UserDict[str, int](), Mapping) is True
+    assert is_real_instance("x", int) is False
+    assert is_real_instance(SimpleLazyObject(setup), str) is False
+    assert is_real_instance(SimpleLazyObject(setup), SimpleLazyObject) is True
 
 
 def test_optional_annotation_widens_an_annotation_with_none() -> None:

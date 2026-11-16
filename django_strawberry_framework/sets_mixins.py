@@ -64,6 +64,8 @@ from .utils._narrowing import (
     class_namespace,
     is_class,
     is_mapping,
+    is_real_instance,
+    is_str,
     read_attr,
     require,
     require_instance,
@@ -191,7 +193,7 @@ class LazyRelatedClassMixin:
         (their exceptions propagate); everything else is returned as-is.
         The owner's module is its ``__module__``.
         """
-        if isinstance(class_ref, str):
+        if is_str(class_ref):
             ref = introspection.text(class_ref)
             try:
                 return _import_object(ref)
@@ -379,7 +381,7 @@ def collect_related_declarations(
             for name, inherited_declaration in inherited.items():
                 collected[name] = inherited_declaration
     for name, declaration in own_items:
-        if isinstance(declaration, declaration_type):
+        if is_real_instance(declaration, declaration_type):
             collected[name] = declaration
         elif name in collected:
             del collected[name]
@@ -400,12 +402,12 @@ def collect_related_declarations(
             )
             if name in declarations:
                 selected = declarations[name]
-                if isinstance(selected, declaration_type):
+                if is_real_instance(selected, declaration_type):
                     collected[name] = selected
                 else:
                     del collected[name]
                 break
-            if introspection.mro_attr(base, name, missing) is not missing:
+            if introspection.class_mro_attr(base, name, missing) is not missing:
                 del collected[name]
                 break
     _reject_shared_relations(new_class, collected)
@@ -432,8 +434,6 @@ def _reject_shared_relations(
     claimed: dict[tuple[str, ...], str] = {}
     for name, declaration in collected.items():
         relation = _declared_relation(name, declaration)
-        if relation is None:
-            continue
         prior = claimed.setdefault(relation, name)
         if prior != name:
             raise ConfigurationError(
@@ -445,16 +445,17 @@ def _reject_shared_relations(
             )
 
 
-def _declared_relation(name: str, declaration: object) -> tuple[str, ...] | None:
-    """Return the relation segments a declaration names, ``None`` for a non-string ``field_name``.
+def _declared_relation(name: str, declaration: object) -> tuple[str, ...]:
+    """Return the relation segments a declaration names.
 
     The relation is the declaration's ``field_name`` (the ORM accessor), or its
-    attribute name when it declares none, as
+    attribute name when it declares none, read as the text it renders, so a lazy
+    ``field_name`` names what its plain ``str`` spelling names, as
     ``utils/permissions.py::walk_declared_relation_path`` matches it.
     """
     field_name: object = getattr(declaration, "field_name", None)
     relation = name if field_name is None else field_name
-    return tuple(relation.split(LOOKUP_SEP)) if isinstance(relation, str) else None
+    return tuple(introspection.text(relation).split(LOOKUP_SEP))
 
 
 def reject_captured_branches(
@@ -483,9 +484,8 @@ def reject_captured_branches(
     is not a ``family`` class generates no input, so no path runs through it.
     """
     relations = [
-        (name, declaration, relation)
+        (name, declaration, _declared_relation(name, declaration))
         for name, declaration in related.items()
-        if (relation := _declared_relation(name, declaration)) is not None
     ]
     for short_name, short, short_relation in relations:
         for long_name, long_declaration, long_relation in relations:
@@ -540,7 +540,7 @@ def _target_reaches(
     related: Mapping[str, object] = getattr(target, related_attr, {})
     for name, declaration in related.items():
         relation = _declared_relation(name, declaration)
-        if relation is None or relation[: len(remainder)] != remainder[: len(relation)]:
+        if relation[: len(remainder)] != remainder[: len(relation)]:
             continue
         child = read_attr(declaration, target_attr)
         # A ``None`` placeholder target generates no input, so no path runs through it.
@@ -633,7 +633,7 @@ def should_cache_expansion(cls: type[object], *, related_attr: str, target_slot:
     own = class_namespace(cls)
     # The set metaclass stores ``related_attr`` as a name-keyed declaration map.
     return related_attr in own and all(
-        not isinstance(read_attr(entry, target_slot), str)
+        not is_str(read_attr(entry, target_slot))
         for entry in require(own[related_attr], is_mapping).values()
     )
 
@@ -734,7 +734,7 @@ def require_lookup_names(set_cls: type[object], field_name: str, lookups: object
     ``str`` lookup names; ``utils/inputs.py::plain_set_meta_fields`` has already
     read every ``str`` subclass member (a ``StrEnum`` lookup) as its text.
     """
-    if type(lookups) is str or isinstance(lookups, Promise):
+    if type(lookups) is str or issubclass(type(lookups), Promise):
         if lookups == "__all__":
             return
     elif is_re_readable_field_declaration(lookups):

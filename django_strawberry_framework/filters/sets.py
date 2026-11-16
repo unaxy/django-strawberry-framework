@@ -126,6 +126,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_list_or_tuple,
     is_lookup,
     is_queryset,
+    is_str,
     is_tuple,
     list_of,
     optional_instance,
@@ -2701,7 +2702,7 @@ def _published_path(owner: type[FilterSet], filter_instance: Filter) -> str | No
     """
     field_name = filter_instance.field_name
     record = _expansion_record(filter_instance)
-    if record is None or not record.holds_in(owner) or not isinstance(field_name, str):
+    if record is None or not record.holds_in(owner) or not is_str(field_name):
         return field_name
     related_filter = owner.related_filters[record.branch]
     prefix = f"{_branch_relation(owner, related_filter)}{LOOKUP_SEP}"

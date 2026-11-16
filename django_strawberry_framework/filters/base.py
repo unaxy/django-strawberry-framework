@@ -493,9 +493,10 @@ def _declared_field_name(filter_instance: Filter) -> str:
 
     django-filter's metaclass defaults every declared filter's ``field_name`` to its
     attribute name and ``filter_for_field`` names every generated one, so a bound
-    filter's ``field_name`` is a string; only an unbound ``Filter()`` still carries
-    the ``None`` its constructor defaults to. A ``None`` here is a filter the
-    consumer rebound after class creation, refused rather than handed to a path walk.
+    filter's ``field_name`` is a string or lazy text, returned as the text it renders;
+    only an unbound ``Filter()`` still carries the ``None`` its constructor defaults
+    to. A ``None`` here is a filter the consumer rebound after class creation, refused
+    rather than handed to a path walk.
     """
     field_name = filter_instance.field_name
     if field_name is None:
@@ -503,7 +504,7 @@ def _declared_field_name(filter_instance: Filter) -> str:
             f"{introspection.kind(filter_instance)} has no field_name; a filter bound to a "
             "FilterSet must name the model field path it filters.",
         )
-    return field_name
+    return introspection.text(field_name)
 
 
 def _bound_field_name(filter_instance: Filter) -> str:
@@ -3876,7 +3877,7 @@ def refuse_querysetless_choice(
         return
     raise ConfigurationError(
         f"FilterSet {filterset_cls.__qualname__}: {introspection.kind(filter_instance)} "
-        f"{filter_name!r} has field_name {introspection.text(_declared_field_name(filter_instance))!r} "
+        f"{filter_name!r} has field_name {_declared_field_name(filter_instance)!r} "
         "and no queryset, so the model-choice form field it builds has no rows to look a "
         "value up in, and every request building the set's form would fail. "
         "Pass queryset= (a model queryset, or a callable taking the request), override the "
@@ -3947,7 +3948,7 @@ def refuse_unresolvable_lookup(
         return
     # django-filter formats the predicate's argument (``Filter.filter``), so a lazy
     # ``field_name`` or ``lookup_expr`` is read as the text it renders.
-    field_name = introspection.text(_declared_field_name(filter_instance))
+    field_name = _declared_field_name(filter_instance)
     lookup_expr = introspection.text(filter_instance.lookup_expr)
     path = (
         _model_resolved_field(model, field_name).path
@@ -4054,7 +4055,7 @@ def refuse_listless_lookup(
         or _takes_list(lookup, field)
     ):
         return
-    field_name = introspection.text(_declared_field_name(filter_instance))
+    field_name = _declared_field_name(filter_instance)
     lookup_expr = introspection.text(filter_instance.lookup_expr)
     related_key = _related_column_hint(field, field_name)
     raise ConfigurationError(
@@ -4092,7 +4093,7 @@ def _filterset_walked_lookup(
     ``filters/sets.py::FilterSet._flat_leaf_walk`` walks it: it reads its pair off the
     per-request copy the walk binds; so does a ``RelatedFilter`` head.
     """
-    field_name = introspection.text(_declared_field_name(filter_instance))
+    field_name = _declared_field_name(filter_instance)
     lookup_expr = introspection.text(filter_instance.lookup_expr)
     model = _filterset_model(filterset)
     if model is None:

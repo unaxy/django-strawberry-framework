@@ -48,7 +48,7 @@ from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 
-from . import truth
+from . import introspection, truth
 from ._narrowing import (
     dict_items,
     is_mapping,
@@ -679,7 +679,8 @@ def walk_declared_relation_path(
 
     Each hop is resolved against the current set's declared related collection
     (``related_filters`` / ``related_orders``) by matching a declaration's
-    ``field_name`` -- the ORM accessor, NOT the public attribute name -- so a
+    ``field_name`` -- the ORM accessor, NOT the public attribute name, read as the
+    text it renders so a lazy ``field_name`` matches as its plain spelling does -- so a
     renamed branch (``visible_shelves = RelatedFilter(ShelfFilter,
     field_name="shelves")``) still resolves; a set declares each relation once
     (``sets_mixins.py::collect_related_declarations``), so no two declarations
@@ -723,11 +724,10 @@ def walk_declared_relation_path(
     while index < len(segments):
         matches: list[tuple[int, str, object]] = []
         for declared_attr, related_obj in _related_declarations(current_cls, related_attr):
-            field_name: object = getattr(related_obj, "field_name", None)
-            if field_name is None:
-                field_name = declared_attr
-            if not truth.is_instance(field_name, str):
-                continue
+            declared_name: object = getattr(related_obj, "field_name", None)
+            field_name = introspection.text(
+                declared_attr if declared_name is None else declared_name,
+            )
             field_segments = tuple(field_name.split(LOOKUP_SEP))
             if segments[index : index + len(field_segments)] != field_segments:
                 continue

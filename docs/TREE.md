@@ -838,6 +838,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_raw_filter_forms_api.py  # Consumer JSON and raw arguments preserve filter forms, widget keys and public primitive calls.
 ├── test_raw_relation_filter_arguments_api.py  # Raw relation filters reached through ordinary public scalar Query arguments.
 ├── test_raw_relation_key_forms_api.py  # Unbound raw relation forms compare target primary keys and drop uncoercible members over HTTP.
+├── test_related_declaration_names_api.py  # A related declaration named like a metaclass attribute survives a base that does not declare it.
 ├── test_related_filter_flat_api.py  # Live contracts of ``RelatedFilter(flat=False)`` on the shipped reading-list cycle.
 ├── test_relation_authority_worlds_api.py  # Live relation leaves answer over each relation kind's visible target rows.
 ├── test_relation_authority_worlds_sharded_api.py  # Walked relation leaves use their root queryset's database on every correlation link.

@@ -437,7 +437,7 @@ def refuse_unannotated_joinless_relation(
     # is read as the text it renders.
     lookup_expr = introspection.text(filter_instance.lookup_expr)
     argument = LOOKUP_SEP.join(
-        (introspection.text(_declared_field_name(filter_instance)), lookup_expr),
+        (_declared_field_name(filter_instance), lookup_expr),
     )
     # The name of the annotation claiming a leading part, or a false value for none (the
     # stubs type it as the expression an older Django returned).

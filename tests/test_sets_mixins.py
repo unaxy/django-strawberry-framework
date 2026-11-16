@@ -31,6 +31,8 @@ from apps.library import models as library_models
 from apps.library.filters import BookFilter
 from apps.library.models import Book
 from django.db.models import Model
+from django.utils.functional import SimpleLazyObject
+from django.utils.translation import gettext_lazy
 from django_filters import CharFilter
 from typing_extensions import override
 
@@ -1099,21 +1101,6 @@ def test_an_overriding_related_order_and_an_overlapping_path_are_accepted() -> N
     assert _Child.related_orders["shelf"] is not _Base.related_orders["shelf"]
 
 
-def test_a_non_string_field_name_claims_no_relation() -> None:
-    """A ``field_name`` that is not a string names no relation, so it collides with nothing.
-
-    ``utils/permissions.py::walk_declared_relation_path`` matches no hop on one either.
-    """
-
-    class _Owner(OrderSet):
-        # basedpyright: a non-string field_name is the shape under test
-        first = RelatedOrder(OrderSet, field_name=7)  # pyright: ignore[reportArgumentType]
-        # basedpyright: a non-string field_name is the shape under test
-        second = RelatedOrder(OrderSet, field_name=7)  # pyright: ignore[reportArgumentType]
-
-    assert list(_Owner.related_orders) == ["first", "second"]
-
-
 def test_a_longer_related_filter_capturing_a_branchs_flat_leaves_is_refused() -> None:
     """``shelf__branch`` beside ``shelf`` takes ``shelf``'s flat leaves into ``branch``; refused.
 
@@ -1348,3 +1335,108 @@ def test_re_readable_gate_message_is_pinned() -> None:
         f"collection of field names; got list_iterator ({one_shot!r}). "
         f"{RE_READABLE_FIELDS_HELP}"
     )
+
+
+def _unevaluated(value: object) -> object:
+    """A lazy proxy of ``value`` whose factory fails the test if anything evaluates it."""
+
+    def setup() -> object:
+        pytest.fail(f"the lazy proxy of {value!r} was evaluated")
+
+    return SimpleLazyObject(setup)
+
+
+class _LazyShelfFilter(FilterSet):
+    class Meta:
+        model = library_models.Shelf
+        fields = {"code": ["exact"]}
+
+
+class _LazyShelfOrder(OrderSet):
+    class Meta:
+        model = library_models.Shelf
+        fields = ["code"]
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["shelves", SimpleLazyObject(lambda: "shelves"), gettext_lazy("shelves")],
+    ids=["str", "simple-lazy-object", "gettext-lazy"],
+)
+def test_a_lazily_named_duplicate_relation_is_refused_as_its_plain_spelling(
+    field_name: str,
+) -> None:
+    """A lazy ``field_name`` claims the relation its text names, so both families refuse it.
+
+    Beside a plain ``"shelves"`` declaration, the lazy spelling of ``shelves`` is a second
+    declaration on that relation.
+    """
+    with pytest.raises(ConfigurationError, match="'shelves' and 'lazy' both declare the relation"):
+
+        @definition_raises
+        class _Filters(FilterSet):
+            shelves = RelatedFilter(_LazyShelfFilter, field_name="shelves")
+            lazy = RelatedFilter(_LazyShelfFilter, field_name=field_name)
+
+    with pytest.raises(ConfigurationError, match="'shelves' and 'lazy' both declare the relation"):
+
+        @definition_raises
+        class _Orders(OrderSet):
+            shelves = RelatedOrder(_LazyShelfOrder, field_name="shelves")
+            lazy = RelatedOrder(_LazyShelfOrder, field_name=field_name)
+
+
+def test_a_flat_copy_whose_field_name_is_a_lazy_proxy_publishes_it_unread() -> None:
+    """``_published_path`` answers a non-``str`` copy ``field_name`` as itself, unevaluated."""
+
+    class _Flat(FilterSet):
+        shelves = RelatedFilter(_LazyShelfFilter, field_name="shelves", flat=True)
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    copies = [
+        leaf
+        for leaf in _Flat.get_filters().values()
+        if filter_sets._expansion_record(leaf) is not None
+    ]
+    assert copies
+    lazy = _unevaluated("shelves__code")
+    vars(copies[0])["field_name"] = lazy
+    assert filter_sets._published_path(_Flat, copies[0]) is lazy
+
+
+def test_a_lazy_proxy_of_an_import_path_is_no_import_path() -> None:
+    """``resolve_lazy_class`` hands a lazy proxy on as itself, for the target gate to refuse."""
+    lazy = _unevaluated("apps.library.filters.ShelfFilter")
+    assert LazyRelatedClassMixin().resolve_lazy_class(lazy, None) is lazy
+
+
+def test_should_cache_expansion_counts_a_lazy_proxy_target_as_resolved_unevaluated() -> None:
+    """A lazy-proxy target slot is no pending import-path ``str``, so the expansion caches."""
+    entry = types.SimpleNamespace(target=_unevaluated("apps.library.filters.ShelfFilter"))
+    owner = type("_LazyTargetCache", (), {"related": {"shelves": entry}})
+    assert should_cache_expansion(owner, related_attr="related", target_slot="target") is True
+
+
+def test_an_orderset_leaves_a_lazy_proxy_class_attribute_unevaluated() -> None:
+    """The related-declaration collector asks each class-body value's real class."""
+
+    class _Orders(OrderSet):
+        stash = _unevaluated("name")
+
+        class Meta:
+            model = library_models.Branch
+            fields = ["name"]
+
+    assert dict(_Orders.related_orders) == {}
+
+
+def test_a_lazy_proxy_lookup_is_refused_naming_it_unevaluated() -> None:
+    """A ``Meta.fields`` lookup given as a lazy proxy is refused as ``SimpleLazyObject``."""
+    with pytest.raises(
+        ConfigurationError,
+        match="entries must be lookup-name strings; got Simple",
+    ):
+        sm.require_lookup_names(_LazyShelfFilter, "code", [_unevaluated("exact")])

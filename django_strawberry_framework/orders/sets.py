@@ -201,7 +201,7 @@ def _require_scoped_order_target(
         f"OrderSet {owner.__qualname__}: RelatedOrder {declared_attr!r} has field_name "
         f"{relation!r}, which reaches {reached.__qualname__}, but its target OrderSet "
         f"{target.__qualname__} is bound to {scope.__qualname__}, whose model is "
-        f"{introspection.name(scope_model)}. A RelatedOrder's target OrderSet must be bound to a "
+        f"{scope_model.__qualname__}. A RelatedOrder's target OrderSet must be bound to a "
         f"type of {reached.__qualname__}, a proxy of it, or a multi-table-inheritance "
         "parent or child of it keyed by the same column.",
     )

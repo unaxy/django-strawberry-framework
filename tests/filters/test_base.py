@@ -42,6 +42,7 @@ from django.forms import CharField, DecimalField, Field, Form, SelectMultiple, T
 from django.http import HttpRequest, JsonResponse, QueryDict
 from django.test import RequestFactory
 from django.test.utils import CaptureQueriesContext, isolate_apps
+from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy
 from django_filters import BaseInFilter, CharFilter
 from django_filters.filterset import BaseFilterSet
@@ -85,6 +86,7 @@ from django_strawberry_framework.filters.base import (
     _bound_field_name,
     _coerce_relation_identity,
     _column_form_field,
+    _declared_field_name,
     _decode_and_validate_global_id,
     _ElementField,
     _filter_schema,
@@ -2320,6 +2322,18 @@ def test_bound_field_name_reads_the_path_the_filterset_binds() -> None:
             fields = ["id"]
 
     assert _bound_field_name(BookFilterSet.base_filters["title"]) == "title"
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["shelves", SimpleLazyObject(lambda: "shelves"), gettext_lazy("shelves")],
+    ids=["str", "simple-lazy-object", "gettext-lazy"],
+)
+def test_declared_field_name_reads_a_lazy_relation_name_as_its_text(field_name: str) -> None:
+    """A lazily spelled ``field_name`` answers the exact ``str`` its plain spelling does."""
+    declared = _declared_field_name(RelatedFilter(FilterSet, field_name=field_name))
+    assert declared == "shelves"
+    assert type(declared) is str
 
 
 def test_filterset_model_field_returns_none_without_model() -> None:

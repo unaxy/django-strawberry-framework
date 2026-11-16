@@ -417,7 +417,6 @@
 "tests/test_routers.py::test_the_websocket_pattern_is_keyword_only_with_no_legacy_url_pattern_alias" = { reportCallIssue = 1 }
 "tests/test_schema.py::_unchecked_entries" = { reportReturnType = 1 }
 "tests/test_sets_mixins.py::test_a_longer_related_order_reaching_a_target_path_is_refused._ShelfOrder" = { reportArgumentType = 1 }
-"tests/test_sets_mixins.py::test_a_non_string_field_name_claims_no_relation._Owner" = { reportArgumentType = 2 }
 "tests/test_sets_mixins.py::test_resolve_lazy_class_owner_scope_matrix" = { reportArgumentType = 1 }
 "tests/test_views.py::_NonCallableSetupView.setup" = { reportAssignmentType = 1 }
 "tests/test_views.py::_asgi_request" = { reportAttributeAccessIssue = 1 }

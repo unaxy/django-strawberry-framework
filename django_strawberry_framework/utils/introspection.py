@@ -3,7 +3,8 @@
 - ``overrides`` and ``mro_attr`` answer what a class stores under a name, or else its
   metaclass does, read by ``inspect.getattr_static`` so no descriptor runs. A
   ``classmethod`` or ``staticmethod`` wrapped around the same function is the same stored
-  function, so a re-wrap is not an override.
+  function, so a re-wrap is not an override. ``class_mro_attr`` reads the class's own MRO
+  alone, so a name only the metaclass carries (``mro``) is absent.
 - ``mro_entry`` finds the nearest registered ancestor by identity, never by ``==`` or
   ``hash`` on the class.
 - ``kind`` and ``text`` spell a value for an error message: a class names itself, any other
@@ -11,6 +12,10 @@
   its own text. ``plain_str`` passes any other value through unchanged.
 - ``name`` names a C callable or a callable instance, which may carry no ``__name__`` of its
   own.
+
+``kind``, ``name``, ``mro_entry`` and ``overrides`` ask a value's real class, never
+``isinstance``: a Django ``SimpleLazyObject`` forwards ``__class__``, so an ``isinstance``
+check would run its factory, and a lazy proxy is not the class it wraps.
 """
 
 from __future__ import annotations
@@ -19,13 +24,19 @@ import inspect
 import types
 from typing import TYPE_CHECKING, TypeVar
 
-from django_strawberry_framework.utils._narrowing import is_str, read_attr
+from django_strawberry_framework.utils._narrowing import (
+    class_namespace,
+    is_class,
+    is_str,
+    read_attr,
+)
 from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = (
+    "class_mro_attr",
     "kind",
     "mro_attr",
     "mro_entry",
@@ -48,6 +59,22 @@ def mro_attr(cls: object, attr: str, default: object = None) -> object:
     return object_result(inspect.getattr_static, cls, attr, default)
 
 
+def class_mro_attr(cls: object, attr: str, default: object = None) -> object:
+    """Return ``attr`` from the first class in the MRO of ``cls`` that stores it, else ``default``.
+
+    Each class's own namespace is read by key, so no descriptor runs and no metaclass
+    attribute answers: ``mro`` or ``__call__``, which only ``type`` carries, is absent. A
+    non-class ``cls`` answers ``default``.
+    """
+    if not is_class(cls):
+        return default
+    for entry in cls.__mro__:
+        namespace = class_namespace(entry)
+        if attr in namespace:
+            return namespace[attr]
+    return default
+
+
 def overrides(cls: object, base: type[object], *names: str) -> bool:
     """Whether ``cls`` stores a different function than ``base`` under any of ``names``.
 
@@ -56,7 +83,7 @@ def overrides(cls: object, base: type[object], *names: str) -> bool:
     holds, so a ``classmethod`` or ``staticmethod`` re-wrap of the same function, and a
     bound method stored on the subclass, are not overrides.
     """
-    if not isinstance(cls, type) or not any(entry is base for entry in cls.__mro__):
+    if not is_class(cls) or not any(entry is base for entry in cls.__mro__):
         return False
     for attr in names:
         own, inherited = mro_attr(cls, attr), mro_attr(base, attr)
@@ -74,7 +101,7 @@ def mro_entry(mapping: Mapping[_K, _V], cls: object) -> tuple[_K, _V] | None:
     ``cls``. ``mapping`` is copied once, so a registration on another thread cannot change it
     during the scan, and keys are matched by identity.
     """
-    if not isinstance(cls, type):
+    if not is_class(cls):
         return None
     entries = dict(mapping)
     for klass in cls.__mro__:
@@ -91,7 +118,7 @@ def kind(value: object) -> str:
     value names its real class. A name that is empty falls back to the metaclass's name, then
     to ``"object"``.
     """
-    if isinstance(value, type):
+    if is_class(value):
         return value.__name__ or type(value).__name__ or "object"
     return type(value).__name__ or "object"
 
@@ -122,7 +149,7 @@ def name(obj: object) -> str:
     a non-empty ``str``.
     """
     fallback = type(obj).__name__ or "object"
-    if callable(obj) or isinstance(obj, _NON_CALLABLE_C_TYPES):
+    if callable(obj) or issubclass(type(obj), _NON_CALLABLE_C_TYPES):
         declared: object = getattr(obj, "__name__", None)
         if isinstance(declared, str) and declared:
             return declared
