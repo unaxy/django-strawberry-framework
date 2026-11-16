@@ -201,7 +201,6 @@
 "tests/auth/test_mutations.py::_channels_router" = { reportArgumentType = 2, reportCallIssue = 2, reportUnknownArgumentType = 2 }
 "tests/auth/test_mutations.py::_privilege_required_user.PrivilegeRequiredUser" = { reportAssignmentType = 1 }
 "tests/auth/test_mutations.py::test_auth_permission_holder_head_is_sealed" = { reportAttributeAccessIssue = 1 }
-"tests/auth/test_mutations.py::test_derive_register_fields_rejects_a_non_string_username_field" = { reportArgumentType = 1 }
 "tests/auth/test_mutations.py::test_derive_register_fields_rejects_unknown_names_via_editable_input_fields" = { reportArgumentType = 1 }
 "tests/auth/test_mutations.py::test_gate_introspecting_the_mutation_object_raises_on_the_model_less_fields.ModelIntrospectingGate.has_permission" = { reportAttributeAccessIssue = 1, reportUnknownMemberType = 1 }
 "tests/auth/test_mutations.py::test_logout_propagates_a_raising_is_authenticated_before_any_teardown" = { reportAttributeAccessIssue = 1 }

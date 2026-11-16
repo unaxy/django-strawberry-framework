@@ -10,6 +10,7 @@ cannot encode. The in-process schema rows read only that hidden state.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Awaitable, Generator
 from types import SimpleNamespace
 
@@ -589,9 +590,10 @@ def test_permission_slot_refusal_preserves_snapshot_and_original_error() -> None
             _data: object,
             _instance: object = None,
         ) -> bool:
-            # The hook's ``mutation`` IS the mutation class; the plain attribute
-            # statement is the persistent-bypass shape the seal refuses.
-            mutation._mutation_meta.permission_classes = ()
+            # The hook's ``mutation`` IS the mutation class; rebinding its validated
+            # permission slot is the persistent-bypass shape the frozen record refuses.
+            slot = "permission_classes"
+            setattr(mutation._mutation_meta, slot, ())
             return True
 
     class Denier:
@@ -639,9 +641,9 @@ def test_permission_slot_refusal_preserves_snapshot_and_original_error() -> None
         AnonymousUser(),
         {"d": {"name": "Blocked", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
     )
-    # The seal raises OUT of the walk: loud top-level failure, no write.
+    # The frozen record raises OUT of the walk: loud top-level failure, no write.
     assert res.errors is not None
-    assert isinstance(res.errors[0].original_error, ConfigurationError)
-    # The seal refused the rebind: the validated configuration is untouched.
+    assert isinstance(res.errors[0].original_error, dataclasses.FrozenInstanceError)
+    # The frozen record refused the rebind: the validated configuration is untouched.
     assert isinstance(CreateItem._mutation_meta, _ValidatedMutationMeta)
     assert CreateItem._mutation_meta.permission_classes == (AllowAndRebind, Denier)

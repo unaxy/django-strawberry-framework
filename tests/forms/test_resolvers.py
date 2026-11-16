@@ -82,6 +82,7 @@ from django.http import QueryDict
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils.datastructures import MultiValueDict
+from django.utils.functional import SimpleLazyObject
 from PIL import Image
 from strawberry import relay
 from strawberry.types import ExecutionResult
@@ -7086,6 +7087,13 @@ def _visible_branch_form(
     return _VisibleBranchNameForm(data=data)
 
 
+def _lazy_genre_form(data: dict[str, object], _instance: models.Model | None) -> forms.BaseForm:
+    # Evaluated, the proxy would be a ``Genre`` row the backing check admits.
+    form = forms.modelform_factory(library_models.Genre, fields=("name",))(data=data)
+    vars(form)["instance"] = SimpleLazyObject(library_models.Genre)
+    return form
+
+
 def _glossary_alias_form(
     data: dict[str, object],
     _instance: models.Model | None,
@@ -7143,6 +7151,13 @@ def _glossary_alias_form(
             _glossary_alias_form,
             "a form whose instance is a GlossaryAlias",
             id="unsaved-instance-str-reads-a-relation",
+        ),
+        pytest.param(
+            library_models.Genre,
+            "create",
+            _lazy_genre_form,
+            "a form whose instance is a SimpleLazyObject",
+            id="lazy-instance",
         ),
     ],
 )

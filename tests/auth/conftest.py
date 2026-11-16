@@ -12,6 +12,7 @@ from collections.abc import Callable
 import pytest
 
 from django_strawberry_framework.auth import mutations as auth_mutations
+from django_strawberry_framework.auth import queries as auth_queries
 from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
 
 
@@ -21,12 +22,11 @@ def sync_boundary_spy(monkeypatch: pytest.MonkeyPatch) -> list[Callable[..., obj
 
     Both ``login`` / ``logout`` and ``current_user`` ride the same
     ``_make_auth_field`` dispatch seam and cross this ONE shared
-    ``run_in_one_sync_boundary`` worker - ``current_user`` through the
-    ``_sync_bridged_async_body`` interim bridge, ``login`` / ``logout`` through
-    their native async bodies. Counting its calls counts how many times an async
-    body was awaited (and so proves which path resolved the field). The async closure
-    resolves the module-global name at call time, so patching the module attribute
-    is observed.
+    ``run_in_one_sync_boundary`` worker - ``current_user`` through its bridging
+    async body, ``login`` / ``logout`` through their native async bodies. Counting
+    its calls counts how many times an async body was awaited (and so proves which
+    path resolved the field). Each async body resolves its module-global name at
+    call time, so patching both module attributes is observed.
     """
     calls: list[Callable[..., object]] = []
     real = run_in_one_sync_boundary
@@ -36,4 +36,5 @@ def sync_boundary_spy(monkeypatch: pytest.MonkeyPatch) -> list[Callable[..., obj
         return await real(fn, *args, **kwargs)
 
     monkeypatch.setattr(auth_mutations, "run_in_one_sync_boundary", _spy)
+    monkeypatch.setattr(auth_queries, "run_in_one_sync_boundary", _spy)
     return calls

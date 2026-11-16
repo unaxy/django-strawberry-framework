@@ -779,19 +779,17 @@ class SerializerMutation(DjangoMutation):
         **The shared build/stash seam is reused only partly here, by necessity.**
         This seam rides the shared ``build_and_stash_input``
         (the materialize-then-stash-``_input_field_specs`` tail,
-        shared with the form flavor) but does NOT route the cache lookup through
-        ``cached_build_input``: that helper looks up its key BEFORE building, which the
-        form flavor can do because its key (``form_class``, operation, effective names) is
-        known pre-build, whereas the serializer's key is the ``SerializerInputShape``
-        DESCRIPTOR - only knowable AFTER the build's pure walk produces it. Forcing this
-        path through ``cached_build_input`` would mean building the shape TWICE (once to
-        derive the key, once inside ``build_fn`` on a miss), the exact waste the
-        descriptor-keyed dedupe avoids; so the descriptor-keyed dedupe routes through
+        shared with the form flavor) but does NOT look its cache key up before the build
+        as ``forms/sets.py::_cached_build_form_input`` does: the form key (``form_class``,
+        operation, effective names) is known pre-build, whereas the serializer's key is the
+        ``SerializerInputShape`` DESCRIPTOR - only knowable AFTER the build's pure walk
+        produces it. A pre-build lookup here would mean building the shape TWICE (once to
+        derive the key, once again on a miss), the exact waste the descriptor-keyed dedupe
+        avoids; so the descriptor-keyed dedupe routes through
         ``inputs.dedupe_serializer_input_shape`` after the build (shared with nested
-        opt-in builds), while the guard-before-dedupe ordering is preserved here
-        directly. The per-declaration guard discipline ``cached_build_input``
-        single-sites is upheld below (the create-required guard runs in ``_build``
-        per declaration, before the dedupe).
+        opt-in builds), while the per-declaration guard-before-dedupe ordering is preserved
+        here directly (the create-required guard runs in ``_build`` per declaration, before
+        the dedupe).
 
         The create-required-narrowing guard (``guard_create_required_serializer_fields``)
         runs PER declaration, BEFORE descriptor dedupe. ``Meta.injected_fields`` is its only

@@ -180,6 +180,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_list,
     is_list_or_tuple,
     is_mapping,
+    is_real_instance,
     is_str,
     list_of,
     pk_of,
@@ -1266,11 +1267,12 @@ def _inserted_authorized_row(
 def _checked_saved_result(mutation_cls: type[SerializerMutation], saved: object) -> models.Model:
     """Validate the ``serializer.save()`` result before the pipeline re-fetches it.
 
-    The result must be a persisted row of the mutation's backing model (a wrong-model or
-    unsaved return has no row to re-fetch).
+    The result must be a persisted row of the mutation's backing model by its real class
+    (a wrong-model, unsaved or lazy-proxy return has no row to re-fetch; a lazy proxy is
+    refused without evaluating it).
     """
     model = backing_model_of(mutation_cls._mutation_meta)
-    if not isinstance(saved, model) or pk_of(saved) is None or saved._state.adding:
+    if not is_real_instance(saved, model) or pk_of(saved) is None or saved._state.adding:
         raise ConfigurationError(
             f"SerializerMutation {mutation_cls.__name__}: save() returned "
             f"{saved!r}; the serializer's create()/update() must persist and "

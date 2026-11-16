@@ -106,8 +106,8 @@
 "django_strawberry_framework/utils/write_transaction.py::pipeline_alias_guard._reject_writes_outside_write_phase" = { FBT001 = 1 }
 "django_strawberry_framework/utils/write_values.py::decode_visible_relation_ids" = { PLC0415 = 1 }
 "django_strawberry_framework/utils/write_values.py::type_check_relation_id" = { PLC0415 = 1 }
-"django_strawberry_framework/write_mixins.py::_id_resolver_seams.resolve_async" = { A002 = 1 }
-"django_strawberry_framework/write_mixins.py::_id_resolver_seams.resolve_sync" = { A002 = 1 }
+"django_strawberry_framework/write_mixins.py::resolver_seams.resolve_async" = { A002 = 1 }
+"django_strawberry_framework/write_mixins.py::resolver_seams.resolve_sync" = { A002 = 1 }
 "examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_category_memberships" = { A002 = 1 }
 "examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_documents" = { A002 = 1 }
 "examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_spec_mentions" = { A002 = 1 }

@@ -556,8 +556,8 @@ sweeps (and future maintainer-agents) do not re-flag them:
   over the shared
   `COMMON_WRITE_META_KEYS` / `MODEL_BACKED_WRITE_META_KEYS` bases; the
   per-flavor tails stay separate.
-- `rest_framework/sets.py::SerializerMutation.build_input`'s partial reuse of
-  `cached_build_input` (documented at `#"build/stash seam is reused only partly here"`).
+- `rest_framework/sets.py::SerializerMutation.build_input`'s partial reuse of the
+  build/stash seam (documented at `#"build/stash seam is reused only partly here"`).
 - `keyset.py::split_order_ref` vs `plans.py::order_entry_name_and_direction`
   (loud config error vs soft fallback — documented).
 - `filters/sets.py::FilterSet._evaluate_logic_tree`'s three branches (the

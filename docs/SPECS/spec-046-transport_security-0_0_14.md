@@ -2425,7 +2425,7 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   owner of that fragment. Every typed configuration rejection on this transport uses it — the
   revalidation window, both router injection seams, and the view's cap resolution.
 - **The session-store resolution is single-sited in `utils/sessions.py::session_store_class`**,
-  imported by both `auth/sessions.py::uses_signed_cookie_sessions` and
+  imported by both `auth/sessions.py::logout_supported` and
   `consumers.py::_refreshed_actor`. One `SESSION_ENGINE` expression, hosted outside the
   opt-in `auth` package so neither caller drags the other in.
 - **Live tests start with [`seed_data`][glossary-seed_data]** and route the schema through

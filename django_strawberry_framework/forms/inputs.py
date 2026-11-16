@@ -86,6 +86,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_class,
     is_concrete_field,
     is_instance,
+    is_real_instance,
     is_str,
     list_of,
     read_attr,
@@ -247,8 +248,8 @@ def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict
         valid_name = is_input_attribute_name(name)
         if not valid_name:
             invalid_names.append(name)
-        # The same hook can map a name to any value.
-        if not isinstance(field, forms.Field):
+        # The same hook can map a name to any value; a lazy proxy is refused by its real class.
+        if not is_real_instance(field, forms.Field):
             invalid_fields.append(name)
         elif valid_name:
             valid[introspection.plain_str(name)] = field

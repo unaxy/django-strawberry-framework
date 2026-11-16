@@ -908,12 +908,10 @@ slot is minted `None` and assigned at bind — the user primary is unresolved at
 class-body time
 ([Decision 9](#decision-9--bind-lifecycle-a-declaration-ledger--bind_auth_mutations-at-phase-25--registered-clear-rows)) —
 and the model-less `logout` holder keeps it `None`. **Both halves of the holder's
-authorization state are sealed at synthesis**: the snapshot refuses attribute
-rebinding and deletion, and the holder class refuses rebinding or deleting its
-`_mutation_meta` head, each with a [`ConfigurationError`][glossary-configurationerror].
-A custom `has_permission` runs inside the permission walk holding the holder class,
-so an unsealed slot would let one request's hook replace the validated permission
-set for every later `login` / `logout` / `me` request. The factory's resolver then calls
+authorization state are fixed at synthesis**: the snapshot is a frozen dataclass,
+whose attribute rebinding and deletion raise `dataclasses.FrozenInstanceError`, and
+the holder class refuses rebinding or deleting its `_mutation_meta` head with a
+[`ConfigurationError`][glossary-configurationerror]. The factory's resolver then calls
 `authorize_or_raise(holder_cls, info, operation, data, instance=instance)` before the
 session work, so the iteration, the `GraphQLError` denial, and the async-hook
 [`SyncMisuseError`][glossary-syncmisuseerror] guard (`reject_async_in_sync_context`
@@ -1028,12 +1026,10 @@ to `Register`** with:
   `get_user_model()` inline — and the rule is exact: `USERNAME_FIELD` first, then
   each distinct `REQUIRED_FIELDS` entry in declaration order, then `password`
   exactly once, deduplicated (an entry repeating `USERNAME_FIELD` or `password`
-  appears once). A non-string `USERNAME_FIELD`, a `REQUIRED_FIELDS` that is not a
-  list or tuple, or a non-string `REQUIRED_FIELDS` entry raises a
+  appears once). A `REQUIRED_FIELDS` that is not a list or tuple, or a non-string
+  `REQUIRED_FIELDS` entry, raises a
   [`ConfigurationError`][glossary-configurationerror] naming the model before any
-  name is validated. Every name is read as plain text, so a `str` subclass's own
-  dunders never decide the dedup or the protected check and the derived tuple holds
-  base `str` only. Unknown / non-editable / reverse names are rejected as a
+  name is validated. Unknown / non-editable / reverse names are rejected as a
   declaration-time [`ConfigurationError`][glossary-configurationerror] naming field +
   model by **delegating to the standard `editable_input_fields` validation**
   ([`mutations/inputs.py`][mutations-inputs] — which already raises naming field +
@@ -1211,7 +1207,7 @@ to `Register`** with:
   because the input name otherwise derives from the *model* (`User`) plus the
   narrowed shape — the deterministic `UserEmailPasswordUsernameInput`. The
   **payload** name has **no seam**: the phase-2.5 bind's payload half
-  ([`write_mixins.py`][write-mixins] `::bind_mutation_outputs`, which both
+  ([`write_mixins.py`][write-mixins] `::bind_write_declarations`, which both
   write-declaration ledgers ride) calls
   `build_payload_type(mutation_cls.__name__, …)` and
   [`DjangoMutationField`][glossary-djangomutationfield]'s synthesized signature
@@ -1681,7 +1677,7 @@ missing work:
   there and is supported. The signed-cookie engine keeps **no server-side record to
   revoke**, and an established socket can neither delete nor replace the browser
   cookie — so a "success" would claim a durable invalidation that did not happen. The
-  capability answer (`auth/sessions.py::uses_signed_cookie_sessions`) is a settings
+  capability answer (`auth/sessions.py::logout_supported`) is a settings
   read, never adapter metadata: it resolves the configured engine's `SessionStore`
   through [`utils/sessions.py::session_store_class`][utils-sessions] — single-sited *outside*
   `auth/` so the WebSocket revalidation can share the `SESSION_ENGINE` expression
@@ -1859,8 +1855,8 @@ so each carries a source comment at its site.
   it is shared with the `036` wrapper and the read-side async seams), never an
   auth-local copy. The invariant is the **count, not the call site**: one resolution
   enters that boundary exactly once, with the permission gate inside it. The primitive
-  is called from each surface's own async body (`current_user`'s through
-  `_sync_bridged_async_body`, which only closes over the sync body) — no auth-local
+  is called from each surface's own async body (`current_user`'s a local `async def`
+  in `auth/queries.py::current_user` that only closes over the sync body) — no auth-local
   copy of the boundary discipline exists, and introducing one would be a second
   definition of it, not a reuse
   ([Decision 10](#decision-10--sync--async-session-work-through-one-sync_to_asyncthread_sensitivetrue-boundary)).
@@ -2181,11 +2177,11 @@ schemas (below).
   with a *different* `permission_classes` succeeds with a fresh holder / rider,
   because the cache / conflict state IS the ledger; the
   **conflicting-declaration raise** — a second call with a different permission set
-  raises `ConfigurationError`, **keyed on `permission_classes` only** (compared element by
-  element by identity, so a consumer metaclass `__eq__` is never consulted) — a repeat call
+  raises `ConfigurationError`, **keyed on `permission_classes` only** (tuple equality) — a
+  repeat call
   differing solely in `description` / `deprecation_reason` / `directives` returns the
   cached class / holder, never raises ([Edge cases](#edge-cases-and-constraints));
-  the sealed holder snapshot and holder `_mutation_meta` head;
+  the frozen holder snapshot and sealed holder `_mutation_meta` head;
 - bind validation (surface-keyed, [Decision 9](#decision-9--bind-lifecycle-a-declaration-ledger--bind_auth_mutations-at-phase-25--registered-clear-rows)):
   the no-primary-user-type
   [`ConfigurationError`][glossary-configurationerror] (message names the fix),

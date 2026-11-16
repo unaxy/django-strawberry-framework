@@ -252,6 +252,7 @@ from django_strawberry_framework.utils._narrowing import (
     dict_items,
     instance_state,
     is_class,
+    is_real_instance,
     list_of,
     read_attr,
     require,
@@ -1388,7 +1389,8 @@ def _require_backing_row(
     A ``ModelForm`` saves whatever row its ``instance`` holds, so a form ``get_form``
     builds over another model would write that model's table: a coincident pk then
     answers success with another row's data. The instance must be an instance of the
-    mutation's backing model (``isinstance``: an MTI child or a proxy subclass
+    mutation's backing model by its real class (``is_real_instance``, so a lazy proxy is
+    refused unevaluated: an MTI child or a proxy subclass
     passes; a concrete base of a proxy-backed mutation, a sibling proxy and an MTI parent
     do not), the truth the save writes by, never the form class's ``Meta.model`` (a
     ``ModelForm`` over another model handed the located row writes the located row's
@@ -1401,7 +1403,7 @@ def _require_backing_row(
     """
     model = backing_model_of(mutation_cls._mutation_meta)
     instance = read_attr(form, "instance", None)
-    if isinstance(instance, model):
+    if is_real_instance(instance, model):
         return instance
     # The class names the refused instance, never the row: an unsaved row's ``__str__``
     # may read a relation it does not hold yet and raise.

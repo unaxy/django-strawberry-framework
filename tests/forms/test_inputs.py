@@ -59,6 +59,7 @@ from django import forms
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from django.db.models.expressions import Combinable
+from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy
 from strawberry import relay
 from strawberry.types.base import StrawberryList, StrawberryOptional, get_object_definition
@@ -2871,6 +2872,23 @@ def test_basis_diagnostic_message_is_pinned() -> None:
         "a mapping of string names to forms.Field instances; invalid names "
         "['9lead'], invalid fields ['ok']."
     )
+
+
+def test_basis_refuses_a_lazy_form_field_unevaluated() -> None:
+    """A hook value that is a lazy proxy of a ``forms.Field`` is refused by its real class."""
+    form_cls = _make_empty_form()
+    evaluated: list[object] = []
+
+    def _factory() -> forms.Field:
+        evaluated.append(1)
+        return forms.CharField()
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"invalid names \[\], invalid fields \['lazy'\]\.",
+    ):
+        normalize_form_field_basis(form_cls, {"lazy": SimpleLazyObject(_factory)})
+    assert evaluated == []
 
 
 # ---------------------------------------------------------------------------

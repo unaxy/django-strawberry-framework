@@ -30,6 +30,7 @@ conflict raise.
 from __future__ import annotations
 
 import functools
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias, TypeVar, cast, final
 
 import strawberry
@@ -69,17 +70,13 @@ from django_strawberry_framework.mutations.sets import (
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.resource_policy import check_deadline
 from django_strawberry_framework.types.base import _is_django_type_class
-from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
-    is_list,
     is_str,
-    is_tuple,
-    list_iter,
+    iter_of,
     read_attr,
     require,
     require_instance,
-    tuple_iter,
 )
 from django_strawberry_framework.utils.directives import validated_field_directives
 from django_strawberry_framework.utils.errors import (
@@ -103,7 +100,7 @@ from django_strawberry_framework.write_mixins import (
 from . import sessions
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from typing import Protocol
 
     from django.contrib.auth.base_user import AbstractBaseUser
@@ -235,6 +232,7 @@ iter_auth_mutations: Callable[[], tuple[_AuthDeclaration, ...]] = _auth_declarat
 register_subsystem_clear(clear_auth_mutation_registry, owner="auth.declarations")
 
 
+@dataclass(frozen=True, slots=True, eq=False)
 class _AuthMutationMetaSnapshot:
     """The duck-typed ``_mutation_meta`` shape a fixed-field permission holder carries.
 
@@ -243,43 +241,12 @@ class _AuthMutationMetaSnapshot:
     holder's snapshot needs exactly the normalized ``permission_classes`` plus the
     pinned operation string - it is deliberately NOT a ``_ValidatedMutationMeta``
     (which would require ``model`` / ``operation`` constructor kwargs a model-less
-    session field does not have).
-
-    Sealed once ``__init__`` finishes, mirroring
-    ``write_mixins.py::_ValidatedMutationMeta``: the holder's snapshot is the
-    per-request authorization source for the fixed auth surfaces
-    (``login`` / ``logout`` / ``current_user`` ride ``DjangoMutation.check_permission``
-    by call), and a ``has_permission`` hook runs inside the walk with the holder
-    class in hand - a mutable slot would let one request's hook rebind the
-    validated set for every later login/logout/me request. A sealed snapshot's
-    own ``__setattr__`` / ``__delattr__`` refuse reassignment and deletion with
-    ``ConfigurationError``.
+    session field does not have). Frozen like ``write_mixins.py::_ValidatedMutationMeta``:
+    authorization configuration is captured once at declaration time.
     """
 
-    __slots__: tuple[str, ...] = ("_sealed", "operation", "permission_classes")
-
-    def __init__(self, operation: str, permission_classes: tuple[type[object], ...]) -> None:
-        self._sealed: bool = False
-        self.operation: str = operation
-        self.permission_classes: tuple[type[object], ...] = permission_classes
-        self._sealed = True
-
-    @override
-    def __setattr__(self, name: str, value: object) -> None:
-        if getattr(self, "_sealed", False):
-            raise ConfigurationError(
-                f"The auth permission holder's validated snapshot is sealed and {name!r} "
-                "cannot be reassigned; authorization configuration is captured once at "
-                "declaration time.",
-            )
-        object.__setattr__(self, name, value)
-
-    @override
-    def __delattr__(self, name: str) -> None:
-        raise ConfigurationError(
-            "The auth permission holder's validated snapshot is sealed; attributes cannot "
-            "be deleted. Authorization configuration is captured once at declaration time.",
-        )
+    operation: str
+    permission_classes: tuple[type[object], ...]
 
 
 # The metaclass of a synthesized auth permission holder. At runtime it IS
@@ -378,13 +345,8 @@ def _reject_conflicting_permission_classes(
     ``permission_classes``; ``description`` / ``deprecation_reason`` /
     ``directives`` are per-field presentation kwargs and never enter the key.
     """
-    declared = list(declared_cls._mutation_meta.permission_classes)
-    # Element-wise identity, not ``!=``: list equality would dispatch a consumer
-    # metaclass ``__eq__`` on each permission class.
-    same = len(declared) == len(permission_classes) and all(
-        stored is given for stored, given in zip(declared, permission_classes, strict=True)
-    )
-    if not same:
+    declared = declared_cls._mutation_meta.permission_classes
+    if declared != permission_classes:
         factory = _SURFACE_FACTORY_NAMES[surface]
         raise ConfigurationError(
             f"auth {factory} is already declared in this process with permission_classes="
@@ -458,31 +420,6 @@ def _declare_fixed_auth_surface(
     )
     register_auth_mutation(holder_cls)
     return holder_cls
-
-
-def _sync_bridged_async_body(
-    sync_body: Callable[..., object],
-) -> Callable[..., Coroutine[object, object, object]]:
-    """Build the async body that runs ``sync_body`` in one sync boundary (spec-040 Decision 10).
-
-    ``_make_auth_field`` carries a real sync resolver body and a real *async*
-    resolver body as separate seams, so native per-transport async work can be
-    injected later. This is the SEAM only: the async body is a genuine ``async def``
-    coroutine function that bridges to ``sync_body`` through the ONE shared
-    ``sync_to_async(thread_sensitive=True)`` worker - request resolution, the
-    permission gate (whose ``instance=request.user`` argument forces the
-    ``SimpleLazyObject`` as it is computed, a sync ORM touch), and the session work
-    all run inside that single boundary. The ``SyncMisuseError`` discipline is
-    unaffected: the worker is itself a sync context, so an ``async def
-    has_permission`` is still rejected there, never silently allowed. A native
-    Django/Channels async body can replace this bridge per surface without touching
-    the dispatch seam below.
-    """
-
-    async def _async_body(info: Info[object, object], **kwargs: object) -> object:
-        return await run_in_one_sync_boundary(sync_body, info, **kwargs)
-
-    return _async_body
 
 
 def _make_auth_field(
@@ -1125,13 +1062,9 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
     ``get_user_model()`` inline - so both the default and a
     custom-``USERNAME_FIELD`` / custom-``REQUIRED_FIELDS`` model are directly
     testable with a test-scoped model (no ``AUTH_USER_MODEL`` swap). A
-    ``USERNAME_FIELD`` that is not a string, a ``REQUIRED_FIELDS`` that is not a
-    list or tuple (Django's own ``auth.E001`` rule), or a ``REQUIRED_FIELDS`` entry
-    that is not a string raises a ``ConfigurationError`` naming the model before
-    any name is validated. Every name is read as plain text through the base
-    ``str`` slot, so a ``str`` subclass's ``__eq__`` / ``__hash__`` / ``__repr__``
-    / ``__lt__`` never decides the dedup, the protected check or the returned
-    tuple, which holds plain ``str`` names only. Unknown / non-editable / reverse
+    ``REQUIRED_FIELDS`` that is not a list or tuple (Django's own ``auth.E001``
+    rule), or an entry that is not a string, raises a ``ConfigurationError``
+    naming the model. Unknown / non-editable / reverse
     names are rejected by DELEGATING to the standard ``editable_input_fields``
     validation (which already raises a ``ConfigurationError`` naming field +
     model), never a re-implemented check. Known account-control fields
@@ -1142,40 +1075,26 @@ def derive_register_fields(user_model: type[AbstractBaseUser]) -> tuple[str, ...
     user-model declaration into public registration input.
     """
     model_name = user_model.__name__
-    # Django reads ``USERNAME_FIELD`` / ``REQUIRED_FIELDS`` as field names but never checks
-    # their types when the model class is built, and django-stubs declares them only on
-    # ``AbstractUser`` / ``AbstractBaseUser`` (its ``ModelBase.__getattr__`` admits only
-    # ``objects``), so both are read by name and each value is an ``object`` until the
-    # checks below prove its type. Each check asks the value's real type, which a
-    # ``__class__`` property cannot restate, and iteration runs through the base
-    # ``list`` / ``tuple`` slot, which a subclass's ``__iter__`` cannot replace.
-    username_field = read_attr(user_model, "USERNAME_FIELD")
-    if not is_str(username_field):
-        raise ConfigurationError(
-            f"register_mutation() needs {model_name}.USERNAME_FIELD to be a field "
-            f"name string; got {username_field!r}.",
-        )
+    # django-stubs declares ``USERNAME_FIELD`` / ``REQUIRED_FIELDS`` only on ``AbstractUser`` /
+    # ``AbstractBaseUser``, so both are read by name.
+    username_field = str(read_attr(user_model, "USERNAME_FIELD"))
     required_fields = read_attr(user_model, "REQUIRED_FIELDS")
-    if is_list(required_fields):
-        entries = list_iter(required_fields)
-    elif is_tuple(required_fields):
-        entries = tuple_iter(required_fields)
-    else:
+    # The real class: a lazy proxy is no list or tuple.
+    if not issubclass(type(required_fields), (list, tuple)):
         raise ConfigurationError(
             f"register_mutation() needs {model_name}.REQUIRED_FIELDS to be a list or "
             f"tuple; got {required_fields!r}.",
         )
-    names = [introspection.text(username_field)]
-    for entry in entries:
+    names = [username_field]
+    for entry in iter_of(required_fields):
         if not is_str(entry):
             raise ConfigurationError(
                 f"register_mutation() needs every {model_name}.REQUIRED_FIELDS entry to be "
                 f"a field name string; got {entry!r}.",
             )
-        names.append(introspection.text(entry))
+        names.append(entry)
     names.append("password")
     deduped = tuple(dict.fromkeys(names))
-    # Every name is a plain ``str``, so the matched entries sort and render as plain text.
     protected = sorted(_REGISTER_PROTECTED_FIELDS.intersection(deduped))
     if protected:
         raise ConfigurationError(

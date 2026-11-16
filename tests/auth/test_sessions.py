@@ -44,7 +44,6 @@ from django_strawberry_framework.auth.sessions import (
     logout_supported,
     require_session,
     scope_session_lock,
-    uses_signed_cookie_sessions,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils._narrowing import instance_state
@@ -316,19 +315,10 @@ async def test_scope_lock_rejects_an_immutable_scope_loudly() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_uses_signed_cookie_sessions_is_false_for_the_default_engine() -> None:
-    assert uses_signed_cookie_sessions() is False
-
-
-@override_settings(SESSION_ENGINE=_SIGNED_COOKIES_ENGINE)
-def test_uses_signed_cookie_sessions_true_under_the_signed_cookie_engine() -> None:
-    assert uses_signed_cookie_sessions() is True
-
-
 def test_signed_cookie_detection_follows_a_subclassed_engine() -> None:
     """A deployment subclassing the signed-cookie engine shares its no-record limit.
 
-    ``uses_signed_cookie_sessions`` resolves the engine's ``SessionStore`` and tests
+    ``logout_supported`` resolves the engine's ``SessionStore`` and tests
     it with ``issubclass``, so a custom engine whose store subclasses the signed-
     cookie store is recognized (and its WebSocket logout is therefore unsupported).
     The stub engine module is registered in ``sys.modules`` for ``import_string`` to
@@ -343,7 +333,6 @@ def test_signed_cookie_detection_follows_a_subclassed_engine() -> None:
     sys.modules[module_name] = module
     try:
         with override_settings(SESSION_ENGINE=module_name):
-            assert uses_signed_cookie_sessions() is True
             assert logout_supported(Transport.CHANNELS_WEBSOCKET) is False
     finally:
         del sys.modules[module_name]
@@ -371,7 +360,6 @@ def test_a_custom_client_side_engine_outside_the_signed_cookie_hierarchy_reads_a
     sys.modules[module_name] = module
     try:
         with override_settings(SESSION_ENGINE=module_name):
-            assert uses_signed_cookie_sessions() is False
             assert logout_supported(Transport.CHANNELS_WEBSOCKET) is True
     finally:
         del sys.modules[module_name]

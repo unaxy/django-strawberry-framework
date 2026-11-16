@@ -20,13 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import importlib
-import inspect
 import itertools
 import json
 import threading
 from collections.abc import Callable, Generator, Iterable, Iterator, MutableMapping
-from enum import Enum
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn, Protocol, runtime_checkable
 
@@ -93,7 +92,6 @@ from django_strawberry_framework.auth.mutations import (
     _make_permission_holder,
     _register_decode_step,
     _register_write_step,
-    _sync_bridged_async_body,
     bind_auth_mutations,
     derive_register_fields,
     iter_auth_mutations,
@@ -494,17 +492,14 @@ def test_registry_clear_drains_ledger_and_resets_conflict_state() -> None:
     assert fresh_holder._mutation_meta.permission_classes == (_AllowAll,)
 
 
-def test_auth_permission_holder_snapshot_is_sealed() -> None:
+def test_auth_permission_holder_snapshot_is_frozen() -> None:
     """A fixed-surface holder's validated snapshot refuses reassignment and deletion.
 
     The holder's duck-typed snapshot IS the fixed auth surface's per-request
     authorization source (``login`` / ``logout`` / ``current_user`` ride
     ``DjangoMutation.check_permission`` by call, which reads
-    ``type(self)._mutation_meta.permission_classes``), so it is SEALED once
-    ``__init__`` finishes - mirroring ``write_mixins.py::_ValidatedMutationMeta``.
-    A mutable slot would let one request's ``has_permission`` hook (which receives
-    the holder) rebind the validated set - e.g. to the empty allow-any posture -
-    for every later login/logout/me request.
+    ``type(self)._mutation_meta.permission_classes``), so it is a frozen record -
+    mirroring ``write_mixins.py::_ValidatedMutationMeta``.
     """
     logout_mutation()
     holder = _declared_auth_surface("logout")
@@ -512,12 +507,11 @@ def test_auth_permission_holder_snapshot_is_sealed() -> None:
     snapshot = holder._mutation_meta
     assert isinstance(snapshot, auth_mutations._AuthMutationMetaSnapshot)
     assert snapshot.permission_classes == ()  # the documented AllowAny auth default
-    with pytest.raises(ConfigurationError, match="sealed"):
-        snapshot.permission_classes = (_DenyAll,)
-    with pytest.raises(ConfigurationError, match="sealed"):
-        del snapshot.permission_classes
-    with pytest.raises(ConfigurationError, match="sealed"):
-        snapshot.operation = "login"
+    for name, value in (("permission_classes", (_DenyAll,)), ("operation", "login")):
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(snapshot, name, value)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            delattr(snapshot, name)
     # The declared configuration is untouched by all three attempts.
     assert snapshot.permission_classes == ()
     assert snapshot.operation == "logout"
@@ -899,16 +893,6 @@ def test_register_arm_error_survives_a_reload_cycle() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_bridged_async_body_is_a_real_coroutine_function() -> None:
-    """The async resolver body is a genuine ``async def`` (not a sync body in disguise)."""
-
-    def _sync_body(_info: object, **_kwargs: object) -> None:
-        return None
-
-    body = _sync_bridged_async_body(_sync_body)
-    assert inspect.iscoroutinefunction(body)
-
-
 def test_auth_field_dispatch_splits_sync_and_async_resolver_bodies() -> None:
     """``_make_auth_field`` picks the sync body vs the async body by ``async_execution``."""
     sync_calls: list[dict[str, object]] = []
@@ -1253,16 +1237,12 @@ _PROTECTED_FIELD_REJECT = (
 )
 
 
-def _privilege_required_user(
-    username_field: object = "username",
-    required_fields: object = ("is_staff",),
-) -> type[AbstractBaseUser]:
+def _privilege_required_user(required_fields: object = ("is_staff",)) -> type[AbstractBaseUser]:
     """Return a freshly declared user model whose ``REQUIRED_FIELDS`` exposes ``is_staff``.
 
-    ``username_field`` / ``required_fields`` replace the two declarations verbatim,
-    so a caller can declare a name as a ``str`` subclass, an entry that is no
-    string, or a ``REQUIRED_FIELDS`` that is no list or tuple; ``email`` is the
-    ordinary editable column such a declaration names. A factory rather
+    ``required_fields`` replaces the declaration verbatim, so a caller can declare
+    an entry that is no string, or a ``REQUIRED_FIELDS`` that is no list or tuple;
+    ``email`` is the ordinary editable column such a declaration names. A factory rather
     than one shared class: each call needs its own ``_unique_app_label()`` so
     Django's app registry does not warn about a re-registered model, and the class
     name is load-bearing - ``_PROTECTED_FIELD_REJECT`` matches on it.
@@ -1277,7 +1257,7 @@ def _privilege_required_user(
         email: _Email = djmodels.EmailField(blank=True)
         is_staff: _Bool = djmodels.BooleanField(default=False)
 
-        USERNAME_FIELD = username_field
+        USERNAME_FIELD = "username"
         # basedpyright: the declaration under test may be malformed; django-stubs types it list[str]
         REQUIRED_FIELDS = required_fields  # pyright: ignore[reportAssignmentType]
 
@@ -1455,193 +1435,10 @@ def test_derive_register_fields_rejects_privilege_fields() -> None:
         derive_register_fields(model)
 
 
-class _ReprRaisingName(str):
-    """A field name whose ``repr`` raises; the reject names it by its value."""
-
-    __slots__ = ()
-
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError("repr boom")
-
-
-class _OrderRaisingName(str):
-    """A field name whose ordering raises; the reject sorts the names as plain text."""
-
-    __slots__ = ()
-
-    @override
-    def __lt__(self, other: str) -> bool:
-        raise RuntimeError("lt boom")
-
-
-class _UserField(str, Enum):
-    """An enum of field names, the ordinary ``str`` subclass a model may declare with."""
-
-    IS_STAFF = "is_staff"
-
-
-class _NeverEqualName(str):
-    """A field name equal to nothing, itself included; read as text it still names its field."""
-
-    __slots__ = ()
-
-    @override
-    def __eq__(self, other: object) -> bool:
-        return False
-
-    __hash__ = str.__hash__
-
-
-class _AlwaysEqualName(str):
-    """A field name that claims equality with every value and hashes to a constant."""
-
-    __slots__ = ()
-
-    @override
-    def __eq__(self, other: object) -> bool:
-        return True
-
-    @override
-    def __hash__(self) -> int:
-        return 1
-
-
-class _HashRaisingName(str):
-    """A field name whose hash raises."""
-
-    __slots__ = ()
-
-    @override
-    def __hash__(self) -> int:
-        raise RuntimeError("hash boom")
-
-
-class _EqRaisingName(str):
-    """A field name whose equality raises."""
-
-    __slots__ = ()
-
-    @override
-    def __eq__(self, other: object) -> bool:
-        raise RuntimeError("eq boom")
-
-    __hash__ = str.__hash__
-
-
-class _IterRaisingList(list[str]):
-    """A ``list`` of field names whose own ``__iter__`` raises."""
-
-    __slots__ = ()
-
-    @override
-    def __iter__(self) -> Iterator[str]:
-        raise RuntimeError("iter boom")
-
-
-class _IterRaisingTuple(tuple[str, ...]):
-    """A ``tuple`` of field names whose own ``__iter__`` raises."""
-
-    __slots__ = ()
-
-    @override
-    def __iter__(self) -> Iterator[str]:
-        raise RuntimeError("iter boom")
-
-
 @pytest.mark.parametrize(
-    ("username_field", "required_fields", "named"),
-    [
-        ("username", [_ReprRaisingName("is_staff")], "['is_staff']"),
-        (_ReprRaisingName("is_staff"), [], "['is_staff']"),
-        (
-            "username",
-            [_OrderRaisingName("is_superuser"), _OrderRaisingName("is_staff")],
-            "['is_staff', 'is_superuser']",
-        ),
-        ("username", [_UserField.IS_STAFF], "['is_staff']"),
-        ("username", [_NeverEqualName("is_staff")], "['is_staff']"),
-        (_NeverEqualName("is_superuser"), [], "['is_superuser']"),
-    ],
-    ids=[
-        "repr-raises-required",
-        "repr-raises-username",
-        "order-raises",
-        "str-enum",
-        "never-equal-required",
-        "never-equal-username",
-    ],
-)
-def test_derive_register_fields_names_a_protected_str_subclass_by_value(
-    username_field: str,
-    required_fields: list[str],
-    named: str,
-) -> None:
-    """A protected entry declared as a ``str`` subclass is refused and named by its value."""
-    model = _privilege_required_user(username_field, required_fields)
-    with pytest.raises(ConfigurationError) as exc:
-        derive_register_fields(model)
-    assert str(exc.value) == (
-        f"register_mutation() cannot auto-expose protected user field(s) {named} "
-        "derived from PrivilegeRequiredUser.USERNAME_FIELD / REQUIRED_FIELDS; remove "
-        "those fields from the automatic registration surface and initialize account "
-        "privileges and activation state in server-owned registration logic."
-    )
-
-
-@pytest.mark.parametrize(
-    ("username_field", "required_fields", "derived"),
-    [
-        ("username", [_NeverEqualName("email")], ("username", "email", "password")),
-        ("username", [_NeverEqualName("username")], ("username", "password")),
-        (_NeverEqualName("username"), ["username"], ("username", "password")),
-        ("username", [_AlwaysEqualName("email")], ("username", "email", "password")),
-        ("username", [_HashRaisingName("email")], ("username", "email", "password")),
-        ("username", [_EqRaisingName("username")], ("username", "password")),
-        ("username", _IterRaisingList(["email"]), ("username", "email", "password")),
-        ("username", _IterRaisingTuple(("email",)), ("username", "email", "password")),
-    ],
-    ids=[
-        "never-equal",
-        "never-equal-repeats-username",
-        "never-equal-username",
-        "always-equal",
-        "hash-raises",
-        "eq-raises-repeats-username",
-        "list-iter-raises",
-        "tuple-iter-raises",
-    ],
-)
-def test_derive_register_fields_reads_str_subclass_names_as_plain_text(
-    username_field: str,
-    required_fields: object,
-    derived: tuple[str, ...],
-) -> None:
-    """Names declared as ``str`` subclasses derive the plain-text tuple, deduplicated by value.
-
-    The entry's own ``__eq__`` / ``__hash__`` never decides the dedup or reaches the
-    returned tuple, and a ``list`` / ``tuple`` subclass's own ``__iter__`` never decides
-    which entries are read.
-    """
-    model = _privilege_required_user(username_field, required_fields)
-    result = derive_register_fields(model)
-    assert result == derived
-    assert [type(name) for name in result] == [str] * len(derived)
-
-
-@pytest.mark.parametrize(
-    ("username_field", "required_fields", "message"),
+    ("required_fields", "message"),
     [
         (
-            3,
-            [],
-            (
-                "register_mutation() needs PrivilegeRequiredUser.USERNAME_FIELD to be a field "
-                "name string; got 3."
-            ),
-        ),
-        (
-            "username",
             [["email"]],
             (
                 "register_mutation() needs every PrivilegeRequiredUser.REQUIRED_FIELDS entry to "
@@ -1649,7 +1446,6 @@ def test_derive_register_fields_reads_str_subclass_names_as_plain_text(
             ),
         ),
         (
-            "username",
             ["email", 3],
             (
                 "register_mutation() needs every PrivilegeRequiredUser.REQUIRED_FIELDS entry to "
@@ -1657,7 +1453,6 @@ def test_derive_register_fields_reads_str_subclass_names_as_plain_text(
             ),
         ),
         (
-            "username",
             "email",
             (
                 "register_mutation() needs PrivilegeRequiredUser.REQUIRED_FIELDS to be a list or "
@@ -1665,7 +1460,6 @@ def test_derive_register_fields_reads_str_subclass_names_as_plain_text(
             ),
         ),
         (
-            "username",
             None,
             (
                 "register_mutation() needs PrivilegeRequiredUser.REQUIRED_FIELDS to be a list or "
@@ -1673,7 +1467,6 @@ def test_derive_register_fields_reads_str_subclass_names_as_plain_text(
             ),
         ),
         (
-            "username",
             {"email"},
             (
                 "register_mutation() needs PrivilegeRequiredUser.REQUIRED_FIELDS to be a list or "
@@ -1682,7 +1475,6 @@ def test_derive_register_fields_reads_str_subclass_names_as_plain_text(
         ),
     ],
     ids=[
-        "username-is-int",
         "unhashable-entry",
         "int-entry",
         "required-is-str",
@@ -1691,17 +1483,16 @@ def test_derive_register_fields_reads_str_subclass_names_as_plain_text(
     ],
 )
 def test_derive_register_fields_rejects_a_malformed_declaration(
-    username_field: object,
     required_fields: object,
     message: str,
 ) -> None:
-    """A non-string name or a ``REQUIRED_FIELDS`` that is no list or tuple is refused, typed.
+    """A non-string entry or a ``REQUIRED_FIELDS`` that is no list or tuple is refused, typed.
 
     Django checks neither type when the model class is built (its ``auth.E001``
     system check requires a list or tuple), so the reject names the model and the
     offending value before any name is validated.
     """
-    model = _privilege_required_user(username_field, required_fields)
+    model = _privilege_required_user(required_fields)
     with pytest.raises(ConfigurationError) as exc:
         derive_register_fields(model)
     assert str(exc.value) == message
@@ -1748,34 +1539,6 @@ def test_derive_register_fields_rejects_unknown_names_via_editable_input_fields(
         # basedpyright: the model whose REQUIRED_FIELDS names no column is the hostile input under
         # test; derive_register_fields types the parameter as type[AbstractBaseUser]
         derive_register_fields(BrokenRequiredUser)  # pyright: ignore[reportArgumentType]
-
-
-def test_derive_register_fields_rejects_a_non_string_username_field() -> None:
-    """A non-string ``USERNAME_FIELD`` is refused before any name is validated.
-
-    Django never checks ``USERNAME_FIELD``'s type when the model class is built,
-    and no fakeshop user can declare a non-string one; it alone reaches the
-    non-string raise in
-    ``django_strawberry_framework/auth/mutations.py::derive_register_fields``.
-    """
-
-    class NonStringLoginUser(djmodels.Model):
-        handle: _Char = djmodels.CharField(max_length=50)
-        password: _Char = djmodels.CharField(max_length=128)
-
-        USERNAME_FIELD = 7
-        REQUIRED_FIELDS = ()
-
-        class Meta:
-            app_label = _unique_app_label()
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"NonStringLoginUser\.USERNAME_FIELD to be a field name string; got 7\.",
-    ):
-        # basedpyright: the model with a non-string USERNAME_FIELD is the hostile input under test;
-        # derive_register_fields types the parameter as type[AbstractBaseUser]
-        derive_register_fields(NonStringLoginUser)  # pyright: ignore[reportArgumentType]
 
 
 def test_exclusion_seam_captures_password_and_preserves_the_provided_marker() -> None:

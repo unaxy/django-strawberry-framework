@@ -51,12 +51,12 @@ From the full entries, 2026-10-21. Item numbers are that file's.
   - Research: holds, but `scope.get` also appears in `consumers.py` (the revalidation `user` read and the window cache)
     and `auth/sessions.py`, so fixing this one site is partial. A hostile scope is in-process consumer code. Decide:
     document the trust boundary in the `scope_singleton` docstring (S) or sweep every site through one helper (M)
-- [ ] 14. `django_strawberry_framework/auth/sessions.py::uses_signed_cookie_sessions` is a subclass check on
+- [ ] 14. `django_strawberry_framework/auth/sessions.py::logout_supported` is a subclass check on
   `SignedCookieSessionStore`, so a custom client-side store is treated as server-side and WebSocket `logout` is allowed
   but cannot revoke the browser cookie; an unlisted import-time error from the engine module escapes raw from
   `logout_supported` (revalidation is unaffected)
   - Research: both halves reproduced. README already states the first half; the raw import error is undocumented (an
-    engine that cannot import also breaks `SessionMiddleware`). Add it to the `uses_signed_cookie_sessions` docstring
+    engine that cannot import also breaks `SessionMiddleware`). Add it to the `logout_supported` docstring
     and one clause in README. Size S
 - [ ] 15. The default `max_collection_cost` is `1_000_000_000`, so a depth-4 nest at `first: 100` passes admission; there
   is no aggregate scalar-bytes bound (65 KB per scalar times up to 5000 nodes; Django's body-size limit is the real cap);

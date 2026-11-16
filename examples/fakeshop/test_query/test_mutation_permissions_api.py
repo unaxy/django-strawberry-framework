@@ -420,8 +420,8 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
     The snapshot walk survives list pollution; a hook could also try to
     REASSIGN the validated ``permission_classes`` slot on the shared
     ``_ValidatedMutationMeta`` record, which would leave an empty posture on the
-    class that authorizes every later request. The sealed record refuses the write with
-    ``ConfigurationError``, so the hostile hook fails the request loudly (a
+    class that authorizes every later request. The frozen record refuses the write with
+    ``dataclasses.FrozenInstanceError``, so the hook fails the request loudly (a
     top-level error, no row), the validated configuration survives untouched,
     and a second identical anonymous request is still denied.
     """
@@ -437,9 +437,10 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
             _data: object,
             _instance: object = None,
         ) -> bool:
-            # The hook's ``mutation`` IS the mutation class; the plain attribute
-            # statement is the persistent-bypass shape the seal refuses.
-            mutation._mutation_meta.permission_classes = ()
+            # The hook's ``mutation`` IS the mutation class; rebinding its validated
+            # permission slot is the persistent-bypass shape the frozen record refuses.
+            slot = "permission_classes"
+            setattr(mutation._mutation_meta, slot, ())
             return True
 
     class Denier:
@@ -490,14 +491,11 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
         AnonymousUser(),
         {"d": {"name": "Blocked", "categoryId": global_id_for(CategoryT, saved_pk(cat))}},
     )
-    # The seal raises OUT of the walk: loud top-level failure, no write.
-    message = (
-        "The validated mutation Meta snapshot is sealed and 'permission_classes' cannot be "
-        "reassigned; authorization configuration is captured once at class creation."
-    )
+    # The frozen record raises OUT of the walk: loud top-level failure, no write.
+    message = "cannot assign to field 'permission_classes'"
     _assert_refusal(res, message)
     assert not product_models.Item.objects.filter(name="Blocked").exists()
-    # The seal refused the rebind: the validated configuration is untouched.
+    # The frozen record refused the rebind: the validated configuration is untouched.
 
     # The next (identical anonymous) request is still denied by the intact posture.
     res2 = _post(
@@ -509,7 +507,7 @@ def test_hook_rebinding_the_validated_permission_slot_fails_closed() -> None:
     _assert_refusal(res2, message)
     assert not product_models.Item.objects.filter(name="StillBlocked").exists()
     # The walk aborts at the FIRST entry (the raising hook) on every request:
-    # the configured denier never ran at all under the seal.
+    # the configured denier never ran at all.
     assert denier_runs == []
 
 

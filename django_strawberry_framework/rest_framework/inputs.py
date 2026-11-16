@@ -1552,13 +1552,13 @@ def dedupe_serializer_input_shape(
     Post-build descriptor-keyed get-or-store: the serializer cache key is the
     frozen ``SerializerInputShape`` itself, which exists only after
     ``build_serializer_input_class`` walks, so callers build first then dedupe
-    here (unlike form ``cached_build_input``, which keys pre-build). Top-level
+    here (unlike ``forms/sets.py::_cached_build_form_input``, which keys pre-build). Top-level
     bind (``sets._serializer_input_shape_for``) and nested opt-in builds share
     this one protocol so cache key / value contracts cannot drift across modules;
     materialize stays at each call site (nested always materializes; top-level
     materializes later via ``build_and_stash_input``). The get-or-store itself
     rides ``utils/inputs.py::get_or_store_shape_build`` (the same spine the
-    model bind and form ``cached_build_input`` use).
+    model bind and the form build use).
     """
     return get_or_store_shape_build(
         _serializer_shape_build_cache,

@@ -227,20 +227,6 @@ async def scope_session_lock(
         yield lock
 
 
-def uses_signed_cookie_sessions() -> bool:
-    """Return whether the configured session engine is Django's signed-cookie engine.
-
-    A settings / session-store read (``settings.SESSION_ENGINE``), NOT adapter
-    metadata: the transport module answers the capability question itself rather
-    than bolting a session-engine flag onto ``ChannelsRequestAdapter``. Resolves
-    the engine's ``SessionStore`` through the shared
-    ``utils/sessions.py::session_store_class`` and tests it against the
-    signed-cookie store so a deployment subclassing that engine (which shares its
-    no-server-side-record limitation) is recognized too.
-    """
-    return issubclass(session_store_class(), SignedCookieSessionStore)
-
-
 def login_supported(transport: Transport) -> bool:
     """Return whether ``login`` can truthfully establish a durable session on ``transport``.
 
@@ -258,8 +244,12 @@ def logout_supported(transport: Transport) -> bool:
     Logout is supportable everywhere except a signed-cookie-engine WebSocket:
     server-side engines invalidate by deleting the record (no new cookie needed),
     but a signed-cookie WebSocket has no server-side record to revoke and cannot
-    delete or replace the browser cookie over an established socket.
+    delete or replace the browser cookie over an established socket. The engine's
+    ``SessionStore`` is resolved through ``utils/sessions.py::session_store_class``
+    and tested against the signed-cookie store, so a deployment subclassing that
+    engine (which shares its no-server-side-record limitation) is recognized too.
     """
-    if transport is Transport.CHANNELS_WEBSOCKET:
-        return not uses_signed_cookie_sessions()
-    return True
+    return transport is not Transport.CHANNELS_WEBSOCKET or not issubclass(
+        session_store_class(),
+        SignedCookieSessionStore,
+    )

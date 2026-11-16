@@ -114,6 +114,7 @@ from django.db.utils import OperationalError
 from django.http import HttpRequest
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
+from django.utils.functional import SimpleLazyObject
 from rest_framework import serializers
 from rest_framework.exceptions import ErrorDetail
 from rest_framework.settings import api_settings
@@ -2497,15 +2498,22 @@ def _saved_result_fixture() -> type[object]:
     )
 
 
+@pytest.mark.parametrize("shape", ["object", "lazy-proxy"])
 @pytest.mark.django_db
-def test_saved_result_wrong_model_is_configuration_error() -> None:
-    """A ``save()`` returning a non-model / wrong-model value fails loud before the re-fetch."""
+def test_saved_result_wrong_model_is_configuration_error(shape: str) -> None:
+    """A ``save()`` returning a non-model value fails loud before the re-fetch.
+
+    A lazy proxy is refused by its real class without being evaluated.
+    """
     fake = _saved_result_fixture()
+    evaluated: list[object] = []
+    saved = SimpleLazyObject(lambda: evaluated.append(1)) if shape == "lazy-proxy" else object()
     with pytest.raises(ConfigurationError, match="must persist and return the written Item row"):
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
-            object(),
+            saved,
         )
+    assert evaluated == []
 
 
 @pytest.mark.django_db

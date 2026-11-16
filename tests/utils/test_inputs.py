@@ -27,12 +27,12 @@ from django_strawberry_framework import (
     DjangoSchema,
     DjangoType,
     finalize_django_types,
-    write_mixins,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet, filter_input_type
 from django_strawberry_framework.filters import inputs as filter_inputs
 from django_strawberry_framework.filters import sets as filter_sets
+from django_strawberry_framework.forms import sets as form_sets
 from django_strawberry_framework.mutations import sets as mutation_sets
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.orders import inputs as order_inputs
@@ -1157,9 +1157,9 @@ def test_get_or_store_shape_build_stores_on_miss_and_reuses_on_hit() -> None:
 
 
 def test_write_flavor_shape_caches_share_get_or_store_owner() -> None:
-    """Model bind, form cached_build_input, and serializer dedupe import one get-or-store."""
+    """Model bind, form build, and serializer dedupe import one get-or-store."""
     assert module_binding(mutation_sets, "get_or_store_shape_build") is get_or_store_shape_build
-    assert module_binding(write_mixins, "get_or_store_shape_build") is get_or_store_shape_build
+    assert module_binding(form_sets, "get_or_store_shape_build") is get_or_store_shape_build
     assert module_binding(ser_inputs, "get_or_store_shape_build") is get_or_store_shape_build
 
 

@@ -9,7 +9,7 @@ The first subject is the ``SESSION_ENGINE``
 expression that resolves a deployment's ``SessionStore`` class, which has two
 callers on opposite sides of the package's opt-in boundary.
 
-* ``auth/sessions.py::uses_signed_cookie_sessions`` asks a *capability* question
+* ``auth/sessions.py::logout_supported`` asks a *capability* question
   about the resolved class (can a WebSocket ``logout`` truthfully invalidate a
   session, or is there no server-side record to delete?).
 * ``consumers.py::_refreshed_actor`` *instantiates* it to reload a WebSocket

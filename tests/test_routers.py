@@ -167,6 +167,7 @@ from django.core.handlers.asgi import ASGIRequest
 from django.http import HttpRequest, JsonResponse
 from django.test import AsyncClient, RequestFactory, override_settings
 from django.urls import URLPattern, path
+from django.utils.functional import SimpleLazyObject
 from graphql import GraphQLError
 from strawberry.channels import GraphQLWSConsumer
 from strawberry.channels.handlers.ws_handler import ChannelsWebSocketAdapter
@@ -2148,6 +2149,22 @@ def test_a_factory_returning_a_non_application_fails_at_construction(
     assert _FACTORY_CONTRACT_SUBSTRING in message
     assert "AllowedHostsOriginValidator" in message
     assert f"returned {expected_tail}" in message
+
+
+def test_a_factory_returning_a_lazy_proxy_is_refused_unevaluated() -> None:
+    """A lazy proxy is refused by its real class; deciding the refusal never evaluates it."""
+    evaluated: list[object] = []
+
+    def factory(*, schema: object) -> object:
+        del schema  # the router passes schema= by keyword; this factory ignores it
+        return SimpleLazyObject(lambda: evaluated.append(1))
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        _router(websocket_consumer_class=factory)
+    message = str(exc_info.value)
+    assert "returned SimpleLazyObject <SimpleLazyObject:" in message
+    assert _ASYNC_FACTORY_SUBSTRING not in message
+    assert evaluated == []
 
 
 def test_an_async_factory_is_rejected_and_the_refused_coroutine_is_closed() -> None:

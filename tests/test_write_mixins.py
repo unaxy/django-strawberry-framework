@@ -6,9 +6,9 @@ primitives (``normalize_meta_field_selection``,
 ``require_subclass`` / ``require_model_class`` / ``require_non_delete_operation``,
 ``_validate_permission_classes``, ``validate_select_for_update``,
 ``model_backed_permission_and_lock``), including their hostile-input reads; the
-declaration-ledger and ``Meta``-validating metaclass factories; the sealed
+declaration-ledger and ``Meta``-validating metaclass factories; the frozen
 validated snapshot and the sealed ``_mutation_meta`` head; and the shared
-phase-2.5 drain (``bind_write_declarations`` / ``bind_mutation_outputs``).
+phase-2.5 drain (``bind_write_declarations``).
 
 Class-creation and bind contracts a request cannot express: every row here
 raises or stashes at declaration / finalize time. The flavors' wire behavior is
@@ -17,6 +17,7 @@ live in ``examples/fakeshop/test_query/``.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from types import SimpleNamespace
 
@@ -51,7 +52,6 @@ from django_strawberry_framework.write_mixins import (
     _validate_permission_classes,
     _ValidatedMutationMeta,
     backing_model_of,
-    bind_mutation_outputs,
     bind_write_declarations,
     make_declaration_registry,
     make_meta_validating_metaclass,
@@ -351,8 +351,8 @@ def test_model_backed_permission_and_lock_defaults_and_explicit_opt_out() -> Non
     assert lock is False
 
 
-def test_bind_mutation_outputs_stashes_model_less_payload_and_slots() -> None:
-    """The shared payload stash writes the three bind-output slots both ledgers fill."""
+def test_bind_write_declarations_stashes_model_less_payload_and_slots() -> None:
+    """The shared drain writes the three bind-output slots both ledgers fill."""
 
     class ProbeForm(forms.Form):
         name = forms.CharField()
@@ -362,10 +362,13 @@ def test_bind_mutation_outputs_stashes_model_less_payload_and_slots() -> None:
             form_class = ProbeForm
             permission_classes = []
 
-    input_cls = BindOutputsProbe.build_input(BindOutputsProbe._mutation_meta)
-    bind_mutation_outputs(BindOutputsProbe, input_cls=input_cls, object_type=None)
+    bind_write_declarations(
+        cache={},
+        iterate=lambda: (BindOutputsProbe,),
+        resolve_object_type=lambda _cls, _meta: None,
+    )
     assert BindOutputsProbe._primary_type is None
-    assert BindOutputsProbe._input_class is input_cls
+    assert BindOutputsProbe._input_class is not None
     assert BindOutputsProbe._payload_type_name == "BindOutputsProbePayload"
     assert "BindOutputsProbePayload" in _materialized_names
 
@@ -386,14 +389,14 @@ def test_backing_model_of_refuses_a_model_less_snapshot() -> None:
         _ = backing_model_of(ModelLessProbe._mutation_meta)
 
 
-def test_model_and_plain_form_binds_ride_bind_mutation_outputs() -> None:
+def test_model_and_plain_form_binds_ride_bind_write_declarations() -> None:
     """Both declaration-ledger drains stash payload + slots through one shared drain."""
     # Both public drains delegate to the one shared body ...
     assert "bind_write_declarations" in bind_mutations.__code__.co_names
     assert "bind_write_declarations" in bind_form_mutations.__code__.co_names
     assert bind_form_mutations.__globals__["bind_write_declarations"] is bind_write_declarations
     # ... which is the single site stashing payload + slots.
-    assert "bind_mutation_outputs" in bind_write_declarations.__code__.co_names
+    assert "build_payload_type" in bind_write_declarations.__code__.co_names
 
 
 @pytest.mark.parametrize("invalid_op", _UNHASHABLE_AND_NON_STRING_OPERATIONS)
@@ -428,6 +431,22 @@ def test_validate_select_for_update_hostile_repr_propagates() -> None:
 
     with pytest.raises(RuntimeError, match="HostileRepr exploded"):
         validate_select_for_update("DjangoMutation", "Probe", BadMeta)
+
+
+def test_validate_select_for_update_refuses_a_lazy_bool() -> None:
+    """A lazy proxy over a bool is no bool: it is refused by its real class, unevaluated."""
+    evaluated: list[object] = []
+
+    def _factory() -> bool:
+        evaluated.append(1)
+        return True
+
+    class LazyMeta:
+        select_for_update = SimpleLazyObject(_factory)
+
+    with pytest.raises(ConfigurationError, match="select_for_update must be a bool"):
+        validate_select_for_update("DjangoMutation", "Probe", LazyMeta)
+    assert evaluated == []
 
 
 def test_validate_permission_classes_messages_open_with_the_site() -> None:
@@ -580,7 +599,7 @@ def test_whole_record_swap_and_deletion_on_a_real_mutation_class_are_sealed() ->
     ``_mutation_meta`` through those methods: a ``has_permission`` hook receives
     the mutation class, so an unguarded head would let one request replace the validated record
     wholesale with a hook-chosen namespace (the empty allow-any posture) - the
-    persistent cross-request bypass the snapshot's own seal closes at the slot
+    persistent cross-request bypass the frozen snapshot closes at the field
     level. Creation time is the one honored write, so the guards are unreachable
     from a live request and are earned here at the unit tier. Related bind
     outputs (``_primary_type`` etc.) are unaffected.
@@ -607,25 +626,22 @@ def test_whole_record_swap_and_deletion_on_a_real_mutation_class_are_sealed() ->
 
 
 def test_validated_mutation_meta_record_refuses_slot_writes_and_deletes() -> None:
-    """The validated snapshot's own slots are sealed once ``__init__`` finishes.
+    """The validated snapshot is a frozen record.
 
-    Mirrors the head seal at the record level: the record is the per-request
-    authorization source (``run_permission_classes`` reads
-    ``type(self)._mutation_meta.permission_classes``), so a sealed record's own
-    ``__setattr__`` / ``__delattr__`` refuse attribute reassignment and deletion. A
-    consumer who needs different authorization declares a new mutation class.
+    The record is the per-request authorization source (``run_permission_classes``
+    reads ``type(self)._mutation_meta.permission_classes``), so attribute
+    reassignment and deletion raise ``FrozenInstanceError``. A consumer who needs
+    different authorization declares a new mutation class.
     """
     snapshot = _create_item_mutation()._mutation_meta
-    with pytest.raises(ConfigurationError, match="sealed"):
-        snapshot.permission_classes = ()
-    with pytest.raises(ConfigurationError) as excinfo:
-        del snapshot.permission_classes
-    assert str(excinfo.value) == (
-        "The validated mutation Meta snapshot is sealed; attributes cannot be deleted. "
-        "Authorization configuration is captured once at class creation."
-    )
-    with pytest.raises(ConfigurationError, match="sealed and 'model' cannot be reassigned"):
-        snapshot.model = None
+    for name, value in (("permission_classes", ()), ("model", None)):
+        with pytest.raises(
+            dataclasses.FrozenInstanceError,
+            match=f"cannot assign to field {name!r}",
+        ):
+            setattr(snapshot, name, value)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            delattr(snapshot, name)
     # The validated configuration is untouched by all three attempts.
     assert snapshot.permission_classes == (DjangoModelPermission,)
     assert snapshot.operation == "create"

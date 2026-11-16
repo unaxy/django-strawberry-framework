@@ -61,10 +61,7 @@ from .consumers import (
 )
 from .exceptions import ConfigurationError
 from .utils import introspection
-from .utils._narrowing import (
-    is_class,
-    is_instance,
-)
+from .utils._narrowing import is_class, is_real_instance
 from .utils.imports import CHANNELS_FLOOR, STRAWBERRY_FLOOR, require_optional_module
 from .utils.querysets import _dispose_sync_awaitable
 
@@ -312,10 +309,11 @@ def _refused_coroutine(application: object) -> bool:
     of at the factory, and a hard error in any consumer running under
     ``-W error``.
 
-    Anything but a coroutine or a future is disposed of by nobody.
+    Both tests read the real class, so a lazy proxy is never evaluated to decide
+    the refusal. Anything but a coroutine or a future is disposed of by nobody.
     """
-    is_coroutine = isinstance(application, _COROUTINE)
-    if is_coroutine or is_instance(application, _FUTURE):
+    is_coroutine = is_real_instance(application, _COROUTINE)
+    if is_coroutine or is_real_instance(application, _FUTURE):
         _dispose_sync_awaitable(application)
     return is_coroutine
 

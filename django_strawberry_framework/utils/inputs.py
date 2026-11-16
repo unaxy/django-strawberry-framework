@@ -999,8 +999,8 @@ def get_or_store_shape_build(
     - model bind (``mutations/sets.py::_materialize_input_for``) keys
       ``MutationInputShape.cache_key`` and puts ``build_mutation_input`` in
       the factory so a hit never re-walks editable columns;
-    - form ``cached_build_input`` keys the pre-build name-set after the
-      per-declaration guard;
+    - form ``forms/sets.py::_cached_build_form_input`` keys the pre-build name-set after
+      the per-declaration guard;
     - serializer ``dedupe_serializer_input_shape`` keys the post-build
       ``SerializerInputShape`` descriptor (nested opt-in and top-level bind).
 

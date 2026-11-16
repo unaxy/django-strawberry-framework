@@ -20,8 +20,7 @@ ledger, metaclass instance, allowed-key set and bind entry point in its own
   (``make_declaration_registry`` / ``make_meta_validating_metaclass``);
 - the resolver-seam factory (``resolver_seams`` / ``dispatch_resolver_entry``);
 - the input build / stash helpers and the phase-2.5 drain
-  (``cached_build_input`` / ``build_and_stash_input`` / ``construction_kwargs`` /
-  ``bind_write_declarations`` / ``bind_mutation_outputs``).
+  (``build_and_stash_input`` / ``construction_kwargs`` / ``bind_write_declarations``).
 
 The ``Meta``-key typo guard each ``_validate_meta`` opens with
 (``utils/inputs.py::reject_unknown_meta_keys``) is not here: the set
@@ -45,6 +44,7 @@ from .utils import introspection
 from .utils._narrowing import (
     class_namespace,
     is_class,
+    is_real_instance,
     is_str,
     is_text_atom,
     list_of,
@@ -53,7 +53,7 @@ from .utils._narrowing import (
     require,
 )
 from .utils.imports import import_attr
-from .utils.inputs import get_or_store_shape_build, normalize_field_name_sequence
+from .utils.inputs import normalize_field_name_sequence
 from .utils.lazy import unwrap_lazy_object
 from .utils.relations import is_model_class
 
@@ -143,43 +143,6 @@ def normalize_meta_field_selection(
         ordered=False,
     )
     return fields, exclude
-
-
-def cached_build_input(
-    cache: dict[_KeyT, tuple[type[object], _PayloadT]],
-    shape_key: _KeyT,
-    *,
-    guard: Callable[[], None],
-    build_fn: Callable[[], tuple[type[object], _PayloadT]],
-) -> tuple[type[object], _PayloadT]:
-    """Run the per-declaration guard, THEN the per-shape cache lookup.
-
-    The shared guard-before-cache-lookup core for flavors whose cache key is
-    known BEFORE the build (today: the form ``build_input`` seam). The
-    load-bearing ordering (spec-038 Decision 7 / spec-039 Decision 7): the
-    create-required-narrowing ``guard`` runs PER declaration, BEFORE the
-    per-shape cache lookup, so a waiving mutation (guard a no-op, having
-    overridden the construction hook) that materializes a narrowed shape FIRST
-    cannot suppress the guard for a later non-waiving mutation reusing the
-    cached shape - the cache key (``shape_key``) excludes the waiver, so the
-    guard is tied to the declaration, not the built shape.
-
-    The get-or-store itself rides ``utils/inputs.py::get_or_store_shape_build``
-    (the same spine serializer ``dedupe_serializer_input_shape`` uses after
-    its walk). The serializer flavor deliberately does NOT call this helper:
-    its cache key is the post-build ``SerializerInputShape`` descriptor, so
-    ``rest_framework/sets.py`` preserves the same guard-before-dedupe
-    discipline inline. The materialize-then-stash tail both flavors still
-    share is ``build_and_stash_input``.
-
-    On a cache miss ``build_fn()`` returns ``(input_cls, payload)`` where
-    ``payload`` is the per-flavor stash value (the form's ``field_specs``
-    list). ``cache`` is the FLAVOR's own per-pass ``make_shape_build_cache()``
-    dict (passed in, not owned here) so the mutation / form caches stay
-    disjoint - each is registered + cleared separately.
-    """
-    guard()
-    return get_or_store_shape_build(cache, shape_key, build_fn)
 
 
 def build_and_stash_input(
@@ -414,11 +377,49 @@ def resolver_seams(
     ``resolve_sync, resolve_async = resolver_seams(...)`` so both land in the class
     ``__dict__``.
     """
-    # Each shape is built in its own scope: the model-less pair has no ``id``, and
-    # both pairs keep ``resolve_sync`` / ``resolve_async`` as their function names.
     if with_id:
-        return _id_resolver_seams(module_path, sync_name, async_name)
-    return _id_less_resolver_seams(module_path, sync_name, async_name)
+
+        def resolve_sync(
+            cls: type[object],
+            info: Info[object, object],
+            *,
+            data: object,
+            id: object,  # noqa: A002 - the GraphQL argument name
+        ) -> object:
+            """Delegate to the flavor's sync resolver entry (function-local import cycle guard)."""
+            return dispatch_resolver_entry(module_path, sync_name, cls, info, data=data, id=id)
+
+        def resolve_async(
+            cls: type[object],
+            info: Info[object, object],
+            *,
+            data: object,
+            id: object,  # noqa: A002 - the GraphQL argument name
+        ) -> object:
+            """Delegate to the flavor's async resolver entry (function-local import cycle guard)."""
+            return dispatch_resolver_entry(module_path, async_name, cls, info, data=data, id=id)
+
+        return classmethod(resolve_sync), classmethod(resolve_async)
+
+    def resolve_sync_without_id(
+        cls: type[object],
+        info: Info[object, object],
+        *,
+        data: object,
+    ) -> object:
+        """Delegate to the flavor's sync resolver entry (no ``id`` - model-less flavor)."""
+        return dispatch_resolver_entry(module_path, sync_name, cls, info, data=data)
+
+    def resolve_async_without_id(
+        cls: type[object],
+        info: Info[object, object],
+        *,
+        data: object,
+    ) -> object:
+        """Delegate to the flavor's async resolver entry (no ``id`` - model-less flavor)."""
+        return dispatch_resolver_entry(module_path, async_name, cls, info, data=data)
+
+    return classmethod(resolve_sync_without_id), classmethod(resolve_async_without_id)
 
 
 def dispatch_resolver_entry(
@@ -437,54 +438,6 @@ def dispatch_resolver_entry(
     """
     entry = require(import_attr(module_path, entry_name), callable)
     return entry(cls, info, **kwargs)
-
-
-def _id_resolver_seams(
-    module_path: str,
-    sync_name: str,
-    async_name: str,
-) -> tuple[_SeamClassmethod, _SeamClassmethod]:
-    """Build ``resolver_seams``' ``(info, *, data, id)`` pair (every model-backed flavor)."""
-
-    def resolve_sync(
-        cls: type[object],
-        info: Info[object, object],
-        *,
-        data: object,
-        id: object,  # noqa: A002 - the GraphQL argument name
-    ) -> object:
-        """Delegate to the flavor's sync resolver entry (function-local import cycle guard)."""
-        return dispatch_resolver_entry(module_path, sync_name, cls, info, data=data, id=id)
-
-    def resolve_async(
-        cls: type[object],
-        info: Info[object, object],
-        *,
-        data: object,
-        id: object,  # noqa: A002 - the GraphQL argument name
-    ) -> object:
-        """Delegate to the flavor's async resolver entry (function-local import cycle guard)."""
-        return dispatch_resolver_entry(module_path, async_name, cls, info, data=data, id=id)
-
-    return classmethod(resolve_sync), classmethod(resolve_async)
-
-
-def _id_less_resolver_seams(
-    module_path: str,
-    sync_name: str,
-    async_name: str,
-) -> tuple[_SeamClassmethod, _SeamClassmethod]:
-    """Build ``resolver_seams``' ``(info, *, data)`` pair (the model-less plain form)."""
-
-    def resolve_sync(cls: type[object], info: Info[object, object], *, data: object) -> object:
-        """Delegate to the flavor's sync resolver entry (no ``id`` - model-less flavor)."""
-        return dispatch_resolver_entry(module_path, sync_name, cls, info, data=data)
-
-    def resolve_async(cls: type[object], info: Info[object, object], *, data: object) -> object:
-        """Delegate to the flavor's async resolver entry (no ``id`` - model-less flavor)."""
-        return dispatch_resolver_entry(module_path, async_name, cls, info, data=data)
-
-    return classmethod(resolve_sync), classmethod(resolve_async)
 
 
 _DeclarationT = TypeVar("_DeclarationT")
@@ -579,7 +532,7 @@ def make_meta_validating_metaclass(
     statement inside the hook could otherwise replace the validated record
     wholesale (an attacker-chosen namespace holding the empty allow-any posture)
     and authorize every later request - the same persistent cross-request
-    bypass class the snapshot's own seal closes. The creation-time write in
+    bypass class the frozen snapshot closes. The creation-time write in
     ``__new__`` is the one honored write; ordinary reassignment or deletion
     afterwards is refused. Unrelated class attributes (the bind's ``_primary_type`` /
     ``_input_class`` / ``_payload_type_name`` outputs) are unaffected.
@@ -661,135 +614,53 @@ def make_meta_validating_metaclass(
     return MetaValidatingMetaclass
 
 
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False)
 class _ValidatedMutationMeta:
     """The validated ``Meta`` snapshot the metaclass stashes on a concrete mutation.
 
-    A flat record (not a dataclass, to stay dependency-light) the bind and the
-    resolver read instead of re-walking the raw ``Meta``. Mirrors
-    ``types/base.py::_ValidatedMeta`` in role: validation happens once at class
-    creation, then every downstream reader trusts this snapshot.
-
-    The snapshot is SEALED once ``__init__`` finishes: the record is the write
-    side's per-request authorization source
+    A flat frozen record the bind and the resolver read instead of re-walking the
+    raw ``Meta``. Mirrors ``types/base.py::_ValidatedMeta`` in role: validation
+    happens once at class creation, then every downstream reader trusts this
+    snapshot. It is the write side's per-request authorization source
     (``mutations/permissions.py::run_permission_classes`` reads
-    ``type(self)._mutation_meta.permission_classes``), and a ``has_permission``
-    hook runs INSIDE the walk with the mutation class in hand - a mutable slot
-    would let one request's hook rebind the validated set (e.g. to the empty
-    allow-any posture) for every later request: a persistent cross-request
-    authorization bypass. Any attribute write or delete through the record's own
-    ``__setattr__`` / ``__delattr__`` on a sealed snapshot raises
-    ``ConfigurationError`` (a consumer who needs different authorization declares
-    a new mutation class).
+    ``type(self)._mutation_meta.permission_classes``); a consumer who needs
+    different authorization declares a new mutation class.
     """
 
-    __slots__: tuple[str, ...] = (
-        "_sealed",
-        "exclude",
-        "fields",
-        "form_class",
-        "injected_fields",
-        "input_class",
-        "model",
-        "nested_fields",
-        "operation",
-        "optional_fields",
-        "partial_input_class",
-        "permission_classes",
-        "schema_fingerprint",
-        "select_for_update",
-        "serializer_class",
-    )
-
-    def __init__(
-        self,
-        *,
-        model: type[models.Model] | None,
-        operation: str,
-        input_class: type[WithStrawberryObjectDefinition] | None,
-        partial_input_class: type[WithStrawberryObjectDefinition] | None,
-        fields: tuple[str, ...] | None,
-        exclude: tuple[str, ...] | None,
-        permission_classes: tuple[WritePermissionClass, ...],
-        form_class: FormClass | None = None,
-        serializer_class: type[DRFSerializer] | None = None,
-        optional_fields: tuple[str, ...] | None = None,
-        schema_fingerprint: tuple[tuple[object, ...], ...] | None = None,
-        injected_fields: tuple[str, ...] | None = None,
-        select_for_update: bool = False,
-        nested_fields: Mapping[str, NestedSerializerConfig] | None = None,
-    ) -> None:
-        self._sealed: bool = False
-        self.model: type[models.Model] | None = model
-        self.operation: str = operation
-        self.input_class: type[WithStrawberryObjectDefinition] | None = input_class
-        self.partial_input_class: type[WithStrawberryObjectDefinition] | None = partial_input_class
-        self.fields: tuple[str, ...] | None = fields
-        self.exclude: tuple[str, ...] | None = exclude
-        self.permission_classes: tuple[WritePermissionClass, ...] = permission_classes
-        # The form-flavor snapshot: a ``DjangoModelFormMutation``
-        # / ``DjangoFormMutation`` records its ``Meta.form_class`` here so the form
-        # ``build_input`` / resolver read one snapshot shape. The model flavor
-        # leaves it ``None`` (it has no ``form_class``); the model path never
-        # reads this slot.
-        self.form_class: FormClass | None = form_class
-        # The serializer-flavor snapshot: a ``SerializerMutation``
-        # records its ``Meta.serializer_class`` here so the serializer ``build_input``
-        # / resolver read one snapshot shape (mirroring ``form_class``). The model +
-        # form flavors leave it ``None``; neither path reads it.
-        self.serializer_class: type[DRFSerializer] | None = serializer_class
-        # The serializer-flavor ``Meta.optional_fields``: the
-        # create-only force-optional override lives on the MUTATION's ``Meta`` (the
-        # documented public key), NOT the serializer's own ``Meta``. Normalized at
-        # class creation and stored here as the validated tuple (``None`` when unset);
-        # the serializer ``build_input`` threads it into
-        # ``build_serializer_input_class`` so it participates in the input shape +
-        # descriptor identity. The model + form flavors leave it ``None``.
-        self.optional_fields: tuple[str, ...] | None = optional_fields
-        # The serializer-flavor schema-hook fingerprint: a stable digest of
-        # the ``get_serializer_for_schema()`` field shape captured at class validation, so the
-        # phase-2.5 bind can raise on a NONDETERMINISTIC hook that drifted. The model + form
-        # flavors leave it ``None``; neither path reads it.
-        self.schema_fingerprint: tuple[tuple[object, ...], ...] | None = schema_fingerprint
-        # The serializer-flavor ``Meta.injected_fields``: the auditable,
-        # per-field replacement for the blanket ``get_serializer_kwargs``-override waiver -
-        # names the required fields a ``get_serializer_kwargs`` override supplies into ``data``,
-        # subtracted from the create-required guard AND verified present at runtime. The model +
-        # form flavors leave it ``None``.
-        self.injected_fields: tuple[str, ...] | None = injected_fields
-        # ``Meta.select_for_update``: the
-        # base-manager ``SELECT ... FOR UPDATE`` row lock on the update / delete
-        # locate AND every relation-target check, constrained by the visibility pk
-        # subquery inside the write transaction. Every model-backed flavor (model /
-        # ``ModelForm`` / serializer) validates it via ``validate_select_for_update``
-        # (default ``True``; an explicit ``False`` opts into weaker concurrency).
-        # Only the model-less plain form leaves the constructor default (``False`` -
-        # it locates no row).
-        self.select_for_update: bool = select_for_update
-        # The serializer-flavor ``Meta.nested_fields``: the explicit opt-in
-        # ``{field_name: NestedSerializerConfig}`` map naming the nested serializer fields the
-        # generated input builds RECURSIVELY (an un-named nested field fails loud). ``None`` when
-        # no nesting is opted in. The model + form flavors leave it ``None``.
-        self.nested_fields: Mapping[str, NestedSerializerConfig] | None = nested_fields
-        # Seal LAST: every validated slot is set; from here on the record's own
-        # ``__setattr__`` / ``__delattr__`` refuse reassignment and deletion.
-        self._sealed = True
-
-    @override
-    def __setattr__(self, name: str, value: object) -> None:
-        """Reject any attribute write on a sealed validated snapshot."""
-        if getattr(self, "_sealed", False):
-            raise ConfigurationError(
-                f"The validated mutation Meta snapshot is sealed and {name!r} cannot be "
-                "reassigned; authorization configuration is captured once at class creation.",
-            )
-        object.__setattr__(self, name, value)
-
-    @override
-    def __delattr__(self, name: str) -> None:
-        raise ConfigurationError(
-            "The validated mutation Meta snapshot is sealed; attributes cannot be deleted. "
-            "Authorization configuration is captured once at class creation.",
-        )
+    model: type[models.Model] | None
+    operation: str
+    input_class: type[WithStrawberryObjectDefinition] | None
+    partial_input_class: type[WithStrawberryObjectDefinition] | None
+    fields: tuple[str, ...] | None
+    exclude: tuple[str, ...] | None
+    permission_classes: tuple[WritePermissionClass, ...]
+    # The form flavors' ``Meta.form_class``; the model flavor leaves it ``None``.
+    form_class: FormClass | None = None
+    # The serializer flavor's ``Meta.serializer_class``; the model and form flavors leave it
+    # ``None``.
+    serializer_class: type[DRFSerializer] | None = None
+    # The serializer flavor's ``Meta.optional_fields``: the create-only force-optional
+    # override, normalized at class creation and threaded into
+    # ``build_serializer_input_class`` so it participates in the input shape and descriptor
+    # identity.
+    optional_fields: tuple[str, ...] | None = None
+    # The serializer flavor's ``get_serializer_for_schema()`` field-shape digest captured at
+    # class validation, so the phase-2.5 bind can raise on a nondeterministic hook that
+    # drifted.
+    schema_fingerprint: tuple[tuple[object, ...], ...] | None = None
+    # The serializer flavor's ``Meta.injected_fields``: the required fields a
+    # ``get_serializer_kwargs`` override supplies into ``data``, subtracted from the
+    # create-required guard and verified present at runtime.
+    injected_fields: tuple[str, ...] | None = None
+    # ``Meta.select_for_update``: the base-manager ``SELECT ... FOR UPDATE`` row lock on the
+    # update / delete locate and every relation-target check. Every model-backed flavor
+    # validates it via ``validate_select_for_update`` (default ``True``); the model-less plain
+    # form keeps ``False`` (it locates no row).
+    select_for_update: bool = False
+    # The serializer flavor's ``Meta.nested_fields``: the opt-in
+    # ``{field_name: NestedSerializerConfig}`` map naming the nested serializer fields the
+    # generated input builds recursively (an un-named nested field fails loud).
+    nested_fields: Mapping[str, NestedSerializerConfig] | None = None
 
 
 def _validate_permission_classes(
@@ -908,11 +779,11 @@ def validate_select_for_update(flavor: str, mutation_name: str, meta: type[objec
     validation reached first (``mutations/resolvers.py::run_write_pipeline_sync``
     probes the located row on a step failure). On a backend without
     ``FOR UPDATE`` (sqlite) Django skips the clause silently, so ``True`` is
-    safe to leave in place regardless of backend. A non-bool is a clear
-    class-creation error.
+    safe to leave in place regardless of backend. A non-bool (a lazy proxy
+    included, read by its real class) is a clear class-creation error.
     """
     select_for_update = introspection.mro_attr(meta, "select_for_update", default=True)
-    if not isinstance(select_for_update, bool):
+    if not is_real_instance(select_for_update, bool):
         raise ConfigurationError(
             f"{flavor} {mutation_name}.Meta.select_for_update must be a bool; got "
             f"{select_for_update!r}.",
@@ -958,7 +829,7 @@ if TYPE_CHECKING:
     )
 
     class _BindTarget(Protocol[_ObjectTypeT_co]):
-        """A declaration class as ``bind_mutation_outputs`` stashes the bind outputs on it.
+        """A declaration class as ``bind_write_declarations`` stashes the bind outputs on it.
 
         ``_primary_type`` holds the payload's object type: the primary
         ``DjangoType`` on the model-backed ledger, ``None`` on the model-less one.
@@ -987,41 +858,6 @@ if TYPE_CHECKING:
             """Build + materialize the operation's input class; ``None`` when it takes none."""
 
 
-def bind_mutation_outputs(
-    mutation_cls: _BindTarget[_ObjectTypeT],
-    *,
-    input_cls: type[object] | None,
-    object_type: _ObjectTypeT,
-) -> None:
-    """Build the payload, materialize it, and stash bind outputs on ``mutation_cls``.
-
-    The payload half of the phase-2.5 bind (the input half is the flavor's
-    ``build_input`` seam; the input twin is ``build_and_stash_input``). Both
-    declaration ledgers write the same three slots ``DjangoMutationField``
-    reads after finalize (``_primary_type`` / ``_input_class`` /
-    ``_payload_type_name``):
-
-    - model-backed (``bind_mutations``): ``object_type`` is the resolved
-      primary ``DjangoType``; the payload carries ``payload_object_slot``;
-    - model-less (``bind_form_mutations``): ``object_type`` is ``None`` and
-      the payload is the pinned ``{ ok errors }`` shape.
-
-    Auth's login/logout holders use a fixed payload *name* (``"Login"`` /
-    ``"Logout"``) rather than the mutation class's name and do not stash
-    ``_input_class``, so they stay local. Payload classes ride the SAME
-    ``materialize_mutation_input_class`` ledger as the input classes (one
-    ledger, one collision check, one ``registry.clear()`` co-clear).
-    """
-    payload_cls = build_payload_type(
-        mutation_cls.__name__,
-        object_type=object_type,
-    )
-    materialize_mutation_input_class(payload_cls.__name__, payload_cls)
-    mutation_cls._primary_type = object_type
-    mutation_cls._input_class = input_cls
-    mutation_cls._payload_type_name = payload_cls.__name__
-
-
 def bind_write_declarations(
     *,
     cache: dict[_KeyT, _PayloadT],
@@ -1043,7 +879,14 @@ def bind_write_declarations(
     Per registered class: resolve the payload's object type, route the input
     materialization through the ``build_input`` seam (spec-038 Decision 13 - the
     model flavor rebuilds the model-column input, the form / serializer flavors
-    build their own), and stash both through ``bind_mutation_outputs``.
+    build their own), build and materialize the payload, and stash the three slots
+    ``DjangoMutationField`` reads after finalize (``_primary_type`` / ``_input_class``
+    / ``_payload_type_name``). A model-backed payload carries ``payload_object_slot``;
+    a model-less one is the pinned ``{ ok errors }`` shape. Payload classes ride the
+    SAME ``materialize_mutation_input_class`` ledger as the input classes (one
+    ledger, one collision check, one ``registry.clear()`` co-clear). Auth's
+    login/logout holders use a fixed payload *name* and stash no ``_input_class``,
+    so they stay local.
 
     ``resolve_object_type`` is the ONLY per-ledger divergence: the model-backed
     drain resolves the primary ``DjangoType`` (raising for no-primary /
@@ -1064,8 +907,9 @@ def bind_write_declarations(
     for mutation_cls in iterate():
         meta = mutation_cls._mutation_meta
         object_type = resolve_object_type(mutation_cls, meta)
-        bind_mutation_outputs(
-            mutation_cls,
-            input_cls=mutation_cls.build_input(meta, object_type),
-            object_type=object_type,
-        )
+        input_cls = mutation_cls.build_input(meta, object_type)
+        payload_cls = build_payload_type(mutation_cls.__name__, object_type=object_type)
+        materialize_mutation_input_class(payload_cls.__name__, payload_cls)
+        mutation_cls._primary_type = object_type
+        mutation_cls._input_class = input_cls
+        mutation_cls._payload_type_name = payload_cls.__name__

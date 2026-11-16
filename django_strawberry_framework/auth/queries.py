@@ -29,13 +29,13 @@ from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils._narrowing import optional_annotation
 from django_strawberry_framework.utils.inputs import make_input_namespace
 from django_strawberry_framework.utils.permissions import request_from_info
+from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
 
 from .mutations import (
     _AUTH_FAMILY_LABEL,
     _authenticated_actor_or_none,
     _declare_fixed_auth_surface,
     _make_auth_field,
-    _sync_bridged_async_body,
 )
 
 if TYPE_CHECKING:
@@ -130,9 +130,17 @@ def current_user(
     """
     holder_cls = _declare_fixed_auth_surface("current_user", "CurrentUser", permission_classes)
     sync_body = functools.partial(_current_user_resolve_body, holder_cls)
+
+    # The async body bridges to ``sync_body`` through the ONE shared sync boundary
+    # (spec-040 Decision 10): request resolution, the permission gate (whose
+    # ``instance=request.user`` forces the ``SimpleLazyObject``, a sync ORM touch) and
+    # the actor read all run inside it.
+    async def async_body(info: Info[object, object], **kwargs: object) -> object:
+        return await run_in_one_sync_boundary(sync_body, info, **kwargs)
+
     return _make_auth_field(
         sync_body=sync_body,
-        async_body=_sync_bridged_async_body(sync_body),
+        async_body=async_body,
         arguments=[],
         # ``_lazy_ref`` builds an ``Annotated[...]`` typing alias, whose ``__or__``
         # builds the ``Optional`` at runtime.

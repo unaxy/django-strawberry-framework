@@ -484,11 +484,8 @@ class _GuardedDateCheck:
         self.model_class: type[models.Model] = model_class
         self.alias: str = alias
         self.sources: Mapping[str, str] = sources
-
-    @property
-    def _default_manager(self) -> _GuardedDateCheck:
-        """The stand-in itself, whose ``filter`` is the manager's."""
-        return self
+        # The stand-in is its own default manager: its ``filter`` is the manager's.
+        self._default_manager: _GuardedDateCheck = self
 
     def filter(self, *args: object, **kwargs: object) -> QuerySet[models.Model]:
         """Return the default manager's ``filter(*args, **kwargs)``, its query guarded."""

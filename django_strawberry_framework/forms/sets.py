@@ -63,6 +63,7 @@ from django_strawberry_framework.utils._narrowing import (
     require,
 )
 from django_strawberry_framework.utils.inputs import (
+    get_or_store_shape_build,
     make_shape_build_cache,
     reject_unknown_meta_keys,
 )
@@ -74,7 +75,6 @@ from django_strawberry_framework.write_mixins import (
     _ValidatedMutationMeta,
     bind_write_declarations,
     build_and_stash_input,
-    cached_build_input,
     construction_kwargs,
     dispatch_resolver_entry,
     make_declaration_registry,
@@ -331,7 +331,7 @@ def _cached_build_form_input(
     effective = tuple(effective_fields)
 
     # Run the create-required-narrowing guard PER declaration, BEFORE the per-shape
-    # cache lookup (the load-bearing ordering ``cached_build_input`` enforces): the
+    # cache lookup (the load-bearing ordering, spec-039 Decision 7): the
     # cache key excludes ``guard_required``, so a waiving mutation
     # (``guard_required=False``, having overridden ``get_form_kwargs`` / ``get_form``)
     # that materializes this shape FIRST must not suppress the guard for a later
@@ -342,14 +342,12 @@ def _cached_build_form_input(
     # required field is widened optional and reconstructed from the row, but a
     # column-less extra cannot be reconstructed, so dropping it finalizes a form that
     # can never validate.
-    def _guard() -> None:
-        if binds_class_fields:
-            if operation_kind == PARTIAL:
-                require_class_choice_models(form_class, form_fields)
-            else:
-                require_class_choice_models(form_class, effective_fields, required_only=True)
-        if not guard_required:
-            return
+    if binds_class_fields:
+        if operation_kind == PARTIAL:
+            require_class_choice_models(form_class, form_fields)
+        else:
+            require_class_choice_models(form_class, effective_fields, required_only=True)
+    if guard_required:
         if operation_kind == PARTIAL:
             guard_partial_required_column_less_fields(form_class, effective, form_fields)
         else:
@@ -373,12 +371,7 @@ def _cached_build_form_input(
         frozenset(effective),
         _form_basis_content_identity(form_class, form_fields),
     )
-    return cached_build_input(
-        _form_shape_build_cache,
-        cache_key,
-        guard=_guard,
-        build_fn=_build,
-    )
+    return get_or_store_shape_build(_form_shape_build_cache, cache_key, _build)
 
 
 def _resolve_effective_form_field_names(
