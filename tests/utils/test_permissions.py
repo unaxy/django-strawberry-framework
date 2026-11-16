@@ -1519,8 +1519,8 @@ def test_resolve_auth_aliases_includes_the_session_store_alias_while_sessions_is
 
 def test_resolve_auth_aliases_skips_uninstalled_models() -> None:
     """A model the deployment does not install is skipped, never an error."""
-    assert _safe_get_model("nonexistent_app", "Nope") is None
-    assert _safe_get_model("auth", "Nope") is None
+    assert _safe_get_model("nonexistent_app.Nope") is None
+    assert _safe_get_model("auth.Nope") is None
 
 
 def test_channels_request_in_object_context_is_adapted_to_channels_request_adapter() -> None:

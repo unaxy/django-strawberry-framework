@@ -43,6 +43,8 @@ import threading
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from enum import Enum
+from operator import attrgetter
+from traceback import walk_tb
 from typing import TYPE_CHECKING
 
 from django.db import Error as DatabaseError
@@ -585,9 +587,8 @@ def decode_visible_relation_ids(
     return [project(pk, key) for pk, key in zip(pks, keys, strict=True)], None
 
 
-def _spec_field_name(spec: InputFieldSpec) -> str:
-    """Default GraphQL error-path: the spec's own wire name."""
-    return spec.graphql_name
+#: Default GraphQL error-path: the spec's own wire name.
+_GRAPHQL_NAME: Callable[[InputFieldSpec], str] = attrgetter("graphql_name")
 
 
 def _no_relation_extra(_spec: InputFieldSpec) -> Mapping[str, object]:
@@ -634,7 +635,7 @@ def decoded_into(
 def scalar_into(
     dest: dict[str, object],
     *,
-    field_name: Callable[[InputFieldSpec], str] = _spec_field_name,
+    field_name: Callable[[InputFieldSpec], str] = _GRAPHQL_NAME,
 ) -> _FieldHandler:
     """SCALAR handler: ``decode_scalar_leaf`` then store under ``target_name``.
 
@@ -664,7 +665,7 @@ def relation_into(
     single: _RelationDecoder,
     multi: _RelationDecoder,
     info: Info[object, object],
-    field_name: Callable[[InputFieldSpec], str] = _spec_field_name,
+    field_name: Callable[[InputFieldSpec], str] = _GRAPHQL_NAME,
     extra: Callable[[InputFieldSpec], Mapping[str, object]] = _no_relation_extra,
 ) -> _FieldHandler:
     """RELATION_SINGLE / RELATION_MULTI handler over flavor decoders.
@@ -697,7 +698,7 @@ def decode_field_handlers(
     single: _RelationDecoder,
     multi: _RelationDecoder,
     file_dest: dict[str, object] | None = None,
-    field_name: Callable[[InputFieldSpec], str] = _spec_field_name,
+    field_name: Callable[[InputFieldSpec], str] = _GRAPHQL_NAME,
     extra: Callable[[InputFieldSpec], Mapping[str, object]] = _no_relation_extra,
     extra_handlers: dict[str, _FieldHandler] | None = None,
 ) -> tuple[dict[str, _FieldHandler], _FieldHandler]:
@@ -910,16 +911,6 @@ def attempted_saves(model: type[models.Model]) -> Generator[list[AttemptedSave],
 _DJANGO_CAUSELESS_REFUSALS = (ProtectedError, RestrictedError)
 
 
-def _on_traceback(frame: FrameType | None, error: BaseException) -> bool:
-    """Return whether ``frame`` is one of the frames ``error``'s traceback passes through."""
-    trace = error.__traceback__
-    while trace is not None:
-        if trace.tb_frame is frame:
-            return True
-        trace = trace.tb_next
-    return False
-
-
 def refused_save(
     attempted: list[AttemptedSave],
     error: BaseException,
@@ -958,16 +949,11 @@ def refused_save(
     raised ``error``.
     """
     frames: set[FrameType] = set()
-    seen: set[int] = set()
     cause: BaseException | None = error
-    while cause is not None and id(cause) not in seen:
-        seen.add(id(cause))
-        trace = cause.__traceback__
-        raised_in: FrameType | None = None
-        while trace is not None:
-            frames.add(trace.tb_frame)
-            raised_in = trace.tb_frame
-            trace = trace.tb_next
+    while cause is not None:
+        chain = [frame for frame, _ in walk_tb(cause.__traceback__)]
+        frames.update(chain)
+        raised_in = chain[-1] if chain else None
         context = cause.__context__
         if (
             cause.__cause__ is None
@@ -977,7 +963,7 @@ def refused_save(
                     isinstance(cause, DatabaseError)
                     and not isinstance(cause, _DJANGO_CAUSELESS_REFUSALS)
                 )
-                or _on_traceback(raised_in, context)
+                or any(frame is raised_in for frame, _ in walk_tb(context.__traceback__))
             )
         ):
             cause = context

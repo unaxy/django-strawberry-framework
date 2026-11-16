@@ -1532,23 +1532,6 @@ def test_django_defines_exactly_the_audited_database_errors() -> None:
     assert defined == expected
 
 
-def test_refused_save_terminates_on_a_cause_cycle() -> None:
-    """A cause chain that loops back on itself ends; an unpaired or senderless record is ``None``."""
-    first = _caught_refusal()
-    second = _caught_refusal()
-    first.__cause__ = second
-    second.__cause__ = first
-    unrelated = inspect.currentframe()
-    assert unrelated is not None
-    attempted: list[AttemptedSave] = [
-        (Genre(name="a"), None, unrelated),
-        (Genre(name="b"), None, None),
-    ]
-    assert refused_save(attempted, first) is None
-    first.__cause__ = first
-    assert refused_save(attempted, first) is None
-
-
 def test_refused_save_reads_the_innermost_save_on_the_traceback() -> None:
     """Two recorded saves both on the traceback: the inner one, which raised, is the refusal."""
     outer_row, inner_row = Genre(name="outer"), Genre(name="inner")

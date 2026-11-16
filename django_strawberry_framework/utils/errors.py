@@ -124,7 +124,7 @@ from .relations import written_model_field
 from .typing import object_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Iterator
     from typing import TypeAlias
 
     from django.db.backends.base.base import BaseDatabaseWrapper
@@ -356,19 +356,6 @@ def _str_list(value: object) -> list[str]:
     return [str(item) for item in value]
 
 
-def _leaf_codes(error: ValidationError) -> list[object]:
-    """Return the truthy ``code`` of every leaf of a Django ``ValidationError``.
-
-    ``error_list`` is the flattened leaf list ``messages`` reads; a dict-form
-    error carries none (its leaves live under ``error_dict``), and a ``None``
-    code is dropped.
-    """
-    # ``ValidationError.__init__`` stores every non-dict error's leaves as ``error_list``.
-    if not hasattr(error, "error_list"):
-        return []
-    return [leaf.code for leaf in error.error_list if leaf.code]
-
-
 def empty_validation_error(path: str = "") -> FieldError:
     """Build the fail-closed leaf for a validation failure carrying no details.
 
@@ -574,11 +561,11 @@ def validation_error_to_field_errors(
 ) -> list[FieldError]:
     """Map a Django ``ValidationError`` to the ``FieldError`` envelope (spec-036 Decision 7).
 
-    Uses ``exc.error_dict`` when present (per-field), keying the model's
-    ``NON_FIELD_ERRORS`` bucket to the ``NON_FIELD_ERROR_KEY`` sentinel (pinned to
-    ``"__all__"`` above - the single source) so a
-    multi-field-constraint error surfaces under ``"__all__"``. Falls back to
-    ``exc.messages`` under the sentinel for a non-dict ``ValidationError``. The
+    Reads Django's own per-field merge (``ValidationError.update_error_dict``): a
+    dict-form error's per-field leaves, the model's ``NON_FIELD_ERRORS`` bucket keyed
+    to the ``NON_FIELD_ERROR_KEY`` sentinel (pinned to ``"__all__"`` above - the
+    single source) so a multi-field-constraint error surfaces under ``"__all__"``,
+    and a non-dict ``ValidationError``'s leaves under the sentinel. The
     single source for the ``full_clean()`` failure, the ``form.errors`` mapping,
     every flavor's save-time Django ``ValidationError`` (``save_or_field_errors``
     and its update / delete counterparts in ``mutations/resolvers.py``) and the
@@ -595,36 +582,23 @@ def validation_error_to_field_errors(
     flattens a nested ``error_dict`` value to its messages, so the error has no
     nested path to re-key.
     """
-    # ``ValidationError.__init__`` stores a dict-form error's per-field leaf lists here.
-    error_dict = truth.static_attr(exc, "error_dict")
-    if error_dict is not None:
-        errors: list[FieldError] = []
-        for field_name, field_leaves in require(error_dict, is_dict).items():
-            field_errors = [
-                require_instance(error, ValidationError) for error in list_of(field_leaves)
-            ]
-            normalized_name = truth.text(field_name)
-            # The sentinel check runs before the re-key (a ``NON_FIELD_ERRORS`` bucket
-            # is never re-keyed), and an unmapped name keeps its validator-side name.
-            path = (
-                ""
-                if normalized_name == NON_FIELD_ERRORS
-                else rekey_error_segment(normalized_name, key_map)[0]
-            )
-            messages = [message for error in field_errors for message in error.messages]
-            # Preserve each leaf Django ``ValidationError.code`` alongside the
-            # message (a ``None`` code is dropped).
-            codes = [code for error in field_errors for code in _leaf_codes(error)]
-            errors.append(
-                field_error(path, messages, codes=codes)
-                if messages
-                else empty_validation_error(path),
-            )
-        if errors:
-            return errors
-    messages = exc.messages
-    codes = _leaf_codes(exc)
-    return [field_error("", messages, codes=codes) if messages else empty_validation_error()]
+    errors: list[FieldError] = []
+    # Django's own merge: a dict-form error's per-field leaf lists, a list-form one's
+    # leaves under ``NON_FIELD_ERRORS``.
+    for field_name, leaves in exc.update_error_dict({}).items():
+        # The sentinel check runs before the re-key (a ``NON_FIELD_ERRORS`` bucket
+        # is never re-keyed), and an unmapped name keeps its validator-side name.
+        path = (
+            "" if field_name == NON_FIELD_ERRORS else rekey_error_segment(field_name, key_map)[0]
+        )
+        messages = [message for leaf in leaves for message in leaf.messages]
+        # Preserve each leaf Django ``ValidationError.code`` alongside the message
+        # (a ``None`` code is dropped).
+        codes = [leaf.code for leaf in leaves if leaf.code]
+        errors.append(
+            field_error(path, messages, codes=codes) if messages else empty_validation_error(path),
+        )
+    return errors or [empty_validation_error()]
 
 
 def integrity_error_field_errors() -> list[FieldError]:
@@ -777,42 +751,28 @@ UNBOUNDED_YEAR_IN_ZONE_MESSAGE = (
 )
 
 
-def unbindable_temporal(
-    column: object,
-    value: object,
-    using: Callable[[], str],
-    *,
-    bound_as_text: bool = False,
-) -> bool:
+def unbindable_temporal(column: object, value: object, using: Callable[[], str]) -> bool:
     """Return whether the database ``using()`` names refuses to bind ``value`` into ``column``.
 
     ``column`` is the model field an identity decode binds ``value`` against; ``value`` is
-    a ``datetime`` for a ``DateTimeField``, a ``time`` for a ``TimeField``, or a list of
-    them. What the backend's adapter refuses (``adapt_datetimefield_value`` /
-    ``adapt_timefield_value``: on SQLite, MySQL and Oracle an aware value whose projection
-    onto the connection's time zone leaves years 1..9999, any aware datetime when
-    ``USE_TZ`` is false, an aware time) is not asked here: the caller has already prepared
-    the value through Django's own ``Field.get_db_prep_value``, which calls that adapter
-    and raises its ``OverflowError`` / ``ValueError``. What remains is the refusal no
-    Django call makes: on PostgreSQL, whose adapters pass both through, an aware one
-    whose UTC offset the server refuses (``refuses_utc_offset``). ``bound_as_text`` holds
-    the value to the text rule whatever the connection's binding mode: psycopg binds the
-    elements of a list parameter as text even under server-side binding.
+    a ``datetime`` for a ``DateTimeField`` or a ``time`` for a ``TimeField``. What the
+    backend's adapter refuses (``adapt_datetimefield_value`` / ``adapt_timefield_value``:
+    on SQLite, MySQL and Oracle an aware value whose projection onto the connection's time
+    zone leaves years 1..9999, any aware datetime when ``USE_TZ`` is false, an aware time)
+    is not asked here: the caller has already prepared the value through Django's own
+    ``Field.get_db_prep_value``, which calls that adapter and raises its ``OverflowError``
+    / ``ValueError``. What remains is the refusal no Django call makes: on PostgreSQL,
+    whose adapters pass both through, an aware one whose UTC offset the server refuses
+    (``refuses_utc_offset``).
 
-    A ``None`` member binds. Any other column answers ``False`` without calling ``using``
-    or touching ``django.db.connections``. A filter's value is not read here: the filter
+    A ``None`` binds. Any other column answers ``False`` without calling ``using`` or
+    touching ``django.db.connections``. A filter's value is not read here: the filter
     form validation asks Django to build and compile the filter's own predicate
     (``filters/sets.py::_unbindable_value_errors``).
     """
-    if isinstance(column, models.DateTimeField):
-        bound_type: type[object] = datetime.datetime
-    elif isinstance(column, models.TimeField):
-        bound_type = datetime.time
-    else:
+    if not isinstance(column, models.DateTimeField | models.TimeField):
         return False
-    members = list(value) if is_list_or_tuple(value) else [value]
-    bound = [member for member in members if isinstance(member, bound_type)]
-    return refuses_utc_offset(connections[using()], bound, bound_as_text=bound_as_text)
+    return refuses_utc_offset(connections[using()], [value])
 
 
 def refuses_utc_offset(
@@ -832,17 +792,23 @@ def refuses_utc_offset(
     at any nesting depth, is held to the text rule. Every other value, and every value on
     any other backend, is not read.
     """
+    return any(
+        isinstance(value, datetime.datetime | datetime.time)
+        and _postgresql_refuses_offset(connection, value, bound_as_text=bound_as_text or nested)
+        for value, nested in _scalars(values)
+    )
+
+
+def _scalars(values: Iterable[object], *, nested: bool = False) -> Iterator[tuple[object, bool]]:
+    """Yield each value in ``values`` that is not a list or tuple, read at any nesting depth.
+
+    Each comes with whether a list or tuple held it (an element of a list parameter).
+    """
     for value in values:
         if is_list_or_tuple(value):
-            if refuses_utc_offset(connection, value, bound_as_text=True):
-                return True
-        elif isinstance(value, datetime.datetime | datetime.time) and _postgresql_refuses_offset(
-            connection,
-            value,
-            bound_as_text=bound_as_text,
-        ):
-            return True
-    return False
+            yield from _scalars(value, nested=True)
+        else:
+            yield value, nested
 
 
 #: The UTC offset magnitude from which PostgreSQL refuses a ``timestamptz`` / ``timetz``
@@ -913,15 +879,10 @@ def refuses_numeric_format(connection: BaseDatabaseWrapper, values: Iterable[obj
     rounds to) rather than failing the bind. What a write stores there and cannot read
     back is ``unstorable_decimal``'s to answer.
     """
-    if connection.vendor != "postgresql":
-        return False
-    for value in values:
-        if is_list_or_tuple(value):
-            if refuses_numeric_format(connection, value):
-                return True
-        elif isinstance(value, Decimal) and not _fits_numeric(connection, value):
-            return True
-    return False
+    return connection.vendor == "postgresql" and any(
+        isinstance(value, Decimal) and not _fits_numeric(connection, value)
+        for value, _ in _scalars(values)
+    )
 
 
 def refuses_integer_range(
@@ -942,17 +903,12 @@ def refuses_integer_range(
     is one list parameter, whose elements are read at any nesting depth. A ``bool`` and
     every other value are not read.
     """
-    for value in values:
-        if is_list_or_tuple(value):
-            if refuses_integer_range(connection, element_field, value):
-                return True
-        elif (
-            isinstance(value, int)
-            and not isinstance(value, bool)
-            and not binds_integer(connection, element_field, value)
-        ):
-            return True
-    return False
+    return any(
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and not binds_integer(connection, element_field, value)
+        for value, _ in _scalars(values)
+    )
 
 
 def _fits_numeric(connection: BaseDatabaseWrapper, number: Decimal) -> bool:

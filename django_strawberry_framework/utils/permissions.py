@@ -53,7 +53,6 @@ from ._narrowing import (
     dict_items,
     is_mapping,
     is_str,
-    mapping_get,
     optional_instance,
     read_attr,
     require,
@@ -157,26 +156,15 @@ class ChannelsRequestAdapter:
         """Return the resolved Channels connection scope."""
         return self._scope
 
-    def _scope_value(self, key: str) -> object:
-        """Read a scope value: ``Mapping.get``'s own body, spelled out.
-
-        The item read, a missing key answered ``None``; a subclass ``get`` override is
-        never consulted, and whatever the scope's own item read raises propagates.
-        """
-        try:
-            return self._scope[key]
-        except KeyError:
-            return None
-
     @property
     def user(self) -> object:
         """The scope's ``user`` (``AuthMiddlewareStack``-populated); ``None`` when absent."""
-        return self._scope_value("user")
+        return self._scope.get("user")
 
     @property
     def session(self) -> object:
         """The scope's ``session`` (``SessionMiddleware``-populated); ``None`` when absent."""
-        return self._scope_value("session")
+        return self._scope.get("session")
 
     def __getattr__(self, name: str) -> object:
         """Delegate every non-scope attribute to the original context value."""
@@ -200,12 +188,10 @@ def _context_request(context: object) -> object:
 
     The Mapping-vs-attribute fork, once. A Strawberry context is either a
     mapping (the classic ``{"request": ...}`` dict) or an object carrying a
-    ``request`` attribute. The mapping read goes through the UNBOUND
-    ``Mapping.get`` so a subclass's ``get`` override never runs; a consumer
-    context whose own read raises propagates that error.
+    ``request`` attribute.
     """
     if is_mapping(context):
-        return mapping_get(context, "request")
+        return context.get("request")
     return getattr(context, "request", None)
 
 
@@ -299,14 +285,15 @@ def request_from_info(info: object, *, family_label: str) -> object:
     )
 
 
-def _safe_get_model(app_label: str, model_name: str) -> type[models.Model] | None:
-    """Return the named model, or ``None`` when the app / model is not installed.
+def _safe_get_model(label: str) -> type[models.Model] | None:
+    """Return the ``"app_label.ModelName"`` model, or ``None`` when it is not installed.
 
-    ``apps.get_model`` answers an uninstalled app or model with ``LookupError``.
+    ``apps.get_model`` answers an uninstalled app or model with ``LookupError`` and a
+    label that is not two dotted parts with ``ValueError``.
     """
     try:
-        return apps.get_model(app_label, model_name)
-    except LookupError:
+        return apps.get_model(label)
+    except (LookupError, ValueError):
         return None
 
 
@@ -330,19 +317,14 @@ def resolve_auth_aliases() -> frozenset[str]:
     # ``AUTH_USER_MODEL`` is ``"app_label.ModelName"``; resolving it through the
     # same ``_safe_get_model`` as the other auth models keeps ONE code path (an
     # uninstalled / misconfigured model is skipped, never an error).
-    # ``AUTH_USER_MODEL`` is a ``str`` setting (``"app_label.ModelName"``).
-    auth_user_model = require(django_setting("AUTH_USER_MODEL"), is_str)
-    user_app_label, _, user_model_name = auth_user_model.partition(".")
     candidates = [
-        _safe_get_model(user_app_label, user_model_name),
-        _safe_get_model("auth", "Permission"),
-        _safe_get_model("auth", "Group"),
-        _safe_get_model("contenttypes", "ContentType"),
-        _safe_get_model("sessions", "Session"),
+        _safe_get_model(require(django_setting("AUTH_USER_MODEL"), is_str)),
+        _safe_get_model("auth.Permission"),
+        _safe_get_model("auth.Group"),
+        _safe_get_model("contenttypes.ContentType"),
+        _safe_get_model("sessions.Session"),
     ]
-    aliases = {router.db_for_read(model) for model in candidates if model is not None}
-    aliases.discard(None)
-    return frozenset(aliases)
+    return frozenset(router.db_for_read(model) for model in candidates if model is not None)
 
 
 def auth_aliases_for_permission_classes(permission_classes: object) -> frozenset[str]:

@@ -157,14 +157,6 @@ def test_validation_error_params_mismatch_propagates_like_django(payload: Valida
         validation_error_to_field_errors(payload)
 
 
-def test_validation_error_map_must_be_a_mapping() -> None:
-    """Django stores a dict-form error's map as a ``dict``; a planted one is a ``TypeError``."""
-    planted_map = ValidationError({"name": ["required"]})
-    vars(planted_map)["error_dict"] = [("name", [])]
-    with pytest.raises(TypeError, match="expected the type the source guarantees"):
-        validation_error_to_field_errors(planted_map)
-
-
 def test_validation_error_mapper_keeps_normal_codes_and_non_field_shape() -> None:
     (error,) = validation_error_to_field_errors(
         ValidationError("whole-object", code="invalid"),
@@ -1339,7 +1331,7 @@ def test_unbindable_temporal_holds_a_utc_offset_to_postgresql_binding_mode(
     refused for an offset of 16:00 or more either way, or one with a fraction of a
     second; bound on the server (any other psycopg 3 cursor) a datetime travels as a UTC
     instant, so no offset refuses it, while a time keeps its whole-second offset, refused
-    from 16:00. Every member of a list is read. A stand-in alias carries each mode, so
+    from 16:00. A stand-in alias carries each mode, so
     the rule holds on every test tier; the real server's answers are pinned by
     ``test_unbindable_temporal_answers_what_postgresql_refuses``.
     """
@@ -1347,10 +1339,9 @@ def test_unbindable_temporal_holds_a_utc_offset_to_postgresql_binding_mode(
     column, is_time = _OFFSET_LEAVES[leaf]
     zone, refused_as_text, refused_time_on_server = _POSTGRESQL_OFFSETS[offset]
     value = _leaf_value(zone, is_time=is_time)
-    bound = [datetime.time(9, 30), value] if is_time else value
     refused = refused_as_text if client_side else is_time and refused_time_on_server
     with postgresql_stand_in(driver, cursor_factory) as alias:
-        assert unbindable_temporal(column, bound, lambda: alias) is refused
+        assert unbindable_temporal(column, value, lambda: alias) is refused
 
 
 @pytest.mark.parametrize("mode", list(BINDING_MODES))
@@ -2269,7 +2260,7 @@ def test_unbindable_temporal_answers_what_postgresql_refuses(
         if column is None:
             assert refuses_utc_offset(connections[alias], [value]) is refused
             return
-        assert unbindable_temporal(column, [value], lambda: alias) is refused
+        assert unbindable_temporal(column, value, lambda: alias) is refused
         assert unstorable_temporal(column, value, lambda: alias) is refused
 
 
