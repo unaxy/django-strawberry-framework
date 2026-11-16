@@ -1387,7 +1387,7 @@ def test_connection_seals_a_malformed_filter_apply_sync_result(
     """Each malformed ``FilterSet.apply_sync`` result is rejected by name at the connection.
 
     The filter arm runs the same post-sidecar seal as the ordering arm
-    (``utils/querysets.py::apply_filterset_sync``), so every defect shape the
+    (``utils/querysets.py::apply_sidecar_sync``), so every defect shape the
     seal names has to arrive here too.
     """
     services.seed_data(2)

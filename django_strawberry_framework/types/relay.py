@@ -62,7 +62,6 @@ from django_strawberry_framework.utils.querysets import (
     lookup_read_alias,
     model_for,
 )
-from django_strawberry_framework.utils.relations import has_composite_pk
 from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
@@ -189,9 +188,8 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
 
     Decision 2 (spec-015 #"Composite primary keys (Django 5.2+) are explicitly out of scope"):
     combining ``relay.Node`` with a composite-primary-key model is explicitly out of scope.
-    Detection is
-    ``django_strawberry_framework/utils/relations.py::has_composite_pk``
-    (Django's ``Options.is_composite_pk``).
+    Detection is Django's ``Options.is_composite_pk``, which reads the live
+    ``_meta.pk`` (``Options.pk_fields`` is cached).
 
     The error message proposes "declare an explicit ``id: relay.NodeID[...]``
     annotation" as a remediation; honor that here so a consumer who
@@ -203,7 +201,7 @@ def _check_composite_pk_for_relay_node(type_cls: type[_RelayDjangoType]) -> None
     on a composite-pk model the pk is no single column either.
     """
     model = model_for(type_cls)
-    if not has_composite_pk(model) or _stamp_relay_id_attr(type_cls) != "pk":
+    if not model._meta.is_composite_pk or _stamp_relay_id_attr(type_cls) != "pk":
         return
     raise ConfigurationError(
         f"{model.__name__}: relay.Node is not supported on models with a "

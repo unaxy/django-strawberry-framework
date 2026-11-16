@@ -40,7 +40,7 @@ from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr, require
 from django_strawberry_framework.utils.typing import peel_strawberry_containers
-from tests._idioms import declare_django_type, definition_raises
+from tests._idioms import declare_django_type
 from tests.filters.fixtures.filtersets import SelfReferentialBranchFilter
 
 
@@ -363,23 +363,6 @@ def test_filter_arguments_factory_input_shape_matches_runtime_filter_for_non_rel
     assert in_annotation is not None
     assert exact_annotation.annotation == (int | None)
     assert in_annotation.annotation == (list[int] | None)
-
-
-def test_filter_arguments_factory_rejects_subclassing() -> None:
-    """Subclassing is rejected at class-creation time (M-filters-3 / H-filters-3).
-
-    The class-level ``input_object_types`` / ``_type_filterset_registry``
-    caches are shared mutable dicts a subclass would inherit rather than
-    isolate, so subclassing is an unsupported design path; the factory's
-    ``__init_subclass__`` raises ``TypeError`` to enforce it.
-    """
-    with pytest.raises(TypeError) as excinfo:
-
-        @definition_raises
-        class _SubFactory(FilterArgumentsFactory):
-            pass
-
-    assert "does not support subclassing" in str(excinfo.value)
 
 
 def test_filter_arguments_factory_empty_filterset_emits_logic_fields() -> None:

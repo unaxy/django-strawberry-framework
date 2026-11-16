@@ -33,7 +33,6 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.relations import (
     RelationLink,
-    has_composite_pk,
     instance_accessor,
     is_many_side_relation_kind,
     is_source_carried_relation_kind,
@@ -369,7 +368,9 @@ class FieldMeta:
                 and target_pk_name is not None
                 and target_field_name == target_pk_name
                 and kind == "forward_single"
-                and not has_composite_pk(related_model)
+                # A composite target pk is a tuple the single-column ``attname`` cannot
+                # match, so elision fails closed for it.
+                and not related_model._meta.is_composite_pk
             ),
             link_carrier_attnames=link_carrier_attnames,
             link_target_attnames=link_target_attnames,

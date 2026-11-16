@@ -23,13 +23,13 @@ from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.reverse_related import ForeignObjectRel
 
 from django_strawberry_framework.exceptions import (
-    ConfigurationError,
     LookupValidationError,
     PathResolutionError,
 )
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_list_or_tuple,
+    is_str,
     read_attr,
     require,
     require_instance,
@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from django.db.models.expressions import Expression
-    from django.db.models.options import Options
     from django.db.models.query_utils import PathInfo
     from typing_extensions import TypeIs
 
@@ -59,7 +58,6 @@ __all__ = [
     "descendant_relation_path",
     "generated_column",
     "generated_column_source",
-    "has_composite_pk",
     "instance_accessor",
     "is_forward_concrete_relation",
     "is_forward_many_to_many",
@@ -109,31 +107,14 @@ MANY_SIDE_RELATION_KINDS: frozenset[RelationKind] = frozenset(
 
 
 def relation_bool(field: object, name: str, *, default: bool = False) -> bool:
-    """Read one relation flag off a Django field (or ``FieldMeta``), requiring a ``bool``.
-
-    An absent or ``None`` flag takes ``default``; any other non-``bool`` is
-    malformed metadata and a configuration error, so a truthy non-bool never
-    silently passes for ``True``.
-    """
-    value: object = getattr(field, name, default)
-    if value is None:
-        value = default
-    if type(value) is not bool:
-        raise ConfigurationError(
-            f"Relation metadata {name!r} on {truth.kind(field)} must be a bool; "
-            f"got {truth.kind(value)}.",
-        )
-    return value
+    """Read one relation flag off a Django field (or ``FieldMeta``); absent or ``None`` is ``default``."""
+    value: bool | None = getattr(field, name, default)
+    return default if value is None else value
 
 
 def relation_name(field: object, name: str) -> str | None:
-    """Read an optional GenericRelation field-name slot, requiring a ``str`` or ``None``."""
-    value = read_attr(field, name, None)
-    if value is not None and type(value) is not str:
-        raise ConfigurationError(
-            f"Relation metadata {name!r} on {truth.kind(field)} must be a string or "
-            f"None; got {truth.kind(value)}.",
-        )
+    """Read an optional GenericRelation field-name slot (``None`` when absent)."""
+    value: str | None = getattr(field, name, None)
     return value
 
 
@@ -317,16 +298,11 @@ def _resolve_segment_field(model: type[models.Model], segment: str) -> ModelFiel
     anywhere in a path behaves like that pk field. Any other unresolvable
     segment surfaces as ``FieldDoesNotExist`` for the caller to convert into a
     typed ``PathResolutionError`` (this includes a hidden reverse relation
-    declared ``related_name="+"``, whose reverse name ``get_field`` rejects). A
-    ``model`` with no ``_meta`` (a ``Meta.model`` that is not a Django model)
-    names no field either.
+    declared ``related_name="+"``, whose reverse name ``get_field`` rejects).
     """
-    meta: Options[models.Model] | None = getattr(model, "_meta", None)
-    if meta is None:
-        raise FieldDoesNotExist(segment)
     if segment == "pk":
-        return meta.pk
-    return meta.get_field(segment)
+        return model._meta.pk
+    return model._meta.get_field(segment)
 
 
 def choice_key_field(model: type[models.Model], key: str | None) -> ConcreteField | None:
@@ -368,16 +344,14 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
     ``Model._meta.get_field`` (with ``pk`` resolved to the pk field). A
     non-relation field is a valid terminal only as the LAST segment; anywhere
     earlier the path continues past an untraversable column and raises. A
-    relation segment must expose non-empty ``path_infos``; its hop records
+    relation segment must expose ``path_infos``; its hop records
     ``relation_kind(field)`` as ``kind`` and ``any(pi.m2m ...)`` as
     ``many_side``, and the walk continues from ``path_infos[-1].to_opts.model``.
     A relation reached at the final segment is preserved as ``terminal`` AND as
     the last hop. Raises ``PathResolutionError`` (naming model, path, and
-    segment) for a missing, non-traversable (forward ``GenericForeignKey``),
-    empty-``path_infos``, or non-relation-mid-path segment.
+    segment) for a missing, non-traversable (forward ``GenericForeignKey``), or
+    non-relation-mid-path segment.
 
-    Kept uncached so callers may pass unhashable test doubles (a
-    ``SimpleNamespace`` fake model pins the empty-``path_infos`` branch);
     ``_classify_path_cached`` layers a bounded ``lru_cache`` over it for the
     hot ``path_traverses_to_many`` path, keyed on the hashable,
     definition-time-stable ``(model, field_path)`` pair.
@@ -416,19 +390,10 @@ def classify_path(model: type[models.Model], field_path: str) -> ClassifiedPath:
         except FieldDoesNotExist:
             raise PathResolutionError(current, field_path, segment) from None
         resolved.append(field)
-        try:
-            is_relation = relation_bool(field, "is_relation")
-        except ConfigurationError:
-            raise PathResolutionError(current, field_path, segment) from None
-        if is_relation:
+        if relation_bool(field, "is_relation"):
             if not _is_traversable_relation(field):
                 raise PathResolutionError(current, field_path, segment)
             path_infos = field.path_infos
-            # The class is tested off a local so the check leaves ``path_infos`` typed as
-            # the relation declares it rather than as a bare ``list`` / ``tuple``.
-            infos_class = type(path_infos)
-            if (infos_class is not list and infos_class is not tuple) or not path_infos:
-                raise PathResolutionError(current, field_path, segment)
             target_model = path_infos[-1].to_opts.model
             many_side = any(relation_bool(path_info, "m2m") for path_info in path_infos)
             kind = relation_kind(field)
@@ -657,9 +622,8 @@ def _classify_path_cached(model: type[models.Model], field_path: str) -> Classif
     definition-time ``(model, field_path)`` pairs during filter/order
     generation, and ``filters/base.py::_filterset_resolved_field`` on every request with
     a filter's ``(model, field_name)``, fixed when its FilterSet is defined; caching the
-    frozen ``ClassifiedPath`` here avoids re-walking model metadata without forcing a
-    cache onto the public, uncached ``classify_path`` (which must accept unhashable test
-    doubles). ``_path_traverses_to_many_cache_clear`` empties it.
+    frozen ``ClassifiedPath`` here avoids re-walking model metadata.
+    ``_path_traverses_to_many_cache_clear`` empties it.
     """
     return classify_path(model, field_path)
 
@@ -728,29 +692,17 @@ def _classified_hops(
         return None
 
 
-def _traverses_to_many(
-    classify: Callable[[type[models.Model], str], ClassifiedPath],
-    model: type[models.Model],
-    field_path: str,
-) -> bool:
-    """Answer the to-many question over ``classify``, with the shared fallback ladder.
-
-    ONE body for both arms of :func:`path_traverses_to_many`: the hashable arm
-    passes the cached classifier, the unhashable arm passes the uncached one.
-    The ladder itself - strict answer, lenient walk on ``PathResolutionError`` -
-    is the contract a 32-path matrix pins, and it must not be able to differ
-    between the two arms.
-    """
-    try:
-        return classify(model, field_path).first_many_index is not None
-    except PathResolutionError:
-        return _lenient_traverses_to_many(model, field_path)
-
-
 @lru_cache(maxsize=2048)
 def _path_traverses_to_many_cached(model: type[models.Model], field_path: str) -> bool:
-    """Compute ``_traverses_to_many`` for hashable definition-time model/path pairs (cached)."""
-    return _traverses_to_many(_classify_path_cached, model, field_path)
+    """Answer ``path_traverses_to_many`` for definition-time model/path pairs (cached).
+
+    The ladder - strict answer, lenient walk on ``PathResolutionError`` - is the
+    contract a 32-path matrix pins.
+    """
+    try:
+        return _classify_path_cached(model, field_path).first_many_index is not None
+    except PathResolutionError:
+        return _lenient_traverses_to_many(model, field_path)
 
 
 def path_traverses_to_many(model: type[models.Model], field_path: str) -> bool:
@@ -786,11 +738,6 @@ def path_traverses_to_many(model: type[models.Model], field_path: str) -> bool:
     model metadata, so the bounded process-lifetime cache safely serves both
     subsystems.
     """
-    try:
-        _ = hash((model, field_path))
-    except TypeError:
-        # An unhashable test double cannot key the cache; answer uncached.
-        return _traverses_to_many(classify_path, model, field_path)
     return _path_traverses_to_many_cached(model, field_path)
 
 
@@ -933,14 +880,10 @@ class RelationLink:
 
 
 def _link_field_tuple(value: object) -> tuple[ConcreteField, ...] | None:
-    """Return ``value`` as a tuple of column fields, or ``None`` when it is not one."""
+    """Return ``value`` as a tuple of column fields, or ``None`` when it is not a sequence."""
     if not is_list_or_tuple(value):
         return None
-    fields = tuple(value)
-    for field in fields:
-        if type(getattr(field, "attname", None)) is not str:
-            return None
-    return cast("tuple[ConcreteField, ...]", fields)
+    return cast("tuple[ConcreteField, ...]", tuple(value))
 
 
 def relation_link(field: object) -> RelationLink:
@@ -958,8 +901,8 @@ def relation_link(field: object) -> RelationLink:
     ``column`` ``None``, and its columns exist only as these pairs, so a
     consumer deriving a column from ``attname`` reads a name no table carries.
 
-    Shapes that carry no pairs, and malformed ones (unequal or empty sides, a
-    member without a string ``attname``), answer the empty ``RelationLink``.
+    Shapes that carry no pairs, and unequal or empty sides, answer the empty
+    ``RelationLink``.
     """
     link = field
     carriers: object = getattr(field, "local_related_fields", None)
@@ -982,12 +925,10 @@ def relation_link(field: object) -> RelationLink:
 
 def m2m_through_model(field: object) -> type[models.Model] | None:
     """Return the M2M join table: ``field.through`` (rel side) or ``remote_field.through``."""
-    through: object = getattr(field, "through", None)
+    through: type[models.Model] | None = getattr(field, "through", None)
     if through is None:
         through = getattr(getattr(field, "remote_field", None), "through", None)
-    # A relation's ``through`` slot holds the join-table model class once the app registry
-    # resolved it; anything else (an unresolved ``"app.Model"`` string) is a ``TypeError``.
-    return None if through is None else require(through, is_model_class)
+    return through
 
 
 def _is_foreign_key(value: object) -> TypeIs[ForeignKeyField]:
@@ -1193,29 +1134,13 @@ def instance_accessor(field: object) -> str:
     the Phase-2 relation resolvers' ``getattr``, the spec-032 synthesized
     relation connections, and the optimizer's prefetch lookup paths.
     """
-    precomputed = read_attr(field, "accessor_name", None)
+    precomputed: str | None = getattr(field, "accessor_name", None)
     if precomputed is not None:
-        if type(precomputed) is not str:
-            raise ConfigurationError(
-                f"Relation accessor metadata on {truth.kind(field)} must be a string; "
-                f"got {truth.kind(precomputed)}.",
-            )
         return precomputed
-    get_accessor_name = read_attr(field, "get_accessor_name", None)
+    get_accessor_name: Callable[[], str] | None = getattr(field, "get_accessor_name", None)
     if get_accessor_name is not None:
-        if not callable(get_accessor_name):
-            raise ConfigurationError(
-                f"Relation accessor metadata on {truth.kind(field)} must be callable.",
-            )
-        accessor_name = get_accessor_name()
-    else:
-        accessor_name = read_attr(field, "name", MISSING_ATTRIBUTE)
-    if type(accessor_name) is not str:
-        raise ConfigurationError(
-            f"Resolved relation accessor on {truth.kind(field)} must be a string; "
-            f"got {truth.kind(accessor_name)}.",
-        )
-    return accessor_name
+        return get_accessor_name()
+    return require(read_attr(field, "name"), is_str)
 
 
 def reverse_relation_by_accessor(model: type[models.Model], part: str) -> ForeignObjectRel | None:
@@ -1316,21 +1241,6 @@ def respell_relation_path(
         hops.append(spelled)
         current = related
     return LOOKUP_SEP.join(hops)
-
-
-def has_composite_pk(model: type[models.Model]) -> bool:
-    """Return whether ``model`` declares a Django 5.2+ composite primary key.
-
-    Reads Django's own ``Options.is_composite_pk`` property, which checks the
-    live ``_meta.pk`` on every call (``Options.pk_fields`` is a cached
-    property and would keep reporting a pk shape that has since been
-    rebound). This is the one composite-pk detection. FK-id elision (a
-    forward single relation satisfying an id-only child selection from the
-    source row's local FK column) must fail closed for it: the source-row
-    ``attname`` carries a single-column id, but the target's ``pk`` is a
-    tuple, so eliding would compare the wrong shapes and surface wrong data.
-    """
-    return model._meta.is_composite_pk
 
 
 def is_stored_column(field: object) -> TypeGuard[ConcreteField]:

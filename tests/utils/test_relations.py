@@ -68,7 +68,6 @@ from django_strawberry_framework.utils.relations import (
     descendant_relation_path,
     generated_column,
     generated_column_source,
-    has_composite_pk,
     instance_accessor,
     is_forward_concrete_relation,
     is_forward_many_to_many,
@@ -875,22 +874,6 @@ def test_classify_path_bare_forward_gfk_raises() -> None:
     assert excinfo.value.segment == "content_object"
 
 
-def test_classify_path_empty_path_infos_relation_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A relation exposing empty ``path_infos`` raises (defensive - no real field does).
-
-    Stock Django relation descriptors always populate ``path_infos``; this pins
-    the fail-closed branch with a real model whose ``get_field`` returns
-    a traversable-looking relation with an empty ``path_infos``.
-    """
-    fake_field = SimpleNamespace(is_relation=True, path_infos=[])
-    model = _serving_field(monkeypatch, lambda _name: fake_field)
-
-    with pytest.raises(PathResolutionError) as excinfo:
-        classify_path(model, "rel")
-
-    assert excinfo.value.segment == "rel"
-
-
 def test_classify_path_non_string_path_raises_typed_path_error() -> None:
     """A non-string path is rejected through the path error contract before any split."""
     with pytest.raises(PathResolutionError):
@@ -1216,39 +1199,6 @@ def test_classify_path_public_returns_fresh_equal_plans() -> None:
     assert first is not second
 
 
-def test_path_traverses_to_many_answers_an_unhashable_model_uncached() -> None:
-    """The public probe bypasses its cache when the model key is unhashable."""
-    scalar = SimpleNamespace(is_relation=False, name="title")
-
-    def get_field(_segment: str) -> SimpleNamespace:
-        return scalar
-
-    unhashable_model = SimpleNamespace(_meta=SimpleNamespace(get_field=get_field))
-    # basedpyright: the unhashable namespace standing in for a model is the input under test;
-    # path_traverses_to_many types the parameter as type[Model]
-    assert path_traverses_to_many(unhashable_model, "title") is False  # pyright: ignore[reportArgumentType]
-
-
-def test_has_composite_pk_cardinality() -> None:
-    """Composite-PK returns True only for a model whose pk is a ``CompositePrimaryKey``."""
-    assert has_composite_pk(Book) is False
-
-    assert has_composite_pk(RpCompositeParent) is True
-
-
-def test_has_composite_pk_follows_a_rebound_pk(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A rebound ``_meta.pk`` is reported in its current shape, not the cached ``pk_fields``."""
-    single_pk = Book._meta.pk
-    assert len(Book._meta.pk_fields) == 1
-    assert len(RpCompositeParent._meta.pk_fields) == 2
-
-    monkeypatch.setattr(Book._meta, "pk", models.CompositePrimaryKey("title", "subtitle"))
-    monkeypatch.setattr(RpCompositeParent._meta, "pk", single_pk)
-
-    assert has_composite_pk(Book) is True
-    assert has_composite_pk(RpCompositeParent) is False
-
-
 @pytest.mark.parametrize(
     ("model", "name", "expected"),
     [
@@ -1291,55 +1241,9 @@ def test_relation_bool_none_value_falls_back_to_default() -> None:
     assert relation_bool(field_with_none, "flag", default=False) is False
 
 
-def test_relation_metadata_rejects_non_boolean_and_non_string_slots() -> None:
-    """Relation flags must be real bools and name slots real strings, not truthy stand-ins."""
-    malformed_bool = SimpleNamespace(
-        many_to_many=1,
-        one_to_many=False,
-        one_to_one=False,
-        auto_created=False,
-        concrete=True,
-    )
-    malformed_name = SimpleNamespace(
-        many_to_many=False,
-        one_to_many=False,
-        one_to_one=False,
-        auto_created=False,
-        concrete=True,
-        content_type_field_name=123,
-    )
-
-    with pytest.raises(ConfigurationError, match="must be a bool"):
-        relation_kind(malformed_bool)
-    with pytest.raises(ConfigurationError, match="must be a string or None"):
-        relation_kind(malformed_name)
-
-
 def test_traversable_relation_probe_handles_a_false_flag() -> None:
     """A field whose relation flag is false is untraversable."""
     assert _is_traversable_relation(SimpleNamespace(is_relation=False)) is False
-
-
-def test_classify_path_wraps_malformed_relation_flags_and_taxonomy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A malformed segment flag is a path error; a malformed kind flag is a metadata error."""
-    malformed_flag = SimpleNamespace(is_relation=1)
-    with pytest.raises(PathResolutionError):
-        classify_path(_serving_field(monkeypatch, lambda _name: malformed_flag), "relation")
-
-    path_info = SimpleNamespace(m2m=False, to_opts=SimpleNamespace(model=Book))
-    malformed_kind = SimpleNamespace(
-        is_relation=True,
-        path_infos=[path_info],
-        many_to_many=1,
-        one_to_many=False,
-        one_to_one=False,
-        auto_created=False,
-        concrete=True,
-    )
-    with pytest.raises(ConfigurationError, match="must be a bool"):
-        classify_path(_serving_field(monkeypatch, lambda _name: malformed_kind), "relation")
 
 
 def test_lookup_validation_rejects_a_non_string_expression() -> None:
@@ -1359,16 +1263,6 @@ def test_many_path_probe_rejects_a_non_string_path() -> None:
     # basedpyright: the non-str path is the hostile input under test; path_traverses_to_many types
     # the parameter as str
     assert path_traverses_to_many(Book, 123) is False  # pyright: ignore[reportArgumentType]
-
-
-def test_instance_accessor_rejects_malformed_accessor_metadata() -> None:
-    """Each accessor tier requires the declared shape: string slot, callable hook, string result."""
-    with pytest.raises(ConfigurationError, match="must be a string"):
-        instance_accessor(SimpleNamespace(accessor_name=123))
-    with pytest.raises(ConfigurationError, match="must be callable"):
-        instance_accessor(SimpleNamespace(get_accessor_name=123, name="relation"))
-    with pytest.raises(ConfigurationError, match="must be a string"):
-        instance_accessor(SimpleNamespace(get_accessor_name=lambda: 123, name="relation"))
 
 
 def test_is_forward_concrete_relation() -> None:
@@ -1629,10 +1523,6 @@ def test_relation_link_reads_the_link_column_pairs(
     [
         SimpleNamespace(local_related_fields="p_id", foreign_related_fields=()),
         SimpleNamespace(
-            local_related_fields=(SimpleNamespace(attname=1),),
-            foreign_related_fields=(SimpleNamespace(attname="id"),),
-        ),
-        SimpleNamespace(
             local_related_fields=(SimpleNamespace(attname="a"), SimpleNamespace(attname="b")),
             foreign_related_fields=(SimpleNamespace(attname="id"),),
         ),
@@ -1642,7 +1532,6 @@ def test_relation_link_reads_the_link_column_pairs(
     ],
     ids=[
         "carriers_not_a_sequence",
-        "carrier_attname_not_a_string",
         "unequal_sides",
         "empty_sides",
         "reverse_link_without_pairs",
@@ -1801,12 +1690,10 @@ def test_non_pk_forward_link_refuses_an_unresolved_related_model(
         non_pk_forward_link(field)
 
 
-def test_m2m_through_model_refuses_an_unresolved_through() -> None:
-    """A join table is a model class once resolved; an ``"app.Model"`` string is a ``TypeError``."""
+def test_m2m_through_model_reads_the_join_table() -> None:
+    """A join table is read off the relation; a field without one answers ``None``."""
     assert m2m_through_model(SimpleNamespace(through=None, remote_field=None)) is None
     assert m2m_through_model(Book._meta.get_field("genres")) is not None
-    with pytest.raises(TypeError, match="expected the type the source guarantees"):
-        m2m_through_model(SimpleNamespace(through="library.BookGenres"))
 
 
 @pytest.mark.parametrize(

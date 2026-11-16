@@ -10,8 +10,8 @@ real GraphQL query can earn it; it is pinned here instead.
 The instrument is OBJECT IDENTITY, not a source grep: a grep is satisfied by a
 same-named local with a copied body and breaks on a legitimate import-style change,
 while identity catches the redefinition AND the deletion. Factory-produced closures
-cannot be object-identical across flavors, so the one-ledger trio's cross-flavor twins
-are held by `__code__` identity instead.
+cannot be object-identical across flavors, so the one-ledger materializer's cross-flavor
+twins are held by `__code__` identity instead.
 
 When a symbol legitimately moves, edit `SHARED_BINDINGS` / `SHARED_CLOSURE_BODIES`
 below deliberately - the manifest is the population this guard covers, and it is meant
@@ -54,10 +54,7 @@ SHARED_BINDINGS = (
 )
 
 # (consumer module, symbol, the flavor twin whose factory produced the same body)
-SHARED_CLOSURE_BODIES = (
-    (serializer_inputs, "_materialize_input", mutation_inputs),
-    (serializer_inputs, "_clear_input_namespace", mutation_inputs),
-)
+SHARED_CLOSURE_BODIES = ((serializer_inputs, "_materialize_input", mutation_inputs),)
 
 
 def _row_id(row: tuple[ModuleType, str, ModuleType]) -> str:

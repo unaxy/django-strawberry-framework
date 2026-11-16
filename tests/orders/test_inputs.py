@@ -1132,7 +1132,7 @@ def test_clear_order_input_namespace_tolerates_unimportable_submodules() -> None
     ``clear_order_input_namespace`` is a thin wrapper over
     ``utils/inputs.py::clear_generated_input_namespace``, which resolves
     the arguments factory and the set root through two independent
-    ``utils/inputs.py::_safe_import`` calls. Setting
+    ``utils/imports.py::import_attr_if_importable`` calls. Setting
     ``sys.modules[name] = None`` makes each lookup return ``None``, so
     the ``if factory_cls is not None:`` and ``if set_root is not None:``
     blocks are both skipped while the reachable ledger reset still runs.
@@ -1141,7 +1141,7 @@ def test_clear_order_input_namespace_tolerates_unimportable_submodules() -> None
     """
     factories_name = "django_strawberry_framework.orders.factories"
     sets_name = "django_strawberry_framework.orders.sets"
-    # A ``None`` entry makes the ``_safe_import`` lookup return ``None``,
+    # A ``None`` entry makes the ``import_attr_if_importable`` lookup return ``None``,
     # so both ``is not None`` blocks are skipped.
     with blocked_modules(factories_name, sets_name):
         # Must not raise even though neither submodule can be imported.

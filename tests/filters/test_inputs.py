@@ -4000,7 +4000,7 @@ def test_clear_filter_input_namespace_tolerates_unimportable_submodules() -> Non
     """Both submodule lookups on the clear path are best-effort: skip, never raise.
 
     The heavy clear reaches ``FilterArgumentsFactory`` and ``FilterSet``
-    through ``utils/inputs.py::_safe_import``, so an unimportable module
+    through ``utils/imports.py::import_attr_if_importable``, so an unimportable module
     yields ``None`` and only its dependent reset is skipped; the reachable
     ledger reset still completes (spec-027 Decision 9).
     """

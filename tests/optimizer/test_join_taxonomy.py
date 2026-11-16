@@ -18,7 +18,6 @@ from apps.library.models import Book, Branch, Genre, Patron, TaggedItem
 from apps.products.models import Category, Item
 from django.db.models import Field, ForeignKey, ForeignObjectRel
 
-from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.optimizer.join_taxonomy import (
     WINDOWABLE_RELATION_KINDS,
@@ -346,37 +345,19 @@ class _AttributeReadRaises:
         raise RuntimeError("many_to_many boom")
 
 
-class _NonBoolFlag:
-    """A field whose ``many_to_many`` VALUE is not a ``bool`` (its ``bool()`` raises)."""
-
-    class _HostileBool:
-        def __bool__(self) -> bool:
-            raise RuntimeError("truth unavailable")
-
-    @property
-    def many_to_many(self) -> object:
-        return self._HostileBool()
-
-
 @pytest.mark.parametrize(
     ("field_factory", "raised", "match"),
     [
         (_AttributeReadRaises, RuntimeError, "many_to_many boom"),
-        (_NonBoolFlag, ConfigurationError, "'many_to_many' .* must be a bool"),
     ],
-    ids=["attribute_read_raises", "non_bool_flag"],
+    ids=["attribute_read_raises"],
 )
 def test_classifier_hostile_many_to_many_metadata(
     field_factory: Callable[[], object],
     raised: type[Exception],
     match: str,
 ) -> None:
-    """Hostile ``many_to_many`` metadata is never classified as a relation shape.
-
-    A raising attribute read propagates as raised; a non-``bool`` flag is
-    malformed relation metadata (``utils/relations.py::relation_bool``) and
-    raises ``ConfigurationError`` before its ``bool()`` is ever asked.
-    """
+    """A raising ``many_to_many`` attribute read propagates as raised."""
     with pytest.raises(raised, match=match):
         classify_relation_join(_as_field(field_factory()))
 

@@ -6,8 +6,8 @@ shape route through here:
 
 - ``registry.py::TypeRegistry.unregister`` (best-effort per-type co-clear);
 - ``types/finalizer.py`` auth bind (opt-in-preserving ``loaded_attr``);
-- ``utils/inputs.py::_safe_import`` (generated-input namespace clearing;
-  attr-lenient wrapper over ``import_attr_if_importable``);
+- ``utils/inputs.py::clear_generated_input_namespace`` (generated-input
+  namespace clearing via ``import_attr_if_importable``);
 - ``types/converters.py`` / ``optimizer/nested_planner.py`` (postgres-only
   soft symbols via ``import_attr_if_importable``);
 - soft-dependency ``require_*`` guards (``require_optional_module``).

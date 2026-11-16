@@ -477,13 +477,11 @@ So both fields' sidecar returns run one seal.
 [`django_strawberry_framework/utils/querysets.py::apply_orderset_sync`][utils-querysets] /
 [`::apply_orderset_async`][utils-querysets], called from
 [`django_strawberry_framework/list_field.py::_execute_queryset_pipeline_sync`][list-field] /
-[`::_execute_queryset_pipeline_async`][list-field] and from
+[`::_execute_queryset_pipeline_async`][list-field], and
 [`django_strawberry_framework/connection.py::_pipeline_sync`][connection] /
-[`::_pipeline_async`][connection], and
-[`django_strawberry_framework/utils/querysets.py::apply_filterset_sync`][utils-querysets] /
-[`::apply_filterset_async`][utils-querysets], called from both `connection.py` pipelines, all run
-[`django_strawberry_framework/utils/querysets.py::_apply_sidecar_sync`][utils-querysets] or
-[`::_apply_sidecar_async`][utils-querysets] under the one `_SIDECAR_RESULT_POLICY`. Both fields
+[`::_pipeline_async`][connection] for both sidecar steps, all run
+[`django_strawberry_framework/utils/querysets.py::apply_sidecar_sync`][utils-querysets] or
+[`::apply_sidecar_async`][utils-querysets] under the one `_SIDECAR_RESULT_POLICY`. Both fields
 therefore freeze the same routing intent before the consumer override receives the queryset and
 validate what it hands back on the same result axes - lazy, model rows of the captured model,
 unsliced, a combinator served as its primary-key set, same routing - before any later step,

@@ -37,7 +37,6 @@ from django_strawberry_framework.mutations import sets as mutation_sets
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.orders import inputs as order_inputs
 from django_strawberry_framework.orders import sets as order_sets
-from django_strawberry_framework.orders.factories import OrderArgumentsFactory
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import inputs as ser_inputs
 from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
@@ -58,7 +57,6 @@ from django_strawberry_framework.utils.inputs import (
     GeneratedInputFieldSpec,
     InputFieldSpec,
     _PlainNames,
-    _safe_import,
     _sorted_meta_values,
     _type_name_claims,
     build_strawberry_input_class,
@@ -96,12 +94,10 @@ from tests._idioms import (
     ClaimsClass,
     ClassReadRaises,
     canonical_order,
-    definition_raises,
     module_binding,
     scrambled,
     str_subclass_name,
 )
-from tests._soft_dependency import blocked_modules
 
 if TYPE_CHECKING:
     from django_strawberry_framework.utils.inputs import SetInputNamespace
@@ -307,29 +303,6 @@ def test_iter_set_subclasses_dedupes_diamond_inheritance() -> None:
     found = iter_set_subclasses(Root)
     assert found.count(D) == 1
     assert {B, C, D}.issubset(set(found))
-
-
-def test_safe_import_returns_none_for_unimportable_module() -> None:
-    """``_safe_import`` swallows ImportError so a partial-load clear continues.
-
-    A ``None`` entry in ``sys.modules`` makes the import raise ImportError --
-    the same way the family ``clear_*_input_namespace`` tolerance tests simulate
-    an unreachable submodule.
-    """
-    fake_name = "django_strawberry_framework._nonexistent_substrate_probe"
-    with blocked_modules(fake_name):
-        assert _safe_import(fake_name, "anything") is None
-
-
-def test_safe_import_returns_none_for_missing_attribute_on_importable_module() -> None:
-    """``_safe_import`` keeps its attr-lenient shape: importable module, absent attr -> ``None``.
-
-    The wrapper deliberately diverges from its ``import_attr_if_importable``
-    delegate here (which fails loud on a missing attribute): the partial-load
-    lifecycle callers treat a module without the looked-up symbol as "nothing to
-    clear", not as a bug.
-    """
-    assert _safe_import("django_strawberry_framework.utils.inputs", "_not_a_real_attr") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1875,27 +1848,13 @@ def test_emit_attribute_collision_message_is_pinned() -> None:
     )
 
 
-def test_lazy_annotation_and_factory_subclass_messages_are_pinned() -> None:
-    """The two ``TypeError`` rejections keep their exact honest wording."""
+def test_lazy_annotation_message_is_pinned() -> None:
+    """The lazy-annotation ``TypeError`` rejection keeps its exact honest wording."""
     with pytest.raises(TypeError) as lazy:
         # basedpyright: the non-class argument is the hostile input under test;
         # filter_input_type types the parameter as type[FilterSet]
         filter_input_type("nope")  # pyright: ignore[reportArgumentType]
     assert str(lazy.value) == "filter_input_type() requires a FilterSet subclass; got 'nope'"
-
-    with pytest.raises(TypeError) as grand:
-
-        @definition_raises
-        class PlainGrand(OrderArgumentsFactory):
-            pass
-
-    assert str(grand.value) == (
-        "OrderArgumentsFactory does not support subclassing "
-        "(attempted by 'PlainGrand'): its class-level caches are shared "
-        "mutable dicts a subclass would inherit rather than isolate, silently "
-        "cross-contaminating builds. Extend it by composition (wrap an "
-        "instance), not inheritance."
-    )
 
 
 def test_normalize_sequence_unordered_rejection_names_the_set_type() -> None:

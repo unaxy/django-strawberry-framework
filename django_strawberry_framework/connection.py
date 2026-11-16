@@ -150,11 +150,8 @@ from .utils.directives import validated_field_directives
 from .utils.execution_mode import async_execution, operation_is_async
 from .utils.querysets import (
     _disposed_awaitable,
-    applied_order,
-    apply_filterset_async,
-    apply_filterset_sync,
-    apply_orderset_async,
-    apply_orderset_sync,
+    apply_sidecar_async,
+    apply_sidecar_sync,
     apply_type_visibility_async,
     apply_type_visibility_sync,
     base_queryset,
@@ -163,11 +160,12 @@ from .utils.querysets import (
     reject_async_iterable_in_sync_context,
     reject_awaitable_sync_source,
     reject_residual_async_source,
+    selected_order,
 )
 from .utils.typing import is_async_callable, object_result, peel_strawberry_containers
 
 if TYPE_CHECKING:
-    from typing import Literal, TypeAlias
+    from typing import TypeAlias
 
     from strawberry.relay.types import NodeIterableType
     from typing_extensions import Self, TypeIs
@@ -181,11 +179,8 @@ if TYPE_CHECKING:
     from .utils.connections import ConnectionWindowBounds
     from .utils.querysets import NormalizedSource
 
-    #: One sidecar step: its kind pairs the set class with that family's apply entry.
-    _SidecarStep: TypeAlias = (
-        tuple[Literal["filter"], type[FilterSet], object]
-        | tuple[Literal["order"], type[OrderSet], object]
-    )
+    #: One sidecar step: the set class and the input its ``apply_*`` receives.
+    _SidecarStep: TypeAlias = tuple[type[FilterSet | OrderSet], object]
 
     class _SelectionPredicate(Protocol):
         """A per-selection observer: ``connection_total_count_selected`` and its sibling."""
@@ -1902,7 +1897,7 @@ def _ordered_for_window(
     # ``.reverse()`` the reverse of the forward total order under the forward flag, before
     # any order is read or written here.
     qs = normalize_order_direction(qs, cursor_field, target_model)
-    applied = applied_order(qs.query, target_model)
+    applied = selected_order(qs.query, target_model)[1]
     ordered = effective_connection_order(cursor_field, qs.query, target_model)
     if ordered != applied:
         qs = qs.order_by(*ordered)
@@ -1997,7 +1992,7 @@ def _sidecar_steps(
     filter_input: object,
     order_by_input: object,
 ) -> tuple[_SidecarStep, ...]:
-    """Return the ``(kind, set_class, input)`` sidecar steps this call actually applies.
+    """Return the ``(set_class, input)`` sidecar steps this call actually applies.
 
     The gate is one rule per step - a declared set whose step runs
     (``_filter_step_runs``: supplied, or a set with a ``required`` own filter),
@@ -2005,20 +2000,17 @@ def _sidecar_steps(
     (filter narrows, then orderBy sorts). Both are written once here for both
     colored pipelines, so the halves cannot drift. The colored ``apply_sync`` /
     ``apply_async`` dispatch deliberately stays at each caller: the ``await`` is written where it
-    happens, never hidden behind a maybe-await.
-
-    ``kind`` is ``"filter"`` or ``"order"`` so each caller can hand the step to
-    its own public entry point
-    (``django_strawberry_framework/utils/querysets.py::apply_filterset_sync`` /
-    ``::apply_orderset_sync`` and their async twins); both run the one
-    post-sidecar seal.
+    happens, never hidden behind a maybe-await. Each caller hands every step
+    to the one post-sidecar seal
+    (``django_strawberry_framework/utils/querysets.py::apply_sidecar_sync`` /
+    ``::apply_sidecar_async``).
     """
     steps: list[_SidecarStep] = []
     filterset_class = definition.filterset_class
     if filterset_class is not None and _filter_step_runs(filterset_class, filter_input):
-        steps.append(("filter", filterset_class, filter_input))
+        steps.append((filterset_class, filter_input))
     if is_supplied(order_by_input) and definition.orderset_class is not None:
-        steps.append(("order", definition.orderset_class, order_by_input))
+        steps.append((definition.orderset_class, order_by_input))
     return tuple(steps)
 
 
@@ -2063,10 +2055,10 @@ def _pipeline_sync(
 
     Both sidecar steps run the SAME post-sidecar seal the list field runs on
     its ordering step
-    (``django_strawberry_framework/utils/querysets.py::apply_filterset_sync`` /
-    ``::apply_orderset_sync``): routing intent is frozen before the override is
-    handed the queryset, and the value it returns must still be a lazy,
-    unsliced queryset of the captured model's rows on the captured connection,
+    (``django_strawberry_framework/utils/querysets.py::apply_sidecar_sync``):
+    routing intent is frozen before the override is handed the queryset, and
+    the value it returns must still be a lazy, unsliced queryset of the
+    captured model's rows on the captured connection,
     because every later step here (the next sidecar, default ordering,
     optimizer, the Relay window) can only NARROW it. The visibility seal runs
     under the one default policy whether or not a sidecar input is supplied, so
@@ -2092,25 +2084,15 @@ def _pipeline_sync(
         async_recourse=_CONNECTION_ASYNC_RECOURSE,
         model=definition.model,
     )
-    for step in steps:
-        if step[0] == "order":
-            qs = apply_orderset_sync(
-                target_type,
-                step[1],
-                qs,
-                step[2],
-                info,
-                model=definition.model,
-            )
-        else:
-            qs = apply_filterset_sync(
-                target_type,
-                step[1],
-                qs,
-                step[2],
-                info,
-                model=definition.model,
-            )
+    for set_class, step_input in steps:
+        qs = apply_sidecar_sync(
+            target_type,
+            set_class,
+            qs,
+            step_input,
+            info,
+            model=definition.model,
+        )
     return _finalize_queryset(target_type, qs, info, definition=definition)
 
 
@@ -2137,9 +2119,8 @@ async def _pipeline_async(
 
     ``definition`` is the factory's one construction-time read, exactly as the
     sync sibling takes it. Both sidecar steps run the same post-sidecar seal
-    (``django_strawberry_framework/utils/querysets.py::apply_filterset_async`` /
-    ``::apply_orderset_async``), and the visibility seal takes the same one
-    default policy the sync sibling uses.
+    (``django_strawberry_framework/utils/querysets.py::apply_sidecar_async``), and
+    the visibility seal takes the same one default policy the sync sibling uses.
     """
     prepared = _prepare_pipeline_source(
         source,
@@ -2158,25 +2139,15 @@ async def _pipeline_async(
         info,
         model=definition.model,
     )
-    for step in steps:
-        if step[0] == "order":
-            qs = await apply_orderset_async(
-                target_type,
-                step[1],
-                qs,
-                step[2],
-                info,
-                model=definition.model,
-            )
-        else:
-            qs = await apply_filterset_async(
-                target_type,
-                step[1],
-                qs,
-                step[2],
-                info,
-                model=definition.model,
-            )
+    for set_class, step_input in steps:
+        qs = await apply_sidecar_async(
+            target_type,
+            set_class,
+            qs,
+            step_input,
+            info,
+            model=definition.model,
+        )
     return await _finalize_queryset_async(target_type, qs, info, definition=definition)
 
 

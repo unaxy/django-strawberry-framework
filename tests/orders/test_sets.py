@@ -1763,24 +1763,6 @@ def test_get_concrete_field_names_for_order_rejects_non_model(invalid_model: obj
         _get_concrete_field_names_for_order(invalid_model)
 
 
-def test_resolve_order_expressions_handles_non_class_model_on_path_error() -> None:
-    """_resolve_order_expressions safely formats non-class model when path resolution fails."""
-
-    class CustomBookOrder(OrderSet):
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-    with pytest.raises(ConfigurationError, match="invalid order path 'bad_field' for model str"):
-        CustomBookOrder._resolve_order_expressions(
-            [("bad_field", Ordering.ASC)],
-            # basedpyright: the string model is the hostile input under test;
-            # _resolve_order_expressions types the parameter as type[Model]
-            model="NotAModel",  # pyright: ignore[reportArgumentType]
-            visible_rows=_every_row,
-        )
-
-
 def test_orderset_clear_order_input_namespace_clears_subclass_caches() -> None:
     """clear_order_input_namespace clears _expanded_fields on base and subclass OrderSets."""
 

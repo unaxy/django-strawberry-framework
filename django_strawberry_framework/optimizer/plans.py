@@ -79,7 +79,7 @@ from django_strawberry_framework.utils.connections import (
     assert_window_fetch_mode,
     window_range_plan,
 )
-from django_strawberry_framework.utils.querysets import applied_order, resolve_order_name
+from django_strawberry_framework.utils.querysets import resolve_order_name, selected_order
 from django_strawberry_framework.utils.relations import (
     generated_column,
     instance_accessor,
@@ -1241,7 +1241,7 @@ def effective_connection_order(
       ``deterministic_order`` would return it unchanged); the cursor
       vocabulary of whatever order wins is ``effective_cursor_state``'s;
     - otherwise the effective ordering is the one Django compiles for ``query``
-      (``utils/querysets.py::applied_order``: an explicit ``orderBy:``, else the
+      (``utils/querysets.py::selected_order``: an explicit ``orderBy:``, else the
       model's ``Meta.ordering`` while default ordering stands), made total by
       ``deterministic_order``. Django applies ``Meta.ordering`` implicitly, so an
       empty ``query.order_by`` does NOT mean unordered - reading it in isolation
@@ -1264,7 +1264,7 @@ def effective_connection_order(
     """
     if cursor_field is not None and not query.order_by:
         return tuple(cursor_field)
-    return deterministic_order(applied_order(query, model), model)
+    return deterministic_order(selected_order(query, model)[1], model)
 
 
 def _extra_order_term(
@@ -1362,7 +1362,7 @@ def normalize_order_direction(
     compiler then flips every term it compiles (``query.order_by``, else
     ``Meta.ordering`` while default ordering stands), and every later
     ``order_by(...)`` on that queryset inherits the flip. The connection order
-    ladder reads terms (``applied_order`` -> ``effective_connection_order`` ->
+    ladder reads terms (``selected_order`` -> ``effective_connection_order`` ->
     ``effective_cursor_state`` / the window ``RowNumber`` order) and writes terms
     back (``_finalize_queryset``'s pk tiebreaker, ``apply_window_pagination``'s
     ``order_by``, the ``last:`` ``.reverse()``), so a reversed queryset would

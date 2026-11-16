@@ -1398,7 +1398,7 @@ def test_list_field_seal_axis_subclass_and_routing_intent() -> None:
     # 1. A subclass result comes back as a clone of its own class
     sealed = _validate_post_orderset_result(
         ItemSealType,
-        _snapshot_routing_intent(base_qs, "Custom.apply"),
+        _snapshot_routing_intent(base_qs),
         sub_qs,
         "Custom.apply",
     )
@@ -1412,7 +1412,7 @@ def test_list_field_seal_axis_subclass_and_routing_intent() -> None:
     set_queryset_hints(base_with_hints, {"shard": "a"})
     sealed_hints = _validate_post_orderset_result(
         ItemSealType,
-        _snapshot_routing_intent(base_with_hints, "Custom.apply"),
+        _snapshot_routing_intent(base_with_hints),
         qs_match,
         "Custom.apply",
     )
@@ -1423,7 +1423,7 @@ def test_list_field_seal_axis_subclass_and_routing_intent() -> None:
     with pytest.raises(ConfigurationError, match="changed database routing intent"):
         _validate_post_orderset_result(
             ItemSealType,
-            _snapshot_routing_intent(base_with_hints, "Custom.apply"),
+            _snapshot_routing_intent(base_with_hints),
             qs_mismatch,
             "Custom.apply",
         )

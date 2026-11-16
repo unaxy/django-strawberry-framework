@@ -192,22 +192,6 @@ def test_mro_walk_bypasses_hostile_field_metaclass_attribute_access() -> None:
         ser_converter.convert_serializer_field(hostile_serializer)
 
 
-def test_mro_walk_bypasses_hostile_field_metaclass_hashing() -> None:
-    """A hostile class hash cannot abort the registry walk."""
-
-    class HostileMeta(type):
-        @override
-        def __hash__(cls) -> NoReturn:
-            raise RuntimeError("class hash failed")
-
-    class HostileFormField(forms.Field, metaclass=HostileMeta):
-        pass
-
-    hostile_form = object.__new__(HostileFormField)
-    with pytest.raises(ConfigurationError, match="Unsupported form field type"):
-        form_converter.convert_form_field(hostile_form)
-
-
 def test_mro_walk_bypasses_a_hostile_metaclass_mro_property() -> None:
     """A metaclass ``__mro__`` PROPERTY cannot raise into the walk.
 

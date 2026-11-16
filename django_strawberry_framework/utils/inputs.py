@@ -102,7 +102,7 @@ if TYPE_CHECKING:
     from django.db import models as django_models
     from graphql import GraphQLInputField, GraphQLType
     from strawberry.types import Info
-    from strawberry.types.base import StrawberryObjectDefinition, WithStrawberryObjectDefinition
+    from strawberry.types.base import WithStrawberryObjectDefinition
     from strawberry.types.field import StrawberryField
     from typing_extensions import TypeIs
 
@@ -630,10 +630,7 @@ def make_input_namespace(
             owner=owner,
         )
 
-    def clear_fn() -> None:
-        ledger.clear()
-
-    return ledger, materialize_fn, clear_fn
+    return ledger, materialize_fn, ledger.clear
 
 
 def make_set_input_namespace(
@@ -969,11 +966,7 @@ def make_shape_build_cache() -> tuple[dict[_KeyT, _ValueT], Callable[[], None]]:
     types are the consuming module's own declaration of its cache variable.
     """
     cache: dict[_KeyT, _ValueT] = {}
-
-    def clear_fn() -> None:
-        cache.clear()
-
-    return cache, clear_fn
+    return cache, cache.clear
 
 
 def get_or_store_shape_build(
@@ -1345,7 +1338,7 @@ def iter_provided_input_fields(data: object) -> Iterator[tuple[str, object, Stra
 
     The ``UNSET``-strip walk ``decode_provided_fields`` opens with - the model,
     form, and serializer write-flavor riders all go through that spine: iterate
-    ``data.__strawberry_definition__.fields``, read each field's value off the input
+    the input's Strawberry definition fields, read each field's value off the input
     dataclass, and skip any left ``strawberry.UNSET`` (an OMITTED field, distinct from
     an explicit ``None`` which is kept as a provided value). Single-sited so the three
     decoders share ONE definition of "which fields did the client provide" - and a
@@ -1353,17 +1346,10 @@ def iter_provided_input_fields(data: object) -> Iterator[tuple[str, object, Stra
     branch, spec lookup, short-circuit protocol) stays at each call site: this owns
     only the walk, not the routing.
     """
-    # A bound input's class is a ``@strawberry.input``, whose definition Strawberry
-    # attaches as a ``StrawberryObjectDefinition`` (``WithStrawberryObjectDefinition``).
-    definition: StrawberryObjectDefinition | None = getattr(
-        data,
-        "__strawberry_definition__",
-        None,
-    )
+    definition = get_object_definition(data)
     if definition is None:
         return
-    fields: Sequence[StrawberryField] = getattr(definition, "fields", ())
-    for field in fields:
+    for field in definition.fields:
         python_name = field.python_name
         value: object = getattr(data, python_name, UNSET)
         if value is UNSET:
@@ -2094,25 +2080,6 @@ def iter_set_subclasses(root: type[_SetT]) -> list[type[_SetT]]:
     return result
 
 
-def _safe_import(module_path: str, attr: str) -> object:
-    """Cycle-safe import of ``module_path.attr`` returning ``None`` on ImportError.
-
-    Encapsulates the "best-effort, skip and continue" pattern the
-    ``registry.clear()`` lifecycle relies on: a partial-load environment (one
-    submodule reachable, another not) still clears whatever IS reachable. A
-    ``None`` entry in ``sys.modules`` (the test-isolation way of simulating an
-    unimportable submodule) raises ``ImportError`` here, as an inline
-    ``from .submodule import X`` does. Delegates to
-    ``utils/imports.py::import_attr_if_importable`` but preserves this wrapper's
-    attr-lenient shape (a missing attr is ``None``, not ``AttributeError``) for
-    the partial-load lifecycle callers.
-    """
-    try:
-        return import_attr_if_importable(module_path, attr)
-    except AttributeError:
-        return None
-
-
 def clear_generated_input_namespace(
     *,
     materialized_names: dict[str, type[object]],
@@ -2141,8 +2108,8 @@ def clear_generated_input_namespace(
     ``inputs`` module ``__dict__`` per the parked-globals lifecycle stated on
     ``make_input_namespace``.
 
-    Each subsystem lookup is best-effort (``_safe_import``): an unreachable
-    factory / set module never prevents the reachable ledger reset. The two
+    Each subsystem lookup is best-effort (``utils/imports.py::import_attr_if_importable``):
+    an unreachable factory / set module never prevents the reachable ledger reset. The two
     lookups are independent so a partial-load build state still clears whatever
     is reachable.
     """
@@ -2151,14 +2118,14 @@ def clear_generated_input_namespace(
 
     # The family names its own ``GeneratedInputArgumentsFactory`` subclass and that
     # factory's collision-registry dict (``make_set_input_namespace``'s kwargs).
-    factory_cls = _safe_import(factory_module, factory_class_name)
+    factory_cls = import_attr_if_importable(factory_module, factory_class_name)
     if factory_cls is not None:
         _ = call_method(read_attr(factory_cls, "input_object_types"), "clear")
         collision_registry = read_attr(factory_cls, collision_registry_attr, None)
         if collision_registry is not None:
             _ = call_method(collision_registry, "clear")
 
-    set_root = _safe_import(set_module, set_class_name)
+    set_root = import_attr_if_importable(set_module, set_class_name)
     if set_root is not None:
         # The per-family binding-state attrs (owner / expansion cache / reentry
         # guard) come from the set base's ``_lifecycle`` descriptor, so the names
@@ -2184,7 +2151,7 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
     Shared substrate for ``filters/factories.py::FilterArgumentsFactory`` and
     ``orders/factories.py::OrderArgumentsFactory`` (and the cookbook's parallel
     ``*_arguments_factory.py`` BFS algorithm). The BFS walk, the per-class
-    collision check, the idempotent cache, and the subclass-rejection guard are
+    collision check and the idempotent cache are
     single-sited here; each family factory subclasses this DIRECTLY and supplies
     its own caches plus the family hook attributes below. Each built root claims
     its GraphQL type name, and the name of every input it embeds (operator bags,
@@ -2214,10 +2181,9 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
       table ``emit_set_input_field_triples`` fills, read for the member each root
       field is generated from (``GeneratedFieldSources``).
 
-    Subclassing a CONCRETE family factory is rejected at class-creation time:
-    the class-level caches are mutable dicts a grand-subclass would inherit
-    rather than isolate, silently cross-contaminating builds. Extend by
-    composition (wrap an instance), not inheritance.
+    The class-level caches are mutable dicts a grand-subclass would inherit
+    rather than isolate, so a family factory is extended by composition (wrap an
+    instance), not inheritance.
     """
 
     # Per-family caches -- declared annotation-only; each family factory MUST
@@ -2232,24 +2198,6 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
     _related_attr: ClassVar[str]
     _related_target_attr: ClassVar[str]
     _field_specs: ClassVar[dict[tuple[type[object], str], GeneratedInputFieldSpec]]
-
-    @override
-    def __init_subclass__(cls, **kwargs: object) -> None:
-        """Allow the direct family factories; reject any deeper subclassing."""
-        super().__init_subclass__(**kwargs)
-        # The two family factories subclass this base directly. A class whose
-        # bases do NOT include the base (by identity) is a grand-subclass of a concrete
-        # factory -- reject it (its caches would be the family's, not its own).
-        bases = truth.bases(cls)
-        if not truth.is_among(GeneratedInputArgumentsFactory, bases):
-            parent = bases[0]
-            raise TypeError(
-                f"{truth.name(parent)} does not support subclassing "
-                f"(attempted by {truth.render(truth.name(cls))}): its class-level "
-                "caches are shared mutable dicts a subclass would inherit rather than "
-                "isolate, silently cross-contaminating builds. Extend it by composition "
-                "(wrap an instance), not inheritance.",
-            )
 
     def __init__(self, set_class: type[_FactorySetT]) -> None:
         """Store the root set class and its class-derived input type name."""

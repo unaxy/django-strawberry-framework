@@ -878,10 +878,10 @@ For a request carrying any non-null list argument, the color-specific queryset p
    that state answers to: the source's own `_db` when it is set, otherwise the answer of the
    same `ConnectionRouter` method Django's own `QuerySet.db` property would use. The accepted
    result's clone is then PINNED to that frozen alias. Hint comparison remains part of the
-   seal (`django_strawberry_framework/utils/querysets.py::_routing_hints_equal`: the candidate's
-   `_db` must equal the snapshot's, `None` included, and every hint value must be the SAME OBJECT
-   the snapshot holds, because a router is free to tell two equal tokens apart by identity), but
-   it is not what carries the attestation. It cannot be: a hint value is an arbitrary consumer
+   seal (`django_strawberry_framework/utils/querysets.py::_seal_or_defect`: the candidate's
+   `_db` must equal the snapshot's, `None` included, and its hints must equal the snapshot's
+   copy, an absent `None` apart from an empty `{}`), but it is not what carries the
+   attestation. It cannot be: a hint value is an arbitrary consumer
    object handed to the router untouched, and a standard `instance` hint is itself mutable, so an
    override can edit state INSIDE a hint it preserves by identity and change the router's answer
    without changing anything the seal can see. Deep-copying hint values is not the
@@ -1078,7 +1078,7 @@ client-visible order contract still exists. The model-default predicate
 default-ordering rule plus a stability requirement, not a parallel reimplementation of it. It
 requires that the model's `Meta.ordering` be the collection the precedence above SELECTS:
 empty `query.extra_order_by`, empty `query.order_by`, and a non-empty ordering read by
-`django_strawberry_framework/utils/querysets.py::default_order` - the sealed queryset's
+`django_strawberry_framework/utils/querysets.py::selected_order` - the sealed queryset's
 `model._meta.ordering`, by truthiness, reached only while `query.default_ordering` is truthy.
 It then requires `query.default_ordering is True` as an exact identity rather than a
 truthiness test, and Django's grouping rule spelled exactly as
@@ -1858,8 +1858,8 @@ Where each part of the surface lives, keyed to the slice checklist:
   `django_strawberry_framework/list_field.py::_has_deterministic_ordering` (the
   term-determinism check) and
   `django_strawberry_framework/list_field.py::_is_model_default_ordering_active` (the
-  model-default eligibility rule), read it directly, and the connection order ladder reads it
-  through `django_strawberry_framework/utils/querysets.py::applied_order`. Neither predicate
+  model-default eligibility rule), read it directly, and so does the connection order ladder.
+  Neither predicate
   scans `query.order_by`, `query.extra_order_by` or
   `Meta.ordering` on its own, because a second scan could disagree with the first and with
   `SQLCompiler._order_by_pairs`. The guard does not reuse

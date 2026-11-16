@@ -421,22 +421,6 @@ def related_queryset(
     return rows
 
 
-def default_order(query: sql.Query, model: type[models.Model]) -> tuple[str | Combinable, ...]:
-    """Return the ``Meta.ordering`` terms Django compiles for ``query`` when nothing explicit is set.
-
-    ``django/db/models/sql/compiler.py::SQLCompiler._order_by_pairs`` reaches the
-    model's ordering only while ``query.default_ordering`` stands (a bare
-    ``.order_by()`` clears it) and reads the option by truthiness, so
-    ``Meta.ordering = None`` - the idiom for clearing an abstract parent's
-    ordering - is no default order, never an iterable. ``model`` is the caller's
-    model rather than ``query.get_meta()``, so a connection's plan-time and
-    resolve-time orders derive from one model read.
-    """
-    if not query.default_ordering:
-        return ()
-    return tuple(model._meta.ordering or ())
-
-
 #: Which collection ``SQLCompiler._order_by_pairs`` selects as the ordering it emits.
 ORDER_FROM_EXTRA = "extra"
 ORDER_FROM_EXPLICIT = "explicit"
@@ -453,10 +437,15 @@ def selected_order(
     ``django/db/models/sql/compiler.py::SQLCompiler._order_by_pairs`` picks ONE
     collection and ignores the rest: an ``extra(order_by=...)`` ordering wins
     outright, an explicit ``order_by`` comes next, and the model's
-    ``Meta.ordering`` (``default_order``) is reached only when nothing explicit
-    was set. They are alternatives, never a union, so a term left in a
-    collection Django did not pick is dormant and reaches no SQL. ``source`` is
-    one of the ``ORDER_FROM_*`` names.
+    ``Meta.ordering`` is reached only when nothing explicit was set and
+    ``query.default_ordering`` stands (a bare ``.order_by()`` clears it). They
+    are alternatives, never a union, so a term left in a collection Django did
+    not pick is dormant and reaches no SQL. ``source`` is one of the
+    ``ORDER_FROM_*`` names. Django reads the ordering option by truthiness, so
+    ``Meta.ordering = None`` - the idiom for clearing an abstract parent's
+    ordering - is no default order, never an iterable. ``model`` is the
+    caller's model rather than ``query.get_meta()``, so a connection's
+    plan-time and resolve-time orders derive from one model read.
 
     Read under the forward flag: a ``.reverse()``'d query (``standard_ordering``
     False) compiles each of these terms flipped.
@@ -465,22 +454,9 @@ def selected_order(
         return ORDER_FROM_EXTRA, tuple(query.extra_order_by)
     if query.order_by:
         return ORDER_FROM_EXPLICIT, tuple(query.order_by)
-    ordering = default_order(query, model)
-    if ordering:
-        return ORDER_FROM_MODEL_DEFAULT, ordering
+    if query.default_ordering and model._meta.ordering:
+        return ORDER_FROM_MODEL_DEFAULT, tuple(model._meta.ordering)
     return ORDER_FROM_NOTHING, ()
-
-
-def applied_order(query: sql.Query, model: type[models.Model]) -> tuple[str | Combinable, ...]:
-    """Return the ORDER BY terms Django compiles for ``query`` (``selected_order``'s terms).
-
-    The connection order ladder reads this only after
-    ``optimizer/plans.py::normalize_order_direction`` has rewritten an
-    ``extra(order_by=...)`` ordering and a ``.reverse()`` into explicit
-    ``order_by`` terms under the forward flag, so the terms it reads here are
-    the ones Django compiles and the ones a later ``order_by(...)`` keeps.
-    """
-    return selected_order(query, model)[1]
 
 
 class _UnexpandableOrderError(Exception):
@@ -1545,32 +1521,6 @@ _LIST_RELATION_CHILD_POLICY: _SealPolicy[models.Model] = _SealPolicy(require_sha
 _SIDECAR_RESULT_POLICY: _SealPolicy[models.Model] = _SealPolicy(require_unevaluated=True)
 
 
-def _routing_hints_equal(cand_hints: object, orig_hints: object) -> bool:
-    """Return True if candidate and original routing hints match without consumer dispatch.
-
-    Preserves the exact distinction between absent (``None``) and empty (``{}``)
-    hints. Keys must match exactly and every value must be the SAME OBJECT the
-    snapshot holds: Django's ``ConnectionRouter`` hands hint values to consumer
-    routers untouched, and a router is free to tell two equal tokens apart by
-    identity, so semantic equality cannot prove equal routing without running
-    the router. Identity is the only comparison that proves it without dispatch.
-    """
-    if cand_hints is orig_hints:
-        return True
-    if cand_hints is None or orig_hints is None:
-        return False
-    if not is_exact_dict(cand_hints) or not is_exact_dict(orig_hints):
-        return False
-    if len(cand_hints) != len(orig_hints):
-        return False
-    for k, orig_v in orig_hints.items():
-        if k not in cand_hints:
-            return False
-        if cand_hints[k] is not orig_v:
-            return False
-    return True
-
-
 @dataclasses.dataclass(frozen=True, slots=True)
 class _RoutingIntent:
     """The source queryset's routing, frozen before consumer ordering code receives it.
@@ -1596,16 +1546,16 @@ class _RoutingIntent:
     effective_alias: str
 
 
-def _snapshot_routing_intent(queryset: object, method_name: str) -> _RoutingIntent:
+def _snapshot_routing_intent(queryset: models.QuerySet[models.Model]) -> _RoutingIntent:
     """Freeze a sealed source's routing BEFORE consumer code receives it.
 
     The post-``OrderSet`` seal compares the returned candidate against this
     baseline, and the baseline has to be taken before the public ``apply_*``
     call: the override is handed the very same queryset object, so reading its
     routing afterwards would read whatever the override left there. The hints
-    dictionary is copied (its values are kept by reference, which is what
-    :func:`_routing_hints_equal` compares), so an in-place ``_hints`` edit on
-    the source cannot rewrite the expectation either.
+    dictionary is copied, so an in-place ``_hints`` edit on the source cannot
+    rewrite the expectation either; the seal compares a candidate's hints to
+    the copy with ``==``, keeping absent (``None``) apart from empty (``{}``).
 
     The effective alias is then RESOLVED here, through the same
     ``ConnectionRouter`` method Django's own ``QuerySet.db`` property would use
@@ -1613,16 +1563,14 @@ def _snapshot_routing_intent(queryset: object, method_name: str) -> _RoutingInte
     and the seal pins the accepted result onto it. Django's router always
     answers with a concrete alias, falling back to ``DEFAULT_DB_ALIAS``, so an
     unrouted source resolves just as it would at execution - only earlier, while
-    the hint values still hold the state the source intended. Django takes any
-    ``str`` a router answers as the alias it names, so a ``TextChoices`` /
-    ``StrEnum`` member is admitted by its real type (``is_str``) and frozen as its
-    exact text (``truth.text``), the alias the seal pins; any other answer
-    raises ``ConfigurationError``.
+    the hint values still hold the state the source intended. A ``TextChoices`` /
+    ``StrEnum`` alias a router answers is frozen as its exact text
+    (``truth.text``), the alias the seal pins.
 
-    Reads come from the instance ``__dict__``; the model comes from that same
-    state, because the source reaching this seam is already a sealed queryset
-    whose ``model`` the visibility boundary checked. The router is the deployment's own
-    code: whatever it raises propagates.
+    Routing reads come from the instance ``__dict__``; the model is the
+    queryset's own, because the source reaching this seam is already a sealed
+    queryset whose ``model`` the visibility boundary checked. The router is the deployment's own
+    code and is trusted: whatever it raises propagates.
     """
     state: dict[str, object] = truth.instance_state(queryset)
     # The source is a queryset this package built, so its routing slots are the ones
@@ -1630,26 +1578,14 @@ def _snapshot_routing_intent(queryset: object, method_name: str) -> _RoutingInte
     # ``_hints`` a str-keyed dict.
     db = cast("str | None", state.get("_db"))
     hints = cast("dict[str, object] | None", state.get("_hints"))
-    model = state.get("model")
+    model = queryset.model
     for_write = state.get("_for_write") is True
     if type(hints) is dict:
         hints = dict(hints)
     if db is not None:
         return _RoutingIntent(db=db, hints=hints, effective_alias=db)
-    if not truth.is_subclass(model, models.Model):
-        raise ConfigurationError(
-            f"{method_name} could not resolve the source QuerySet's effective database "
-            f"alias: its model is {truth.kind(model)}, so no router answer can be "
-            f"obtained for it.",
-        )
     resolve = router.db_for_write if for_write else router.db_for_read
     alias = resolve(model, **(hints if type(hints) is dict else {}))
-    if not is_str(alias):
-        raise ConfigurationError(
-            f"{method_name} could not resolve the source QuerySet's effective database "
-            f"alias: the database router answered {truth.render(alias)} for "
-            f"{truth.name(model)}; an alias must be a string.",
-        )
     return _RoutingIntent(db=None, hints=hints, effective_alias=truth.text(alias))
 
 
@@ -1786,7 +1722,7 @@ def require_orderset_class(
     return orderset_class
 
 
-def _apply_sidecar_sync(
+def apply_sidecar_sync(
     target_type: type[DjangoType],
     set_class: type[FilterSet | OrderSet],
     queryset: models.QuerySet[models.Model],
@@ -1818,10 +1754,9 @@ def _apply_sidecar_sync(
     method_name = f"{truth.name(set_class)}.apply_sync"
     # Frozen BEFORE the override receives the queryset: it can mutate the
     # object it was handed, so a post-call read is not a baseline.
-    expected_routing = _snapshot_routing_intent(queryset, method_name)
+    expected_routing = _snapshot_routing_intent(queryset)
     candidate = set_class.apply_sync(input_value, queryset, info)
-    if inspect.isawaitable(candidate):
-        _dispose_sync_awaitable(candidate)
+    if _disposed_awaitable(candidate):
         raise SyncMisuseError(
             f"{method_name} returned an awaitable in a sync resolver context. "
             f"Make apply_sync synchronous or execute the query asynchronously.",
@@ -1835,7 +1770,7 @@ def _apply_sidecar_sync(
     )
 
 
-async def _apply_sidecar_async(
+async def apply_sidecar_async(
     target_type: type[DjangoType],
     set_class: type[FilterSet | OrderSet],
     queryset: models.QuerySet[models.Model],
@@ -1844,14 +1779,14 @@ async def _apply_sidecar_async(
     *,
     model: type[models.Model],
 ) -> models.QuerySet[models.Model]:
-    """Async sibling of :func:`_apply_sidecar_sync`, running the same one seal.
+    """Async sibling of :func:`apply_sidecar_sync`, running the same one seal.
 
     The awaited result carries the same ``_SIDECAR_RESULT_POLICY`` contract;
     the extra arms reject a public method that never returned an awaitable at
     all, and one that awaited to a second awaitable.
     """
     method_name = f"{truth.name(set_class)}.apply_async"
-    expected_routing = _snapshot_routing_intent(queryset, method_name)
+    expected_routing = _snapshot_routing_intent(queryset)
     candidate_awaitable = set_class.apply_async(input_value, queryset, info)
     if not inspect.isawaitable(candidate_awaitable):
         raise ConfigurationError(
@@ -1859,8 +1794,7 @@ async def _apply_sidecar_async(
             f"({truth.kind(candidate_awaitable)}); expected an awaitable coroutine or Future.",
         )
     candidate = await candidate_awaitable
-    if inspect.isawaitable(candidate):
-        _dispose_sync_awaitable(candidate)
+    if _disposed_awaitable(candidate):
         raise ConfigurationError(
             f"{method_name} returned a residual awaitable value "
             f"({truth.kind(candidate)}); expected a QuerySet.",
@@ -1886,10 +1820,10 @@ def apply_orderset_sync(
     """Run ``OrderSet.apply_sync`` through the shared post-sidecar seal.
 
     Both the list field and the Relay connection field enter here; see
-    :func:`_apply_sidecar_sync` for the seal itself.
+    :func:`apply_sidecar_sync` for the seal itself.
     """
     orderset_class = require_orderset_class(target_type, orderset_class)
-    return _apply_sidecar_sync(target_type, orderset_class, queryset, order_by, info, model=model)
+    return apply_sidecar_sync(target_type, orderset_class, queryset, order_by, info, model=model)
 
 
 async def apply_orderset_async(
@@ -1903,56 +1837,11 @@ async def apply_orderset_async(
 ) -> models.QuerySet[models.Model]:
     """Async sibling of :func:`apply_orderset_sync`."""
     orderset_class = require_orderset_class(target_type, orderset_class)
-    return await _apply_sidecar_async(
+    return await apply_sidecar_async(
         target_type,
         orderset_class,
         queryset,
         order_by,
-        info,
-        model=model,
-    )
-
-
-def apply_filterset_sync(
-    target_type: type[DjangoType],
-    filterset_class: type[FilterSet],
-    queryset: models.QuerySet[models.Model],
-    filter_input: object,
-    info: object,
-    *,
-    model: type[models.Model],
-) -> models.QuerySet[models.Model]:
-    """Run ``FilterSet.apply_sync`` through the shared post-sidecar seal.
-
-    The Relay connection field is the one field publishing ``filter:``; its
-    pipeline enters here so a filter override answers to the same contract as
-    an ordering override (:func:`_apply_sidecar_sync`).
-    """
-    return _apply_sidecar_sync(
-        target_type,
-        filterset_class,
-        queryset,
-        filter_input,
-        info,
-        model=model,
-    )
-
-
-async def apply_filterset_async(
-    target_type: type[DjangoType],
-    filterset_class: type[FilterSet],
-    queryset: models.QuerySet[models.Model],
-    filter_input: object,
-    info: object,
-    *,
-    model: type[models.Model],
-) -> models.QuerySet[models.Model]:
-    """Async sibling of :func:`apply_filterset_sync`."""
-    return await _apply_sidecar_async(
-        target_type,
-        filterset_class,
-        queryset,
-        filter_input,
         info,
         model=model,
     )
@@ -2347,7 +2236,7 @@ def _seal_or_defect(
     db = queryset_db(candidate)
     if expected_routing is not None:
         hints = queryset_hints(candidate)
-        if db != expected_routing.db or not _routing_hints_equal(hints, expected_routing.hints):
+        if db != expected_routing.db or hints != expected_routing.hints:
             return None, (
                 "routing",
                 (
@@ -2732,8 +2621,7 @@ def _normalized_visibility_result(
     answers to two reads.
     """
     model = _captured_model(type_cls, model)
-    if isinstance(result, models.Manager):
-        result = _coerced_manager_queryset(result)
+    result = normalize_query_source(result)[0]
     sealed = _seal_or_defect(result, model, required_alias, policy)
     if sealed[1] is not None:
         raise _visibility_result_error(type_cls, model, required_alias, sealed[1], render_error)
@@ -2841,30 +2729,6 @@ def apply_type_visibility_sync(
     )
 
 
-def visibility_scoped_related_queryset(
-    related_type: type[DjangoType],
-    info: object,
-    async_recourse: str,
-) -> models.QuerySet[models.Model]:
-    """Return a related type's base queryset scoped by its ``get_queryset`` visibility hook.
-
-    The one-line composition of the two primitives every relation-visibility check
-    shares - ``apply_type_visibility_sync(related_type, initial_queryset(
-    related_type), info, recourse)``. Single-sourced so the model relation decode
-    (``mutations/resolvers.py``) and the form relation decode
-    (``forms/resolvers.py``) provably apply the SAME related-type ``get_queryset``
-    (the cross-flavor security invariant spec-038 claims), rather than re-spelling
-    the composition at each site. ``async_recourse`` is required: every caller passes
-    its own surface-specific wording.
-    """
-    return apply_type_visibility_sync(
-        related_type,
-        initial_queryset(related_type),
-        info,
-        async_recourse,
-    )
-
-
 def related_visibility_queryset(
     related_model: type[models.Model],
     info: object,
@@ -2889,7 +2753,12 @@ def related_visibility_queryset(
     related_type = registry.get(related_model)
     if related_type is None:
         return None
-    return visibility_scoped_related_queryset(related_type, info, async_recourse)
+    return apply_type_visibility_sync(
+        related_type,
+        initial_queryset(related_type),
+        info,
+        async_recourse,
+    )
 
 
 def related_visibility_queryset_or_default(
@@ -3084,7 +2953,7 @@ def visible_related_object(
     form AND serializer relation decoders share ONE implementation rather than
     forking a second object-returning decoder. Resolves the related model's primary
     ``DjangoType`` via the registry and runs the SAME visibility hook every read
-    surface applies (``visibility_scoped_related_queryset`` =
+    surface applies (``related_visibility_queryset`` =
     ``apply_type_visibility_sync(initial_queryset(...))``), so a writer cannot
     attach a row they could not *see*. Returns the visible object or ``None``
     (hidden / missing - the caller maps ``None`` to the field-keyed ``FieldError``,
@@ -3100,7 +2969,7 @@ def visible_related_object(
     (``registry.get``), and a model with no primary still resolves via the default
     manager (no visibility contract to apply). ``async_recourse`` is required: the
     form and serializer paths pass their own surface-specific wording, matching
-    ``visibility_scoped_related_queryset``.
+    ``related_visibility_queryset``.
 
     The helper accepts a raw pk AFTER a flavor-specific decoder has chosen that
     branch; it does NOT imply every generated GraphQL relation input accepts both a

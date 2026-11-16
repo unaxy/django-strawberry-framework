@@ -206,10 +206,6 @@ AUDITED_SITES: dict[tuple[str, str], int] = {
         "django.db.models.options.Options",
     ): 1,
     (
-        "django_strawberry_framework/utils/relations.py::_resolve_segment_field",
-        "django.db.models.options.Options",
-    ): 1,
-    (
         "django_strawberry_framework/utils/write_values.py::unstorable_columns",
         "django.db.models.Field",
     ): 1,

@@ -34,7 +34,7 @@ from django_strawberry_framework.orders.inputs import (
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr
 from django_strawberry_framework.utils.inputs import _type_name_claims
-from tests._idioms import canonical_order, definition_raises, scrambled, type_args
+from tests._idioms import canonical_order, scrambled, type_args
 
 
 @pytest.fixture(autouse=True)
@@ -241,17 +241,6 @@ def test_factory_input_object_types_shared_across_factory_instances() -> None:
     _ = factory_b.arguments
     assert "SharedOrderAInputType" in OrderArgumentsFactory.input_object_types
     assert "SharedOrderBInputType" in OrderArgumentsFactory.input_object_types
-
-
-def test_factory_subclass_rejected_at_class_creation_time() -> None:
-    """Subclassing ``OrderArgumentsFactory`` raises ``TypeError`` immediately."""
-    with pytest.raises(TypeError) as excinfo:
-
-        @definition_raises
-        class _SubFactory(OrderArgumentsFactory):
-            pass
-
-    assert "does not support subclassing" in str(excinfo.value)
 
 
 def test_factory_skips_related_order_with_none_target() -> None:

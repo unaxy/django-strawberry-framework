@@ -1482,7 +1482,7 @@ async def test_connection_async_branches_a_malformed_filter_apply_async_result_n
     """Each malformed ``FilterSet.apply_async`` result names its defect over ``/graphql-async/``.
 
     The filter arm of the async pipeline awaits the SAME post-sidecar seal the
-    ordering arm does (``utils/querysets.py::apply_filterset_async``), so every
+    ordering arm does (``utils/querysets.py::apply_sidecar_async``), so every
     defect shape that matrix pins has to arrive here too. Each row asserts the
     typed rejection, that the override was entered, and that no raw exception
     text reaches the payload. The residual row additionally reads the disposal:

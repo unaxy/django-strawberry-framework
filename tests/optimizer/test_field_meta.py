@@ -28,12 +28,11 @@ from apps.library.models import (
 from apps.products.models import Category, Item
 
 from django_strawberry_framework import DjangoType, finalize_django_types
-from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
+from django_strawberry_framework.exceptions import OptimizerError
 from django_strawberry_framework.optimizer.field_meta import FieldMeta, _target_pk_name
 from django_strawberry_framework.optimizer.selections import PYTHON_NAME_ATTR
 from django_strawberry_framework.optimizer.walker import _resolve_field_map, plan_optimizations
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.utils.relations import has_composite_pk
 from tests._idioms import pickle_roundtrip
 from tests._relation_fixtures import RpCompositeParent
 
@@ -379,45 +378,6 @@ def test_from_django_field_rejects_non_string_field_name() -> None:
         FieldMeta.from_django_field(non_str_field)  # pyright: ignore[reportArgumentType]
 
 
-def test_from_django_field_rejects_invalid_relation_metadata() -> None:
-    """Invalid relation metadata raises typed ConfigurationError."""
-
-    class NonBoolM2M:
-        name = "rel"
-        is_relation = True
-        many_to_many = "yes"
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"Relation metadata 'many_to_many' on .* must be a bool",
-    ):
-        FieldMeta.from_django_field(NonBoolM2M())
-
-    class NonCallableAccessor:
-        name = "rel"
-        is_relation = True
-        one_to_many = True
-        auto_created = True
-        get_accessor_name = "not_callable"
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"Relation accessor metadata .* must be callable",
-    ):
-        FieldMeta.from_django_field(NonCallableAccessor())
-
-    class NonStrAccessor:
-        name = "rel"
-        is_relation = True
-        accessor_name = 12345
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"Relation accessor metadata on .* must be a string",
-    ):
-        FieldMeta.from_django_field(NonStrAccessor())
-
-
 def test_field_meta_is_frozen() -> None:
     """FieldMeta instances are immutable."""
     fm = FieldMeta(name="test")
@@ -478,10 +438,10 @@ def test_fk_id_elision_edge_cases() -> None:
     assert fm_to_field.fk_id_elision_eligible is False
 
     # Composite PK target (``tests/_relation_fixtures.py::RpCompositeParent``): not eligible
-    assert has_composite_pk(RpCompositeParent) is True
+    assert RpCompositeParent._meta.is_composite_pk is True
 
     # basedpyright: a plain forward FK to a composite-pk target does not exist in Django (system
-    # check fields.E347), so the duck FK is the only way to reach the has_composite_pk guard;
+    # check fields.E347), so the duck FK is the only way to reach the composite-pk guard;
     # FieldMeta.from_django_field types the parameter as a Django field
     fake_comp_fk = SimpleNamespace(
         name="comp_rel",

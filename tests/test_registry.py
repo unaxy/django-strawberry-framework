@@ -2180,8 +2180,8 @@ def test_clear_tolerates_unimportable_filter_submodules(fresh_registry: TypeRegi
     ``register_subsystem_clear``, and ``clear()`` replays the already-resolved callables. That
     replay is the only place a poisoned ``sys.modules`` can be reached at all, and it imports
     neither poisoned name directly; the two submodule lookups it does make are best-effort
-    (``utils/inputs.py::_safe_import``). So neither the poisoned package nor the poisoned
-    ``inputs`` module can make ``clear()`` raise: the registry's own state is dropped either way
+    (``utils/imports.py::import_attr_if_importable``). So neither the poisoned package nor the
+    poisoned ``inputs`` module can make ``clear()`` raise: the registry's own state is dropped either way
     (spec-027 Decision 9).
 
     Registry lifecycle: ``clear`` / ``unregister`` / teardown callbacks. A live request cannot show
@@ -2214,9 +2214,10 @@ def test_clear_tolerates_unimportable_order_submodules(fresh_registry: TypeRegis
     registers ``clear_order_input_namespace`` and the bound ``_helper_referenced_ordersets.clear`` -- and
     ``clear()`` replays the already-resolved callables. That replay is the only place a poisoned
     ``sys.modules`` can be reached at all, and it imports neither poisoned name directly; the two
-    submodule lookups it does make are best-effort (``utils/inputs.py::_safe_import``). So neither
-    the poisoned package nor the poisoned ``inputs`` module can make ``clear()`` raise: the
-    registry's own state is dropped either way (spec-028 Decision 9).
+    submodule lookups it does make are best-effort
+    (``utils/imports.py::import_attr_if_importable``). So neither the poisoned package nor the
+    poisoned ``inputs`` module can make ``clear()`` raise: the registry's own state is dropped
+    either way (spec-028 Decision 9).
 
     Registry lifecycle: ``clear`` / ``unregister`` / teardown callbacks. A live request cannot show
     LIFO order, retry, or ImportError guards. No live sibling.
