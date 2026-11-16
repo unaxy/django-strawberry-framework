@@ -892,8 +892,7 @@ For a request carrying any non-null list argument, the color-specific queryset p
 
    Timing is part of the contract: at most one router call, taken at the snapshot and only for
    an unrouted source, and none during validation. A router exception propagates unchanged; a
-   router answer that is not a string alias fails the ordering call closed with a
-   `ConfigurationError`; a `TextChoices` / `StrEnum` member answer is the alias it spells
+   `TextChoices` / `StrEnum` member answer is the alias it spells
    and is frozen as that exact text. The sharded live suite
    ([`examples/fakeshop/test_query/test_multi_db.py`][fakeshop-test-multi-db]) covers the
    `.using("shard_b")` source an override re-routes

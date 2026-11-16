@@ -771,7 +771,7 @@ def is_forward_many_to_many(field: object) -> bool:
     Single-sited here so the predicate cannot drift across the write
     surfaces that select editable / attestable M2M fields. Each flag is read
     through ``relation_bool``, ``relation_kind``'s read contract: an absent or
-    ``None`` flag reads as ``False`` and a non-``bool`` one raises. Over a model field, ``True`` narrows it to
+    ``None`` flag reads as ``False``. Over a model field, ``True`` narrows it to
     the forward ``ManyToManyField`` (a concrete ``Field``, never a reverse rel).
     """
     many_to_many = relation_bool(field, "many_to_many")

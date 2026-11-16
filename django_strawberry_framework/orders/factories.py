@@ -65,8 +65,7 @@ class OrderArgumentsFactory(GeneratedInputArgumentsFactory[OrderSet]):
     aligned with the filter side), where the cookbook's order factory used
     LIFO; both reach the same set of classes for a finite graph.
 
-    Subclassing is rejected at class-creation time; extend by composition (wrap
-    an instance), not inheritance.
+    Extend by composition (wrap an instance), not inheritance.
     """
 
     input_object_types: ClassVar[dict[str, type[object]]] = {}

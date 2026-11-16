@@ -3898,6 +3898,35 @@ def test_routing_rejects_a_renamed_hint_key_at_equal_length() -> None:
         )
 
 
+def test_routing_rejects_an_equal_hint_value_that_is_not_the_same_object() -> None:
+    """An equal-but-distinct hint value is a routing change, not the same intent.
+
+    Django's ``ConnectionRouter`` passes hint values to consumer routers as the
+    objects they are, and a router may tell two equal tokens apart by identity,
+    so only the SAME object the snapshot holds proves the same route.
+    """
+    DummyType = _declared_type(Category, "DummyType")
+    source_qs = Category.objects.all()
+    set_queryset_hints(source_qs, {"tenant": "shard-a"})
+    expected = _snapshot_routing_intent(source_qs)
+
+    cand_qs = Category.objects.all()
+    set_queryset_hints(cand_qs, {"tenant": "shard-a!"[:-1]})
+    assert queryset_hints(cand_qs)["tenant"] is not queryset_hints(source_qs)["tenant"]
+    with pytest.raises(ConfigurationError, match="changed database routing intent"):
+        _validate_post_orderset_result(DummyType, expected, cand_qs, "MyOrderSet.apply_sync")
+
+    same_qs = Category.objects.all()
+    set_queryset_hints(same_qs, {"tenant": queryset_hints(source_qs)["tenant"]})
+    validated = _validate_post_orderset_result(
+        DummyType,
+        expected,
+        same_qs,
+        "MyOrderSet.apply_sync",
+    )
+    assert validated is not None
+
+
 def test_snapshot_routing_intent_is_frozen_before_consumer_code_can_mutate_the_source() -> None:
     """The baseline is a COPY taken before the override runs, not a post-call read.
 

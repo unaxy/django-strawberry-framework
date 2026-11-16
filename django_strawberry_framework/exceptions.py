@@ -115,11 +115,8 @@ class PathResolutionError(ConfigurationError):
         - A forward ``GenericForeignKey`` segment (``is_relation=True`` but no
           ``path_infos``), whether terminal or mid-path - it is neither a
           scalar terminal nor a traversable relation.
-        - A relation segment whose ``path_infos`` is empty.
-        - Guard arms the segment list above does not name: a ``field_path``
-          that is not a ``str`` (raised before segmentation, naming the whole
-          value as the segment), and a segment whose ``is_relation`` flag
-          ``utils/relations.py::relation_bool`` rejects as malformed metadata.
+        - A ``field_path`` that is not a ``str`` (raised before segmentation,
+          naming the whole value as the segment).
 
     The message always names the model label, the complete declared path, and
     the offending segment so the failure is actionable.

@@ -57,10 +57,8 @@ class FilterArgumentsFactory(GeneratedInputArgumentsFactory[FilterSet]):
     the finalizer's phase-2.5 contract. ``arguments`` returns the built input
     class for the root filterset (spec-027 Decision 6).
 
-    Subclassing is rejected at class-creation time (the caches are shared
-    mutable dicts a subclass would inherit rather than isolate, silently
-    cross-contaminating builds); extend by composition (wrap an instance),
-    not inheritance.
+    The caches are shared mutable dicts a subclass would inherit rather than
+    isolate; extend by composition (wrap an instance), not inheritance.
     """
 
     input_object_types: ClassVar[dict[str, type[object]]] = {}

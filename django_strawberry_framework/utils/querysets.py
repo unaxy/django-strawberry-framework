@@ -1521,6 +1521,25 @@ _LIST_RELATION_CHILD_POLICY: _SealPolicy[models.Model] = _SealPolicy(require_sha
 _SIDECAR_RESULT_POLICY: _SealPolicy[models.Model] = _SealPolicy(require_unevaluated=True)
 
 
+def _routing_hints_equal(cand_hints: object, orig_hints: object) -> bool:
+    """Return True if candidate and original routing hints match without consumer dispatch.
+
+    Preserves the exact distinction between absent (``None``) and empty (``{}``)
+    hints. Keys must match exactly and every value must be the SAME OBJECT the
+    snapshot holds: Django's ``ConnectionRouter`` hands hint values to consumer
+    routers untouched, and a router is free to tell two equal tokens apart by
+    identity, so semantic equality cannot prove equal routing without running
+    the router. Identity is the only comparison that proves it without dispatch.
+    """
+    if cand_hints is orig_hints:
+        return True
+    if not is_exact_dict(cand_hints) or not is_exact_dict(orig_hints):
+        return False
+    if cand_hints.keys() != orig_hints.keys():
+        return False
+    return all(cand_hints[k] is v for k, v in orig_hints.items())
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class _RoutingIntent:
     """The source queryset's routing, frozen before consumer ordering code receives it.
@@ -2236,7 +2255,7 @@ def _seal_or_defect(
     db = queryset_db(candidate)
     if expected_routing is not None:
         hints = queryset_hints(candidate)
-        if db != expected_routing.db or hints != expected_routing.hints:
+        if db != expected_routing.db or not _routing_hints_equal(hints, expected_routing.hints):
             return None, (
                 "routing",
                 (
