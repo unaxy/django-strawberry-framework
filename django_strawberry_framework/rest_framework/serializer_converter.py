@@ -471,7 +471,6 @@ def _list_child_conversion(field: serializers.ListField) -> SerializerFieldConve
             "a GraphQL list input requires a typed scalar child "
             "(e.g. ListField(child=serializers.CharField())).",
         )
-    _reject_nested_serializer(child)
     if isinstance(child, (serializers.RelatedField, serializers.ManyRelatedField)):
         raise ConfigurationError(
             f"Serializer field {field_name!r} is a ListField whose child is a "
@@ -609,9 +608,6 @@ def convert_serializer_field(
         _reject_unsupported_relation_field(field_)
         return _CONVERT_RELATION_SINGLE(field_)
 
-    def _list(field_: serializers.ListField) -> SerializerFieldConversion:
-        return _list_child_conversion(field_)
-
     def _nested(field_: DRFField) -> SerializerFieldConversion:
         # A nested ``Serializer`` / ``ListSerializer`` always raises; the handler
         # never returns, so the skeleton never falls through on it.
@@ -629,7 +625,7 @@ def convert_serializer_field(
             (serializers.ManyRelatedField, _relation_multi),
             (serializers.RelatedField, _relation_single),
             (serializers.FileField, _CONVERT_FILE),
-            (serializers.ListField, _list),
+            (serializers.ListField, _list_child_conversion),
             (serializers.MultipleChoiceField, _CONVERT_MULTIPLE_CHOICE),
         ],
         scalar_registry=_SERIALIZER_FIELD_CONVERTERS,
@@ -658,11 +654,6 @@ def _unsupported_serializer_field(field: DRFField) -> ConfigurationError:
     )
 
 
-def _relation_cardinality(field: DRFField) -> bool:
-    """Return whether a DRF relation field validates a collection of related objects."""
-    return isinstance(field, serializers.ManyRelatedField)
-
-
 def _reject_relation_cardinality_mismatch(field: DRFField, column: ModelField) -> None:
     """Reject a serializer relation whose collection shape disagrees with its model relation.
 
@@ -673,7 +664,7 @@ def _reject_relation_cardinality_mismatch(field: DRFField, column: ModelField) -
     emits a list while DRF requires one id). The generated input must describe the same shape
     the runtime serializer validates.
     """
-    serializer_many = _relation_cardinality(field)
+    serializer_many = isinstance(field, serializers.ManyRelatedField)
     model_many = model_column_write_kind(column) == RELATION_MULTI
     if serializer_many == model_many:
         return
@@ -763,15 +754,6 @@ def serializer_field_fits_kind(field: DRFField, kind: str) -> bool:
     return True
 
 
-def _serializer_kind_noun(field: DRFField) -> str:
-    """Return the kind a serializer field validates, in the kind-mismatch diagnostic's words."""
-    if isinstance(field, serializers.FileField):
-        return _KIND_NOUNS[FILE]
-    if isinstance(field, (serializers.RelatedField, serializers.ManyRelatedField)):
-        return _KIND_NOUNS[RELATION_SINGLE]
-    return _KIND_NOUNS[SCALAR]
-
-
 def _reject_kind_mismatch(field: DRFField, column: ModelField, kind: str) -> None:
     """Reject a serializer field whose kind disagrees with the ``kind`` of the column it writes.
 
@@ -787,7 +769,12 @@ def _reject_kind_mismatch(field: DRFField, column: ModelField, kind: str) -> Non
     """
     if serializer_field_fits_kind(field, kind):
         return
-    field_kind = _serializer_kind_noun(field)
+    if isinstance(field, serializers.FileField):
+        field_kind = _KIND_NOUNS[FILE]
+    elif isinstance(field, (serializers.RelatedField, serializers.ManyRelatedField)):
+        field_kind = _KIND_NOUNS[RELATION_SINGLE]
+    else:
+        field_kind = _KIND_NOUNS[SCALAR]
     column_kind = _KIND_NOUNS[kind]
     field_class = type(field).__name__
     consequence = (
@@ -1098,19 +1085,6 @@ def serializer_choice_source(field: DRFField) -> serializers.ChoiceField | None:
     return None
 
 
-def _writes_choice_list(field: DRFField) -> bool:
-    """Return whether a serializer field validates a LIST of choice values.
-
-    ``MultipleChoiceField.to_internal_value`` returns a list, and a ``ListField`` whose child
-    is a ``ChoiceField`` (``serializer_choice_source``) validates each element through that
-    child; both publish ``list[<enum>]`` and both store a collection, so both are checked
-    against the column each element is stored through.
-    """
-    if isinstance(field, serializers.MultipleChoiceField):
-        return True
-    return isinstance(field, serializers.ListField) and serializer_choice_source(field) is not None
-
-
 def _reject_choice_values_the_column_does_not_list(field: DRFField, column: ConcreteField) -> None:
     """Refuse a serializer choice field admitting a value its choice column does not list.
 
@@ -1280,7 +1254,11 @@ def _model_backed_scalar_annotation(
     does not have, so it is refused (``_reject_read_enum_over_grouped_column``).
     """
     choice_column = column
-    if _writes_choice_list(field):
+    # A ``MultipleChoiceField`` or ``ListField(child=ChoiceField)`` validates a LIST of choice
+    # values, so it is checked against the column each element is stored through.
+    if isinstance(field, serializers.MultipleChoiceField) or (
+        isinstance(field, serializers.ListField) and serializer_choice_source(field) is not None
+    ):
         choice_column = _multiple_choice_element_column(field, column)
     _reject_choice_values_the_column_does_not_list(field, choice_column)
     choice = _enumerable_choice_source(field)
@@ -1398,7 +1376,7 @@ def _serializer_choice_annotation(
     subclass) -> ``list[<enum>]`` with a non-null element; a ``ListField(child=ChoiceField)``
     -> ``list[<enum>]`` whose element follows the child's ``allow_null`` like every other
     ``ListField`` (``_list_annotation``). Shared by the column-less path
-    (``_serializer_only_scalar_annotation``) and the model-backed path
+    (``resolve_serializer_field``) and the model-backed path
     (``_model_backed_scalar_annotation``), so a declared choice field emits the SAME generated
     enum whether or not it maps to a model column.
     """
@@ -1408,24 +1386,6 @@ def _serializer_choice_annotation(
     if isinstance(field, serializers.MultipleChoiceField):
         return GenericAlias(list, (enum_cls,))
     return enum_cls
-
-
-def _serializer_only_scalar_annotation(
-    field: DRFField,
-    conversion: SerializerFieldConversion,
-    type_name: str,
-) -> object:
-    """Resolve a column-less serializer SCALAR annotation, upgrading choices to enums.
-
-    A serializer-only ``ChoiceField`` becomes a generated enum; a ``MultipleChoiceField``
-    (a ``ChoiceField`` subclass, so its base conversion is ``list[str]``) and a
-    ``ListField(child=ChoiceField)`` (base ``list[str]`` through the scalar registry) become
-    ``list[<enum>]``. Every other scalar keeps its converter annotation.
-    """
-    choice = _enumerable_choice_source(field)
-    if choice is None:
-        return conversion.annotation
-    return _serializer_choice_annotation(field, choice, type_name)
 
 
 def resolve_serializer_field(
@@ -1556,7 +1516,12 @@ def resolve_serializer_field(
             # ``ListField(child=ChoiceField)`` is upgraded to a generated GraphQL enum here
             # (the build site owns ``type_name``); every other scalar keeps its converter
             # annotation.
-            annotation = _serializer_only_scalar_annotation(field, conversion, type_name)
+            choice = _enumerable_choice_source(field)
+            annotation = (
+                conversion.annotation
+                if choice is None
+                else _serializer_choice_annotation(field, choice, type_name)
+            )
             python_attr = serializer_field_input_attr(field_name, kind)
 
     spec = InputFieldSpec(

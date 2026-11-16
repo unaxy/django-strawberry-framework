@@ -65,11 +65,11 @@ from django.utils.choices import CallableChoiceIterator
 from django_strawberry_framework import logger
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import (
-    CREATE,
     PARTIAL,
     annotate_queryset_relation,
     model_column_input_annotation,
     model_column_write_kind,
+    related_model_of_queryset,
 )
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.scalars import Upload
@@ -96,21 +96,20 @@ from django_strawberry_framework.utils.inputs import (
     RELATION_MULTI,
     RELATION_SINGLE,
     SCALAR,
-    GeneratedFieldSources,
     InputFieldSpec,
     build_strawberry_input_class,
     guard_dropped_required,
     is_input_attribute_name,
-    iter_input_field_collisions,
     make_input_namespace,
     name_set_input_type_name,
     optional_input_field,
     predicted_input_field_name,
+    raise_first_input_field_collision,
     resolve_effective_fields,
+    write_input_sources,
 )
 from django_strawberry_framework.utils.relations import (
     choice_key_field,
-    is_forward_concrete_relation,
     is_forward_many_to_many,
     is_model_class,
     is_row_key_column,
@@ -169,15 +168,6 @@ INPUTS_MODULE_PATH: str = "django_strawberry_framework.forms.inputs"
 # Decision 7). The bind keys on it; the generators here do not branch on it.
 FORM: str = "form"
 
-# The create-shaped operation kinds (everything that is NOT ``PARTIAL``): a
-# ``DjangoModelFormMutation`` create (``CREATE``) and a plain
-# ``DjangoFormMutation`` (``FORM``). The generator's only behavioral split is
-# create-shaped vs ``PARTIAL`` (the latter widens model-backed fields to
-# optional), so this names the create-shaped set in one place. ``CREATE`` /
-# ``PARTIAL`` are re-exported from ``mutations.inputs`` so callers + tests
-# address the form generator's full kind vocabulary on this module.
-CREATE_SHAPED_KINDS: frozenset[str] = frozenset({CREATE, FORM})
-
 # The form-input namespace lifecycle trio, single-sited via
 # ``utils/inputs.py::make_input_namespace`` (spec-039 - the one-ledger shape
 # the mutation, form, and serializer flavors share). ``_materialized_names`` is
@@ -185,56 +175,14 @@ CREATE_SHAPED_KINDS: frozenset[str] = frozenset({CREATE, FORM})
 # ``registry.clear()`` routes through
 # ``clear_form_input_namespace`` to reset it - a namespace disjoint from
 # ``mutations.inputs`` so the ``036`` ``<Model>Input`` and the form
-# ``<FormClass>Input`` never share a module ``__dict__`` slot. The public
-# ``materialize_*`` / ``clear_*`` names below stay thin wrappers so callers + tests
-# address them unchanged.
+# ``<FormClass>Input`` never share a module ``__dict__`` slot. Both public names are the
+# factory's own callables.
 _materialized_names, _materialize_input, _clear_input_namespace = make_input_namespace(
     INPUTS_MODULE_PATH,
     "DjangoFormMutation",
 )
-
-
-def materialize_form_input_class(
-    name: str,
-    input_cls: type[object],
-    owner: str | None = None,
-) -> None:
-    """Set ``input_cls`` as a real module global of ``forms.inputs`` under ``name``.
-
-    Thin family wrapper over the ``make_input_namespace`` materializer (which
-    delegates to ``utils/inputs.py::materialize_generated_input_class`` pinning
-    the form-side module path, family label, and ledger). See that helper for the
-    Strawberry ``LazyType.resolve_type`` contract, the ``(name, input_cls)``
-    idempotency clause (re-materializing the same class under the same name is a
-    no-op, so identical shapes dedupe), and the distinct-class collision raise (a
-    second, DIFFERENT class under one name raises ``ConfigurationError`` - the
-    spec-038 finalize-time collision raise, including two different form classes
-    sharing a ``__name__``, which can never dedupe because they are distinct
-    ``form_class`` identities). ``owner`` names the declaration behind the input
-    (``write_mixins.py::build_and_stash_input`` passes the mutation class) in the
-    cross-family type-name claim, so a model or serializer input of different
-    fields under the same generated name is reported against both declarations.
-
-    Defined here; called by the phase-2.5 bind.
-    """
-    _materialize_input(name, input_cls, owner)
-
-
-def clear_form_input_namespace() -> None:
-    """Reset the form-input ledger for a fresh build.
-
-    Clears ``_materialized_names`` (via the ``make_input_namespace`` clear) so
-    ``materialize_form_input_class`` re-emits on the next finalize. Materialized
-    class objects stay parked in ``forms.inputs.__dict__`` per the
-    parked-globals lifecycle stated on
-    ``utils/inputs.py::make_input_namespace``.
-
-    Like ``clear_mutation_input_namespace`` (and unlike the set families' clear),
-    this resets only the module-level ledger it owns - the form subsystem has no
-    arguments-factory cache and no per-set ``_lifecycle`` binding state. Wired
-    into ``registry.clear()``.
-    """
-    _clear_input_namespace()
+materialize_form_input_class = _materialize_input
+clear_form_input_namespace = _clear_input_namespace
 
 
 # Register the form input-namespace clear as a canonical PRE-BIND clear:
@@ -260,26 +208,11 @@ def get_form_fields(form_class: FormClass) -> dict[str, forms.Field]:
     discoverable, request-independent stable field shape (spec-038 Decision 7). The overridable
     ``get_form_fields(cls)`` classmethod on the base delegates here for its
     default; this module ships the module-level discovery function only.
-
-    A consumer having clobbered ``base_fields`` to a value ``dict()`` cannot
-    read (its documented ``TypeError`` / ``ValueError``) raises a typed
-    ``ConfigurationError`` naming the form (the bind's default hook delegates
-    here, so a corrupted basis never escapes the schema-time build raw).
     """
-    try:
-        # The form metaclass stores ``base_fields`` as the name-keyed ``Field`` map; a
-        # clobbered value fails ``dict()`` and is reported below.
-        return dict(
-            cast(
-                "Mapping[str, forms.Field]",
-                introspection.mro_attr(form_class, "base_fields", None),
-            ),
-        )
-    except (TypeError, ValueError) as exc:
-        raise ConfigurationError(
-            f"DjangoFormMutation for {form_class.__name__} get_form_fields() must return "
-            "a mapping of field names to forms.Field instances.",
-        ) from exc
+    # The form metaclass stores ``base_fields`` as the name-keyed ``Field`` map.
+    return dict(
+        cast("Mapping[str, forms.Field]", introspection.mro_attr(form_class, "base_fields", None)),
+    )
 
 
 def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict[str, forms.Field]:
@@ -291,8 +224,7 @@ def _form_field_basis(form_class: FormClass, form_fields: object = None) -> dict
     mapping keeps later narrowing/build passes from observing caller mutation,
     while the hook remains responsible for returning a request-independent
     field representation. A hook mapping ``dict()`` cannot read (its documented
-    ``TypeError`` / ``ValueError``) raises the same typed diagnostic
-    ``get_form_fields`` raises for a corrupted ``base_fields``.
+    ``TypeError`` / ``ValueError``) raises a typed ``ConfigurationError``.
     """
     source = get_form_fields(form_class) if form_fields is None else form_fields
     try:
@@ -344,19 +276,6 @@ def normalize_form_field_basis(
     return _form_field_basis(form_class, form_fields)
 
 
-def _related_model_of(field: forms.Field) -> object:
-    """Return a column-less relation field's ``queryset.model``, or ``None``.
-
-    The annotation input the build reads through
-    ``_model_less_relation_annotation`` (``annotate_queryset_relation(
-    field.queryset, ...)``). A field without a ``queryset`` attribute (every
-    scalar) and a queryset-less field (the request-scoped-choices idiom, whose
-    build-time annotation raises its own typed error when emitted) project
-    ``None``.
-    """
-    return getattr(getattr(field, "queryset", None), "model", None)
-
-
 def _form_basis_content_identity(
     form_class: FormClass,
     form_fields: Mapping[str, forms.Field] | None = None,
@@ -370,7 +289,7 @@ def _form_basis_content_identity(
     in ``convert_form_field``), the ONE requiredness decision
     (``converter.form_field_required`` with the field's backing column, the
     same resolution the build site uses), a column-less relation field's
-    related model (``_related_model_of``, which fixes the
+    related model (``related_model_of_queryset``, which fixes the
     Relay-``GlobalID``-vs-raw-pk id annotation), and the column values a choice
     field narrows its published enum to (``_choice_narrowing_identity``) - so
     two calls with identical projections build identical input classes and
@@ -408,7 +327,7 @@ def _basis_field_identity(
         name,
         type(field),
         form_field_required(field, column=column),
-        _related_model_of(field),
+        related_model_of_queryset(getattr(field, "queryset", None)),
         _choice_narrowing_identity(name, field, column, form_class),
     )
 
@@ -523,7 +442,7 @@ def form_input_type_name(
     collide loudly at the materialize ledger. Token concatenation,
     full-vs-narrowed comparison, and the ``PartialInput`` / ``Input`` suffix ride
     ``utils/inputs.py::name_set_input_type_name`` (the name-set owner shared
-    with model ``mutation_input_type_name``). This wrapper supplies the
+    with model ``mutation_input_shape``). This wrapper supplies the
     form-class base name and the create-vs-partial decision
     (``operation_kind == PARTIAL``; a ``FORM`` sentinel is create-shaped).
     """
@@ -568,14 +487,11 @@ def _model_column_for(form_class: FormClass, name: str) -> ConcreteField | None:
         column = model._meta.get_field(name)
     except FieldDoesNotExist:
         return None
-    # A reverse relation (``ForeignObjectRel``) is no model ``Field``; of the rest, the arms
-    # below let through only a forward concrete / forward M2M column.
+    # A reverse relation (``ForeignObjectRel``) is no model ``Field``; of the rest, only a
+    # forward M2M or a stored column (Django's ``concrete_fields``) backs a form field.
     if not is_concrete_field(column):
         return None
-    if getattr(column, "is_relation", False):
-        if not (is_forward_many_to_many(column) or is_forward_concrete_relation(column)):
-            return None
-    elif getattr(column, "column", None) is None:
+    if not (is_forward_many_to_many(column) or is_stored_column(column)):
         return None
     return column
 
@@ -594,7 +510,11 @@ def relation_target_model(
     field whose queryset is assigned per request).
     """
     column = _model_column_for(form_class, name)
-    model = _related_model_of(field) if column is None else column.related_model
+    model = (
+        related_model_of_queryset(getattr(field, "queryset", None))
+        if column is None
+        else column.related_model
+    )
     return model if is_model_class(model) else None
 
 
@@ -1382,46 +1302,6 @@ def _field_triple_and_spec(
     return python_attr, annotation, spec, field_required
 
 
-def _form_input_sources(
-    form_class: FormClass,
-    field_specs: list[InputFieldSpec],
-) -> GeneratedFieldSources:
-    """Name the form a generated input is built from, and each field's form field."""
-    return GeneratedFieldSources(
-        subject=f"Form {form_class.__name__!r}",
-        field_noun="form fields",
-        rename_clause="Rename one of the form fields,",
-        members={spec.input_attr: spec.target_name for spec in field_specs},
-    )
-
-
-def _guard_input_attr_collisions(
-    sources: GeneratedFieldSources,
-    field_specs: list[InputFieldSpec],
-) -> None:
-    """Raise if two form fields collide on the generated input attr.
-
-    A relation field ``foo`` remaps to input attr ``foo_id`` (the ``036`` scheme),
-    so a form declaring BOTH a relation ``foo`` AND a field literally named
-    ``foo_id`` produces two specs with ``input_attr == "foo_id"``;
-    ``build_strawberry_input_class`` would resolve that by SILENTLY dropping one,
-    so it fails loud here (the package's fail-loud contract). Two field names the
-    executing schema's ``NameConverter`` names alike (``foo_bar`` / ``fooBar`` by
-    default) are refused per schema (``schema.py::_refuse_field_name_collisions``).
-
-    The seen-dict walk + the collision arms are single-sited in
-    ``utils/inputs.py::iter_input_field_collisions``; the form
-    flavor raises on the FIRST collision (the serializer aggregates instead),
-    with byte-stable wording via the threaded form nouns.
-    """
-    for message in iter_input_field_collisions(
-        field_specs,
-        sources=sources,
-        name_of=lambda spec: spec.target_name,
-    ):
-        raise ConfigurationError(message)
-
-
 def build_form_input_class(
     form_class: FormClass,
     *,
@@ -1441,12 +1321,6 @@ def build_form_input_class(
     required on update). Optional fields widen ``annotation | None`` + a
     ``strawberry.UNSET`` default, the ``036`` shape.
 
-    ``operation_kind`` is part of the generator's pinned vocabulary (the three
-    kinds re-exported / declared on this module): anything else is a
-    misconfiguration the generator would otherwise silently resolve to a
-    create-shaped input, so it fails loud naming the form and the received
-    value.
-
     Before any field is built, every field the operation binds (every declared field for
     an update, the input's own for a create) must agree with its backing column's kind, a
     built-in temporal field reading the column's temporal kind
@@ -1455,12 +1329,6 @@ def build_form_input_class(
     whose input shape disagrees with its column (``_advise_shape_disagreement``); an update's
     also names the initial its omitted field binds. A plain form has no column to disagree with.
     """
-    if operation_kind not in CREATE_SHAPED_KINDS | {PARTIAL}:
-        raise ConfigurationError(
-            f"DjangoFormMutation input build for {form_class.__name__} received "
-            f"out-of-vocabulary operation_kind {operation_kind!r}; expected CREATE, "
-            "FORM, or PARTIAL.",
-        )
     effective = resolve_effective_form_fields(
         form_class,
         fields=fields,
@@ -1512,8 +1380,18 @@ def build_form_input_class(
         annotation, field_kwargs = optional_input_field(annotation, widen=not required)
         triples.append((python_attr, annotation, field_kwargs))
 
-    sources = _form_input_sources(form_class, field_specs)
-    _guard_input_attr_collisions(sources, field_specs)
+    # A relation ``foo`` remaps to input attr ``foo_id``, so a literal ``foo_id`` field
+    # beside it would be silently dropped by ``build_strawberry_input_class``.
+    sources = write_input_sources(
+        f"Form {form_class.__name__!r}",
+        "form",
+        {spec.input_attr: spec.target_name for spec in field_specs},
+    )
+    raise_first_input_field_collision(
+        field_specs,
+        sources=sources,
+        name_of=lambda spec: spec.target_name,
+    )
     input_cls = build_strawberry_input_class(type_name, triples, sources=sources)
     return input_cls, field_specs
 

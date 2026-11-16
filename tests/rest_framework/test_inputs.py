@@ -781,7 +781,7 @@ def test_description_difference_yields_distinct_descriptor_names() -> None:
     assert shape_a.required_state == shape_b.required_state
     assert shape_a.optional_fields == shape_b.optional_fields
     assert shape_a.descriptions != shape_b.descriptions
-    assert shape_a.cache_key != shape_b.cache_key
+    assert shape_a != shape_b
     assert cre_a.__name__ != cre_b.__name__
     assert _field_map(cre_a)["note"].description == "Help A Constraints: max_length=10."
     assert _field_map(cre_b)["note"].description == "Help B Constraints: max_length=99."
@@ -861,16 +861,6 @@ def test_distinct_descriptors_colliding_on_one_name_raise() -> None:
         materialize_serializer_input_class("CollidingInput", cre_b)
 
 
-def test_descriptor_is_its_own_cache_key() -> None:
-    """The frozen ``SerializerInputShape`` is hashable and is its own cache key."""
-    _register_products_types()
-    _, cshape, _, _ = _build_serializer_inputs(_item_serializer())
-    assert isinstance(cshape, SerializerInputShape)
-    assert cshape.cache_key is cshape
-    # Hashable (frozen dataclass) - usable as a dict key.
-    _ = {cshape: 1}
-
-
 def test_dedupe_serializer_input_shape_is_sole_cache_protocol() -> None:
     """Top-level and nested builds share one post-build get-or-store.
 
@@ -888,13 +878,13 @@ def test_dedupe_serializer_input_shape_is_sole_cache_protocol() -> None:
     cre_a, shape_a = build_serializer_input_class(serializer_cls, operation_kind="create")
     cre_b, shape_b = build_serializer_input_class(serializer_cls, operation_kind="create")
     assert shape_a == shape_b
-    assert shape_a.cache_key not in _serializer_shape_build_cache
+    assert shape_a not in _serializer_shape_build_cache
 
     first_cls, first_shape = dedupe_serializer_input_shape(cre_a, shape_a)
     second_cls, second_shape = dedupe_serializer_input_shape(cre_b, shape_b)
     assert first_cls is second_cls is cre_a
     assert first_shape is second_shape is shape_a
-    assert _serializer_shape_build_cache[shape_a.cache_key] == (cre_a, shape_a)
+    assert _serializer_shape_build_cache[shape_a] == (cre_a, shape_a)
 
 
 # ---------------------------------------------------------------------------

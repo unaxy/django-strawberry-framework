@@ -608,7 +608,8 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         ``forms/inputs.py`` instead (spec-038 Decision 13). Returning ``None`` means "no
         input for this operation" (the model ``delete`` case).
         """
-        input_cls = _materialize_input_for(cls.__name__, meta, primary_type)
+        del primary_type  # the model input resolves each RELATED model's primary itself.
+        input_cls = _materialize_input_for(cls.__name__, meta)
         if input_cls is not None:
             # The decode's bind-time hand-off: total-coverage specs (merged
             # dataclass, consumer overrides included) + the Django-field index
@@ -755,7 +756,6 @@ def _resolve_primary_type(
 def _materialize_input_for(
     mutation_name: str,
     meta: _ValidatedMutationMeta,
-    primary_type: type[DjangoType],
 ) -> type[WithStrawberryObjectDefinition] | None:
     """Build + materialize the operation's input class, or return ``None`` for ``delete``.
 
@@ -792,7 +792,6 @@ def _materialize_input_for(
         return _materialize_merged_input(
             mutation_name,
             meta,
-            primary_type,
             operation_kind,
             require(consumer_input, _is_input_type),
             override_attr=override_attr,
@@ -817,7 +816,6 @@ def _materialize_input_for(
         lambda: build_mutation_input(
             backing_model_of(meta),
             operation_kind=operation_kind,
-            primary_type=primary_type,
             fields=meta.fields,
             exclude=meta.exclude,
             shape=shape,
@@ -834,7 +832,6 @@ def _materialize_input_for(
 def _materialize_merged_input(
     mutation_name: str,
     meta: _ValidatedMutationMeta,
-    primary_type: type[DjangoType],
     operation_kind: str,
     consumer_input: type[WithStrawberryObjectDefinition],
     *,
@@ -891,7 +888,6 @@ def _materialize_merged_input(
     remainder = build_mutation_input(
         backing_model_of(meta),
         operation_kind=operation_kind,
-        primary_type=primary_type,
         fields=meta.fields,
         exclude=meta.exclude,
         overrides=consumer_attrs,

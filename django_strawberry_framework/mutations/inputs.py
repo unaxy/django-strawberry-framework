@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
+from strawberry.types import get_object_definition
 from strawberry.types.base import has_object_definition
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -64,16 +65,16 @@ from django_strawberry_framework.utils.inputs import (
     RELATION_MULTI,
     RELATION_SINGLE,
     SCALAR,
-    GeneratedFieldSources,
     InputFieldSpec,
     build_strawberry_input_class,
-    iter_input_field_collisions,
     make_input_namespace,
     name_set_input_type_name,
     normalize_field_name_sequence,
     optional_input_field,
     predicted_input_field_name,
+    raise_first_input_field_collision,
     resolve_effective_fields,
+    write_input_sources,
 )
 from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 from django_strawberry_framework.utils.relations import (
@@ -131,7 +132,7 @@ def _operation_kind_display_word(operation_kind: str) -> str:
     ``CREATE`` reads ``"create"``; any other kind (today only ``PARTIAL``)
     reads ``"update"``. Single-sites the mapping both configuration-error
     subjects use (the generated input's subject in
-    ``_generated_input_sources`` and the empty-input message in
+    ``build_mutation_input`` and the empty-input message in
     ``editable_input_fields``), so a new generator kind updates one body
     instead of two message sites.
     """
@@ -544,7 +545,7 @@ def relation_input_python_attr(field: ModelField) -> str:
 
 
 def relation_input_annotation(
-    field: ConcreteField,
+    field: ModelField,
     *,
     related_primary_type: type[DjangoType] | None,
 ) -> tuple[str, object]:
@@ -634,7 +635,7 @@ def _relation_field_index(
 
 def mutation_input_field_specs(
     model: type[models.Model],
-    input_cls: type[WithStrawberryObjectDefinition],
+    input_cls: type[object],
     *,
     excluded_attrs: Collection[str] = (),
 ) -> tuple[list[InputFieldSpec], ModelFieldIndex]:
@@ -666,7 +667,7 @@ def mutation_input_field_specs(
     fk_by_attr, m2m_by_name = _relation_field_index(model)
     specs: list[InputFieldSpec] = []
     model_fields: ModelFieldIndex = {}
-    for field in input_cls.__strawberry_definition__.fields:
+    for field in get_object_definition(input_cls, strict=True).fields:
         python_name = field.python_name
         graphql_name = field.graphql_name or predicted_input_field_name(python_name)
         django_field = fk_by_attr.get(python_name) or m2m_by_name.get(python_name)
@@ -710,7 +711,7 @@ def model_column_write_annotation(
 ) -> object:
     """Return the GraphQL annotation for a backing column, without naming.
 
-    Relation rides ``relation_id_annotation`` (primary lookup via ``primary_of``);
+    Relation rides ``relation_input_annotation`` (primary lookup via ``primary_of``);
     file -> ``Upload``; else ``convert_scalar(..., force_nullable=False)``.
     ``model_column_input_annotation`` adds the 036 ``<name>_id`` naming; the
     serializer overlay uses this for relation / file columns and then applies
@@ -720,12 +721,8 @@ def model_column_write_annotation(
     kind = model_column_write_kind(field)
     if kind in (RELATION_SINGLE, RELATION_MULTI):
         # A relation field's ``related_model`` is its resolved target model class.
-        related_model = require(field.related_model, is_model_class)
-        return relation_id_annotation(
-            related_model,
-            primary_of(related_model),
-            many=kind == RELATION_MULTI,
-        )
+        related_primary_type = primary_of(require(field.related_model, is_model_class))
+        return relation_input_annotation(field, related_primary_type=related_primary_type)[1]
     if kind == FILE:
         return Upload
     # ``model_column_write_kind`` classifies every reverse ``ForeignObjectRel`` as a
@@ -762,36 +759,6 @@ def model_column_input_annotation(
             related_primary_type=primary_of(require(field.related_model, is_model_class)),
         )
     return field.name, model_column_write_annotation(field, type_name, primary_of=primary_of)
-
-
-def mutation_input_type_name(
-    model: type[models.Model],
-    operation_kind: str,
-    effective_field_names: tuple[str, ...],
-    *,
-    full_field_names: tuple[str, ...],
-) -> str:
-    """Return the generated input-class name for a shape.
-
-    The canonical full editable shape takes the stable ``<Model>Input`` /
-    ``<Model>PartialInput`` name; a narrowed shape (``Meta.fields`` /
-    ``Meta.exclude``) takes a deterministic shape-derived name so two NARROWINGS
-    to the same effective field set produce the same name (dedupe via the
-    materialize ledger) while a different shape produces a different name.
-
-    Identity is ``(model, operation_kind, frozenset(effective_field_names))``.
-    The narrowed-shape suffix, full-vs-narrowed comparison, and
-    ``PartialInput`` / ``Input`` suffix ride
-    ``utils/inputs.py::name_set_input_type_name`` (the name-set owner shared
-    with form ``form_input_type_name``). This wrapper supplies the model base
-    name and the create-vs-partial decision (``operation_kind != CREATE``).
-    """
-    return name_set_input_type_name(
-        model.__name__,
-        is_partial=operation_kind != CREATE,
-        effective_field_names=effective_field_names,
-        full_field_names=full_field_names,
-    )
 
 
 class MutationInputShape(NamedTuple):
@@ -836,7 +803,7 @@ def mutation_input_shape(
 
     Single-sources the editable-field walk (``editable_input_fields`` for the
     selected set AND the full set), the effective-name frozenset, the generated
-    ``type_name`` (via ``mutation_input_type_name``), and the
+    ``type_name`` (via ``utils/inputs.py::name_set_input_type_name``), and the
     ``_shape_build_cache`` key. ``build_mutation_input`` calls this for its
     selected fields + name; ``mutations/sets.py``'s bind calls it for the cache key
     and the merged-input name; ``DjangoMutation.input_type_name`` returns
@@ -860,10 +827,12 @@ def mutation_input_shape(
         field.name for field in editable_input_fields(model, operation_kind=operation_kind)
     )
     effective_field_names = frozenset(field.name for field in selected)
-    type_name = mutation_input_type_name(
-        model,
-        operation_kind,
-        tuple(field.name for field in selected),
+    # Canonical ``<Model>Input`` / ``<Model>PartialInput`` for the full editable shape, a
+    # deterministic set-derived name for a ``Meta.fields`` / ``Meta.exclude`` narrowing.
+    type_name = name_set_input_type_name(
+        model.__name__,
+        is_partial=operation_kind != CREATE,
+        effective_field_names=tuple(field.name for field in selected),
         full_field_names=full_field_names,
     )
     return MutationInputShape(
@@ -884,42 +853,10 @@ class _GeneratedInputFieldName(NamedTuple):
     model_field_name: str
 
 
-def _generated_input_sources(
-    model: type[models.Model],
-    operation_kind: str,
-    names: list[_GeneratedInputFieldName],
-) -> GeneratedFieldSources:
-    """Name the model and operation a generated input is built for, and each field's column."""
-    kind = _operation_kind_display_word(operation_kind)
-    return GeneratedFieldSources(
-        subject=f"DjangoMutation {kind} input for {model.__name__}",
-        field_noun="model fields",
-        rename_clause="Rename one of the model fields,",
-        # A ``Meta.input_class`` field over one column replaces its generated field and
-        # takes an explicit ``name=``, which no migration needs.
-        name_clause="Declare one on Meta.input_class with a different explicit name=,",
-        members={name.input_attr: name.model_field_name for name in names},
-    )
-
-
-def _reject_generated_input_collisions(
-    sources: GeneratedFieldSources,
-    names: list[_GeneratedInputFieldName],
-) -> None:
-    """Fail loud when distinct model fields collapse to one generated input field."""
-    for message in iter_input_field_collisions(
-        names,
-        sources=sources,
-        name_of=lambda spec: spec.model_field_name,
-    ):
-        raise ConfigurationError(message)
-
-
 def build_mutation_input(
     model: type[models.Model],
     *,
     operation_kind: str,
-    primary_type: type[DjangoType],
     fields: Iterable[str] | None = None,
     exclude: Iterable[str] | None = None,
     overrides: Iterable[str] | None = None,
@@ -928,10 +865,8 @@ def build_mutation_input(
     """Build the ``<Model>Input`` / ``<Model>PartialInput`` ``@strawberry.input`` class.
 
     ``operation_kind`` is ``CREATE`` (honor the per-field required rule) or
-    ``PARTIAL`` (force every field optional). ``primary_type`` is the model's
-    resolved primary ``DjangoType`` (threaded for call-site symmetry; the
-    relation-id strategy resolves the RELATED model's primary inside
-    ``relation_input_annotation`` via the registry at bind time).
+    ``PARTIAL`` (force every field optional). The relation-id strategy resolves the
+    RELATED model's primary inside ``relation_input_annotation`` via the registry.
 
     ``overrides`` names python attrs a consumer ``input_class`` supplies
     (spec-036 relation-override / spec-010 contract): a column whose generated
@@ -957,7 +892,6 @@ def build_mutation_input(
     Returns an UNMATERIALIZED ``@strawberry.input`` class. The phase-2.5
     bind calls ``materialize_mutation_input_class`` to pin it as a module global.
     """
-    del primary_type  # reserved: relation-id strategy resolves the RELATED primary itself.
     is_create = operation_kind == CREATE
     if shape is None:
         shape = mutation_input_shape(model, operation_kind, fields=fields, exclude=exclude)
@@ -995,8 +929,19 @@ def build_mutation_input(
 
     # An attr collision is ambiguous even when a consumer override hides both
     # generated fields.
-    sources = _generated_input_sources(model, operation_kind, selected_names)
-    _reject_generated_input_collisions(sources, selected_names)
+    sources = write_input_sources(
+        f"DjangoMutation {_operation_kind_display_word(operation_kind)} input for {model.__name__}",
+        "model",
+        {name.input_attr: name.model_field_name for name in selected_names},
+        # A ``Meta.input_class`` field over one column replaces its generated field and
+        # takes an explicit ``name=``, which no migration needs.
+        name_clause="Declare one on Meta.input_class with a different explicit name=,",
+    )
+    raise_first_input_field_collision(
+        selected_names,
+        sources=sources,
+        name_of=lambda name: name.model_field_name,
+    )
     return build_strawberry_input_class(type_name, triples, sources=sources)
 
 

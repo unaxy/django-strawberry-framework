@@ -1428,7 +1428,6 @@ def _synthesize_register_rider(
             input_cls = build_mutation_input(
                 model,
                 operation_kind=CREATE,
-                primary_type=primary_type,
                 fields=meta.fields,
                 shape=pinned,
             )

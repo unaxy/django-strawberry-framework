@@ -2954,7 +2954,7 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   `category_id` (the id-like-suffix rule, Decision 7) — raise a
   [`ConfigurationError`][glossary-configurationerror] **before materialization**, naming both
   offending fields. This is the serializer analog of the form collision guard
-  [`forms/inputs.py`][forms-inputs]`::_guard_input_attr_collisions`; the serializer reuses
+  [`utils/inputs.py`][utils-inputs]`::raise_first_input_field_collision`; the serializer reuses
   that guard's shape rather than re-forking it (a silent drop of one field would otherwise
   let `build_strawberry_input_class` collapse the two). Two scalars the executing
   schema's `NameConverter` names alike (`foo_bar` + `fooBar`, both `fooBar` by default)
@@ -3265,7 +3265,7 @@ same transport, different app.
     fields colliding on one generated input attr** (`category` relation → `category_id`
     clashing with a literal `category_id`) raise
     [`ConfigurationError`][glossary-configurationerror] **before materialization** (the
-    serializer analog of [`forms/inputs.py`][forms-inputs]`::_guard_input_attr_collisions`),
+    serializer analog of [`utils/inputs.py`][utils-inputs]`::raise_first_input_field_collision`),
     `foo_bar` + `fooBar` is refused at `DjangoSchema` build where the converter names them
     alike,
     two **writable** serializer fields whose sources resolve to **one** model attribute

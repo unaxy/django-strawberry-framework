@@ -1362,7 +1362,7 @@ input's identity is **not** its name — it is the tuple **`(form_class, operati
 kind, frozenset(effective field names after `Meta.fields` / `Meta.exclude`),
 field-discovery basis content identity)`**, parallel to `036`'s `(model, operation kind,
 effective field set)` ([`mutations/inputs.py`][mutations-inputs]
-`mutation_input_shape` / `mutation_input_type_name`) plus one component the form
+`mutation_input_shape`) plus one component the form
 flavor needs. The fourth component is the **basis content** the `get_form_fields` hook
 contributes, not a fifth concept: `forms/inputs.py::_form_basis_content_identity`
 projects each basis field to its converter-dispatch type, its requiredness, a

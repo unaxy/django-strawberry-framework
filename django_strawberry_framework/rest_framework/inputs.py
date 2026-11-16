@@ -71,7 +71,6 @@ from django_strawberry_framework.utils._narrowing import (
     read_attr,
 )
 from django_strawberry_framework.utils.inputs import (
-    GeneratedFieldSources,
     InputFieldSpec,
     build_strawberry_input_class,
     generated_input_type_name,
@@ -86,6 +85,7 @@ from django_strawberry_framework.utils.inputs import (
     pascalize_token,
     predicted_input_field_name,
     resolve_effective_fields,
+    write_input_sources,
 )
 from django_strawberry_framework.utils.relations import is_row_key_column, written_model_field
 from django_strawberry_framework.write_mixins import require_model_class
@@ -104,7 +104,7 @@ from .serializer_converter import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping
 
     from django.db import models
     from typing_extensions import TypeIs
@@ -1019,9 +1019,8 @@ class SerializerInputShape:
     ``<Serializer>Input`` for the DEFAULT full shape only - a hook-returned "full"
     shape that differs from the default discovery takes a deterministic
     descriptor-derived name, never the canonical one - and a descriptor-derived name
-    for any narrowed / ``optional_fields`` divergence). ``cache_key`` is the
-    descriptor itself (it is frozen + hashable), the ``make_shape_build_cache`` key
-    the bind dedupes on.
+    for any narrowed / ``optional_fields`` divergence). The frozen, hashable descriptor
+    is itself the ``make_shape_build_cache`` key the bind dedupes on.
     """
 
     serializer_class: type[DRFBaseSerializer]
@@ -1032,11 +1031,6 @@ class SerializerInputShape:
     required_state: tuple[bool, ...]
     optional_fields: frozenset[str]
     type_name: str
-
-    @property
-    def cache_key(self) -> SerializerInputShape:
-        """The per-shape build-cache key (the frozen descriptor is its own key)."""
-        return self
 
 
 # The generated-input-name -> ``SerializerInputShape`` debug registry.
@@ -1105,25 +1099,6 @@ def describe_serializer_input(name: str) -> str | None:
     return "\n".join(lines)
 
 
-def _related_model_token(related_model: type[models.Model] | None) -> str:
-    """Return a stable, process-independent identifier for a relation target model.
-
-    Folded into ``_shape_token`` so two relation shapes that differ ONLY in their
-    target model (same declared field name, same GraphQL id annotation - e.g. a
-    ``target`` ``PrimaryKeyRelatedField`` a schema hook points at different models)
-    produce DISTINCT descriptor-derived names. The descriptor cache key already
-    separates them (``InputFieldSpec.related_model`` is part of the frozen
-    ``field_specs`` tuple), so the generated NAME must separate them too, or two
-    distinct descriptors collide on one materialized name. ``None`` (a
-    non-relation field) yields the literal ``"None"``; the module + qualname pair
-    is deterministic across processes (unlike ``id()`` / the salted builtin
-    ``hash``), load-bearing for the materialize-ledger dedupe.
-    """
-    if related_model is None:
-        return "None"
-    return f"{related_model.__module__}.{related_model.__qualname__}"
-
-
 def _shape_token(
     spec: InputFieldSpec,
     annotation: str,
@@ -1163,7 +1138,11 @@ def _shape_token(
         spec.input_attr,
         spec.graphql_name,
         str(spec.source),
-        _related_model_token(spec.related_model),
+        # module + qualname is deterministic across processes (unlike ``id()`` / salted ``hash``),
+        # so two shapes differing only in relation target get distinct, stable names.
+        "None"
+        if spec.related_model is None
+        else f"{spec.related_model.__module__}.{spec.related_model.__qualname__}",
     ]
     # The description is appended only when present: an undescribed field contributes
     # nothing to the digest.
@@ -1324,19 +1303,6 @@ def guard_create_required_serializer_fields(
     )
 
 
-def _serializer_input_sources(
-    serializer_class: type[DRFBaseSerializer],
-    field_specs: Sequence[InputFieldSpec],
-) -> GeneratedFieldSources:
-    """Name the serializer a generated input is built from, and each field's serializer field."""
-    return GeneratedFieldSources(
-        subject=f"SerializerMutation for {serializer_class.__name__!r}",
-        field_noun="serializer fields",
-        rename_clause="Rename one,",
-        members={spec.input_attr: spec.target_name for spec in field_specs},
-    )
-
-
 def _collect_input_attr_collision_messages(
     serializer_class: type[DRFBaseSerializer],
     field_specs: list[InputFieldSpec],
@@ -1383,7 +1349,12 @@ def _collect_input_attr_collision_messages(
     return list(
         iter_input_field_collisions(
             field_specs,
-            sources=_serializer_input_sources(serializer_class, field_specs),
+            sources=write_input_sources(
+                f"SerializerMutation for {serializer_class.__name__!r}",
+                "serializer",
+                {spec.input_attr: spec.target_name for spec in field_specs},
+                rename_clause="Rename one,",
+            ),
             name_of=lambda spec: spec.target_name,
             source_of=lambda spec: write_source_key(model, spec.source or spec.target_name),
         ),
@@ -1591,33 +1562,9 @@ def dedupe_serializer_input_shape(
     """
     return get_or_store_shape_build(
         _serializer_shape_build_cache,
-        shape.cache_key,
+        shape,
         lambda: (input_cls, shape),
     )
-
-
-def _dedupe_and_materialize_nested(
-    nested_cls: type[object],
-    nested_shape: SerializerInputShape,
-    owner: str,
-) -> tuple[type[object], SerializerInputShape]:
-    """Dedupe a nested input on its descriptor, materialize it, return the canonical pair.
-
-    Two references to the SAME nested shape (within one build or across two top-level mutations)
-    must resolve to ONE class object, or Strawberry rejects two distinct types under one GraphQL
-    name. The nested build rides the SAME per-shape build cache the top level uses via
-    ``dedupe_serializer_input_shape`` (keyed on the frozen ``SerializerInputShape``
-    descriptor - nested and top-level keys never collide because the descriptors differ),
-    and materializes through the SAME ledger, so a genuine distinct-class-same-name clash
-    (an astronomically-unlikely digest collision) still fails loud at materialize. Identical
-    descriptors return the cached class; a first sighting is cached + materialized.
-    Materializing a cache hit is intentionally idempotent and keeps the cache from assuming
-    that the independently reset ledger is still warm. ``owner`` names the nested serializer
-    in the cross-family type-name claim's collision message.
-    """
-    nested_cls, nested_shape = dedupe_serializer_input_shape(nested_cls, nested_shape)
-    materialize_serializer_input_class(nested_shape.type_name, nested_cls, owner)
-    return nested_cls, nested_shape
 
 
 def _resolve_nested_field(
@@ -1670,9 +1617,13 @@ def _resolve_nested_field(
         nested_configs=nested_config.nested_fields,
         _nested_path=nested_path,
     )
-    nested_cls, nested_shape = _dedupe_and_materialize_nested(
+    # Identical nested shapes (within one build or across mutations) must resolve to ONE class
+    # or Strawberry rejects two types under one name; materializing a cache hit is idempotent
+    # and keeps the cache from assuming the independently reset ledger is still warm.
+    nested_cls, nested_shape = dedupe_serializer_input_shape(nested_cls, nested_shape)
+    materialize_serializer_input_class(
+        nested_shape.type_name,
         nested_cls,
-        nested_shape,
         f"the nested input of serializer {nested_class.__module__}.{nested_class.__qualname__}",
     )
     kind = NESTED_MULTI if many else NESTED_SINGLE
@@ -1935,7 +1886,12 @@ def build_serializer_input_class(
     input_cls = build_strawberry_input_class(
         type_name,
         triples,
-        sources=_serializer_input_sources(serializer_class, field_specs),
+        sources=write_input_sources(
+            f"SerializerMutation for {serializer_class.__name__!r}",
+            "serializer",
+            {spec.input_attr: spec.target_name for spec in field_specs},
+            rename_clause="Rename one,",
+        ),
     )
     shape = SerializerInputShape(
         serializer_class=serializer_class,

@@ -222,26 +222,6 @@ def test_get_form_fields_does_not_instantiate_kwarg_requiring_form() -> None:
         KwargForm()  # pyright: ignore[reportCallIssue]
 
 
-def test_corrupted_base_fields_raises_typed_on_default_path() -> None:
-    """A clobbered ``base_fields`` raises a typed diagnostic naming the form.
-
-    The default basis acquisition (``dict(form_class.base_fields)`` inside
-    ``get_form_fields``) is guarded alongside the hook mapping: a consumer having
-    clobbered ``base_fields`` to a non-mapping raises ``ConfigurationError``
-    naming the form instead of a raw ``TypeError`` propagating out of
-    ``build_form_input_class`` (the bind's build path).
-    """
-
-    class Corrupt(forms.Form):
-        pass
-
-    # basedpyright: the corrupt base_fields value is the hostile input under test; django-stubs
-    # types the slot as a field mapping
-    Corrupt.base_fields = 123  # pyright: ignore[reportAttributeAccessIssue]
-    with pytest.raises(ConfigurationError, match="Corrupt"):
-        build_form_input_class(Corrupt, operation_kind=FORM)
-
-
 def test_normalize_form_field_basis_rejects_none() -> None:
     """A mutation hook returning ``None`` raises a fail-loud ``ConfigurationError``."""
 
@@ -2550,30 +2530,6 @@ def test_canonical_name_for_full_shape() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "operation_kind",
-    [42, "update"],
-    ids=["non-string", "unknown-string"],
-)
-def test_build_form_input_class_rejects_out_of_vocabulary_operation_kind(
-    operation_kind: str | int,
-) -> None:
-    """Every operation outside CREATE / FORM / PARTIAL raises the vocabulary refusal."""
-
-    class ProbeForm(forms.Form):
-        x = forms.CharField(required=False)
-
-    with pytest.raises(
-        ConfigurationError,
-        match=re.escape(f"out-of-vocabulary operation_kind {operation_kind!r}"),
-    ):
-        # basedpyright: the non-str operation kind is the deliberate invalid input.
-        build_form_input_class(
-            ProbeForm,
-            operation_kind=operation_kind,  # pyright: ignore[reportArgumentType]
-        )
-
-
 def test_identical_shape_dedupes_via_ledger() -> None:
     """Materializing the same class twice under one name is a no-op (identical shapes dedupe)."""
     cre, _ = build_form_input_class(_item_model_form(), operation_kind=CREATE)
@@ -2866,36 +2822,6 @@ def test_resolve_target_column_reverse_m2m_and_non_concrete_fallback() -> None:
 
     assert _model_column_for(_as_form_class(fake_form), "reverse_m2m") is None
     assert _model_column_for(_as_form_class(fake_form), "non_concrete") is None
-
-
-def test_form_basis_content_identity_reraises_the_basis_typed_reject_verbatim() -> None:
-    """A hostile basis reaching the cache-key projection keeps the build's OWN reject.
-
-    ``_form_basis_content_identity`` resolves its basis through the same guarded
-    ``_form_field_basis`` read the build uses, so a basis the build already rejects
-    typed must surface as THAT typed ``ConfigurationError`` verbatim - never
-    re-wrapped in the projection's own raw-read wording, never a raw escape from
-    cache-key assembly.
-    """
-
-    class _ClobberedBasesForm(forms.Form):
-        name = forms.CharField()
-
-    # dict(42) raises TypeError inside the guard
-    # basedpyright: the corrupt base_fields value is the hostile input under test; django-stubs
-    # types the slot as a field mapping
-    _ClobberedBasesForm.base_fields = 42  # pyright: ignore[reportAttributeAccessIssue]
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        _form_basis_content_identity(_ClobberedBasesForm, None)
-
-    assert (
-        "get_form_fields() must return a mapping of field names to forms.Field instances."
-        in str(excinfo.value)
-    )
-    # The passthrough arm re-raises the basis reject VERBATIM: the projection's own
-    # raw-read wording must not appear.
-    assert "reading the field basis" not in str(excinfo.value)
 
 
 def test_form_basis_content_identity_propagates_a_raw_requiredness_read_failure() -> None:

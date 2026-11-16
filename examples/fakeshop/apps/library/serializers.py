@@ -203,7 +203,7 @@ class TargetedShelfSerializer(ModelSerializerBase[Shelf]):
     ``get_serializer_for_schema()`` (the schema-time field map) AND ``get_serializer_kwargs``
     (the per-request construction), so the only descriptor axis differing between their
     generated inputs is ``target``'s ``related_model`` - exactly the axis the descriptor-
-    derived naming folds in (``rest_framework/inputs.py::_related_model_token``). Both hook
+    derived naming folds in (``rest_framework/inputs.py::_shape_token``). Both hook
     shapes claiming the single canonical input name would collide at materialize, so the
     canonical name is reserved for the (here unused) DEFAULT full
     shape (``code`` + ``branch``, no ``target`` - the no-arg construction), so each hook shape

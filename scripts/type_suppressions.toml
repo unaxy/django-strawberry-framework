@@ -252,10 +252,7 @@
 "tests/filters/test_sets.py::test_normalize_input_walks_strawberry_dataclass._Input" = { reportAny = 1 }
 "tests/filters/test_sets.py::test_run_permission_checks_skips_unset_related_branch.BranchInput" = { reportAny = 2 }
 "tests/forms/test_inputs.py::_as_form_class" = { reportReturnType = 1 }
-"tests/forms/test_inputs.py::test_build_form_input_class_rejects_out_of_vocabulary_operation_kind" = { reportArgumentType = 1 }
-"tests/forms/test_inputs.py::test_corrupted_base_fields_raises_typed_on_default_path" = { reportAttributeAccessIssue = 1 }
 "tests/forms/test_inputs.py::test_form_basis_content_identity_propagates_a_raw_requiredness_read_failure._HostileRequiredField.required" = { reportIncompatibleVariableOverride = 1 }
-"tests/forms/test_inputs.py::test_form_basis_content_identity_reraises_the_basis_typed_reject_verbatim" = { reportAttributeAccessIssue = 1 }
 "tests/forms/test_inputs.py::test_get_form_fields_does_not_instantiate_kwarg_requiring_form" = { reportCallIssue = 1 }
 "tests/forms/test_resolvers.py::test_partial_update_reconstruct_with_extra_model_choice_field" = { reportAttributeAccessIssue = 1 }
 "tests/forms/test_sets.py::test_default_form_field_hook_rejects_a_class_without_form_metadata" = { reportArgumentType = 1 }

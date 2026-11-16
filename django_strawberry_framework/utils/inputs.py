@@ -197,6 +197,24 @@ class GeneratedFieldSources:
     levers: Mapping[str, MemberLever] | None = None
 
 
+def write_input_sources(
+    subject: str,
+    noun: str,
+    members: Mapping[str, str],
+    *,
+    rename_clause: str | None = None,
+    name_clause: str | None = None,
+) -> GeneratedFieldSources:
+    """Build a mutation flavor's ``GeneratedFieldSources`` over its ``<noun> fields``."""
+    return GeneratedFieldSources(
+        subject=subject,
+        field_noun=f"{noun} fields",
+        rename_clause=rename_clause or f"Rename one of the {noun} fields,",
+        members=members,
+        name_clause=name_clause,
+    )
+
+
 @dataclass(frozen=True)
 class MemberLever:
     """The kind of set member one generated input field comes from, which decides its remedy.
@@ -1083,7 +1101,7 @@ def name_set_input_type_name(
 ) -> str:
     """Return the generated input-class name for a name-set write-input shape.
 
-    Model ``mutation_input_type_name`` and form ``form_input_type_name`` both
+    Model ``mutation_input_shape`` and form ``form_input_type_name`` both
     name a shape from ``(owner, operation_kind, frozenset(effective names))``.
     This helper owns that shared spine: sorted-name ``pascalize_token``
     concatenation, full-vs-narrowed comparison, and ``generated_input_type_name``.
@@ -2005,6 +2023,17 @@ def iter_input_field_collisions(
                 )
             seen_source[write_source] = current
         seen_attr[spec.input_attr] = current
+
+
+def raise_first_input_field_collision(
+    field_specs: Iterable[_SpecT],
+    *,
+    sources: GeneratedFieldSources,
+    name_of: Callable[[_SpecT], str],
+) -> None:
+    """Raise the first ``iter_input_field_collisions`` message as a ``ConfigurationError``."""
+    for message in iter_input_field_collisions(field_specs, sources=sources, name_of=name_of):
+        raise ConfigurationError(message)
 
 
 def build_lazy_input_annotation(

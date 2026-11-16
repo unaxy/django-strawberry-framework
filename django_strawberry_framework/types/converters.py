@@ -86,6 +86,7 @@ from typing import TYPE_CHECKING, TypeAlias, TypeGuard, TypeVar, cast
 import strawberry
 from django.db import models
 from django.db.models.fields.files import FieldFile, ImageFieldFile
+from django.utils.choices import flatten_choices
 from graphql import GraphQLError, assert_enum_value_name
 
 from django_strawberry_framework.exceptions import ConfigurationError
@@ -989,8 +990,8 @@ def _normalize_choice_pairs(
 
     ``flatten_groups`` answers "which values does the column list?" rather than "can the read
     enum be built?": each group of Django's grouped-choices form (a ``(None, [...])`` group
-    included) is expanded one level, in order, every inner entry passing the same
-    malformed-entry check (Django's ``Field.flatchoices`` rule, which ``Field.validate`` reads).
+    included) is expanded one level, in order (Django's ``flatten_choices``, the ``flatchoices``
+    rule ``Field.validate`` reads), every inner entry passing the same malformed-entry check.
     Without it the grouped form is refused, since the read enum supports only the flat form.
 
     A ``None``-valued pair (the ``(None, label)`` pair ``Choices.__empty__`` adds to
@@ -1002,13 +1003,11 @@ def _normalize_choice_pairs(
     pairs = tuple(choice_pairs)
     normalized_pairs: list[tuple[object, object]] = []
     for entry in pairs:
-        value, label = _unpack_choice_entry(entry, source_label=source_label)
-        if flatten_groups and _is_choice_group(label):
-            normalized_pairs.extend(
-                _unpack_choice_entry(inner, source_label=source_label) for inner in label
-            )
-            continue
-        normalized_pairs.append((value, label))
+        pair = _unpack_choice_entry(entry, source_label=source_label)
+        flattened = flatten_choices([pair]) if flatten_groups else (pair,)
+        normalized_pairs.extend(
+            _unpack_choice_entry(item, source_label=source_label) for item in flattened
+        )
 
     for _value, label in normalized_pairs:
         if _is_choice_group(label):

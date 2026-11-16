@@ -1228,6 +1228,18 @@ def test_name_set_input_type_name_canonical_and_narrowed() -> None:
         )
         == "ItemNameInput"
     )
+    # Set identity: the narrowed name is independent of declaration order.
+    assert name_set_input_type_name(
+        "Item",
+        is_partial=False,
+        effective_field_names=("name", "other"),
+        full_field_names=full,
+    ) == name_set_input_type_name(
+        "Item",
+        is_partial=False,
+        effective_field_names=("other", "name"),
+        full_field_names=full,
+    )
 
 
 def test_name_set_input_type_name_token_boundaries_do_not_collide() -> None:

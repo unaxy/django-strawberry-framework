@@ -8,8 +8,7 @@ Covers the spec-036 generation substrate
 - ``input_field_required`` (the create-required rule);
 - ``build_mutation_input`` create vs partial shapes, FK/O2O ``<field>_id`` mapping,
   M2M ``list[<id>]``, Relay-vs-non-Relay id type, and the consumer-override seam;
-- ``mutation_input_type_name`` stable full-shape names + shape-derived narrowed
-  names, with dedupe + the distinct-shape collision ``ConfigurationError`` via
+- generated input-name dedupe + the distinct-shape collision ``ConfigurationError`` via
   ``materialize_mutation_input_class``;
 - the ``FileField`` / ``ImageField`` -> ``Upload`` input mapping (required /
   optional shapes, ``| None`` widening, ``Meta.fields`` / ``Meta.exclude``
@@ -55,7 +54,6 @@ import pytest
 import strawberry
 from apps.library import models as library_models
 from apps.products import models as product_models
-from apps.products.schema import CategoryType, ItemType
 from apps.scalars.models import MediaSpecimen
 from django import forms
 from django.db import models
@@ -101,7 +99,6 @@ from django_strawberry_framework.mutations.inputs import (
     model_column_write_annotation,
     model_column_write_kind,
     mutation_input_field_specs,
-    mutation_input_type_name,
     related_model_of_queryset,
     relation_id_annotation,
     relation_id_scalar,
@@ -534,7 +531,7 @@ def test_create_input_required_and_optional_shapes() -> None:
     control the related primary's Relay shape without depending on finalization
     injecting ``relay.Node`` into the products types' ``__bases__``.
     """
-    cls = build_mutation_input(product_models.Item, operation_kind=CREATE, primary_type=ItemType)
+    cls = build_mutation_input(product_models.Item, operation_kind=CREATE)
     fields = _field_map(cls)
 
     assert not _is_optional(fields["name"])
@@ -576,7 +573,7 @@ def test_create_input_required_and_optional_shapes() -> None:
 )
 def test_partial_input_all_fields_optional_and_unset(name: str) -> None:
     """ItemPartialInput: every field optional + UNSET-defaulted, incl. name / categoryId."""
-    cls = build_mutation_input(product_models.Item, operation_kind=PARTIAL, primary_type=ItemType)
+    cls = build_mutation_input(product_models.Item, operation_kind=PARTIAL)
     fields = _field_map(cls)
     assert _is_optional(fields[name]), name
     assert _default_of(fields[name]) is UNSET, name
@@ -584,13 +581,13 @@ def test_partial_input_all_fields_optional_and_unset(name: str) -> None:
 
 def test_create_input_name_is_canonical_model_input() -> None:
     """The full editable shape takes the stable ``<Model>Input`` name."""
-    cls = build_mutation_input(product_models.Item, operation_kind=CREATE, primary_type=ItemType)
+    cls = build_mutation_input(product_models.Item, operation_kind=CREATE)
     assert cls.__name__ == "ItemInput"
 
 
 def test_partial_input_name_is_canonical_model_partial_input() -> None:
     """The full editable shape takes the stable ``<Model>PartialInput`` name."""
-    cls = build_mutation_input(product_models.Item, operation_kind=PARTIAL, primary_type=ItemType)
+    cls = build_mutation_input(product_models.Item, operation_kind=PARTIAL)
     assert cls.__name__ == "ItemPartialInput"
 
 
@@ -863,7 +860,6 @@ def test_consumer_override_skips_generated_field() -> None:
     cls = build_mutation_input(
         product_models.Item,
         operation_kind=CREATE,
-        primary_type=ItemType,
         overrides=frozenset({"category_id"}),
     )
     fields = _field_map(cls)
@@ -877,7 +873,6 @@ def test_consumer_override_freezes_one_shot_iterable() -> None:
     cls = build_mutation_input(
         product_models.Item,
         operation_kind=CREATE,
-        primary_type=ItemType,
         overrides=iter(("category_id", "attachment")),
     )
     fields = _field_map(cls)
@@ -905,13 +900,11 @@ def _build_item_input(key: str, names: Iterable[str] | None) -> type:
         return build_mutation_input(
             product_models.Item,
             operation_kind=CREATE,
-            primary_type=ItemType,
             fields=names,
         )
     return build_mutation_input(
         product_models.Item,
         operation_kind=CREATE,
-        primary_type=ItemType,
         exclude=names,
     )
 
@@ -955,7 +948,7 @@ def test_fk_id_attr_collision_with_m2m_is_fail_loud() -> None:
     generated-input guards (``iter_input_field_collisions``). ``Owner`` stays synthetic: an M2M
     literally named ``category_id`` beside a ``category`` FK is a naming clash no fakeshop model
     carries, and it alone drives the input-attr arm of
-    ``django_strawberry_framework/mutations/inputs.py::_reject_generated_input_collisions``.
+    ``django_strawberry_framework/mutations/inputs.py::build_mutation_input``.
     """
     _make_relay_target()
 
@@ -970,13 +963,8 @@ def test_fk_id_attr_collision_with_m2m_is_fail_loud() -> None:
         class Meta:
             app_label = _unique_app_label()
 
-    class OwnerType(DjangoType, relay.Node):
-        class Meta:
-            model = Owner
-            fields = ("id",)
-
     with pytest.raises(ConfigurationError) as exc:
-        build_mutation_input(Owner, operation_kind=CREATE, primary_type=OwnerType)
+        build_mutation_input(Owner, operation_kind=CREATE)
     message = str(exc.value)
     assert "category_id" in message
     assert "'category'" in message
@@ -988,7 +976,6 @@ def test_fk_id_attr_collision_with_m2m_is_fail_loud() -> None:
         build_mutation_input(
             Owner,
             operation_kind=CREATE,
-            primary_type=OwnerType,
             overrides=frozenset({"category_id"}),
         )
 
@@ -999,7 +986,7 @@ def test_no_false_positive_collision_on_ordinary_model() -> None:
     ``Item`` (name / description / category FK / attachment / is_private) has no colliding
     generated attrs or GraphQL names, so the full editable create input still builds.
     """
-    cls = build_mutation_input(product_models.Item, operation_kind=CREATE, primary_type=ItemType)
+    cls = build_mutation_input(product_models.Item, operation_kind=CREATE)
     assert set(_field_map(cls)) == {
         "name",
         "description",
@@ -1007,103 +994,6 @@ def test_no_false_positive_collision_on_ordinary_model() -> None:
         "attachment",
         "is_private",
     }
-
-
-# ---------------------------------------------------------------------------
-# mutation_input_type_name - stable full name + shape-derived narrowed name
-# ---------------------------------------------------------------------------
-
-
-def test_type_name_full_shape_is_canonical() -> None:
-    """The full editable shape resolves to ``<Model>Input`` / ``<Model>PartialInput``."""
-    full = tuple(
-        f.name for f in editable_input_fields(product_models.Item, operation_kind=PARTIAL)
-    )
-    assert (
-        mutation_input_type_name(product_models.Item, CREATE, full, full_field_names=full)
-        == "ItemInput"
-    )
-    assert (
-        mutation_input_type_name(product_models.Item, PARTIAL, full, full_field_names=full)
-        == "ItemPartialInput"
-    )
-
-
-def test_type_name_narrowed_shape_is_deterministic_and_distinct() -> None:
-    """A narrowed shape gets a deterministic, non-canonical, set-derived name."""
-    full = tuple(
-        f.name for f in editable_input_fields(product_models.Item, operation_kind=PARTIAL)
-    )
-    narrowed = ("name", "category")
-    name_a = mutation_input_type_name(product_models.Item, CREATE, narrowed, full_field_names=full)
-    # Deterministic across calls; order-independent (set identity).
-    name_b = mutation_input_type_name(
-        product_models.Item,
-        CREATE,
-        ("category", "name"),
-        full_field_names=full,
-    )
-    assert name_a == name_b
-    assert name_a != "ItemInput"
-    assert name_a.startswith("Item")
-    assert name_a.endswith("Input")
-
-
-def test_type_name_token_boundaries_do_not_collide() -> None:
-    """Different field sets that share a pascalized token stream get distinct names.
-
-    A per-segment-capitalize token (``IsPrivate``) keeps interior capitals, so a bare
-    concatenation re-decomposes ambiguously: ``("a_b", "c")`` and ``("a", "b_c")``
-    both collapse onto ``ABC`` - a generated GraphQL type-name collision that trips
-    the distinct-shape collision raise at materialize. A single-leading-capital token
-    (letter underscores collapsed, no interior capital) makes the concatenation
-    uniquely decomposable at uppercase boundaries, so the suffix is injective over
-    field-name sets (``AbC`` vs ``ABc``). Underscore-before-digit is retained so the
-    type stem stays distinct on the wire under the pinned ``strawberry.input(name=)``.
-    """
-    full = ("not_the_narrowed_set",)  # any set != either narrowing, so both are "narrowed"
-    left = mutation_input_type_name(
-        product_models.Item,
-        CREATE,
-        ("a_b", "c"),
-        full_field_names=full,
-    )
-    right = mutation_input_type_name(
-        product_models.Item,
-        CREATE,
-        ("a", "b_c"),
-        full_field_names=full,
-    )
-    assert left != right
-    assert left == "ItemA_ubCInput"
-    assert right == "ItemAB_ucInput"
-
-
-@pytest.mark.parametrize(
-    ("left_field", "right_field"),
-    [("a_b", "ab"), ("field2_x", "field2x"), ("fooBar", "foobar")],
-    ids=["underscore", "digit-underscore", "capitalization"],
-)
-def test_type_name_other_legal_boundaries_do_not_collide(
-    left_field: str,
-    right_field: str,
-) -> None:
-    """Underscores after digits, collapsed letters, and capitals remain injective."""
-    full = ("not_the_narrowed_set",)
-
-    left = mutation_input_type_name(
-        product_models.Item,
-        CREATE,
-        (left_field,),
-        full_field_names=full,
-    )
-    right = mutation_input_type_name(
-        product_models.Item,
-        CREATE,
-        (right_field,),
-        full_field_names=full,
-    )
-    assert left != right
 
 
 def _empty_input_message(kind: str, model_name: str) -> str:
@@ -1128,7 +1018,6 @@ def test_build_empty_field_set_raises_configuration_error() -> None:
         build_mutation_input(
             product_models.Category,
             operation_kind=CREATE,
-            primary_type=CategoryType,
             fields=(),
         )
     assert str(exc.value) == (
@@ -1176,7 +1065,6 @@ def test_build_empty_selection_raises_whatever_the_overrides() -> None:
         build_mutation_input(
             product_models.Category,
             operation_kind=CREATE,
-            primary_type=CategoryType,
             fields=(),
             overrides=("name",),
         )
@@ -1190,7 +1078,7 @@ def test_build_empty_selection_raises_whatever_the_overrides() -> None:
 
 def test_identical_shape_dedupes_via_ledger() -> None:
     """Materializing the same class twice under one name is a no-op (identical shapes dedupe)."""
-    cls = build_mutation_input(product_models.Item, operation_kind=CREATE, primary_type=ItemType)
+    cls = build_mutation_input(product_models.Item, operation_kind=CREATE)
     materialize_mutation_input_class("ItemInput", cls)
     # Idempotent re-materialize of the SAME (name, cls) pair: no raise.
     materialize_mutation_input_class("ItemInput", cls)
@@ -1200,11 +1088,10 @@ def test_identical_shape_dedupes_via_ledger() -> None:
 
 def test_distinct_shapes_colliding_on_one_name_raise_configuration_error() -> None:
     """Two DISTINCT classes under one name raise ``ConfigurationError``."""
-    cls_a = build_mutation_input(product_models.Item, operation_kind=CREATE, primary_type=ItemType)
+    cls_a = build_mutation_input(product_models.Item, operation_kind=CREATE)
     cls_b = build_mutation_input(
         product_models.Category,
         operation_kind=CREATE,
-        primary_type=CategoryType,
     )
     materialize_mutation_input_class("CollidingInput", cls_a)
     with pytest.raises(ConfigurationError, match="DjangoMutation"):
@@ -1243,7 +1130,6 @@ def test_schema_build_rejects_consumer_alias_colliding_with_generated_remainder(
     remainder = build_mutation_input(
         product_models.Item,
         operation_kind=CREATE,
-        primary_type=ItemType,
     )
     merged = strawberry.input(type("MergedItemInput", (ConsumerInput, remainder), {}))
     materialize_mutation_input_class("MergedItemInput", merged)
@@ -1276,11 +1162,6 @@ def test_unnamed_consumer_field_collides_only_where_the_schema_names_it_alike() 
         class Meta:
             app_label = _unique_app_label()
 
-    class DigitCollideType(DjangoType, relay.Node):
-        class Meta:
-            model = DigitCollide
-            fields = ("id",)
-
     @strawberry.input
     class ConsumerInput:
         field_2: int
@@ -1288,7 +1169,6 @@ def test_unnamed_consumer_field_collides_only_where_the_schema_names_it_alike() 
     remainder = build_mutation_input(
         DigitCollide,
         operation_kind=CREATE,
-        primary_type=DigitCollideType,
     )
     merged = strawberry.input(type("DigitCollideInput", (ConsumerInput, remainder), {}))
     materialize_mutation_input_class("DigitCollideInput", merged)
@@ -1320,15 +1200,9 @@ def _camel_collide_write_input(flavor: str) -> type[WithStrawberryObjectDefiniti
             class Meta:
                 app_label = _unique_app_label()
 
-        class CamelCollideType(DjangoType, relay.Node):
-            class Meta:
-                model = CamelCollide
-                fields = ("id",)
-
         input_cls = build_mutation_input(
             CamelCollide,
             operation_kind=CREATE,
-            primary_type=CamelCollideType,
         )
         materialize_mutation_input_class(input_cls.__strawberry_definition__.name, input_cls)
         return input_cls
@@ -1410,16 +1284,10 @@ def test_a_python_keyword_column_is_refused_naming_the_column() -> None:
         },
     )
 
-    class KeywordColumnType(DjangoType, relay.Node):
-        class Meta:
-            model = keyword_model
-            fields = ("id",)
-
     with pytest.raises(ConfigurationError) as exc:
         _ = build_mutation_input(
             keyword_model,
             operation_kind=CREATE,
-            primary_type=KeywordColumnType,
         )
     assert str(exc.value) == (
         "Generated input 'KeywordColumnInput' cannot carry a field for 'from': a Python "
@@ -1431,17 +1299,6 @@ def test_a_python_keyword_column_is_refused_naming_the_column() -> None:
 # ---------------------------------------------------------------------------
 # Upload mapping (spec-037) - FileField/ImageField become Upload
 # ---------------------------------------------------------------------------
-
-
-def _media_specimen_node() -> type[DjangoType]:
-    """Register a Relay-Node ``DjangoType`` over ``scalars.MediaSpecimen`` and return it."""
-
-    class MediaSpecimenNode(DjangoType, relay.Node):
-        class Meta:
-            model = MediaSpecimen
-            fields = ("id",)
-
-    return MediaSpecimenNode
 
 
 @pytest.mark.parametrize(
@@ -1460,20 +1317,16 @@ def test_optional_file_column_defaults_to_unset(column: str) -> None:
     cls = build_mutation_input(
         MediaSpecimen,
         operation_kind=CREATE,
-        primary_type=_media_specimen_node(),
     )
     assert _default_of(_field_map(cls)[column]) is UNSET
 
 
 def test_file_field_narrowed_by_meta_fields_and_exclude() -> None:
     """A file column is included / excluded by model field name via ``fields`` / ``exclude``."""
-    primary_type = _media_specimen_node()
-
     # ``fields`` dropping the file column drops it from the input.
     only_label = build_mutation_input(
         MediaSpecimen,
         operation_kind=CREATE,
-        primary_type=primary_type,
         fields=("label",),
     )
     assert "attachment" not in _field_map(only_label)
@@ -1482,7 +1335,6 @@ def test_file_field_narrowed_by_meta_fields_and_exclude() -> None:
     with_file = build_mutation_input(
         MediaSpecimen,
         operation_kind=CREATE,
-        primary_type=primary_type,
         fields=("label", "attachment"),
     )
     assert _inner_type(_field_map(with_file)["attachment"]) is Upload
@@ -1491,7 +1343,6 @@ def test_file_field_narrowed_by_meta_fields_and_exclude() -> None:
     excluded = build_mutation_input(
         MediaSpecimen,
         operation_kind=CREATE,
-        primary_type=primary_type,
         exclude=("attachment",),
     )
     assert "attachment" not in _field_map(excluded)
@@ -1507,7 +1358,6 @@ def test_file_field_consumer_override_skips_generated_upload_field() -> None:
     cls = build_mutation_input(
         MediaSpecimen,
         operation_kind=CREATE,
-        primary_type=_media_specimen_node(),
         overrides=frozenset({"attachment"}),
     )
     fields = _field_map(cls)
@@ -1880,15 +1730,9 @@ def test_generated_input_over_a_foreign_object_model_binds_its_carriers() -> Non
     The relation contributes no ``parent_id`` attr, so the bind-time reverse map
     resolves every generated attr to a concrete column.
     """
-    child_type = type(
-        "LnkPairChildType",
-        (DjangoType,),
-        {"Meta": type("Meta", (), {"model": _link_models.LnkPairChild, "fields": ("id", "name")})},
-    )
     input_cls = build_mutation_input(
         _link_models.LnkPairChild,
         operation_kind=CREATE,
-        primary_type=child_type,
     )
     assert list(_field_map(input_cls)) == ["p_tenant", "p_code", "name"]
     specs, _model_fields = mutation_input_field_specs(_link_models.LnkPairChild, input_cls)
@@ -1908,7 +1752,6 @@ def test_mutation_input_field_specs_covers_generated_input() -> None:
     input_cls = build_mutation_input(
         product_models.Item,
         operation_kind=CREATE,
-        primary_type=ItemType,
     )
     specs, model_fields = mutation_input_field_specs(product_models.Item, input_cls)
     by_attr = {spec.input_attr: spec for spec in specs}
@@ -1940,7 +1783,6 @@ def test_mutation_input_field_specs_record_the_bind_time_wire_name() -> None:
     remainder = build_mutation_input(
         product_models.Item,
         operation_kind=CREATE,
-        primary_type=ItemType,
         overrides=frozenset({"name"}),
     )
     merged = strawberry.input(type("BindNameItemInput", (ConsumerInput, remainder), {}))
@@ -2096,7 +1938,6 @@ def test_build_mutation_input_rejects_bare_string_overrides(
         build_mutation_input(
             product_models.Item,
             operation_kind=CREATE,
-            primary_type=ItemType,
             overrides=make_value(),
         )
 

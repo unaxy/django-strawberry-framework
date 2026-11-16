@@ -814,10 +814,9 @@ def is_forward_concrete_relation(field: object) -> bool:
     the cardinality question through it makes the answer version-independent.
 
     The M2M exclusion belongs HERE rather than at the callers, so every caller
-    inherits the whole contract: ``forms/inputs.py::_model_column_for`` and
-    ``mutations/inputs.py::_relation_field_index`` answer a forward M2M through
-    ``is_forward_many_to_many`` and every other relation through this predicate,
-    with no cardinality-flag read of their own.
+    inherits the whole contract: ``mutations/inputs.py::_relation_field_index`` answers a
+    forward M2M through ``is_forward_many_to_many`` and every other relation through this
+    predicate, with no cardinality-flag read of its own.
 
     The ``column`` / ``related_model`` reads stay load-bearing AFTER the kind
     gate, because a forward ``GenericForeignKey`` also classifies
@@ -825,9 +824,8 @@ def is_forward_concrete_relation(field: object) -> bool:
     ``content_type_field_name`` / ``object_id_field_name`` slots that mark a
     ``GenericRelation``, so the ``"generic"`` arm never claims it. It is virtual
     all the same (``column=None``, ``related_model=None``), and excluding it
-    keeps a scalar or extra form field that merely shares a name with a virtual
-    or reverse relation from being misclassified by the FK index or by ModelForm
-    backing-column resolution.
+    keeps a scalar that merely shares a name with a virtual or reverse relation from
+    being misclassified by the FK index.
 
     Over a model field, ``True`` narrows it to the forward FK / OneToOne ``Field``.
     """
