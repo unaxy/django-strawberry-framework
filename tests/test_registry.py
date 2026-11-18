@@ -544,16 +544,6 @@ def test_before_bind_iteration_excludes_full_clear_only_callbacks() -> None:
         _subsystem_clears.update(callbacks)
 
 
-def test_register_subsystem_clear_rejects_empty_owner() -> None:
-    """``register_subsystem_clear`` rejects an empty owner string.
-
-    Registry lifecycle: ``clear`` / ``unregister`` / teardown callbacks. A live request cannot show
-    LIFO order, retry, or ImportError guards. No live sibling.
-    """
-    with pytest.raises(ValueError, match="non-empty owner"):
-        register_subsystem_clear(lambda: None, owner="")
-
-
 def test_iter_types_yields_registered_pairs(fresh_registry: TypeRegistry) -> None:
     """``iter_types()`` yields ``(model, type_cls)`` for each registration.
 

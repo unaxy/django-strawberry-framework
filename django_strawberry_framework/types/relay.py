@@ -319,66 +319,6 @@ _STRAWBERRY_RESOLVE_ID = require(
 )
 
 
-def _coerce_node_id(node_id: object) -> object:
-    if isinstance(node_id, relay.GlobalID):
-        return node_id.node_id
-    return node_id
-
-
-def _node_value_or_none(
-    cls: type[_RelayDjangoType],
-    node_id: object,
-    *,
-    slot: tuple[str, ModelField | None],
-) -> object:
-    """Return the id-slot value ``node_id`` names, coerced to its column type; ``None`` if no row.
-
-    Every caller of ``resolve_node`` / ``resolve_nodes`` passes the raw GlobalID
-    ``node_id`` string - Strawberry's ``relay.node()`` field and the package's
-    ``DjangoNodeField`` / ``DjangoNodesField`` alike, per Strawberry's
-    ``node_id: str`` contract - so the default resolvers coerce it themselves,
-    against the concrete field behind ``resolve_id_attr()`` through the same
-    ``relay.py::_coerce_pk_or_none`` rule the root fields' uncoercible-id check
-    uses. The coerced value both filters the queryset and keys the reorder, so an
-    id spelling a row's value differently (``"007"`` for pk ``7``, an upper-case
-    UUID) still finds it, and a literal the column rejects identifies no row
-    instead of leaking Django's ``ValueError`` from the filter. A
-    ``relay.GlobalID`` is unwrapped first. ``slot`` is the batch's precomputed
-    ``relay.py::_node_id_slot`` value (see ``_node_values``).
-    """
-    # In-function import: ``relay.py`` imports this module at module top, so a
-    # module-top import back would close the load cycle.
-    from django_strawberry_framework.relay import _coerce_pk_or_none  # noqa: PLC0415 - import cycle
-
-    return _coerce_pk_or_none(
-        cls,
-        _coerce_node_id(node_id),
-        alias=lookup_read_alias(model_for(cls)),
-        slot=slot,
-    )
-
-
-def _raise_if_required(
-    cls: type[_RelayDjangoType],
-    id_attr: str,
-    node_id: object,
-    *,
-    required: bool,
-) -> None:
-    """Raise ``DoesNotExist`` for an id that identifies no row when the caller required one.
-
-    Keeps the ``required=True`` failure homogeneous with ``_order_nodes``'s
-    miss, so a consumer catches one exception type for "required id identifies
-    no row"; with ``required=False`` the miss is the caller's ``None``.
-    """
-    if not required:
-        return
-    model = model_for(cls)
-    raise model.DoesNotExist(
-        f"{model.__name__}: no row matching {id_attr}={node_id!r}.",
-    )
-
-
 def _node_values(
     cls: type[_RelayDjangoType],
     id_attr: str,
@@ -386,31 +326,48 @@ def _node_values(
     *,
     required: bool,
 ) -> tuple[list[object], ModelField | None]:
-    """Coerce each of ``node_ids`` (``None`` where it names no row); a required miss raises.
+    """Coerce each of ``node_ids`` to its id-slot value (``None`` where it names no row).
 
-    The id slot is a per-type constant, so it is resolved once for the batch
-    and threaded to every coercion instead of once per id. Returns the values
-    and the slot's field, which ``_order_nodes`` keys the reorder through.
+    Every caller of ``resolve_nodes`` passes the raw GlobalID ``node_id`` string -
+    Strawberry's ``relay.node()`` field and the package's ``DjangoNodeField`` /
+    ``DjangoNodesField`` alike, per Strawberry's ``node_id: str`` contract - so the
+    default resolver coerces it itself (a ``relay.GlobalID`` is unwrapped first),
+    against the concrete field behind ``resolve_id_attr()`` through the same
+    ``relay.py::_coerce_pk_or_none`` rule the root fields' uncoercible-id check
+    uses. The coerced value both filters the queryset and keys the reorder, so an
+    id spelling a row's value differently (``"007"`` for pk ``7``, an upper-case
+    UUID) still finds it, and a literal the column rejects identifies no row
+    instead of leaking Django's ``ValueError`` from the filter.
+
+    The id slot is a per-type constant, so it is resolved once for the batch. With
+    ``required=True`` an id that identifies no row raises the model's
+    ``DoesNotExist``, homogeneous with ``_order_nodes``'s miss, so a consumer
+    catches one exception type for "required id identifies no row". Returns the
+    values and the slot's field, which ``_order_nodes`` keys the reorder through.
     """
-    # In-function import for the same load cycle ``_node_value_or_none`` names.
-    from django_strawberry_framework.relay import _node_id_slot  # noqa: PLC0415 - import cycle
+    # In-function import: ``relay.py`` imports this module at module top, so a
+    # module-top import back would close the load cycle.
+    from django_strawberry_framework.relay import _coerce_pk_or_none, _node_id_slot  # noqa: PLC0415 - import cycle
 
     raw_ids = list(node_ids)
     slot = _node_id_slot(cls)
-    values = [_node_value_or_none(cls, node_id, slot=slot) for node_id in raw_ids]
-    for node_id, value in zip(raw_ids, values, strict=True):
-        if value is None:
-            _raise_if_required(cls, id_attr, node_id, required=required)
+    values = [
+        _coerce_pk_or_none(
+            cls,
+            node_id.node_id if isinstance(node_id, relay.GlobalID) else node_id,
+            alias=lookup_read_alias(model_for(cls)),
+            slot=slot,
+        )
+        for node_id in raw_ids
+    ]
+    if required:
+        model = model_for(cls)
+        for node_id, value in zip(raw_ids, values, strict=True):
+            if value is None:
+                raise model.DoesNotExist(
+                    f"{model.__name__}: no row matching {id_attr}={node_id!r}.",
+                )
     return values, slot[1]
-
-
-def _apply_nodes_filter(
-    qs: models.QuerySet[_ModelT],
-    id_attr: str,
-    values: list[object],
-) -> models.QuerySet[_ModelT]:
-    """Filter ``qs`` to the rows whose id slot is one of the coerced ``values``."""
-    return qs.filter(**{f"{id_attr}__in": values})
 
 
 # Keep the GlobalID strategy helpers in this Relay foundation module; do not
@@ -505,42 +462,10 @@ def _resolve_globalid_strategy(
 #
 # ``MODEL_LABEL_STRATEGIES`` answers BOTH directions - which strategies EMIT a
 # model label and which ACCEPT one on decode - because for the framework
-# strategies the two coincide. That is why ``_emits_model_label`` and
-# ``_accepts_model_label_decode`` have identical bodies and are still two names:
-# each names the direction its reader asks. Membership is the contract, so a
-# reader may test the sets directly. Split the sets, not just the predicates, if
-# encode and decode acceptance ever diverge.
+# strategies the two coincide. Membership is the contract, so readers test the
+# sets directly. Split the sets if encode and decode acceptance ever diverge.
 MODEL_LABEL_STRATEGIES = frozenset({"model", "type+model"})
 TYPE_NAME_STRATEGIES = frozenset({"type", "type+model"})
-
-
-def _emits_model_label(effective_strategy: str | None) -> bool:
-    """Return whether a recorded effective strategy emits the model-label slot.
-
-    ``model`` and ``type+model`` both emit ``app_label.modelname`` in the
-    ``GlobalID`` type-name slot.
-    """
-    return effective_strategy in MODEL_LABEL_STRATEGIES
-
-
-def _accepts_model_label_decode(effective_strategy: str | None) -> bool:
-    """Return whether a recorded effective strategy can decode a model-label slot.
-
-    Identical membership to ``_emits_model_label`` - ``model`` and ``type+model``
-    both decode model labels - but named for the *acceptance* side. Why one
-    frozenset serves both directions is stated on ``MODEL_LABEL_STRATEGIES``
-    itself.
-    """
-    return effective_strategy in MODEL_LABEL_STRATEGIES
-
-
-def _accepts_type_name_decode(effective_strategy: str | None) -> bool:
-    """Return whether a recorded effective strategy can decode a GraphQL-type-name slot.
-
-    ``type`` and ``type+model`` both accept a bare ``graphql_type_name`` payload.
-    Sibling of ``_accepts_model_label_decode`` for the type-name shape.
-    """
-    return effective_strategy in TYPE_NAME_STRATEGIES
 
 
 def encode_typename(
@@ -1040,9 +965,9 @@ def decode_global_id(
       converter renames the type.
     - **Enforce the recorded strategy permits the payload shape.** Reads
       the candidate's stamped ``effective_globalid_strategy``: a model-label
-      payload is permitted iff ``_accepts_model_label_decode`` (``model`` /
-      ``type+model``); a type-name payload iff ``_accepts_type_name_decode``
-      (``type`` / ``type+model``). ``callable`` / ``custom`` are in neither
+      payload is permitted iff the strategy is in ``MODEL_LABEL_STRATEGIES``
+      (``model`` / ``type+model``); a type-name payload iff it is in
+      ``TYPE_NAME_STRATEGIES`` (``type`` / ``type+model``). ``callable`` / ``custom`` are in neither
       membership (encode-only: no decode path exists), and an absent (``None``)
       strategy (a non-Relay-Node ``DjangoType`` or a mid-state type) is rejected -
       so a crafted ID cannot resolve to a type that cannot be a Node. The
@@ -1110,16 +1035,13 @@ def decode_global_id(
             f"decode_global_id: {type_name!r} resolves to a type with no recorded GlobalID "
             "strategy; it is not a framework-decodable Relay-Node DjangoType.",
         )
-    permitted = (
-        _accepts_model_label_decode(strategy)
-        if is_model_label
-        else _accepts_type_name_decode(strategy)
-    )
-    if not permitted:
+    model_ok = strategy in MODEL_LABEL_STRATEGIES
+    type_ok = strategy in TYPE_NAME_STRATEGIES
+    if not (model_ok if is_model_label else type_ok):
         # The strategy decodes the other payload shape, or (in neither membership) none.
-        if _accepts_model_label_decode(strategy):
+        if model_ok:
             reason = "decodes only a model-label payload"
-        elif _accepts_type_name_decode(strategy):
+        elif type_ok:
             reason = "decodes only a type-name payload"
         else:
             reason = "is encode-only (no decode path exists)"
@@ -1162,7 +1084,7 @@ def _order_nodes(
     miss already raised in ``_node_values``).
 
     ``required=True`` raises the model's ``DoesNotExist`` for any missing
-    key - homogeneous with ``_raise_if_required``'s uncoercible-id miss so
+    key - homogeneous with ``_node_values``'s uncoercible-id miss so
     consumers writing visibility-aware exception handling can catch a
     single exception type for the "required missing id" semantic.
     ``required=False`` emits ``None`` for missing keys. Rows sharing one key
@@ -1260,7 +1182,7 @@ def _resolve_nodes_default(
         return apply_type_visibility_sync(cls, initial_queryset(cls), info, _RELAY_ASYNC_RECOURSE)
     values, field = _node_values(cls, id_attr, node_ids, required=required)
     qs = apply_type_visibility_sync(cls, initial_queryset(cls), info, _RELAY_ASYNC_RECOURSE)
-    qs = _apply_nodes_filter(qs, id_attr, [value for value in values if value is not None])
+    qs = qs.filter(**{f"{id_attr}__in": [value for value in values if value is not None]})
     return _order_nodes(cls, list(qs), values, id_attr, field=field, required=required)
 
 
@@ -1284,7 +1206,7 @@ async def _resolve_nodes_async(
         return await apply_type_visibility_async(cls, initial_queryset(cls), info)
     values, field = _node_values(cls, id_attr, node_ids, required=required)
     qs = await apply_type_visibility_async(cls, initial_queryset(cls), info)
-    qs = _apply_nodes_filter(qs, id_attr, [value for value in values if value is not None])
+    qs = qs.filter(**{f"{id_attr}__in": [value for value in values if value is not None]})
     results = [obj async for obj in qs]
     return _order_nodes(cls, results, values, id_attr, field=field, required=required)
 

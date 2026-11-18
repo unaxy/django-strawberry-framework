@@ -386,7 +386,7 @@ def build_lateral_sql(
         # adapter (JSONField and custom fields cannot rely on the driver's
         # native Python adaptation); nothing is interpolated. The SQL text
         # itself is ``keyset.keyset_seek_sql`` - the raw-SQL twin of
-        # ``keyset_seek_q`` - so the dialects cannot drift.
+        # ``KeysetSeek.q`` - so the dialects cannot drift.
         seek_sql, seek_params = _keyset_seek_sql(
             spec.keyset_seek,
             qn,
@@ -839,7 +839,7 @@ def _keyset_seek_quals_match(
 
     ``seek`` is the spec's ``keyset_seek``, read by the caller that found it set.
 
-    ``keyset.keyset_seek_q`` builds a deterministic tree - the redundant
+    ``keyset.KeysetSeek.q`` builds a deterministic tree - the redundant
     leading bound plus the OR-expansion - which Django's same-connector
     squash splices into the root AND as TWO children (one child for a
     single-column cursor, where the "expansion" is a bare comparison).

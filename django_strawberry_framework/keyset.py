@@ -42,8 +42,8 @@ Contract highlights (each enforced in this module or at finalization):
   per-parent fallback pipeline, and root connections all mint and decode
   through THIS module, so a cursor minted by any path replays on every
   other (the cross-strategy byte-parity invariant).
-- **One seek plan, two renderers.** ``build_keyset_seek_plan`` owns the
-  dialect-agnostic predicate (directions + values); ``keyset_seek_q`` and
+- **One seek plan, two renderers.** ``KeysetSeek.plan`` owns the
+  dialect-agnostic predicate (directions + values); ``KeysetSeek.q`` and
   ``keyset_seek_sql`` are the ORM and raw-SQL renderers. The backends stay
   separate - portable ``Q`` for the windowed floor, parameterized SQL for
   the lateral branch - but they cannot disagree on which side of a cursor
@@ -104,7 +104,7 @@ from strawberry.relay.utils import from_base64, to_base64
 from .exceptions import ConfigurationError
 from .utils import truth
 from .utils._narrowing import is_concrete_field, is_dict, is_list, list_of, read_attr, require
-from .utils.connections import PaginationArgumentError, published_page_argument_name
+from .utils.connections import pagination_argument_error
 from .utils.imports import CRYPTOGRAPHY_FLOOR, require_optional_module
 from .utils.relations import _resolve_segment_field, generated_column, is_stored_column
 from .utils.typing import object_result
@@ -125,6 +125,8 @@ KEYSET_CURSOR_PREFIX = "dstcursor"
 #: Domain separation for the AES-SIV key and associated data.
 _CURSOR_ENCRYPTION_SALT = "django_strawberry_framework.keyset_cursor"
 _CURSOR_ENCRYPTION_CONTEXT = b"django-strawberry-framework keyset cursor v1"
+#: The one malformed / tampered / mismatched keyset-cursor rejection.
+_INVALID_CURSOR = "contains an invalid cursor for this connection."
 _CRYPTOGRAPHY_INSTALL_HINT = (
     "Meta.cursor_field requires cryptography, which is not installed. Install it "
     f"with `pip install 'cryptography>={CRYPTOGRAPHY_FLOOR}'` (the package's verified AES-SIV "
@@ -177,20 +179,54 @@ class KeysetSeek:
     flip: bool = False
 
     def q(self) -> models.Q:
-        """Return the ORM seek predicate (``keyset_seek_q`` over this carrier)."""
-        return keyset_seek_q(self.columns, self.cursor, flip=self.flip)
+        """Return the ORM seek predicate: rows STRICTLY past the cursor in the total order.
+
+        ``flip=False`` selects rows after the cursor under the effective order
+        (the ``after:`` seek); ``flip=True`` selects rows before it (the
+        ``before:`` seek) by inverting every per-column comparison. Because the
+        terminal column is unique, "strictly past" excludes the cursor row
+        itself in both directions.
+
+        Shape: the per-column OR-expansion
+        ``a CMP v_a  OR  (a = v_a AND b CMP v_b)  OR  ...`` - the portable form
+        that survives mixed ASC/DESC directions where SQL row-value comparison
+        cannot - ANDed with the REDUNDANT LEADING BOUND ``a CMP= v_a``. The
+        redundant conjunct is load-bearing for the asymptotics: a bare
+        OR-expansion is a filter predicate, not an index ACCESS predicate; the
+        leading bound lets the composite ``(cursor columns..., pk)`` index seek
+        to the cursor position (the use-the-index-luke lesson upstream's
+        comparator omits). Columns are non-nullable by contract, so no
+        ``isnull`` arms exist.
+
+        Renders ``plan()`` as ORM ``Q`` objects; the raw-SQL twin is
+        ``keyset_seek_sql``.
+        """
+        plan = self.plan()
+        seek = models.Q()
+        equal_prefix = models.Q()
+        for index, column in enumerate(self.columns):
+            op = "gt" if plan.greater[index] else "lt"
+            seek |= equal_prefix & models.Q(**{f"{column.name}__{op}": plan.values[index]})
+            equal_prefix &= models.Q(**{column.name: plan.values[index]})
+        bound_op = "gte" if plan.lead_greater else "lte"
+        return models.Q(**{f"{self.columns[0].name}__{bound_op}": plan.values[0]}) & seek
 
     def plan(self, values: Sequence[object] | None = None) -> KeysetSeekPlan:
         """Return the dialect-agnostic seek plan (optionally over already-adapted ``values``).
 
-        Default values are the decoded cursor payload. SQL renderers that bind
-        through ``Field.get_db_prep_value`` pass the prepared sequence so the
-        plan's parameter list matches the dialect's bind adapters.
+        The single owner of the seek STRUCTURE every dialect renders: direction
+        bits via ``keyset_seek_greater`` and the ``uniform`` / ``lead_greater``
+        derived facts the SQL renderer uses for its row-value shortcut. Default
+        values are the decoded cursor payload. SQL renderers that bind through
+        ``Field.get_db_prep_value`` pass the prepared sequence so the plan's
+        parameter list matches the dialect's bind adapters.
         """
-        return build_keyset_seek_plan(
-            [column.descending for column in self.columns],
-            self.cursor.values if values is None else values,
-            flip=self.flip,
+        return KeysetSeekPlan(
+            greater=tuple(
+                keyset_seek_greater(descending=column.descending, flip=self.flip)
+                for column in self.columns
+            ),
+            values=tuple(self.cursor.values if values is None else values),
         )
 
 
@@ -432,9 +468,9 @@ def _deserialize_cursor_value(
         # detects model-field drift between mint and decode (and malformed
         # internally minted/test payloads) before a mismatched value reaches SQL.
         if serialize_cursor_value(field, value) != raw:
-            raise _invalid_cursor_error(argument, info)
+            raise pagination_argument_error(info, argument, _INVALID_CURSOR)
     except (TypeError, ValidationError, ValueError):
-        raise _invalid_cursor_error(argument, info) from None
+        raise pagination_argument_error(info, argument, _INVALID_CURSOR) from None
     else:
         return value
 
@@ -450,18 +486,6 @@ def keyset_contract_error(detail: str) -> GraphQLError:
     """
     return GraphQLError(
         f"This connection uses keyset cursors (Meta.cursor_field), which {detail}",
-    )
-
-
-def _invalid_cursor_error(argument: str, info: EitherInfo | None) -> PaginationArgumentError:
-    """Build the one malformed / tampered / mismatched keyset-cursor error shape.
-
-    ``argument`` is the Python name; the message carries the name ``info``'s
-    schema published for it (``utils/connections.py::published_page_argument_name``).
-    """
-    name = published_page_argument_name(info, argument)
-    return PaginationArgumentError(
-        f"Argument '{name}' contains an invalid cursor for this connection.",
     )
 
 
@@ -527,7 +551,7 @@ def _decrypt_cursor_payload(value: str, argument: str, info: EitherInfo | None =
             validate=True,
         )
     except (UnicodeEncodeError, binascii.Error, ValueError):
-        raise _invalid_cursor_error(argument, info) from None
+        raise pagination_argument_error(info, argument, _INVALID_CURSOR) from None
     _aessiv, invalid_tag = _cursor_crypto_types()
     secrets = (
         read_attr(settings, "SECRET_KEY"),
@@ -544,8 +568,8 @@ def _decrypt_cursor_payload(value: str, argument: str, info: EitherInfo | None =
         try:
             return object_result(signing.JSONSerializer().loads, serialized)
         except (TypeError, ValueError):
-            raise _invalid_cursor_error(argument, info) from None
-    raise _invalid_cursor_error(argument, info)
+            raise pagination_argument_error(info, argument, _INVALID_CURSOR) from None
+    raise pagination_argument_error(info, argument, _INVALID_CURSOR)
 
 
 def encode_keyset_cursor(
@@ -605,21 +629,17 @@ def decode_keyset_cursor(
     try:
         prefix, encrypted = from_base64(value)
     except ValueError:
-        raise _invalid_cursor_error(argument, info) from None
+        raise pagination_argument_error(info, argument, _INVALID_CURSOR) from None
     if prefix != KEYSET_CURSOR_PREFIX:
-        raise _invalid_cursor_error(argument, info)
+        raise pagination_argument_error(info, argument, _INVALID_CURSOR)
     payload = _decrypt_cursor_payload(encrypted, argument, info)
     # The decoded JSON object's keys and values are unchecked beyond the reads below.
-    if not is_dict(payload):
-        raise _invalid_cursor_error(argument, info)
-    if payload.get("o") != fingerprint:
-        raise _invalid_cursor_error(argument, info)
+    if not is_dict(payload) or payload.get("o") != fingerprint:
+        raise pagination_argument_error(info, argument, _INVALID_CURSOR)
     raw_list = payload.get("v")
     # Each element is checked by ``_deserialize_cursor_value``, which takes ``object``.
-    if not is_list(raw_list):
-        raise _invalid_cursor_error(argument, info)
-    if len(raw_list) != len(columns):
-        raise _invalid_cursor_error(argument, info)
+    if not is_list(raw_list) or len(raw_list) != len(columns):
+        raise pagination_argument_error(info, argument, _INVALID_CURSOR)
     return KeysetCursor(
         values=tuple(
             _deserialize_cursor_value(column.field, raw, argument, info)
@@ -634,8 +654,8 @@ def keyset_seek_greater(*, descending: bool, flip: bool) -> bool:
     The single direction rule every seek dialect renders from: an ascending
     column seeks greater values going forward (``flip=False``, the
     ``after:`` seek); a descending column flips it; a ``before:`` seek
-    (``flip=True``) inverts again. Shared by ``build_keyset_seek_plan`` (and
-    therefore both ``keyset_seek_q`` and ``keyset_seek_sql``) plus the
+    (``flip=True``) inverts again. Shared by ``KeysetSeek.plan`` (and
+    therefore both ``KeysetSeek.q`` and ``keyset_seek_sql``) plus the
     lateral fetch-time structural verifier
     (``optimizer/lateral_fetch.py::_keyset_seek_quals_match``), so the two
     dialects can never seek opposite sides of the same cursor - the
@@ -664,16 +684,6 @@ class KeysetSeekPlan:
     greater: tuple[bool, ...]
     values: tuple[object, ...]
 
-    def __post_init__(self) -> None:
-        """Reject empty or arity-mismatched seek plans at construction."""
-        if not self.greater:
-            raise ValueError("keyset seek requires at least one column")
-        if len(self.greater) != len(self.values):
-            raise ValueError(
-                f"keyset seek arity mismatch: {len(self.greater)} directions "
-                f"vs {len(self.values)} values",
-            )
-
     @property
     def uniform(self) -> bool:
         """Whether every column shares one comparison direction."""
@@ -685,73 +695,10 @@ class KeysetSeekPlan:
         return self.greater[0]
 
 
-def build_keyset_seek_plan(
-    descending: Sequence[bool],
-    values: Sequence[object],
-    *,
-    flip: bool = False,
-) -> KeysetSeekPlan:
-    """Build the shared seek plan from per-column descending flags and values.
-
-    The single owner of the seek STRUCTURE every dialect renders: direction
-    bits via ``keyset_seek_greater``, arity checks, and the ``uniform`` /
-    ``lead_greater`` derived facts the SQL renderer uses for its row-value
-    shortcut. Callers supply already-adapted values when the dialect binds
-    through field adapters.
-    """
-    return KeysetSeekPlan(
-        greater=tuple(keyset_seek_greater(descending=flag, flip=flip) for flag in descending),
-        values=tuple(values),
-    )
-
-
-def keyset_seek_q(
-    columns: tuple[CursorColumn, ...],
-    cursor: KeysetCursor,
-    *,
-    flip: bool = False,
-) -> models.Q:
-    """Return the seek predicate: rows STRICTLY past the cursor position in the total order.
-
-    ``flip=False`` selects rows after the cursor under the effective order
-    (the ``after:`` seek); ``flip=True`` selects rows before it (the
-    ``before:`` seek) by inverting every per-column comparison. Because the
-    terminal column is unique, "strictly past" excludes the cursor row
-    itself in both directions.
-
-    Shape: the per-column OR-expansion
-    ``a CMP v_a  OR  (a = v_a AND b CMP v_b)  OR  ...`` - the portable form
-    that survives mixed ASC/DESC directions where SQL row-value comparison
-    cannot - ANDed with the REDUNDANT LEADING BOUND ``a CMP= v_a``. The
-    redundant conjunct is load-bearing for the asymptotics: a bare
-    OR-expansion is a filter predicate, not an index ACCESS predicate; the
-    leading bound lets the composite ``(cursor columns..., pk)`` index seek
-    to the cursor position (the use-the-index-luke lesson upstream's
-    comparator omits). Columns are non-nullable by contract, so no
-    ``isnull`` arms exist.
-
-    Renders ``build_keyset_seek_plan`` as ORM ``Q`` objects; the raw-SQL
-    twin is ``keyset_seek_sql``.
-    """
-    plan = build_keyset_seek_plan(
-        [column.descending for column in columns],
-        cursor.values,
-        flip=flip,
-    )
-    seek = models.Q()
-    equal_prefix = models.Q()
-    for index, column in enumerate(columns):
-        op = "gt" if plan.greater[index] else "lt"
-        seek |= equal_prefix & models.Q(**{f"{column.name}__{op}": plan.values[index]})
-        equal_prefix &= models.Q(**{column.name: plan.values[index]})
-    bound_op = "gte" if plan.lead_greater else "lte"
-    return models.Q(**{f"{columns[0].name}__{bound_op}": plan.values[0]}) & seek
-
-
 def keyset_seek_sql(column_refs: Sequence[str], plan: KeysetSeekPlan) -> tuple[str, list[object]]:
     """Render ``plan`` as a parameterized SQL seek predicate over ``column_refs``.
 
-    The raw-SQL twin of ``keyset_seek_q``. Uniform directions emit the native
+    The raw-SQL twin of ``KeysetSeek.q``. Uniform directions emit the native
     row-value comparison ``(a, b) > (%s, %s)`` - the exact index-seek form
     Postgres optimizes best; mixed ASC/DESC directions (which row-value SQL
     cannot express) emit the same redundant-leading-bound OR-expansion the
@@ -759,11 +706,6 @@ def keyset_seek_sql(column_refs: Sequence[str], plan: KeysetSeekPlan) -> tuple[s
     set. ``column_refs`` are already-quoted SQL column references
     (``child."number"``); values ride as bind parameters from ``plan.values``.
     """
-    if len(column_refs) != len(plan.greater):
-        raise ValueError(
-            f"keyset seek arity mismatch: {len(column_refs)} column refs "
-            f"vs {len(plan.greater)} directions",
-        )
     values = list(plan.values)
     if plan.uniform:
         op = ">" if plan.greater[0] else "<"

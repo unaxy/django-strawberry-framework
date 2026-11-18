@@ -1197,11 +1197,11 @@ def test_orderset_active_permission_leaf_paths_falls_back_to_python_attr_when_no
 def test_orderset_apply_sync_returns_queryset_when_all_directions_filter_to_empty_expressions() -> (
     None
 ):
-    """Covers ``orders/sets.py::OrderSet._apply_orderings`` #"if not expressions:".
+    """Covers the empty-expressions return through ``apply_sync``.
 
-    A subclass overrides ``_normalize_input`` to emit
-    ``[("title", None)]`` -- non-empty ``data``, so the #"if not data:"
-    early return is skipped, but ``_resolve_order_expressions``'s
+    ``django_strawberry_framework/orders/sets.py::OrderSet._apply_orderings``
+    #"if not expressions:". A subclass overrides ``_normalize_input`` to emit
+    ``[("title", None)]``: ``_resolve_order_expressions``'s
     #"if direction is None:" skip drops the one term, leaving an empty
     ``expressions`` list. Reached here through ``apply_sync``; the async
     entry point reaches the same guard in
@@ -1226,11 +1226,12 @@ def test_orderset_apply_sync_returns_queryset_when_all_directions_filter_to_empt
 
 @pytest.mark.django_db
 def test_orderset_apply_async_returns_queryset_when_data_is_empty() -> None:
-    """Covers ``orders/sets.py::OrderSet._apply_orderings`` #"if not data:" via ``apply_async``.
+    """Covers the empty-expressions return for empty input through ``apply_async``.
 
-    Calling ``apply_async`` with an empty list yields an empty normalized
-    data list, hitting that early return before any ``order_by(...)``
-    clause is built. ``apply_sync`` and ``apply_async`` share the one
+    ``django_strawberry_framework/orders/sets.py::OrderSet._apply_orderings``
+    #"if not expressions:". Calling ``apply_async`` with an empty list yields no order terms, so
+    the empty-``expressions`` return hands back ``queryset`` before any
+    ``order_by(...)`` clause is built. ``apply_sync`` and ``apply_async`` share the one
     helper, so this row pins the async entry point reaching it, not a
     second copy of the guard.
     """
@@ -1250,9 +1251,10 @@ def test_orderset_apply_async_returns_queryset_when_data_is_empty() -> None:
 def test_orderset_apply_async_returns_queryset_when_all_directions_filter_to_empty_expressions() -> (
     None
 ):
-    """Covers ``orders/sets.py::OrderSet._apply_orderings`` #"if not expressions:" via ``apply_async``.
+    """Covers the empty-expressions return through ``apply_async``.
 
-    Symmetric of the sync-side row: a subclass overrides
+    ``django_strawberry_framework/orders/sets.py::OrderSet._apply_orderings``
+    #"if not expressions:". Symmetric of the sync-side row: a subclass overrides
     ``_normalize_input`` to emit ``[("title", None)]`` and the async
     entry point reaches the same shared guard.
     """

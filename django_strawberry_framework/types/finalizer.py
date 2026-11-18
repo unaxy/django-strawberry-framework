@@ -87,9 +87,8 @@ from django_strawberry_framework.utils.typing import object_result
 from .base import DEFAULT_RELATION_SHAPE
 from .converters import resolved_relation_annotation
 from .relay import (
-    _accepts_model_label_decode,
+    MODEL_LABEL_STRATEGIES,
     _check_composite_pk_for_relay_node,
-    _emits_model_label,
     _validated_globalid_setting,
     apply_interfaces,
     implements_relay_node,
@@ -331,7 +330,7 @@ def _audit_model_label_routing(multi_type_models: tuple[type[models.Model], ...]
         # without a declared primary; a ``None`` primary has no definition either.
         primary = registry.primary_for(model)
         primary_strategy = _definition_or_raise(model, primary).effective_globalid_strategy
-        if not _accepts_model_label_decode(primary_strategy):
+        if primary_strategy not in MODEL_LABEL_STRATEGIES:
             offenders.append((model, emitter, primary_strategy))
     if not offenders:
         return
@@ -349,7 +348,7 @@ def _first_model_label_emitter(model: type[models.Model]) -> type[DjangoType] | 
     """
     for type_cls in registry.types_for(model):
         strategy = _definition_or_raise(model, type_cls).effective_globalid_strategy
-        if _emits_model_label(strategy):
+        if strategy in MODEL_LABEL_STRATEGIES:
             return type_cls
     return None
 
@@ -399,9 +398,8 @@ def _warn_model_label_secondary_collapse(
             type_cls
             for type_cls in registry.types_for(model)
             if type_cls is not primary
-            and _emits_model_label(
-                _definition_or_raise(model, type_cls).effective_globalid_strategy,
-            )
+            and _definition_or_raise(model, type_cls).effective_globalid_strategy
+            in MODEL_LABEL_STRATEGIES
         )
         if not secondaries:
             continue

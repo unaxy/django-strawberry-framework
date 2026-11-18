@@ -202,20 +202,17 @@ def test_marked_mutation_class_is_none_off_a_marked_root_mutation_field() -> Non
     ctx = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
     ctx.schema = graphql_schema
 
-    # parent_type is None when schema.mutation_type is None (query-only schema)
-    assert ctx._marked_mutation_class(None, []) is None
+    # A query-only schema has no mutation root
+    query_type = graphql_schema.query_type
+    assert query_type is not None
+    assert ctx._marked_mutation_class(query_type, [_field_node("hello")]) is None
 
     # Schema with mutation
     schema_with_mut = DjangoSchema(query=DummyQuery, mutation=DummyMutation)
     ctx_mut = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
     ctx_mut.schema = schema_with_mut._schema
     mut_type = schema_with_mut._schema.mutation_type
-
-    # parent_type is None when schema.mutation_type is present
-    assert ctx_mut._marked_mutation_class(None, []) is None
-
-    # field_nodes is empty
-    assert ctx_mut._marked_mutation_class(mut_type, []) is None
+    assert mut_type is not None
 
     # Introspection field (__typename)
     assert ctx_mut._marked_mutation_class(mut_type, [_field_node("__typename")]) is None

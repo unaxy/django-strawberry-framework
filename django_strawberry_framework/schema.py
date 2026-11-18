@@ -241,7 +241,7 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
 
     def _marked_mutation_class(
         self,
-        parent_type: GraphQLObjectType | None,
+        parent_type: GraphQLObjectType,
         field_nodes: list[FieldNode],
     ) -> WriteMutationClass | None:
         """Return the field's bound mutation class, or ``None`` for any unmarked field.
@@ -252,13 +252,7 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         is read off the synthesized ``_resolve`` the ``DjangoMutationField``
         factory stamped with its mutation class (``utils/typing.py::wrapped_resolver``).
         """
-        if (
-            parent_type is None
-            or self.schema.mutation_type is None
-            or parent_type is not self.schema.mutation_type
-        ):
-            return None
-        if not field_nodes:
+        if parent_type is not self.schema.mutation_type:
             return None
         field_def = self.schema.get_field(parent_type, field_nodes[0].name.value)
         return getattr(wrapped_resolver(field_def), MUTATION_CLASS_MARKER, None)
@@ -408,19 +402,6 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
 SCHEMA_CONFIGURATION_ERROR_CODE = "SCHEMA_CONFIGURATION_UNAVAILABLE"
 
 
-def _operation_mode(*, sync: bool) -> OperationMode:
-    """Return the executor this operation is being driven by, from the flag upstream passed.
-
-    ``get_extensions(sync=True)`` is ``execute_sync`` and nothing else;
-    ``execute``, ``stream`` and ``subscribe`` all leave it false. That flag is
-    the authoritative statement of which executor holds the operation, and it is
-    the only one: the ambient event loop answers a different question and
-    disagrees with this one whenever a synchronous operation is started from
-    inside an asynchronous one.
-    """
-    return OperationMode.SYNC if sync else OperationMode.ASYNC
-
-
 class DjangoSchema(strawberry.Schema):
     """``strawberry.Schema`` with the mutation-transaction execution context installed.
 
@@ -543,7 +524,7 @@ class DjangoSchema(strawberry.Schema):
         # else ext()``, so anything that is neither an instance nor callable would
         # fail at the first operation, deep inside the engine; it is named here.
         for entry in entries:
-            if not _is_resolvable_extension_entry(entry):
+            if not (isinstance(entry, SchemaExtension) or callable(entry)):
                 raise ConfigurationError(
                     "Every entry in DjangoSchema(extensions=[...]) has to be something "
                     "Strawberry can resolve into an extension for an operation - a "
@@ -751,16 +732,6 @@ class DjangoSchema(strawberry.Schema):
         return source
 
 
-def _is_resolvable_extension_entry(entry: object) -> bool:
-    """Whether Strawberry can turn ``entry`` into an extension for an operation.
-
-    Its resolution is ``entry if isinstance(entry, SchemaExtension) else
-    entry()``, so an instance answers for itself and everything else has to be
-    callable - which a class and a factory both are.
-    """
-    return isinstance(entry, SchemaExtension) or callable(entry)
-
-
 def _admitted_chain(resolved: list[SchemaExtension], *, sync: bool) -> list[SchemaExtension]:
     """Return the schema's authorities around ``resolved``.
 
@@ -793,7 +764,9 @@ def _admitted_chain(resolved: list[SchemaExtension], *, sync: bool) -> list[Sche
         DjangoErrorPolicyExtension(),
         *resolved,
         DjangoResourcePolicyExtension(),
-        _OperationModeMarker(_operation_mode(sync=sync)),
+        # ``get_extensions(sync=True)`` is ``execute_sync`` alone: that flag, not the
+        # ambient event loop, names the executor driving the operation.
+        _OperationModeMarker(OperationMode.SYNC if sync else OperationMode.ASYNC),
     ]
 
 

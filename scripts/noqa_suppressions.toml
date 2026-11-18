@@ -92,7 +92,6 @@
 "django_strawberry_framework/types/finalizer.py::_expand_orderset" = { PLC0415 = 1 }
 "django_strawberry_framework/types/finalizer.py::_synthesize_relation_connections" = { PLC0415 = 1 }
 "django_strawberry_framework/types/finalizer.py::finalize_django_types" = { PLC0415 = 3 }
-"django_strawberry_framework/types/relay.py::_node_value_or_none" = { PLC0415 = 1 }
 "django_strawberry_framework/types/relay.py::_node_values" = { PLC0415 = 1 }
 "django_strawberry_framework/types/relay.py::_resolve_globalid_strategy" = { PLC0415 = 1 }
 "django_strawberry_framework/types/relay.py::_validated_globalid_setting" = { PLC0415 = 1 }

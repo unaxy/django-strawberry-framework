@@ -59,7 +59,7 @@ related-model column besides the pk (a pk-only order is the link itself, which a
 through-table index leading ``(parent_fk, child_fk)`` can serve); a
 multi-table-inheritance child that inherits any of those columns from a parent
 table is cross-table the same way.
-For a keyset connection the composite mirrors ``keyset.py::keyset_seek_q``'s
+For a keyset connection the composite mirrors ``keyset.py::KeysetSeek.q``'s
 redundant-leading-bound design (the same leading columns the seek predicate
 compares). The planner emits a dev-mode advisory
 (``optimizer/nested_planner.py::_advise_composite_index``, ``WARNING`` only

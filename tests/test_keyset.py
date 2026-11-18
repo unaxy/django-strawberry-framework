@@ -58,12 +58,10 @@ from django_strawberry_framework.keyset import (
     _cursor_crypto_types,
     _decrypt_cursor_payload,
     _encrypt_cursor_payload,
-    build_keyset_seek_plan,
     cursor_columns_for,
     decode_keyset_cursor,
     encode_keyset_cursor,
     keyset_seek_greater,
-    keyset_seek_q,
     keyset_seek_sql,
     order_fingerprint,
     serialize_cursor_value,
@@ -473,35 +471,41 @@ def test_keyset_seek_greater_direction_table() -> None:
     assert keyset_seek_greater(descending=True, flip=True) is True
 
 
-def test_build_keyset_seek_plan_mixed_and_uniform() -> None:
+def _seek_plan(
+    order: tuple[str, ...],
+    values: tuple[object, ...],
+    *,
+    flip: bool = False,
+) -> KeysetSeekPlan:
+    columns = cursor_columns_for(Issue, order)
+    return KeysetSeek(columns=columns, cursor=KeysetCursor(values=values), flip=flip).plan()
+
+
+def test_keyset_seek_plan_mixed_and_uniform() -> None:
     """The shared plan owns directions, values, and the uniform/lead facts."""
-    mixed = build_keyset_seek_plan([True, False], (3, 1))
+    mixed = _seek_plan(("-number", "id"), (3, 1))
     assert mixed == KeysetSeekPlan(greater=(False, True), values=(3, 1))
     assert mixed.uniform is False
     assert mixed.lead_greater is False
-    flipped = build_keyset_seek_plan([True, False], (3, 1), flip=True)
+    flipped = _seek_plan(("-number", "id"), (3, 1), flip=True)
     assert flipped.greater == (True, False)
     assert flipped.lead_greater is True
-    uniform = build_keyset_seek_plan([False, False], (3, 1))
+    uniform = _seek_plan(("number", "id"), (3, 1))
     assert uniform.uniform is True
     assert uniform.lead_greater is True
-    with pytest.raises(ValueError, match="at least one column"):
-        KeysetSeekPlan(greater=(), values=())
-    with pytest.raises(ValueError, match="arity mismatch"):
-        build_keyset_seek_plan([False], (1, 2))
 
 
 def test_keyset_seek_sql_uniform_row_value_and_mixed_or_expansion() -> None:
     """SQL renderer: row-value when uniform; leading-bound OR-expansion when mixed."""
-    uniform = build_keyset_seek_plan([False, False], (3, 1))
+    uniform = _seek_plan(("number", "id"), (3, 1))
     sql, params = keyset_seek_sql(['"number"', '"id"'], uniform)
     assert sql == '("number", "id") > (%s, %s)'
     assert params == [3, 1]
-    single = build_keyset_seek_plan([False], (5,))
+    single = _seek_plan(("id",), (5,))
     sql, params = keyset_seek_sql(['"id"'], single)
     assert sql == '"id" > %s'
     assert params == [5]
-    mixed = build_keyset_seek_plan([True, False], (3, 1))
+    mixed = _seek_plan(("-number", "id"), (3, 1))
     sql, params = keyset_seek_sql(['"number"', '"id"'], mixed)
     assert sql == ('"number" <= %s AND ("number" < %s OR ("number" = %s AND "id" > %s))')
     assert params == [
@@ -510,8 +514,6 @@ def test_keyset_seek_sql_uniform_row_value_and_mixed_or_expansion() -> None:
         3,
         1,
     ]
-    with pytest.raises(ValueError, match="column refs"):
-        keyset_seek_sql(['"number"'], mixed)
 
 
 @pytest.mark.django_db
@@ -523,25 +525,26 @@ def test_keyset_seek_q_mixed_directions_both_ways() -> None:
     ]
     columns = _issue_columns()
     cursor = KeysetCursor(values=(2, saved_pk(issues[1])))
-    after = list(Issue.objects.filter(keyset_seek_q(columns, cursor)).order_by("-number", "id"))
+    after = list(
+        Issue.objects.filter(KeysetSeek(columns=columns, cursor=cursor).q()).order_by(
+            "-number",
+            "id",
+        ),
+    )
     before = list(
-        Issue.objects.filter(keyset_seek_q(columns, cursor, flip=True)).order_by("-number", "id"),
+        Issue.objects.filter(KeysetSeek(columns=columns, cursor=cursor, flip=True).q()).order_by(
+            "-number",
+            "id",
+        ),
     )
     # Under (-number, id): "after" the cursor means SMALLER numbers.
     assert [issue.number for issue in after] == [1]
     assert [issue.number for issue in before] == [3]
 
 
-@pytest.mark.django_db
-def test_keyset_seek_carrier_q_matches_builder() -> None:
-    columns = _issue_columns()
-    cursor = KeysetCursor(values=(2, 1))
-    seek = KeysetSeek(columns=columns, cursor=cursor)
-    assert str(seek.q()) == str(keyset_seek_q(columns, cursor))
-    assert seek.plan() == build_keyset_seek_plan(
-        [column.descending for column in columns],
-        cursor.values,
-    )
+def test_keyset_seek_plan_takes_prepared_values() -> None:
+    seek = KeysetSeek(columns=_issue_columns(), cursor=KeysetCursor(values=(2, 1)))
+    assert seek.plan().values == (2, 1)
     prepared = ("prep-3", "prep-1")
     assert seek.plan(prepared).values == prepared
 

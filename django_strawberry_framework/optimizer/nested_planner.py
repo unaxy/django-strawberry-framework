@@ -657,7 +657,7 @@ def _advise_composite_index(
     leading columns mirror ``(content_type_id?, partition column, order terms...,
     pk)`` lets the database serve each partition's page from the index instead of
     sorting per partition (the keyset composite mirrors
-    ``keyset.py::keyset_seek_q``'s redundant-leading-bound design). Direction is
+    ``keyset.py::KeysetSeek.q``'s redundant-leading-bound design). Direction is
     load-bearing: a B-tree serves only the requested order or its FULL reverse
     after the equality prefix.
 

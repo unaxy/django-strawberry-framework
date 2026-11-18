@@ -71,8 +71,6 @@ def register_subsystem_clear(
     replace the old function object instead of accumulating duplicates. Optional
     subsystems remain lazy because only an imported owner can register.
     """
-    if not owner:
-        raise ValueError("register_subsystem_clear() requires a non-empty owner")
     _subsystem_clears[owner] = (clear, before_bind)
 
 
@@ -387,8 +385,6 @@ class TypeRegistry:
         so the optimizer can pipeline through unwrapped wrapper types
         without an extra guard).
         """
-        if type_cls is None:
-            return None
         # The stored keys are ``DjangoType`` classes but the probe is any object (a
         # Strawberry definition's ``origin``, which is a ``GraphQLScalarType`` instance
         # for a scalar); the identity map's lookup accepts any object.

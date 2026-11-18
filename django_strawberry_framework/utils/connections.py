@@ -723,6 +723,9 @@ _OFFSET_CURSOR_MAX_DIGITS = len(str(sys.maxsize))
 #: an index (``U+0661`` for ``1``), neither of which a mint writes.
 _OFFSET_CURSOR_INDEX_PATTERN = re.compile(r"0|[1-9][0-9]*")
 
+#: ``SliceMetadata``'s foreign-cursor rejection, worded as Strawberry words it.
+_NON_EXISTING_VALUE = "contains a non-existing value."
+
 
 def published_page_argument_name(
     info: EitherInfo | None,
@@ -789,21 +792,26 @@ def decode_offset_cursor(
     try:
         cursor_prefix, raw = from_base64(value)
     except ValueError:
-        raise _non_existing_cursor_error(info, argument) from None
+        raise pagination_argument_error(info, argument, _NON_EXISTING_VALUE) from None
     if cursor_prefix != prefix or not _OFFSET_CURSOR_INDEX_PATTERN.fullmatch(raw):
-        raise _non_existing_cursor_error(info, argument)
+        raise pagination_argument_error(info, argument, _NON_EXISTING_VALUE)
     if len(raw) > _OFFSET_CURSOR_MAX_DIGITS:
-        raise _non_existing_cursor_error(info, argument)
+        raise pagination_argument_error(info, argument, _NON_EXISTING_VALUE)
     position = int(raw)
     if position >= sys.maxsize:
-        raise _non_existing_cursor_error(info, argument)
+        raise pagination_argument_error(info, argument, _NON_EXISTING_VALUE)
     return position
 
 
-def _non_existing_cursor_error(info: EitherInfo | None, argument: str) -> PaginationArgumentError:
-    """Build ``SliceMetadata``'s foreign-cursor rejection for ``argument``."""
-    name = published_page_argument_name(info, argument)
-    return PaginationArgumentError(f"Argument '{name}' contains a non-existing value.")
+def pagination_argument_error(
+    info: EitherInfo | None,
+    argument: str,
+    detail: str,
+) -> PaginationArgumentError:
+    """Build ``Argument '<name>' <detail>``, naming ``argument`` as ``info``'s schema published it."""
+    return PaginationArgumentError(
+        f"Argument '{published_page_argument_name(info, argument)}' {detail}",
+    )
 
 
 def derive_connection_window_bounds(
@@ -936,11 +944,9 @@ def assert_relay_pagination_bound(
     if not isinstance(value, int):
         return
     if value < 0:
-        name = published_page_argument_name(info, argument)
-        raise PaginationArgumentError(f"Argument '{name}' must be a non-negative integer.")
+        raise pagination_argument_error(info, argument, "must be a non-negative integer.")
     if value > cap:
-        name = published_page_argument_name(info, argument)
-        raise PaginationArgumentError(f"Argument '{name}' cannot be higher than {cap}.")
+        raise pagination_argument_error(info, argument, f"cannot be higher than {cap}.")
 
 
 def validate_offset_pagination(

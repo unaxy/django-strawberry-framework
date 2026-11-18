@@ -7160,7 +7160,9 @@ class FilterSet(
         without rebinding the instance method on every sibling filterset
         a recursive branch builds; the instance is passed explicitly so
         the override sees both the policy-owning class (``cls``) and the
-        actual filterset whose form to validate.
+        actual filterset whose form to validate. A supported override raises or
+        calls ``super()``; one that accepts a form error without either does not
+        keep the annotation-bound leaves applied.
 
         The text preflight and final bind ask enter the actual form's errors
         (``FilterSet.form`` builds a
