@@ -10,7 +10,6 @@ cannot leak partial directives into the walker's parent plan.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import lru_cache
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -30,6 +29,7 @@ from django_strawberry_framework.keyset import (
     declared_cursor_state_for_definition,
     decode_keyset_cursor,
 )
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
@@ -46,13 +46,8 @@ from django_strawberry_framework.utils.connections import (
     derive_keyset_window_bounds,
     has_connection_sidecar_kwargs,
     relation_connection_to_attr,
+    relay_max_results_from_info,
     window_range_plan,
-)
-
-# Imported under a private alias. The dig itself has one owner in
-# ``utils/connections.py``, shared with the resolve-time cap.
-from django_strawberry_framework.utils.connections import (
-    relay_max_results_from_info as _relay_max_results_from_info,
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.querysets import expand_relation_order
@@ -71,7 +66,6 @@ from .plans import (
     JoinPrefix,
     OptimizationPlan,
     PlannedWindow,
-    _extend_only_projection,
     append_unique,
     append_unique_many,
     apply_projection,
@@ -82,19 +76,19 @@ from .plans import (
     normalize_order_direction,
     order_entry_has_explicit_nulls,
     order_entry_name_and_direction,
+    resolver_key,
 )
 from .selections import (
+    RUNTIME_PREFIXES_ATTR,
     connection_has_next_page_selected,
     connection_node_children,
     connection_total_count_selected,
     python_arguments,
-)
-from .selections import (
-    response_keys as _response_keys,
+    response_keys,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from typing import TypeAlias
 
     from django.contrib.postgres.indexes import BTreeIndex
@@ -181,19 +175,6 @@ def _every_backend_supports_index_column_ordering() -> bool:
         return False
 
 
-@dataclass(frozen=True)
-class NestedConnectionPlanResult:
-    """An isolated nested-connection plan and the windows a strategy accepted."""
-
-    plan: OptimizationPlan
-    accepted_response_keys: tuple[str | None, ...] = ()
-
-    @property
-    def accepted(self) -> bool:
-        """Return whether at least one fetch window was accepted."""
-        return bool(self.accepted_response_keys)
-
-
 def _order_entry_field_name(entry: object) -> str | None:
     """Return the field name an ``order_by`` entry references, or ``None``.
 
@@ -248,6 +229,158 @@ def _select_nested_strategy(hint: OptimizerHint | None) -> NestedConnectionStrat
     if name is not None:
         return resolve_strategy(name)
     return active_strategy()
+
+
+def _target_has_custom_get_queryset(
+    target_type: type[DjangoType] | None,
+    target_definition: DjangoTypeDefinition | None = None,
+) -> bool:
+    """Report whether a relation target overrides ``get_queryset``.
+
+    Answers from the CAPTURED definition when the walk resolved one, so the
+    verdict that decides ``select_related`` versus ``Prefetch`` - and, through
+    ``_build_child_queryset``, whether the child's visibility hook runs at all -
+    comes from the same object the relation was resolved through, not from a
+    second request-time read of the target class.
+
+    The class fallback is reached only for a registration the registry holds
+    WITHOUT a definition. ``DjangoType.__init_subclass__`` registers the type
+    and its definition in one atomic call, so no real ``DjangoType`` can
+    present that shape; a bare class registered directly through
+    ``registry.register`` carries no definition to read, and its own report is
+    the only answer there is.
+    """
+    if target_definition is not None:
+        return target_definition.has_custom_get_queryset
+    return target_type is not None and target_type.has_custom_get_queryset()
+
+
+def _resolve_relation_target(
+    definition: DjangoTypeDefinition | None,
+    django_name: str,
+    django_field: FieldMeta,
+) -> tuple[type[DjangoType] | None, DjangoTypeDefinition | None]:
+    """Return one relation target as ``(origin, definition)``.
+
+    The owner definition's ``related_target_for`` already resolved the child
+    ``DjangoTypeDefinition``; both halves of that one answer are returned
+    together so every later decision about the target - the ``get_queryset``
+    downgrade, the child visibility model, the declared cursor vocabulary -
+    spends this resolution instead of asking the target class again at request
+    time. Collapsing the pair to its ``origin`` here is what forced those
+    re-reads, and a target whose metadata changes between them is exactly the
+    threat the one-definition rule exists for.
+
+    The unresolved-relation fallback stays registry-only and answers in the
+    same shape: the registry's type for the related model plus the registry's
+    definition for that type (``registry.get_definition``, the same canonical
+    lookup ``_has_custom_id_resolver`` uses). A model with no registered type
+    yields ``(None, None)``; a type the registry holds without a definition
+    yields its origin and ``None``, and each consumer degrades on its own
+    documented contract rather than reaching for a class attribute.
+    """
+    if definition is not None:
+        resolved = definition.related_target_for(django_name)
+        if resolved is not None:
+            target_definition, _model_field = resolved
+            return target_definition.origin, target_definition
+    related_model = django_field.related_model
+    if related_model is None:
+        return None, None
+    origin = registry.get(related_model)
+    if origin is None:
+        return None, None
+    return origin, registry.get_definition(origin)
+
+
+def _resolver_identities_for(
+    sel: FieldSelection,
+    field_name: str,
+    type_cls: type[DjangoType] | None,
+    runtime_prefixes: tuple[tuple[str, ...], ...],
+) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...]]:
+    """Return ``(runtime_paths, resolver_identities)`` for one selection.
+
+    Shared by the list-relation walk (``_walk_selections``, keyed on the
+    Django field name) and the nested-connection planner
+    (``_plan_connection_relation``, keyed on ``relation_field_name`` - the
+    underlying relation field, NOT the generated ``<field>_connection``
+    accessor). ``field_name`` is the resolver-key vocabulary, so passing
+    ``relation_field_name`` at the connection site keeps the walker's emitted
+    key MATCHING the resolve-time key ``connection.py``'s
+    ``_check_n1(kind="connection_to_attr")`` rebuilds via
+    ``resolver_key(type_cls, relation_field_name, runtime_path)`` - the
+    load-bearing "planned -> silent" parity (``connection.py`` resolver doc).
+
+    A selection-specific ``RUNTIME_PREFIXES_ATTR`` (set by connection
+    extraction) overrides the inherited ``runtime_prefixes``; the runtime path
+    is the cartesian product over those prefixes and ``response_keys(sel)``.
+    """
+    # Only the walker's ``SimpleNamespace`` clones carry runtime prefixes.
+    carried_prefixes = _selection_runtime_prefixes(sel)
+    selection_runtime_prefixes: tuple[tuple[str, ...], ...] = (
+        tuple(carried_prefixes) if carried_prefixes is not None else runtime_prefixes
+    )
+    runtime_paths = tuple(
+        (*runtime_prefix, response_key)
+        for runtime_prefix in selection_runtime_prefixes
+        for response_key in response_keys(sel)
+    )
+    resolver_identities = tuple(
+        resolver_key(type_cls, field_name, runtime_path) for runtime_path in runtime_paths
+    )
+    return runtime_paths, resolver_identities
+
+
+def _response_key_arguments_conflict(selection: FieldSelection) -> bool:
+    """Return whether one response key carries two DIFFERENT argument payloads.
+
+    Set by ``_record_response_key_arguments`` when parent-alias subtrees were
+    union-merged (the only reachable source - graphql-core validation rules
+    the shape out within one selection set). Selections built outside
+    ``_merge_aliased_selections`` never carry the flag.
+    """
+    return getattr(selection, "_optimizer_response_key_argument_conflict", False)
+
+
+def _aliased_arguments_diverge(selection: FieldSelection) -> bool:
+    """Return whether a merged selection's aliases carry divergent arguments.
+
+    ``True`` when two response keys of the same field were selected with
+    different argument payloads (e.g. ``a: books(first: 2)`` +
+    ``b: books(first: 5)``). The scheme selector for
+    ``_plan_connection_relation``: divergent aliases plan one window PER
+    RESPONSE KEY (each under its own ``to_attr``), while agreeing
+    aliases share one window. Payloads are graphql-core-coerced,
+    so the literal ``first: 2`` and a variable resolving to ``2`` agree. Selections built
+    outside ``_merge_aliased_selections`` (direct test/helper callers) carry
+    no per-response-key map and never diverge.
+    """
+    # ``_merge_aliased_selections`` built this map from response keys to payloads.
+    per_key: dict[str, Mapping[str, object]] | None = getattr(
+        selection,
+        "_optimizer_response_key_arguments",
+        None,
+    )
+    if not per_key:
+        return False
+    payloads = list(per_key.values())
+    first = payloads[0]
+    return any(payload != first for payload in payloads[1:])
+
+
+def _selection_runtime_prefixes(selection: FieldSelection) -> list[tuple[str, ...]] | None:
+    """Return selection-specific runtime prefixes carried by connection extraction."""
+    # Every writer (``with_runtime_prefix`` and the merge below) stores a list of
+    # runtime-path tuples.
+    prefixes: Iterable[tuple[str, ...]] | None = getattr(
+        selection,
+        RUNTIME_PREFIXES_ATTR,
+        None,
+    )
+    if prefixes is None:
+        return None
+    return list(prefixes)
 
 
 def _concrete_order_terms(
@@ -385,24 +518,13 @@ def _index_leading_terms(meta: _OptionsAny, index: object) -> list[tuple[str, bo
     field_names: Sequence[str] | None = getattr(index, "fields", None)
     if not field_names:
         return None
-    terms: list[tuple[str, bool]] = []
-    saw_descending = False
-    for name in field_names:
-        descending = name.startswith("-")
-        saw_descending = saw_descending or descending
-        bare = name[1:] if descending else name
-        try:
-            field = meta.get_field(bare)
-        except FieldDoesNotExist:
-            return None
-        # Django's model checks admit only concrete local fields in ``Meta.indexes``; a name
-        # resolving to a reverse relation cannot be proven an index column.
-        if not is_concrete_field(field):
-            return None
-        terms.append((field.attname, descending))
-    if saw_descending and not _every_backend_supports_index_column_ordering():
+    descending = [name.startswith("-") for name in field_names]
+    ascending = _plain_field_terms(meta, [name.removeprefix("-") for name in field_names])
+    if ascending is None:
         return None
-    return terms
+    if any(descending) and not _every_backend_supports_index_column_ordering():
+        return None
+    return [(attname, flag) for (attname, _), flag in zip(ascending, descending, strict=True)]
 
 
 # Tri-state result of index inspection: a covering index is present, no index in
@@ -465,7 +587,8 @@ def _plain_field_terms(meta: _OptionsAny, names: Sequence[str]) -> list[tuple[st
     """Map DIRECTIONLESS field names to ascending ``(attname, False)`` terms, or ``None``.
 
     For ``UniqueConstraint`` / ``unique_together`` entries, which carry no
-    per-column direction: the unique btree is ascending, and
+    per-column direction (and for an ``Index``'s names with their ``-`` prefix
+    stripped, ``_index_leading_terms``): the unique btree is ascending, and
     ``_terms_serve_order`` still admits a FULL backward scan, so ascending terms
     correctly cover the requested order or its full reverse. ``None`` when any
     name does not resolve to a field (a migration lag), so the caller leaves
@@ -477,8 +600,8 @@ def _plain_field_terms(meta: _OptionsAny, names: Sequence[str]) -> list[tuple[st
             field = meta.get_field(name)
         except FieldDoesNotExist:
             return None
-        # Django's model checks admit only concrete local fields in unique sets; a name
-        # resolving to a reverse relation cannot be proven a unique column.
+        # Django's model checks admit only concrete local fields in unique sets and
+        # ``Meta.indexes``; a name resolving to a reverse relation cannot be proven a column.
         if not is_concrete_field(field):
             return None
         terms.append((field.attname, False))
@@ -593,22 +716,6 @@ def _index_coverage(
     return _INDEX_UNKNOWN if saw_uninspectable else _INDEX_ABSENT
 
 
-def _describe_index_columns(
-    equality: Sequence[str],
-    order_terms: Sequence[tuple[str, bool]],
-) -> list[str]:
-    """Render the recommended composite-index columns, annotating descending order.
-
-    Equality columns carry no direction (an equality predicate is
-    direction-agnostic); each order column shows ``DESC`` when the requested
-    ordering is descending so the advisory names the exact B-tree shape.
-    """
-    columns = list(equality)
-    for attname, descending in order_terms:
-        columns.append(f"{attname} DESC" if descending else attname)
-    return columns
-
-
 # One plan shape warns at most once even when its plan is rebuilt on every
 # request: plans carrying a custom ``get_queryset`` stay out of the extension's
 # cross-request plan cache, so ``plan_connection_relation`` re-runs this advisory
@@ -627,8 +734,16 @@ def _emit_index_advisory(
     equality: tuple[str, ...],
     effective_order: tuple[tuple[str, bool], ...],
 ) -> None:
-    """Log the composite-index recommendation for one plan shape (once per shape)."""
-    columns = _describe_index_columns(equality, effective_order)
+    """Log the composite-index recommendation for one plan shape (once per shape).
+
+    Equality columns carry no direction (an equality predicate is
+    direction-agnostic); each order column shows ``DESC`` when the requested
+    ordering is descending so the advisory names the exact B-tree shape.
+    """
+    columns = [
+        *equality,
+        *(f"{attname} DESC" if descending else attname for attname, descending in effective_order),
+    ]
     log = logger.warning if django_setting("DEBUG") else logger.debug
     log(
         "Optimizer: nested connection on %s.%s has no represented index covering the "
@@ -829,7 +944,7 @@ def _connection_window_slice_from_arguments(
     (``_optimizer_response_key_arguments``). Reads the payload by Python name
     (graphql-core coerced it, ``selections.py::python_arguments``), resolves
     ``max_results`` from the Strawberry schema config via
-    ``_relay_max_results_from_info`` (the walker's graphql-core ``info.schema``
+    ``relay_max_results_from_info`` (the walker's graphql-core ``info.schema``
     has no ``.config`` the engine could read), and hands those to the shared
     helper, which owns the ``reverse`` / ``limit`` rule.
 
@@ -852,19 +967,18 @@ def _connection_window_slice_from_arguments(
     records the field as accounted-for (spec-033 Decision 5).
     """
     try:
-        bounds = derive_connection_window_bounds(
+        return derive_connection_window_bounds(
             info,
             before=_cursor_argument(arguments, "before"),
             after=_cursor_argument(arguments, "after"),
             first=_int_argument(arguments, "first"),
             last=_int_argument(arguments, "last"),
-            max_results=_relay_max_results_from_info(info),
+            max_results=relay_max_results_from_info(info),
             # Only generated connections are planned, and each inherits the stock edge class.
             prefix=relay.Edge.CURSOR_PREFIX,
         )
     except PaginationArgumentError:
         return None
-    return bounds
 
 
 def _keyset_window_slice_from_arguments(
@@ -922,7 +1036,7 @@ def _keyset_window_slice_from_arguments(
             after=after,
             first=first,
             last=last,
-            max_results=_relay_max_results_from_info(info),
+            max_results=relay_max_results_from_info(info),
         )
     except (GraphQLError, ValueError, TypeError):
         return None
@@ -1025,7 +1139,7 @@ def _identities_for_response_keys(
     """Filter parallel ``(runtime_paths, resolver_identities)`` to given keys.
 
     ``_resolver_identities_for`` already builds identities per response key
-    (the cartesian ``runtime_prefixes x _response_keys(sel)``; each runtime
+    (the cartesian ``runtime_prefixes x response_keys(sel)``; each runtime
     path ENDS in its response key), so per-key selection is a filter over the
     parallel tuples, never a re-derivation. Used by the divergent-alias scheme
     to record identities only for the keys actually planned (or, for
@@ -1062,13 +1176,13 @@ def _settle_window_pass(
     for fallback_key, reason in fallback_keys:
         _log_connection_fallback(
             relation_field_name,
-            [fallback_key] if fallback_key is not None else _response_keys(sel),
+            [fallback_key] if fallback_key is not None else response_keys(sel),
             reason,
         )
     if malformed_keys:
         _log_connection_fallback(
             relation_field_name,
-            malformed_keys if divergent else _response_keys(sel),
+            malformed_keys if divergent else response_keys(sel),
             "malformed pagination",
         )
         _record_accounted_keys(
@@ -1117,29 +1231,9 @@ def plan_connection_relation(
     type_cls: type[DjangoType] | None,
     model: type[models.Model],
     introduce_projection: bool,
-    resolve_optimizer_hints: Callable[[DjangoTypeDefinition | None], dict[str, OptimizerHint]],
-    resolve_relation_target: Callable[
-        [DjangoTypeDefinition | None, str, FieldMeta],
-        tuple[type[DjangoType] | None, DjangoTypeDefinition | None],
-    ],
-    response_key_arguments_conflict: Callable[[FieldSelection], bool],
-    aliased_arguments_diverge: Callable[[FieldSelection], bool],
-    target_has_custom_get_queryset: Callable[
-        [type[DjangoType] | None, DjangoTypeDefinition | None],
-        bool,
-    ],
-    resolver_identities_for: Callable[
-        [
-            FieldSelection,
-            str,
-            type[DjangoType] | None,
-            tuple[tuple[str, ...], ...],
-        ],
-        tuple[tuple[tuple[str, ...], ...], tuple[str, ...]],
-    ],
     build_child_queryset: Callable[..., QuerySet[models.Model]],
     build_prefetch_child_queryset_from_base: Callable[..., QuerySet[models.Model]],
-) -> NestedConnectionPlanResult:
+) -> OptimizationPlan:
     """Plan one recognized nested connection as a windowed ``Prefetch``.
 
     Orchestrates the windowed-prefetch plan (spec-033 Decision 4); leaves the
@@ -1156,7 +1250,7 @@ def plan_connection_relation(
     parent-row link columns, accessors for the window's ``Prefetch`` lookup.
 
     Every decision about the relation TARGET spends one resolution.
-    ``resolve_relation_target`` answers with the child definition beside its
+    ``_resolve_relation_target`` answers with the child definition beside its
     origin, and that object - never a fresh read of the target class - decides
     the ``get_queryset`` downgrade, supplies the model the child's visibility
     seal validates against, and fixes the declared cursor vocabulary each
@@ -1171,7 +1265,7 @@ def plan_connection_relation(
     plan = OptimizationPlan(introduce_projection=introduce_projection)
     django_field = field_map.get(relation_field_name)
     if django_field is None:
-        return NestedConnectionPlanResult(plan=plan)
+        return plan
     # Parent-row link columns (a reverse ``to_field`` / ``ForeignObject``
     # link's non-pk targets). The window's attach reads them off each parent
     # row, and so does the per-parent resolution every refusal arm below - and
@@ -1182,14 +1276,14 @@ def plan_connection_relation(
         plan.only_fields,
         [f"{prefix.query}{attname}" for attname in django_field.source_link_attnames],
     )
-    hints_map = resolve_optimizer_hints(definition)
+    hints_map = definition.optimizer_hints if definition is not None else {}
     if hint_is_skip(hints_map.get(relation_field_name)):
-        return NestedConnectionPlanResult(plan=plan)
+        return plan
     # (b) Refusal arms detectable before any queryset is built -> UNPLANNED.
-    if response_key_arguments_conflict(sel):
+    if _response_key_arguments_conflict(sel):
         _log_connection_fallback(
             relation_field_name,
-            _response_keys(sel),
+            response_keys(sel),
             "conflicting arguments for one response key",
         )
         # ONE response key carries two different argument payloads - reachable
@@ -1202,20 +1296,20 @@ def plan_connection_relation(
         # arguments and the access stays strictness-visible, like the sidecar
         # shapes. A silent first-payload-wins window here served the sibling
         # alias a wrong page.
-        return NestedConnectionPlanResult(plan=plan)
+        return plan
     # Scheme selector only (payload map + identity writes). Arguments-derived
     # gates including sidecar run per payload inside ``_divergent_key_windows``,
     # after the relation-level identities / related_model gates below.
-    divergent = aliased_arguments_diverge(sel)
+    divergent = _aliased_arguments_diverge(sel)
 
-    target_type, target_definition = resolve_relation_target(
+    target_type, target_definition = _resolve_relation_target(
         definition,
         relation_field_name,
         django_field,
     )
-    has_custom_get_queryset = target_has_custom_get_queryset(target_type, target_definition)
+    has_custom_get_queryset = _target_has_custom_get_queryset(target_type, target_definition)
 
-    runtime_paths, resolver_identities = resolver_identities_for(
+    runtime_paths, resolver_identities = _resolver_identities_for(
         sel,
         relation_field_name,
         type_cls,
@@ -1223,7 +1317,7 @@ def plan_connection_relation(
     )
 
     if django_field.related_model is None:
-        return NestedConnectionPlanResult(plan=plan)
+        return plan
 
     # Keyset context (the ``cursor_field`` opt-in): when the relation target
     # is keyset-mode, every window below derives through the keyset adapter
@@ -1243,10 +1337,10 @@ def plan_connection_relation(
     if filterset_class is not None and filterset_class._requires_bound_form():
         _log_connection_fallback(
             relation_field_name,
-            _response_keys(sel),
+            response_keys(sel),
             "target filter set has a required filter",
         )
-        return NestedConnectionPlanResult(plan=plan)
+        return plan
 
     # (e/f) Slice window(s) from the selection's resolved pagination arguments.
     # Pure (mutates nothing), so resolve BEFORE the child build - a malformed
@@ -1291,7 +1385,7 @@ def plan_connection_relation(
     if keyset_context is None or not (argument_pass[0] or argument_pass[1]):
         keyed_windows = settle(argument_pass)
         if not keyed_windows:
-            return NestedConnectionPlanResult(plan=plan)
+            return plan
 
     # (g, partition) pure; classify the join before the child build so an
     # unsupported relation kind (single-valued forward, or a shape with no
@@ -1306,7 +1400,7 @@ def plan_connection_relation(
     if not join.windowable:
         if keyset_context is not None:
             _ = settle(argument_pass)
-        return NestedConnectionPlanResult(plan=plan)
+        return plan
 
     # (a) Unwrap edges { node }; scalar-only selections plan with [] node children.
     # ``runtime_paths`` spans ALL response keys (per-key child selections are
@@ -1332,13 +1426,12 @@ def plan_connection_relation(
         django_field,
         target_type,
         info,
-        has_custom_qs=has_custom_get_queryset,
         target_definition=target_definition,
     )
     if unwindowable_child_queryset_reason(base_queryset) is not None:
         if keyset_context is not None:
             _ = settle(argument_pass)
-        return NestedConnectionPlanResult(plan=plan)
+        return plan
 
     # (c) Build the child plan/queryset exactly like the list prefetch path, but
     # against a THROWAWAY sub-plan so a strategy refusal below (spec-033 Decision 6,
@@ -1434,7 +1527,7 @@ def plan_connection_relation(
             _ = settle(argument_pass)
             _log_connection_fallback(
                 relation_field_name,
-                _response_keys(sel),
+                response_keys(sel),
                 "keyset order cannot anchor cursors",
             )
             # Every key this order governs raises that keyset error per parent,
@@ -1452,7 +1545,7 @@ def plan_connection_relation(
                 runtime_paths=runtime_paths,
                 resolver_identities=resolver_identities,
             )
-            return NestedConnectionPlanResult(plan=plan)
+            return plan
         if cursor_annotations:
             child_queryset = child_queryset.annotate(**cursor_annotations)
         # The declared vocabulary IS the window's (the same object) -> the
@@ -1464,7 +1557,7 @@ def plan_connection_relation(
             else _divergent_key_windows(response_key_arguments, info, keyset_window_state),
         )
         if not keyed_windows:
-            return NestedConnectionPlanResult(plan=plan)
+            return plan
 
     # The window numbers its rows by ``Query.resolve_ref``, which reads a relation
     # name as its key column, while the statement's ``ORDER BY`` (and the
@@ -1480,8 +1573,8 @@ def plan_connection_relation(
     # leave the relation to it. A keyset order never reaches here random - the
     # cursor vocabulary above refuses it first, with its own error.
     if has_random_term(order_by, child_queryset):
-        _log_connection_fallback(relation_field_name, _response_keys(sel), "random order")
-        return NestedConnectionPlanResult(plan=plan)
+        _log_connection_fallback(relation_field_name, response_keys(sel), "random order")
+        return plan
 
     # A scalar-only (pageInfo/totalCount) selection unwrapped to [] node children,
     # so the child plan added no `.only()` projection; restrict it to the minimal
@@ -1501,9 +1594,10 @@ def plan_connection_relation(
         # projection that did not select them as GraphQL fields (the
         # scalar-only branch above already carries its order columns; a
         # related-path column rides its annotation instead).
-        child_queryset = _extend_only_projection(
+        child_queryset = apply_projection(
             child_queryset,
             local_cursor_attnames(keyset_window_state),
+            introduce=False,
         )
 
     # Conditional total count (spec-033 Decision 4) + count-free ``hasNextPage``
@@ -1622,12 +1716,12 @@ def plan_connection_relation(
         else:
             _log_connection_fallback(
                 relation_field_name,
-                [resp_key] if resp_key is not None else _response_keys(sel),
+                [resp_key] if resp_key is not None else response_keys(sel),
                 f"strategy {getattr(strategy, 'name', truth.name(type(strategy)))!r} "
                 "refused the window",
             )
     if not planned_keys:
-        return NestedConnectionPlanResult(plan=plan)
+        return plan
     # Success path: absorb the child metadata the sub-plan collected into the
     # parent only now - a strategy that refused every window (like each earlier
     # refusal arm) must leak no child resolver keys / fk-id elisions /
@@ -1650,7 +1744,4 @@ def plan_connection_relation(
             plan.planned_resolver_keys,
             resolver_identities,
         )
-    return NestedConnectionPlanResult(
-        plan=plan,
-        accepted_response_keys=tuple(planned_keys),
-    )
+    return plan

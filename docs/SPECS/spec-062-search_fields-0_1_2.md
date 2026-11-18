@@ -169,7 +169,7 @@ is the audit ledger. Load-bearing entries:
   new live search coverage, update the glossary DB so
   [`Meta.search_fields`][glossary-metasearch_fields] reads "implemented on
   `main`; release pending the joint `0.1.2` cut" and regenerate
-  `docs/GLOSSARY.md`, **audit the four Slice-0 fold-in obligations named
+  `docs/GLOSSARY.md`, **audit the three Slice-0 fold-in obligations named
   in the opener** (below), flip card 062 + regenerate the board. Leave
   README/docs README shipped-surface wording, GOAL/TODAY release status,
   `CHANGELOG.md`, and the version triplet untouched — all are owned by the
@@ -1765,25 +1765,22 @@ compiler shape.
 - `KANBAN.md` / `KANBAN.html`: card flip via DB + regen only.
 - **Slice-0 fold-in audit (the opener's card-owned bookkeeping,
   enumerated so no item can be silently dropped OR silently redone).**
-  Four of them are already in the tree; Slice 5 re-verifies each is
+  Three of them are already in the tree; Slice 5 re-verifies each is
   present and still accurate, and does not rewrite what is already
   correct:
-  1. `django_strawberry_framework/exceptions.py::OptimizerError`'s
-     docstring carries the row-preserving predicate-attachment raise site
-     (the two `attach_exists` caller-contract guards); verify only.
-  2. `docs/TREE.md` carries `optimizer/predicates.py` and
+  1. `docs/TREE.md` carries `optimizer/predicates.py` and
      `tests/optimizer/test_predicates.py`; the Slice 5 regen for
      `filters/search.py` re-renders them from the tree, so the check is
      that their one-line descriptions still read true.
-  3. `examples/fakeshop/test_query/README.md` describes the Part 1 live
+  2. `examples/fakeshop/test_query/README.md` describes the Part 1 live
      coverage (the loan reverse-FK surface, the flat-leaf regressions);
      Slice 5 appends the search coverage rather than replacing those
      paragraphs.
-  4. `docs/GLOSSARY.md#filterset` carries the row-preserving
+  3. `docs/GLOSSARY.md#filterset` carries the row-preserving
      multiset-contract paragraph; Slice 5's only glossary write is the
      [`Meta.search_fields`][glossary-metasearch_fields] status move
      above.
-  What Slice 5 still owes on top of the four: the `KANBAN.md` fold-in for
+  What Slice 5 still owes on top of the three: the `KANBAN.md` fold-in for
   the shipped multiset-contract change (card flip + regen, above).
 
 ## Risks and open questions
@@ -1917,8 +1914,8 @@ compiler shape.
   search reproduction passes under Python 3.10 + `Django==5.2.16`, and
   the latest-Django job stays green.
 - [ ] Slice 5 card-local docs updated; GLOSSARY moves to the precise
-  intermediate status; the four Slice-0 fold-in obligations are audited
-  present and accurate (`OptimizerError` raise site, `docs/TREE.md`
+  intermediate status; the three Slice-0 fold-in obligations are audited
+  present and accurate (`docs/TREE.md`
   predicate modules, `test_query/README.md` Part 1 paragraphs,
   `GLOSSARY.md#filterset` multiset contract) rather than dropped or
   rewritten; no release-cut artifact is changed.

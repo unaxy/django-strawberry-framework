@@ -10,12 +10,12 @@ and
 """
 
 import pytest
-from apps.library.models import Book, Branch, Genre, Loan, Shelf, TaggedItem
-from django.db import NotSupportedError, connection, router
+from apps.library.models import Book, Branch, Genre, Shelf, TaggedItem
+from django.db import NotSupportedError, connection
 from django.db.models import CompositePrimaryKey, Model, Q, QuerySet, Value
 from django.db.models.lookups import Lookup
 
-from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.optimizer.predicates import (
     _effective_alias_names,
     _next_reserved_alias,
@@ -99,54 +99,6 @@ def test_alias_allocation() -> None:
     qs_o, cond_o = attach_exists(ordered, inner_o)
     assert cond_o.children == [("_dst_predicate_0", True)]
     assert qs_o.filter(cond_o).count() == 0
-
-
-def test_same_model_guard() -> None:
-    with pytest.raises(OptimizerError, match="does not"):
-        attach_exists(Book.objects.all(), correlated_inner_root(Loan.objects.all()))
-
-
-def test_same_alias_guard() -> None:
-    # Building with .using() does not hit the DB, so no second database is needed.
-    inner = correlated_inner_root(Book.objects.all()).using("nonexistent")
-    with pytest.raises(OptimizerError, match="database-alias mismatch"):
-        attach_exists(Book.objects.all(), inner)
-
-
-def test_alias_mismatch_message_reports_the_compared_values(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The mismatch guard snapshots both ``.db`` resolutions before comparing.
-
-    It formats its message from the snapshots.
-
-    ``.db`` re-resolves through the router on every read of a hint-less
-    queryset, so a stateful router whose answers change between reads must see
-    the guard report the aliases the comparison actually saw -- never a
-    re-resolution inside the message f-string, which could claim a mismatch
-    between two identical aliases (and would read the router a third time).
-    """
-    reads = {"n": 0}
-
-    def flip(_model_instance: object = None, **_hints: object) -> str:
-        reads["n"] += 1
-        return "default" if reads["n"] % 2 else "nonexistent"
-
-    monkeypatch.setattr(router, "db_for_read", flip)
-    outer = Book.objects.all()  # hint-less: .db resolves through the router
-    inner = correlated_inner_root(outer)  # router read 1 pins the inner to 'default'
-    assert inner.db == "default"
-    reads_after_build = reads["n"]
-
-    with pytest.raises(OptimizerError) as exc:
-        attach_exists(outer, inner)
-
-    message = str(exc.value)
-    assert "inner 'default'" in message, message
-    assert "outer 'nonexistent'" in message, message
-    # Exactly one router read per queryset during attach: the outer read the
-    # comparison performed (the inner was pinned at build time).
-    assert reads["n"] - reads_after_build == 1, message
 
 
 def test_database_alias_preserved() -> None:

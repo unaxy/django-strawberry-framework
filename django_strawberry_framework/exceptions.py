@@ -231,10 +231,6 @@ class OptimizerError(DjangoStrawberryFrameworkError):
           rejects a keyset-seek window that is also reversed, since backward
           keyset pagination resolves through the per-parent/root slicer, never a
           reversed window plan.
-        - Row-preserving predicate attachment
-          (``optimizer/predicates.py::attach_exists``): the two runtime
-          caller-contract guards - inner-queryset model does not match the outer
-          model, or inner and outer resolve to different database aliases.
         - Hooked relation without resolve info
           (``optimizer/walker.py::_hook_info``): a direct walk planned with no
           operation's resolve info reaches a relation whose target declares

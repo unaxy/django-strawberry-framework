@@ -808,8 +808,8 @@ def test_builds_plan_is_true_only_when_apply_to_would_run_the_walker(
 def test_resolve_async_passes_through_evaluated_queryset(monkeypatch: pytest.MonkeyPatch) -> None:
     """Async mirror: the await -> ``_optimize`` wrapper inherits the evaluated-queryset guard.
 
-    The async path (``_async_optimize`` awaits the resolver then calls
-    ``_optimize_async``, which hands an evaluated queryset straight to
+    The async path (``_async_optimize`` awaits the resolver, and
+    ``_needs_sync_boundary`` hands an evaluated queryset straight to
     ``_optimize``) routes it through the same guard. The
     tripwire on ``_resolve_model_from_return_type`` proves ``_optimize``
     short-circuits BEFORE return-type resolution / plan build - if the guard
@@ -1747,18 +1747,6 @@ def test_cache_separates_operation_names_in_same_document() -> None:
     assert ext.cache_info().hits == 0
     assert ext.cache_info().misses == 2
     assert ext.cache_info().size == 2
-
-
-def test_build_cache_key_is_stable_when_source_location_missing() -> None:
-    """Cache key still works when the operation has no source body."""
-    document = "{ allCategories { name } }"
-    operation = _operation(parse(document, no_location=True))
-    info = raw_info_of(make_info(document=document))._replace(operation=operation)
-
-    key = DjangoOptimizerExtension._build_cache_key(info, Category)
-
-    assert key[2] is Category
-    assert isinstance(key[3], tuple)
 
 
 def test_directive_var_family_with_skip() -> None:
@@ -2916,11 +2904,6 @@ def test_cache_key_includes_fragment_spread_directive_variable_value() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_collect_schema_reachable_types_returns_empty_without_graphql_schema() -> None:
-    """Schemas without a graphql-core schema expose no reachable types."""
-    assert len(_collect_schema_reachable_types(SimpleNamespace())) == 0
-
-
 def test_check_schema_skips_unreachable_and_missing_field_map(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3581,23 +3564,14 @@ def test_planned_windows_publish_read_and_clear_with_the_frame() -> None:
     assert planned_window("Root.kids@roots.kids") is None
 
 
-def test_relation_is_optimizer_scoped_unhashable_fail_closed() -> None:
-    """``relation_is_optimizer_scoped`` fails closed (returns False) for unhashable objects."""
-    # Inactive: returns False for unhashable shapes
-    # basedpyright: the unhashable key is the hostile input under test;
-    # relation_is_optimizer_scoped types the parameter as str
-    assert not relation_is_optimizer_scoped({})  # pyright: ignore[reportArgumentType]
-    assert not relation_is_optimizer_scoped([])  # pyright: ignore[reportArgumentType]
-
-    # Active: still fail-closed (returns False rather than raising TypeError)
+def test_relation_is_optimizer_scoped_reads_the_active_frame() -> None:
+    """``relation_is_optimizer_scoped`` answers from the active frame, ``False`` with none."""
+    assert not relation_is_optimizer_scoped("valid@Type")
     frame = begin_execution_frame({}, nested=False)
     try:
         publish_scoped_relations({"valid@Type"})
         assert relation_is_optimizer_scoped("valid@Type")
-        # basedpyright: the unhashable key is the hostile input under test;
-        # relation_is_optimizer_scoped types the parameter as str
-        assert not relation_is_optimizer_scoped({})  # pyright: ignore[reportArgumentType]
-        assert not relation_is_optimizer_scoped([])  # pyright: ignore[reportArgumentType]
+        assert not relation_is_optimizer_scoped("other@Type")
     finally:
         end_execution_frame(frame)
 
@@ -4960,7 +4934,7 @@ def test_cascading_target_downgrades_join_to_prefetch() -> None:
     """A relation whose target hook cascades plans a ``Prefetch`` (not ``select_related``).
 
     The target reports ``has_custom_get_queryset() is True``, so the shipped
-    ``optimizer/walker.py::_target_has_custom_get_queryset`` rule fires the
+    ``optimizer/nested_planner.py::_target_has_custom_get_queryset`` rule fires the
     downgrade and bakes the cascade into the child queryset - no optimizer change.
     ``select_related`` is empty, the relation plans one ``Prefetch``, and the plan
     is ``cacheable is False``.

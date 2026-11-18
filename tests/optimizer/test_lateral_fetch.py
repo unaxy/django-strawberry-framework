@@ -26,7 +26,6 @@ from django.db.models import F, Prefetch, Q, QuerySet, Value
 from django.db.models.functions import Lower
 from typing_extensions import Self
 
-from django_strawberry_framework.exceptions import OptimizerError
 from django_strawberry_framework.keyset import (
     KeysetCursor,
     KeysetSeek,
@@ -168,24 +167,6 @@ def test_spec_direct_fk_reverse_foreign_key() -> None:
         False,
         True,
     )
-
-
-def test_lateral_spec_rejects_engaged_probe_with_count() -> None:
-    """The lateral window spec enforces the same probe/count contract as the ORM.
-
-    The lateral twin of the ``NestedConnectionRequest`` guard: constructing a
-    ``LateralWindowSpec`` that engages the count-free probe while also annotating
-    the count raises ``OptimizerError``, so the raw-SQL backend cannot develop a
-    different fetch-mode contract. Built by flipping ``with_total_count`` on a
-    real count-free probe spec.
-    """
-    probe_spec = _build_lateral_spec(
-        _shelf_books_request(with_total_count=False, next_page_probe=True),
-    )
-    assert probe_spec is not None
-    assert probe_spec.next_page_probe is True
-    with pytest.raises(OptimizerError, match="mutually exclusive"):
-        dataclasses.replace(probe_spec, with_total_count=True)
 
 
 def test_spec_forward_m2m_through_table() -> None:

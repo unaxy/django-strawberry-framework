@@ -859,8 +859,8 @@ def test_strictness_silent_when_planned() -> None:
     The load-bearing resolver-key parity: the resolver-side ``_check_n1`` builds
     ``resolver_key(declaring_type, relation_field_name, runtime_path)`` - the
     IDENTICAL shape the walker emits for a nested connection
-    (``walker.py::_resolver_identities_for #"resolver_key(type_cls, relation_field_name"``,
-    reached from ``_plan_connection_relation``). When that exact key is in
+    (``nested_planner.py::_resolver_identities_for #"resolver_key(type_cls, field_name"``,
+    called with the relation field name). When that exact key is in
     ``DST_OPTIMIZER_PLANNED`` the resolver is silent even with the ``to_attr``
     ABSENT on ``root`` (the planned short-circuit beats the connection probe), so
     a window-planned connection never false-flags. A divergent key

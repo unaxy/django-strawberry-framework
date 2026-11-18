@@ -579,13 +579,10 @@ def node_children_with_runtime_prefix(
     runtime_prefixes: tuple[tuple[str, ...], ...],
 ) -> list[SimpleNamespace]:
     """Clone node children with a connection-aware runtime prefix."""
-    children: list[SimpleNamespace] = []
     members: Iterable[ConvertedSelection] = getattr(node_selection, "selections", None) or []
-    for child in members:
-        if not should_include(child):
-            continue
-        children.append(with_runtime_prefix(child, runtime_prefixes))
-    return children
+    return [
+        with_runtime_prefix(child, runtime_prefixes) for child in members if should_include(child)
+    ]
 
 
 # The Python names of a Relay connection's own fields, the names Strawberry's

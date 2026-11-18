@@ -21,15 +21,12 @@ Django descriptors into the walk.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
-from django_strawberry_framework.exceptions import OptimizerError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
-    is_str,
     optional_instance,
     read_attr,
-    require,
 )
 from django_strawberry_framework.utils.relations import (
     RelationLink,
@@ -47,32 +44,6 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.utils.relations import RelationKind
     from django_strawberry_framework.utils.typing import ConcreteField, ModelField
-
-_ABSENT = object()
-
-
-class _DjangoFieldLike(Protocol):
-    """Structural contract for the inputs ``from_django_field`` accepts.
-
-    Every Django ``Field`` and reverse-relation descriptor surfaced by
-    ``Model._meta.get_field`` / ``Model._meta.get_fields`` guarantees
-    ``name`` and ``is_relation``; the remaining attributes
-    (``many_to_many``, ``attname``, ``target_field``, ``field``, ...)
-    are read defensively with ``getattr`` defaults so the four documented
-    input shapes (forward field, reverse FK, M2M, O2O) all build cleanly
-    without per-shape branching. Both members are read-only, which is what
-    lets a reverse-relation descriptor (whose ``name`` is a property) satisfy
-    the contract beside a forward ``Field``. ``from_django_field`` names
-    ``ModelField`` beside this protocol: the stubs declare a reverse relation's
-    ``name`` as a ``cached_property``, which pyright does not match against a
-    protocol property.
-    """
-
-    @property
-    def name(self) -> str: ...
-
-    @property
-    def is_relation(self) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,7 +201,7 @@ class FieldMeta:
         return self.source_target_attnames
 
     @classmethod
-    def from_django_field(cls, field: _DjangoFieldLike | ModelField) -> FieldMeta:
+    def from_django_field(cls, field: ModelField) -> FieldMeta:
         """Build a ``FieldMeta`` from a Django field descriptor.
 
         ``field.name`` and ``field.is_relation`` are the two load-bearing
@@ -238,27 +209,11 @@ class FieldMeta:
         guarantees; the rest are read with ``getattr`` defaults so
         forward fields, reverse relations, and the various M2M shapes
         all build cleanly without per-shape branching.
-
-        Raises:
-            OptimizerError: if ``field`` does not expose the two
-                required attributes ``name`` and ``is_relation``. The
-                explicit guard converts a malformed descriptor into a
-                typed failure at stamp time (``DjangoType`` construction
-                or the walker's unregistered fallback map-build) rather
-                than a late ``AttributeError`` mid-walk.
-
         """
-        field_name = read_attr(field, "name", _ABSENT)
-        is_relation = read_attr(field, "is_relation", _ABSENT)
-        if field_name is _ABSENT or is_relation is _ABSENT:
-            raise OptimizerError(
-                f"FieldMeta.from_django_field expected a Django field descriptor "
-                f"exposing 'name' and 'is_relation'; got {truth.kind(field)}.",
-            )
         return cls._from_field_shape(
             field,
-            is_relation=bool(is_relation),
-            field_name=require(field_name, is_str),
+            is_relation=bool(field.is_relation),
+            field_name=field.name,
         )
 
     @classmethod
@@ -269,13 +224,12 @@ class FieldMeta:
         is_relation: bool,
         field_name: str,
     ) -> FieldMeta:
-        """Build a ``FieldMeta`` from a guard-cleared field-shaped descriptor.
+        """Build a ``FieldMeta`` from a field-shaped descriptor.
 
         Internal helper behind the canonical ``from_django_field`` entry
-        point, which has already established that the input exposes the
-        field-shaped attribute surface (``name`` plus the
-        ``getattr``-defaulted cardinality / target / related-model
-        attributes) and reads ``is_relation`` as ``bool(field.is_relation)``.
+        point, which reads ``name`` and ``is_relation`` off the Django field
+        and leaves the cardinality / target / related-model attributes to the
+        ``getattr``-defaulted reads here.
 
         It holds the cardinality-gated nullable rule (many-side -> ``False``;
         reverse OneToOne -> ``True``; otherwise ``field.null``), the

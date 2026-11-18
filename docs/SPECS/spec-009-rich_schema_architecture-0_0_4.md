@@ -101,7 +101,7 @@ and these functions:
 - `django_strawberry_framework/types/finalizer.py::finalize_django_types`
 - [`DjangoOptimizerExtension`][glossary-djangooptimizerextension]: `django_strawberry_framework/optimizer/extension.py`
 - `django_strawberry_framework/optimizer/extension.py::DjangoOptimizerExtension.check_schema`
-- `django_strawberry_framework/optimizer/walker.py::plan_relation`
+- `django_strawberry_framework/optimizer/walker.py::_walk_selections`
 - `django_strawberry_framework/optimizer/walker.py::_plan_prefetch_relation`
 
 Type creation is two-phase:

@@ -507,7 +507,7 @@ def _optimizer_scoped_relation(
     The trust boundary for skipping a target's custom ``get_queryset`` here is
     per-relation, not per-request. The optimizer downgrades a custom-visibility
     target's traversal to a ``Prefetch`` and applies the hook to that child
-    queryset (``optimizer/walker.py::plan_relation``), so a relation the walker
+    queryset (``optimizer/walker.py::_walk_selections``), so a relation the walker
     planned arrives already scoped and re-filtering it would only repeat the
     query. A consumer ``Prefetch`` carrying a queryset on such a planned path is
     sealed through the same hook in place of the planned one

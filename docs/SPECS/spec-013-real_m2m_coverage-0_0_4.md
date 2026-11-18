@@ -32,7 +32,7 @@ An unmanaged fixture model has no table, so its relation edges can be asserted o
 
 - [`tests/types/test_definition_order.py`][test-types-definition-order] `::test_many_to_many_forward_and_reverse_relations_resolve` — `BookType.genres` and `GenreType.books` resolve to `list[…]` of the peer type, `ShelfType.books` to `list[BookType]`, and `BookType.shelf` to `ShelfType`.
 - [`tests/types/test_definition_order.py`][test-types-definition-order] `::test_one_to_one_forward_and_reverse_relations_resolve` — `MembershipCardType.patron` is `PatronType`; `PatronType.card` is `MembershipCardType | None`.
-- [`tests/optimizer/test_definition_order.py`][test-optimizer-definition-order] `::test_plan_relation_decisions_match_cardinality_after_finalization` — `plan_relation` returns `("prefetch", "default")` for `Book.genres` and `Genre.books`, and `("select", "default")` for both halves of the one-to-one pair.
+- [`tests/optimizer/test_definition_order.py`][test-optimizer-definition-order] `::test_relation_plans_match_cardinality_after_finalization` — the walker prefetches `Book.genres` and `Genre.books` and joins both halves of the one-to-one pair with `select_related`.
 
 **HTTP-tier coverage** pins the same edges through the live `/graphql/` endpoint, in [`examples/fakeshop/test_query/test_library_api.py`][test-library-api]:
 

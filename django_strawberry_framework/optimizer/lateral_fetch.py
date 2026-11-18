@@ -95,7 +95,6 @@ from django_strawberry_framework.utils._narrowing import (
     require,
 )
 from django_strawberry_framework.utils.connections import (
-    assert_window_fetch_mode_for,
     window_range_plan,
 )
 from django_strawberry_framework.utils.typing import object_result
@@ -250,15 +249,6 @@ class LateralWindowSpec:
     # never enter the plan cache: a custom ``get_queryset`` marks the plan
     # non-cacheable (``nested_planner.py``).
     visibility_where: WhereNode | None = None
-
-    def __post_init__(self) -> None:
-        """Enforce the probe/count mutual-exclusion on the lateral window spec.
-
-        The lateral twin of ``NestedConnectionRequest.__post_init__``: the same
-        shared ``assert_window_fetch_mode_for`` so the raw-SQL backend cannot
-        develop a different fetch-mode contract from the ORM window.
-        """
-        assert_window_fetch_mode_for(self)
 
 
 def build_lateral_sql(

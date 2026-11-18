@@ -69,7 +69,7 @@ from django.db.models.expressions import Col
 from django.db.models.fields.reverse_related import ForeignObjectRel
 from django.db.models.sql.datastructures import Join
 
-from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
@@ -305,40 +305,14 @@ def attach_exists(
     ``filter()``, ``exclude()``, ``distinct()``, or builds a predicate body -
     ``.alias()`` is its only outer mutation.
 
-    Runtime guards (all ``OptimizerError`` for family coherence - each is a
-    caller-contract violation in runtime query state, not consumer
-    configuration):
-
-    - ``inner_queryset.model`` must be ``queryset.model``.
-    - ``inner_queryset.db`` must equal ``queryset.db`` (same database alias).
-
-    A combined OUTER queryset (union / intersection / difference) is refused by
-    Django's own ``.alias()`` (``NotSupportedError``).
+    The caller builds ``inner_queryset`` over ``queryset``'s own model and
+    database alias (``correlated_inner_root``). A combined OUTER queryset
+    (union / intersection / difference) is refused by Django's own
+    ``.alias()`` (``NotSupportedError``).
 
     An evaluated OUTER queryset is valid input (see module docstring). The INNER
     queryset must never execute independently (module invariant).
     """
-    model = queryset.model
-    inner_model = inner_queryset.model
-    if inner_model is not model:
-        raise OptimizerError(
-            f"attach_exists inner queryset model {truth.name(inner_model)!r} does not "
-            f"match outer model {truth.name(model)!r}; the inner root must be a "
-            f"correlated queryset over the same model.",
-        )
-    # Snapshot both resolutions BEFORE comparing and format the message from the
-    # snapshots: ``.db`` re-resolves through the router on every read of a
-    # hint-less queryset, so re-reading inside the f-string would report aliases
-    # that were never compared (a stateful router can make the message claim a
-    # mismatch between two identical aliases).
-    inner_db = inner_queryset.db
-    outer_db = queryset.db
-    if inner_db != outer_db:
-        raise OptimizerError(
-            f"attach_exists database-alias mismatch: inner {inner_db!r} "
-            f"vs outer {outer_db!r}; both querysets must resolve to the same "
-            f"database alias.",
-        )
     alias = _next_reserved_alias(queryset)
     new_queryset = queryset.alias(**{alias: Exists(inner_queryset)})
     return new_queryset, Q(**{alias: True})

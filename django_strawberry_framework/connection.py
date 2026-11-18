@@ -99,7 +99,7 @@ from .optimizer.plans import (
     WINDOW_KEYSET_SEEK_COUNT,
     WINDOW_ROW_NUMBER,
     WINDOW_TOTAL_COUNT,
-    _extend_only_projection,
+    apply_projection,
     effective_connection_order,
     effective_cursor_state,
     local_cursor_attnames,
@@ -1043,7 +1043,7 @@ def _keyset_order_state(
     resolved, annotations = effective_cursor_state(state, effective)
     if annotations:
         queryset = queryset.annotate(**annotations)
-    queryset = _extend_only_projection(queryset, local_cursor_attnames(resolved))
+    queryset = apply_projection(queryset, local_cursor_attnames(resolved), introduce=False)
     return resolved.columns, resolved.fingerprint, queryset
 
 

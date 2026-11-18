@@ -37,10 +37,7 @@ from django_strawberry_framework.optimizer.nested_fetch import (
     resolve_strategy,
     unwindowable_child_queryset_reason,
 )
-from django_strawberry_framework.optimizer.nested_planner import (
-    NestedConnectionPlanResult,
-    _select_nested_strategy,
-)
+from django_strawberry_framework.optimizer.nested_planner import _select_nested_strategy
 from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER,
     WINDOW_TOTAL_COUNT,
@@ -53,15 +50,6 @@ from tests.optimizer._builders import nested_connection_request
 def _books_request(**overrides: object) -> NestedConnectionRequest:
     """A minimal valid request for the reverse-M2M ``Genre.books`` relation."""
     return nested_connection_request(Genre, "books", **overrides)
-
-
-def test_nested_plan_result_reports_strategy_acceptance() -> None:
-    plan = OptimizationPlan()
-
-    assert NestedConnectionPlanResult(plan=plan).accepted is False
-    assert (
-        NestedConnectionPlanResult(plan=plan, accepted_response_keys=("books",)).accepted is True
-    )
 
 
 def test_windowed_strategy_attaches_windowed_prefetch() -> None:

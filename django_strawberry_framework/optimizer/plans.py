@@ -41,10 +41,9 @@ in a single pass once the walk completes.
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import MutableSequence
-from dataclasses import dataclass, field, fields, replace
-from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypeVar, cast
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
 
 from django.core.exceptions import FieldDoesNotExist, FieldError
 from django.db.models import Count, F, OrderBy, Prefetch, Q, QuerySet, Value, Window, sql
@@ -174,35 +173,20 @@ class _IndexedList(list[_T]):
             self.append_unique(value)
 
     def append_unique(self, value: _T) -> None:
-        """Append ``value`` once, using the sidecar index when the key is hashable.
-
-        The hashable path runs inside one ``try`` (zero-cost when nothing raises)
-        rather than a probe-``try`` plus a ``contextlib.suppress``
-        around the ``add`` - a per-call context-manager allocation this hot loop
-        could feel. One ``try`` is safe because ``in`` and ``add`` hash the
-        SAME key: when the membership probe passed, the ``add`` cannot raise
-        ``TypeError``, so the appended-then-failed-to-index state is unreachable.
-        """
+        """Append ``value`` once, using the sidecar index (every key is a ``str``)."""
         key = self._key
         index_key = value if key is None else key(value)
-        try:
-            if index_key in self._seen:
-                return
-            super().append(value)
-            self._seen.add(index_key)
-        except TypeError:
-            # Unhashable index key: fall back to a linear membership scan and
-            # leave the sidecar index untouched (nothing hashable to record).
-            if value not in self:
-                super().append(value)
+        if index_key in self._seen:
+            return
+        super().append(value)
+        self._seen.add(index_key)
 
     @override
     def append(self, value: _T) -> None:
         """Append directly and keep the sidecar index useful for later helper calls."""
         super().append(value)
         key = self._key
-        with contextlib.suppress(TypeError):
-            self._seen.add(value if key is None else key(value))
+        self._seen.add(value if key is None else key(value))
 
     @override
     def extend(self, values: Iterable[_T]) -> None:
@@ -387,28 +371,6 @@ class OptimizationPlan:
     (merged like ``planned_resolver_keys``), excluded from ``is_empty``.
     """
 
-    _FULL_MERGE_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {
-            "select_related",
-            "prefetch_related",
-            "only_fields",
-            "select_path_resolver_keys",
-            "prefetch_path_resolver_keys",
-            "prefetch_path_seals",
-        },
-    )
-    _METADATA_MERGE_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {
-            "fk_id_elisions",
-            "planned_resolver_keys",
-            "cacheable",
-            "planned_windows",
-        },
-    )
-    _DERIVED_FINALIZED_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {"finalized_fk_id_elisions", "finalized_planned_resolver_keys", "finalized_lookup_paths"},
-    )
-    _CONSTRUCTION_FIELDS: ClassVar[frozenset[str]] = frozenset({"introduce_projection"})
     finalized_fk_id_elisions: frozenset[str] | None = None
     """Frozen membership set for ``fk_id_elisions`` after ``finalize()``."""
     finalized_planned_resolver_keys: frozenset[str] | None = None
@@ -566,7 +528,6 @@ class OptimizationPlan:
         child plan reaches this point already reconciled against its base
         queryset (``diff_plan_for_queryset`` publishes a finalized copy).
         """
-        self._assert_merge_field_inventory()
         self._assert_under_construction()
         append_unique_many(self.fk_id_elisions, other.fk_id_elisions)
         append_unique_many(self.planned_resolver_keys, other.planned_resolver_keys)
@@ -582,27 +543,6 @@ class OptimizationPlan:
             or self.finalized_lookup_paths is not None
         ):
             raise RuntimeError("OptimizationPlan merges are construction-time operations.")
-
-    @classmethod
-    def _assert_merge_field_inventory(cls) -> None:
-        """Require every dataclass field to have explicit merge ownership."""
-        actual = frozenset(item.name for item in fields(cls))
-        classified = (
-            cls._FULL_MERGE_FIELDS
-            | cls._METADATA_MERGE_FIELDS
-            | cls._DERIVED_FINALIZED_FIELDS
-            | cls._CONSTRUCTION_FIELDS
-        )
-        if actual != classified:
-            missing = sorted(actual - classified)
-            stale = sorted(classified - actual)
-            raise RuntimeError(
-                "OptimizationPlan merge field inventory drifted; "
-                f"unclassified={missing}, stale={stale}.",
-            )
-
-
-OptimizationPlan._assert_merge_field_inventory()
 
 
 def resolver_key(
@@ -620,21 +560,13 @@ def resolver_key(
 def runtime_path_from_info(info: object) -> tuple[str, ...]:
     """Return the runtime path tuple from a GraphQL ``info`` (or ``()`` when absent).
 
-    Thin wrapper that pulls ``info.path`` and delegates to
-    ``runtime_path_from_path``; an ``info`` of ``None`` (or one carrying no path)
-    yields the empty tuple so resolver-key construction stays branch-free at the
-    call site.
-    """
-    return runtime_path_from_path(optional_instance(read_attr(info, "path", None), Path))
-
-
-def runtime_path_from_path(path: Path | None) -> tuple[str, ...]:
-    """Return a GraphQL response ``path``'s keys root-first, list indexes stripped.
-
     graphql-core's ``Path.as_list`` walks the ``prev`` chain; dropping its
     integer keys (list-index entries) leaves a stable structural identity for
-    cache-key and resolver-key purposes.
+    cache-key and resolver-key purposes. An ``info`` of ``None`` (or one carrying
+    no path) yields the empty tuple so resolver-key construction stays
+    branch-free at the call site.
     """
+    path = optional_instance(read_attr(info, "path", None), Path)
     if path is None:
         return ()
     return tuple(key for key in path.as_list() if isinstance(key, str))
@@ -783,51 +715,6 @@ def _consumer_prefetch_lookups(queryset: QuerySet[models.Model, object]) -> list
     return list(queryset_prefetch_lookups(queryset))
 
 
-def deferred_loading_of(queryset: QuerySet[models.Model, object]) -> tuple[frozenset[str], bool]:
-    """Return a queryset's raw ``(names, defer_flag)`` deferred-loading state.
-
-    THE single reader of the brittle Django-private contract for
-    ``QuerySet.query.deferred_loading``, a ``(field_set, defer_flag)`` tuple
-    where ``defer_flag is False`` means ``.only()`` was applied (Django's
-    "load only this set" mode) and ``defer_flag is True`` is the default
-    ``.defer()``-or-nothing mode. Every consumer builds on this one unpack
-    so a future Django rename has one fix.
-    """
-    field_set, defer_flag = queryset.query.deferred_loading
-    return frozenset(field_set), defer_flag
-
-
-def _extend_only_projection(
-    child_queryset: QuerySet[_M, _RowT],
-    attnames: tuple[str, ...],
-) -> QuerySet[_M, _RowT]:
-    """Ensure ``attnames`` load under an existing ``.only()`` / ``.defer()`` projection.
-
-    The keyset cursor-column loader: a keyset page mints edge cursors from
-    the rows' ordering-column VALUES, so those columns must survive the
-    ``.only()`` mask even when the query never selects them as GraphQL
-    fields. Django's ``.only()`` chaining REPLACES the load-only set, so the
-    extension re-applies the UNION read through the shared
-    ``deferred_loading_of`` unpack. A ``.defer()`` mask needs the inverse:
-    clear it, then re-apply every deferred field EXCEPT the cursor columns.
-    Otherwise cursor minting lazy-loads once per edge in sync execution and
-    raises ``SynchronousOnlyOperation`` in async execution.
-    """
-    names, defer_flag = deferred_loading_of(child_queryset)
-    if defer_flag:
-        remaining = sorted(set(names) - set(attnames))
-        if len(remaining) == len(names):
-            return child_queryset
-        cleared = child_queryset.defer(None)
-        return cleared.defer(*remaining) if remaining else cleared
-    if not names:
-        return child_queryset
-    missing = [attname for attname in attnames if attname not in names]
-    if not missing:
-        return child_queryset
-    return child_queryset.only(*names, *missing)
-
-
 def _select_mask(model: type[models.Model], names: Iterable[str]) -> dict[object, object]:
     """Django's select mask for ``.only(*names)`` on ``model`` (``Query.get_select_mask``).
 
@@ -866,7 +753,10 @@ def _loads(select_mask: dict[object, object], entry: str, model: type[models.Mod
     return _mask_covers(select_mask, entry_mask)
 
 
-def merged_projection(queryset: QuerySet[_M], names: Sequence[str]) -> tuple[list[str], bool]:
+def merged_projection(
+    queryset: QuerySet[_M, _RowT],
+    names: Sequence[str],
+) -> tuple[list[str], bool]:
     """Union the queryset's own projection with ``names`` as loaded column sets.
 
     Returns ``(entries, defer_mode)``: the entries to write with ``.only()``
@@ -904,10 +794,12 @@ def _consumer_projection(
     blocks ``select_related`` traversal exactly like an omitting ``.only(...)``
     does.
     """
-    names, defer_flag = deferred_loading_of(queryset)
+    # ``Query.deferred_loading`` is ``(names, defer_flag)``: ``defer_flag`` False
+    # means ``.only()`` applied, True the default ``.defer()``-or-nothing mode.
+    names, defer_flag = queryset.query.deferred_loading
     if not names:
         return None
-    return names, defer_flag
+    return frozenset(names), defer_flag
 
 
 def _select_path_missing_connectors(
@@ -961,11 +853,11 @@ def _select_path_missing_connectors(
 
 
 def apply_projection(
-    queryset: QuerySet[_M],
+    queryset: QuerySet[_M, _RowT],
     names: Sequence[str],
     *,
     introduce: bool = True,
-) -> QuerySet[_M]:
+) -> QuerySet[_M, _RowT]:
     """Project ``names`` onto ``queryset`` without shrinking what it already loads or traverses.
 
     The one projection writer for a plan (``OptimizationPlan.apply``, root and
@@ -1016,7 +908,7 @@ def apply_projection(
     return queryset.only(*entries, *extras)
 
 
-def _prefetch_carrier_attnames(queryset: QuerySet[_M]) -> list[str]:
+def _prefetch_carrier_attnames(queryset: QuerySet[_M, _RowT]) -> list[str]:
     """Source-row link columns of every ``prefetch_related`` lookup the queryset carries.
 
     Each lookup's first segment names the field Django reaches on the instance
@@ -1478,25 +1370,6 @@ def _draws_at_random(node: object) -> bool:
     return any(_draws_at_random(source) for source in list_of(sources))
 
 
-def _keyset_order_ref(entry: object) -> tuple[str, str, bool] | None:
-    """Parse one effective-order entry into ``(canonical ref, name, descending)``.
-
-    Accepts the string and plain-``OrderBy``/``F`` shapes
-    ``order_entry_name_and_direction`` parses; rejects (``None``) entries a
-    value cursor cannot anchor: unresolvable expressions (aggregates,
-    transforms) and explicit ``nulls_first`` / ``nulls_last`` positioning
-    (the nullable domain the keyset column contract excludes --
-    ``order_entry_has_explicit_nulls``).
-    """
-    if order_entry_has_explicit_nulls(entry):
-        return None
-    parsed = order_entry_name_and_direction(entry)
-    if parsed is None:
-        return None
-    name, descending = parsed
-    return (f"-{name}" if descending else name), name, descending
-
-
 def _resolve_order_path_field(model: type[models.Model], path: str) -> ConcreteField | None:
     """Resolve a (possibly ``__``-traversing) order path to its terminal column.
 
@@ -1570,15 +1443,24 @@ def effective_cursor_state(
                 "row orders as missing. Order by a non-nullable column or paginate under "
                 "the default order.",
             )
-        parsed = _keyset_order_ref(entry)
-        field = None if parsed is None else _resolve_order_path_field(model, parsed[1])
+        # A value cursor anchors the string and plain-``OrderBy``/``F`` shapes
+        # ``order_entry_name_and_direction`` parses, never explicit
+        # ``nulls_first`` / ``nulls_last`` positioning (the nullable domain the
+        # keyset column contract excludes).
+        parsed = (
+            None
+            if order_entry_has_explicit_nulls(entry)
+            else order_entry_name_and_direction(entry)
+        )
+        field = None if parsed is None else _resolve_order_path_field(model, parsed[0])
         if parsed is None or field is None:
             raise keyset_contract_error(
                 "require every ordering entry to be a database column; the "
                 "requested order cannot anchor stable cursors. Remove the "
                 "unsupported orderBy entry or paginate under the default order.",
             )
-        ref, name, descending = parsed
+        name, descending = parsed
+        ref = f"-{name}" if descending else name
         # A ``GeneratedField`` is nullable, JSON and coded as the column it computes.
         field = generated_column(field) or field
         if getattr(field, "null", False):
@@ -2026,10 +1908,13 @@ def diff_plan_for_queryset(
         plan,
         queryset,
     )
+    # The wildcard ``select_related()`` (``True``) flattens to no paths, so explicit
+    # nullable-FK entries still apply (``_flatten_select_related``).
+    already_select = _flatten_select_related(queryset.query.select_related)
     new_select = [
         name
-        for name in _diff_select_related(plan.select_related, queryset)
-        if name not in released_select
+        for name in plan.select_related
+        if name not in already_select and name not in released_select
     ]
     new_prefetch, new_queryset, dropped_prefetch_paths, sealed_paths = _diff_prefetch_related(
         plan.prefetch_related,
@@ -2190,22 +2075,6 @@ def _withdraw_owned_select_paths(
     return released, rerooted, keys, prefixes
 
 
-def _diff_select_related(plan_select_related: Sequence[str], queryset: object) -> list[str]:
-    """Drop optimizer ``select_related`` entries that the queryset already has.
-
-    Compared as dotted lookup paths against the consumer's existing
-    ``query.select_related`` dict.  Exact matches are dropped; the
-    wildcard form (``True``) is treated as no overlap so explicit
-    nullable-FK entries still apply (see ``_flatten_select_related``).
-    Defensive: a queryset-shaped object without ``.query`` is treated
-    as having no existing select_related, matching the rest of the
-    file's defensive ``getattr`` style.
-    """
-    query = getattr(queryset, "query", None)
-    already_select = _flatten_select_related(getattr(query, "select_related", False))
-    return [name for name in plan_select_related if name not in already_select]
-
-
 def _diff_prefetch_related(
     plan_prefetch_related: Sequence[PrefetchLookup],
     queryset: QuerySet[_M],
@@ -2353,10 +2222,7 @@ def _prefetch_lookup_paths(entries: Iterable[PrefetchLookup], prefix: str = "") 
             path = f"{prefix}__{entry}" if prefix else entry
             paths.add(path)
             continue
-        prefetch_to = getattr(entry, "prefetch_to", None)
-        if prefetch_to is None:
-            continue
-        path = f"{prefix}__{prefetch_to}" if prefix else prefetch_to
+        path = f"{prefix}__{entry.prefetch_to}" if prefix else entry.prefetch_to
         paths.add(path)
         inner = entry.queryset
         inner_lookups = _consumer_prefetch_lookups(inner) if inner is not None else []

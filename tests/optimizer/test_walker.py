@@ -76,9 +76,11 @@ from django_strawberry_framework.optimizer.nested_fetch import (
     unwindowable_child_queryset_reason,
 )
 from django_strawberry_framework.optimizer.nested_planner import (
+    _aliased_arguments_diverge,
     _concrete_order_columns,
     _divergent_key_windows,
     _record_accounted_keys,
+    _response_key_arguments_conflict,
 )
 from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER,
@@ -95,7 +97,6 @@ from django_strawberry_framework.optimizer.selections import (
 )
 from django_strawberry_framework.optimizer.walker import (
     _RELAY_ID_PYTHON_NAME,
-    _aliased_arguments_diverge,
     _apply_hint,
     _build_child_queryset,
     _build_connection_child_queryset,
@@ -105,9 +106,8 @@ from django_strawberry_framework.optimizer.walker import (
     _merge_runtime_prefixes,
     _plan_connection_relation,
     _prefetch_hint_for_path,
-    _record_prefetch_path_keys,
+    _record_path_resolver_keys,
     _resolve_field_map,
-    _response_key_arguments_conflict,
     _selected_scalar_names,
     plan_optimizations,
 )
@@ -514,11 +514,11 @@ def test_plan_skips_unknown_selections() -> None:
     assert plan.is_empty
 
 
-def test_record_prefetch_path_keys_ignores_an_empty_key_set() -> None:
+def test_record_path_resolver_keys_ignores_an_empty_key_set() -> None:
     """An empty resolver-key tuple leaves the path ledger untouched."""
     plan = OptimizationPlan()
 
-    _record_prefetch_path_keys(plan, "items", ())
+    _record_path_resolver_keys(plan.prefetch_path_resolver_keys, "items", ())
 
     assert plan.prefetch_path_resolver_keys == {}
 
@@ -848,18 +848,6 @@ def test_plan_select_relation_with_missing_related_model_is_not_elided(
     assert plan.select_related == ("relation",)
     assert plan.only_fields == ("relation_id",)
     assert plan.fk_id_elisions == ()
-
-
-def test_unregistered_field_map_rejects_malformed_descriptor() -> None:
-    """Unregistered planning stamps via ``from_django_field`` and fails typed-and-early."""
-
-    class FakeModel:
-        _meta = SimpleNamespace(get_fields=lambda: [SimpleNamespace(name="x")])
-
-    with pytest.raises(OptimizerError, match="expected a Django field descriptor"):
-        # basedpyright: the model whose field lacks is_relation is the hostile input under test;
-        # plan_optimizations types the parameter as type[Model]
-        plan_optimizations([_sel("x")], FakeModel)  # pyright: ignore[reportArgumentType]
 
 
 def test_unregistered_field_map_stamps_a_multi_column_forward_foreign_object() -> None:
@@ -1841,7 +1829,6 @@ def test_connection_child_seam_still_admits_a_sliced_hook_result() -> None:
         field,
         SlicedItemType,
         info,
-        has_custom_qs=True,
         target_definition=SlicedItemType.__django_strawberry_definition__,
     )
     assert admitted.query.is_sliced
@@ -1851,7 +1838,6 @@ def test_connection_child_seam_still_admits_a_sliced_hook_result() -> None:
             field,
             SlicedItemType,
             info,
-            has_custom_qs=True,
             target_definition=SlicedItemType.__django_strawberry_definition__,
         )
     assert "returned a sliced queryset (rows 0:1)" in str(excinfo.value)
@@ -1891,14 +1877,16 @@ def test_child_builder_spends_the_passed_definition_not_a_class_reread() -> None
             return queryset.order_by("pk")[:1]
 
     diverged = _as_definitionless_django_type(DivergedItemType)
-    # basedpyright: a definition carrying only the ``model`` slot the child builder reads is the
+    # basedpyright: a definition carrying only the two slots the child builder reads is the
     # input under test; the builder types the parameter as DjangoTypeDefinition
-    resolved: DjangoTypeDefinition = SimpleNamespace(model=Item)  # pyright: ignore[reportAssignmentType]
+    resolved: DjangoTypeDefinition = SimpleNamespace(  # pyright: ignore[reportAssignmentType]
+        model=Item,
+        has_custom_get_queryset=True,
+    )
     admitted = _build_connection_child_queryset(
         field,
         diverged,
         info,
-        has_custom_qs=True,
         target_definition=resolved,
     )
     assert admitted.query.is_sliced
@@ -1908,7 +1896,6 @@ def test_child_builder_spends_the_passed_definition_not_a_class_reread() -> None
             field,
             diverged,
             info,
-            has_custom_qs=True,
             target_definition=resolved,
         )
     assert "returned a sliced queryset (rows 0:1)" in str(excinfo.value)
@@ -1940,7 +1927,6 @@ def test_child_hook_without_resolve_info_fails_loudly() -> None:
             field,
             HookedItemType,
             None,
-            has_custom_qs=True,
             target_definition=HookedItemType.__django_strawberry_definition__,
         )
     assert calls == []
@@ -1948,9 +1934,25 @@ def test_child_hook_without_resolve_info_fails_loudly() -> None:
 
 def test_build_child_queryset_refuses_a_custom_verdict_without_a_target_type() -> None:
     """A custom ``get_queryset`` verdict with no target type names the defect, not a hook."""
+
+    class HookedItemType(DjangoType):
+        class Meta:
+            model = Item
+            fields = ("id", "name")
+
+        @override
+        @classmethod
+        def get_queryset(cls, queryset: QuerySet[Item], info: strawberry.Info) -> QuerySet[Item]:
+            return queryset
+
     field = FieldMeta.from_django_field(Category._meta.get_field("items"))
     with pytest.raises(TypeError, match="custom get_queryset verdict reached a relation with no"):
-        _build_child_queryset(field, None, None, has_custom_qs=True)
+        _build_child_queryset(
+            field,
+            None,
+            None,
+            target_definition=HookedItemType.__django_strawberry_definition__,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2661,37 +2663,6 @@ def test_plan_prefetch_obj_hint_dedupes_repeat_lookups() -> None:
         registry.clear()
 
     assert plan.prefetch_related == (explicit,)
-
-
-def test_plan_tolerates_optimizer_hints_set_to_none() -> None:
-    """Shape guard: definition.optimizer_hints = None must not raise.
-
-    The definition field is typed as a dict, but defending the
-    intersection ``set to None`` keeps the reader robust against
-    misbehaving writers and matches the ``... or {}`` pattern used
-    elsewhere in the package.
-    """
-    registry.clear()
-
-    class ItemType:
-        @classmethod
-        def has_custom_get_queryset(cls) -> bool:
-            return False
-
-    _register_type_definition(Item, ItemType)
-    item_definition = registry.get_definition(ItemType)
-    assert item_definition is not None
-    # basedpyright: the planted None is the misbehaving-writer input under test;
-    # DjangoTypeDefinition types optimizer_hints as a dict
-    item_definition.optimizer_hints = None  # pyright: ignore[reportAttributeAccessIssue]
-    try:
-        plan = plan_optimizations([_sel("category", selections=[_sel("name")])], Item)
-    finally:
-        registry.clear()
-
-    # With no hints, default dispatch picks select_related for a forward FK
-    # with a non-id-only child selection.
-    assert plan.select_related == ("category",)
 
 
 def test_plan_tolerates_registered_type_without_definition() -> None:
@@ -5694,25 +5665,9 @@ def test_query_identical_selection_still_projects_only(
     assert {"category_id", "category__name"} <= set(only_fields)
 
 
-@pytest.mark.parametrize(
-    "partial",
-    [
-        None,
-        SimpleNamespace(),
-        SimpleNamespace(operation=None),
-        SimpleNamespace(operation=SimpleNamespace(operation=None)),
-    ],
-    ids=[
-        "no-info",
-        "no-operation",
-        "null-operation",
-        "null-operation-type",
-    ],
-)
-def test_projection_defaults_on_without_an_operation(partial: object) -> None:
-    """A missing executor operation defaults to introducing a projection for every info shape."""
-    info = None if partial is None else _as_partial_resolve_info(partial)
-    plan = plan_optimizations([_sel("name")], Category, info=info)
+def test_projection_defaults_on_without_resolve_info() -> None:
+    """A walk with no resolve info introduces a projection."""
+    plan = plan_optimizations([_sel("name")], Category, info=None)
     assert plan.introduce_projection is True
     assert plan.only_fields == ("name",)
 
@@ -6508,7 +6463,6 @@ def test_single_valued_child_hook_reads_every_target_row_in_the_default_manager_
             field,
             ShapedShelfType,
             raw_info_of(make_info()),
-            has_custom_qs=True,
             target_definition=ShapedShelfType.__django_strawberry_definition__,
         )
 
@@ -6551,6 +6505,6 @@ def test_many_side_child_reads_the_default_manager_rows(
     owner = Branch if parent_rows == "branch" else Book
     child_field = FieldMeta.from_django_field(owner._meta.get_field(relation))
     with default_manager_shape(model, "hand_written", field):
-        child = _build_child_queryset(child_field, None, None, has_custom_qs=False)
+        child = _build_child_queryset(child_field, None, None)
 
         assert sorted(child.values_list(field, flat=True)) == ["aa-ok"]

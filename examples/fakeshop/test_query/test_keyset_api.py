@@ -778,10 +778,10 @@ def test_nested_keyset_unselected_cursor_column_is_not_lazy_loaded_per_edge() ->
     ``IssueType.cursor_field = ("-number", "id")``. When the node selection does
     NOT select ``number`` (only ``title``), the scalar-only window projection
     would ``.only("title", "id")`` and DEFER ``number`` - so minting each edge's
-    value cursor would lazy-load ``number`` once PER edge (an N+1). The already
-    -implemented ``_extend_only_projection`` (which killed the strawberry-django
-    ``annotate_ordering_fields`` port) folds the cursor columns back into the
-    projection, so the whole nested window stays a single batched prefetch with
+    value cursor would lazy-load ``number`` once PER edge (an N+1). The planner
+    widens the projection with the cursor columns
+    (``optimizer/plans.py::apply_projection``), so the whole nested window stays a
+    single batched prefetch with
     zero per-edge lazy loads. Pinned here as live behavior.
     """
     _seed_periodicals()

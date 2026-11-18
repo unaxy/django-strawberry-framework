@@ -1282,7 +1282,7 @@ async def run_in_one_sync_boundary(
     read path enters it once per custom synchronous ``get_queryset`` call
     (``apply_type_visibility_async``; a cascade walk inside that hook rides the
     same worker) and once per optimizer plan build
-    (``DjangoOptimizerExtension._optimize_async``,
+    (``DjangoOptimizerExtension._needs_sync_boundary``,
     ``apply_connection_optimization_async``), so one read resolution may enter it
     more than once; the optimizer's hop serves a plain ``def`` root under the
     asynchronous executor too (``DjangoOptimizerExtension.resolve``).

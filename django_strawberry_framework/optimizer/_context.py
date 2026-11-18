@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 from contextvars import ContextVar, Token
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
 from django_strawberry_framework.utils._narrowing import (
@@ -184,45 +185,24 @@ _NO_KEYS: frozenset[object] = frozenset()
 #: no package runner exists on either side.
 
 
+@dataclass(slots=True, kw_only=True)
 class _ExecutionFrame:
     """The scratch one managed execution publishes to itself.
 
-    ``__slots__`` because every member is reached from the optimizer's hot path
+    Slotted because every member is reached from the optimizer's hot path
     and an attribute grown by a typo is a memo nothing would ever read back.
     """
 
-    __slots__: tuple[str, ...] = (
-        "converted",
-        "key_parts",
-        "optimizer",
-        "planned_windows",
-        "plans",
-        "publishes_to_context",
-        "scoped_relations",
-        "stashes",
-        "strategy",
-        "strictness",
-    )
-
-    def __init__(
-        self,
-        stashes: dict[str, object],
-        *,
-        publishes_to_context: bool,
-        optimizer: DjangoOptimizerExtension | None,
-        strategy: NestedConnectionStrategy | None,
-        strictness: str | None,
-    ) -> None:
-        self.stashes: dict[str, object] = stashes
-        self.publishes_to_context: bool = publishes_to_context
-        self.optimizer: DjangoOptimizerExtension | None = optimizer
-        self.strategy: NestedConnectionStrategy | None = strategy
-        self.strictness: str | None = strictness
-        self.scoped_relations: set[str] = set()
-        self.planned_windows: dict[str, PlannedWindow] = {}
-        self.plans: dict[PlanCacheKey, OptimizationPlan] = {}
-        self.key_parts: dict[int, CacheKeyParts] = {}
-        self.converted: dict[ConvertedMemoKey, list[Selection]] = {}
+    stashes: dict[str, object]
+    publishes_to_context: bool
+    optimizer: DjangoOptimizerExtension | None
+    strategy: NestedConnectionStrategy | None
+    strictness: str | None
+    scoped_relations: set[str] = field(default_factory=set)
+    planned_windows: dict[str, PlannedWindow] = field(default_factory=dict)
+    plans: dict[PlanCacheKey, OptimizationPlan] = field(default_factory=dict)
+    key_parts: dict[int, CacheKeyParts] = field(default_factory=dict)
+    converted: dict[ConvertedMemoKey, list[Selection]] = field(default_factory=dict)
 
     def clear(self) -> None:
         """Empty every store this frame owns, at the end of the execution.
@@ -279,7 +259,7 @@ def begin_execution_frame(
     request context object stays the outer operation's medium.
     """
     frame = _ExecutionFrame(
-        stashes,
+        stashes=stashes,
         publishes_to_context=not (nested or _active_frame() is not None),
         optimizer=optimizer,
         strategy=strategy,
@@ -365,10 +345,7 @@ def relation_is_optimizer_scoped(key: str) -> bool:
     frame = _active_frame()
     if frame is None:
         return False
-    try:
-        return key in frame.scoped_relations
-    except TypeError:
-        return False
+    return key in frame.scoped_relations
 
 
 def operation_publishes_to_context() -> bool:

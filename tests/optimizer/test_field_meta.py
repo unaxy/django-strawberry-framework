@@ -28,7 +28,6 @@ from apps.library.models import (
 from apps.products.models import Category, Item
 
 from django_strawberry_framework import DjangoType, finalize_django_types
-from django_strawberry_framework.exceptions import OptimizerError
 from django_strawberry_framework.optimizer.field_meta import FieldMeta, _target_pk_name
 from django_strawberry_framework.optimizer.selections import PYTHON_NAME_ATTR
 from django_strawberry_framework.optimizer.walker import _resolve_field_map, plan_optimizations
@@ -320,35 +319,6 @@ def test_from_django_field_reverse_one_to_one_is_nullable() -> None:
     assert fm.nullable is True
 
 
-def test_from_django_field_rejects_non_django_input() -> None:
-    """Inputs missing 'name'/'is_relation' raise OptimizerError at the call site.
-
-    Without the guard, the failure mode would be ``AttributeError`` deep
-    inside the optimizer walk. The typed exception makes the contract
-    violation explicit at stamp time.
-    """
-
-    class NotAField:
-        pass
-
-    with pytest.raises(OptimizerError, match="expected a Django field descriptor"):
-        # basedpyright: the attribute-less object is the hostile input under test;
-        # FieldMeta.from_django_field types the parameter as a Django field
-        FieldMeta.from_django_field(NotAField())  # pyright: ignore[reportArgumentType]
-
-
-def test_from_django_field_rejects_partial_shape() -> None:
-    """An input with 'name' but missing 'is_relation' still raises OptimizerError."""
-
-    class PartialField:
-        name = "x"
-
-    with pytest.raises(OptimizerError):
-        # basedpyright: the field without is_relation is the hostile input under test;
-        # FieldMeta.from_django_field types the parameter as a Django field
-        FieldMeta.from_django_field(PartialField())  # pyright: ignore[reportArgumentType]
-
-
 def test_target_pk_name_resolves_or_answers_none() -> None:
     """_target_pk_name returns the model's pk name, or None for a shape without one."""
     assert _target_pk_name(None) is None
@@ -367,15 +337,6 @@ def test_target_pk_name_resolves_or_answers_none() -> None:
     assert _target_pk_name(non_str_pk) is None  # pyright: ignore[reportArgumentType]
 
     assert _target_pk_name(Category) == "id"
-
-
-def test_from_django_field_rejects_non_string_field_name() -> None:
-    """A non-string field name fails the typed read at stamp time."""
-    non_str_field = SimpleNamespace(name=123, is_relation=False)
-    with pytest.raises(TypeError, match="got int"):
-        # basedpyright: the non-str field name is the hostile input under test;
-        # FieldMeta.from_django_field types the parameter as a Django field
-        FieldMeta.from_django_field(non_str_field)  # pyright: ignore[reportArgumentType]
 
 
 def test_field_meta_is_frozen() -> None:

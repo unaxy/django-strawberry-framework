@@ -8,6 +8,7 @@ not GraphQL fields. Consumer-visible SQL is
 
 import sys
 from collections.abc import Callable
+from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
@@ -59,7 +60,7 @@ from django_strawberry_framework.optimizer.plans import (
     normalize_order_direction,
     order_entry_has_explicit_nulls,
     resolver_key,
-    runtime_path_from_path,
+    runtime_path_from_info,
     seals_consumer_prefetch,
 )
 from django_strawberry_framework.utils._queryset_private import (
@@ -127,13 +128,6 @@ class TestLookupPaths:
             fk_id_elisions=["ItemType.owner@allItems.owner"],
         )
         assert lookup_paths(plan) == {"category"}
-
-    def test_ignores_unknown_prefetch_like_entries(self) -> None:
-        # Deliberately impossible for generated plans; covers defensive flattening.
-        # basedpyright: the non-lookup prefetch entry is the hostile input under test;
-        # OptimizationPlan types prefetch_related as Sequence[PrefetchLookup]
-        plan = OptimizationPlan(prefetch_related=[object()])  # pyright: ignore[reportArgumentType]
-        assert lookup_paths(plan) == set()
 
     def test_uses_finalized_lookup_paths_after_finalize(self) -> None:
         """After ``finalize()``, ``lookup_paths`` reuses the frozen path set."""
@@ -281,40 +275,42 @@ class TestOptimizationPlanMerge:
         with pytest.raises(RuntimeError, match="construction-time"):
             OptimizationPlan().finalize().merge_from(OptimizationPlan())
 
-    def test_merge_inventory_guard_reports_stale_classification(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            OptimizationPlan,
-            "_FULL_MERGE_FIELDS",
-            OptimizationPlan._FULL_MERGE_FIELDS | {"removed_field"},
-        )
+    def test_every_field_has_explicit_merge_ownership(self) -> None:
+        """Each dataclass field is merged in full, merged as metadata, derived, or construction-only.
 
-        with pytest.raises(RuntimeError, match=r"stale=\['removed_field'\]"):
-            OptimizationPlan._assert_merge_field_inventory()
-
-    def test_introduce_projection_is_a_construction_field_no_merge_carries(self) -> None:
-        """The operation flag is set when a plan is built and never merged from another plan.
-
-        Every plan of one walk is built with its parent's flag, so a merge has
-        nothing to reconcile; the inventory guard classifies it on its own.
+        ``merge_from`` carries the full set, ``merge_metadata_from`` the metadata
+        set, ``finalize`` derives the ``finalized_*`` fields, and the operation
+        flag is set when a plan is built: every plan of one walk is built with its
+        parent's flag, so a merge has nothing to reconcile. A new field fails here
+        until it is given an owner.
         """
-        assert frozenset({"introduce_projection"}) == OptimizationPlan._CONSTRUCTION_FIELDS
-        OptimizationPlan._assert_merge_field_inventory()
+        full = {
+            "select_related",
+            "prefetch_related",
+            "only_fields",
+            "select_path_resolver_keys",
+            "prefetch_path_resolver_keys",
+            "prefetch_path_seals",
+        }
+        metadata = {
+            "fk_id_elisions",
+            "planned_resolver_keys",
+            "cacheable",
+            "planned_windows",
+        }
+        derived = {
+            "finalized_fk_id_elisions",
+            "finalized_planned_resolver_keys",
+            "finalized_lookup_paths",
+        }
+        construction = {"introduce_projection"}
+        assert {item.name for item in fields(OptimizationPlan)} == (
+            full | metadata | derived | construction
+        )
         target = OptimizationPlan(introduce_projection=False)
         target.merge_from(OptimizationPlan(only_fields=["name"]))
         target.merge_metadata_from(OptimizationPlan())
         assert target.introduce_projection is False
-
-    def test_merge_inventory_guard_reports_an_unclassified_construction_field(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(OptimizationPlan, "_CONSTRUCTION_FIELDS", frozenset[str]())
-
-        with pytest.raises(RuntimeError, match=r"unclassified=\['introduce_projection'\]"):
-            OptimizationPlan._assert_merge_field_inventory()
 
 
 class TestOptimizationPlanFinalize:
@@ -487,16 +483,6 @@ class TestIndexedList:
         # already-present value is a no-op.
         indexed.append_unique("b")
         assert indexed == ["a", "b", "c"]
-
-    def test_append_unique_falls_back_to_membership_for_unhashable_values(self) -> None:
-        indexed: _IndexedList[list[str]] = _IndexedList()
-        unhashable = ["nested"]
-        # Unhashable key: the ``_seen`` probe raises ``TypeError`` and the
-        # helper falls back to an ``in self`` membership scan. First insert
-        # appends; the second is recognised as a duplicate and skipped.
-        indexed.append_unique(unhashable)
-        indexed.append_unique(unhashable)
-        assert indexed == [["nested"]]
 
 
 class TestFlattenSelectRelated:
@@ -938,16 +924,17 @@ class TestConsumerPrefetchSeal:
         )
 
 
-class TestRuntimePathFromPath:
-    """``runtime_path_from_path`` reads graphql-core's ``Path.as_list``."""
+class TestRuntimePathFromInfo:
+    """``runtime_path_from_info`` reads graphql-core's ``Path.as_list``."""
 
     def test_strips_list_indexes(self) -> None:
         """Integer (list-index) keys are skipped; string keys/aliases kept."""
-        assert runtime_path_from_path(response_path("allItems", 0, "cat")) == ("allItems", "cat")
+        info = SimpleNamespace(path=response_path("allItems", 0, "cat"))
+        assert runtime_path_from_info(info) == ("allItems", "cat")
 
     def test_absent_path_is_empty(self) -> None:
         """No path (an ``info`` carrying none) is the empty runtime path."""
-        assert runtime_path_from_path(None) == ()
+        assert runtime_path_from_info(SimpleNamespace(path=None)) == ()
 
 
 class TestApplyWindowPagination:

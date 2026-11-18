@@ -39,6 +39,7 @@ from django.db import models
 from graphql.language.ast import (
     DocumentNode,
     FieldNode,
+    Location,
     VariableNode,
 )
 from graphql.language.printer import print_ast
@@ -48,7 +49,9 @@ from graphql.type.definition import (
     GraphQLUnionType,
     get_named_type,
 )
+from graphql.type.schema import GraphQLSchema
 from graphql.utilities.separate_operations import separate_operations
+from strawberry import Schema
 
 # basedpyright: Strawberry annotates ``info`` as graphql-core's bare generic ``GraphQLResolveInfo``
 from strawberry.types.nodes import get_variable_values  # pyright: ignore[reportUnknownVariableType]
@@ -57,9 +60,7 @@ from typing_extensions import override
 from django_strawberry_framework.extensions.operation_state import (
     OperationState,
     _OperationBoundExtension,
-)
-from django_strawberry_framework.extensions.operation_state import (
-    operation_is_nested as _operation_is_nested,
+    operation_is_nested,
 )
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.utils import truth
@@ -70,6 +71,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_set_or_frozenset,
     is_str,
     read_attr,
+    require_instance,
 )
 from django_strawberry_framework.utils.connections import resolve_relay_max_results
 from django_strawberry_framework.utils.execution_mode import operation_is_async
@@ -80,17 +82,11 @@ from django_strawberry_framework.utils.querysets import (
     wrap_async_queryset_adapter,
 )
 from django_strawberry_framework.utils.typing import (
-    MISSING_ATTRIBUTE,
     graphql_fields,
     graphql_type_of,
     published_python_name,
     return_type_of,
-)
-from django_strawberry_framework.utils.typing import (
-    strawberry_schema_from_info as _strawberry_schema_from_info,
-)
-from django_strawberry_framework.utils.typing import (
-    strawberry_schema_from_schema as _strawberry_schema_from_schema,
+    strawberry_schema_from_info,
 )
 
 from . import logger
@@ -100,39 +96,17 @@ from ._context import (
     DST_OPTIMIZER_PLAN,
     DST_OPTIMIZER_PLANNED,
     DST_OPTIMIZER_STRICTNESS,
-)
-from ._context import (
-    active_optimizer as _active_optimizer,
-)
-from ._context import (
-    begin_execution_frame as _begin_execution_frame,
-)
-from ._context import (
-    cache_key_parts_memo as _cache_key_parts_memo,
-)
-from ._context import (
-    clear_optimizer_context as _clear_optimizer_context,
-)
-from ._context import (
-    end_execution_frame as _end_execution_frame,
-)
-from ._context import (
-    execution_plan_memo as _execution_plan_memo,
-)
-from ._context import (
-    operation_publishes_to_context as _operation_publishes_to_context,
-)
-from ._context import (
-    optimizer_value as _optimizer_value,
-)
-from ._context import (
-    publish_planned_windows as _publish_planned_windows,
-)
-from ._context import (
-    publish_scoped_relations as _publish_scoped_relations,
-)
-from ._context import (
-    stash_for_optimizer as _stash_for_optimizer,
+    active_optimizer,
+    begin_execution_frame,
+    cache_key_parts_memo,
+    clear_optimizer_context,
+    end_execution_frame,
+    execution_plan_memo,
+    operation_publishes_to_context,
+    optimizer_value,
+    publish_planned_windows,
+    publish_scoped_relations,
+    stash_for_optimizer,
 )
 from ._context import (
     stash_on_context as _stash_on_context,
@@ -163,7 +137,6 @@ if TYPE_CHECKING:
 
     from graphql.language.ast import FragmentDefinitionNode, Node, OperationDefinitionNode
     from graphql.type.definition import GraphQLResolveInfo, GraphQLType
-    from graphql.type.schema import GraphQLSchema
     from strawberry.types.execution import ExecutionContext
     from strawberry.types.nodes import Selection
 
@@ -522,26 +495,16 @@ def _doc_cache_entry(
     definition), so any difference in a reachable fragment body is already
     reflected in it, the operation name disambiguates the operations of a
     multi-operation document (which share one body), and the wire names keep
-    one document executed against two schemas' vocabularies apart. Falls back to
-    computing directly - never caching - for a programmatically built AST that
-    carries no source ``loc`` (the cache would have no stable text key); the
-    per-execution ``id(operation)`` memo in ``_build_cache_key`` still dedupes
-    those within one execution.
+    one document executed against two schemas' vocabularies apart. Strawberry
+    parses every executed document from its source text, so the operation always
+    carries its ``loc``.
 
     ``_collect_cache_relevant_var_names`` is called through the module global
     (not captured) so a test spy patched onto the module still intercepts the
     miss-path collection.
     """
-    loc = getattr(operation, "loc", None)
-    source = getattr(loc, "source", None)
-    body = getattr(source, "body", None)
-    if body is None:
-        return (
-            _print_operation_with_reachable_fragments(operation, fragments),
-            _collect_cache_relevant_var_names(operation, fragments, pagination_wire_names),
-        )
-    name_node = getattr(operation, "name", None)
-    key = (body, getattr(name_node, "value", None), pagination_wire_names)
+    name = operation.name.value if operation.name is not None else None
+    key = (require_instance(operation.loc, Location).source.body, name, pagination_wire_names)
     cached = _doc_key_cache.get(key)
     if cached is not None:
         # ``move_to_end`` is the LRU promotion; guard the concurrent-eviction
@@ -670,12 +633,10 @@ def _collect_schema_reachable_types(schema: object) -> "truth.IdentitySet[type[D
     warnings.
     """
     reachable: truth.IdentitySet[type[DjangoType]] = truth.IdentitySet()
+    strawberry_schema = require_instance(schema, Schema)
     # Strawberry's ``Schema.__init__`` stores the graphql-core schema it builds at
     # ``_schema``.
-    gql_schema: GraphQLSchema | None = getattr(schema, "_schema", None)
-    if gql_schema is None:
-        return reachable
-    strawberry_schema = _strawberry_schema_from_schema(schema)
+    gql_schema = require_instance(read_attr(strawberry_schema, "_schema"), GraphQLSchema)
     visited_type_names: set[str] = set()
 
     def _walk_gql_type(gql_type: "GraphQLType") -> None:
@@ -685,10 +646,8 @@ def _collect_schema_reachable_types(schema: object) -> "truth.IdentitySet[type[D
         if type_name in visited_type_names:
             return
         visited_type_names.add(type_name)
-        # Check if this type is a DjangoType. The lookup is read by name: any schema
-        # object that carries ``get_type_by_name`` answers it.
-        lookup = read_attr(strawberry_schema, "get_type_by_name", MISSING_ATTRIBUTE)
-        definition = lookup(type_name) if callable(lookup) else None
+        # Check if this type is a DjangoType.
+        definition = strawberry_schema.get_type_by_name(type_name)
         if definition is not None:
             registered = registry.get_definition(read_attr(definition, "origin", None))
             if registered is not None:
@@ -748,7 +707,7 @@ def _resolve_model_from_return_type(info: "GraphQLResolveInfo[object]") -> _Orig
     queryset through unchanged.
     """
     type_name = get_named_type(return_type_of(info)).name
-    strawberry_schema = _strawberry_schema_from_info(info)
+    strawberry_schema = strawberry_schema_from_info(info)
     if strawberry_schema is None:
         return None
     definition = strawberry_schema.get_type_by_name(type_name)
@@ -931,9 +890,9 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # where in the hook order the store is opened - an operation started
         # from a consumer extension's teardown begins after the outer
         # optimizer's frame was closed and is still inside the outer request.
-        frame = _begin_execution_frame(
+        frame = begin_execution_frame(
             {} if state is None else state.stashes,
-            nested=_operation_is_nested(),
+            nested=operation_is_nested(),
             optimizer=self,
             strategy=self.nested_connection_strategy,
             strictness=self.strictness,
@@ -944,12 +903,12 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # context object would show a consumer reading the published plan off
         # their request a prior operation's FK-id elisions and planned-resolver
         # keys; the package's own reads answer from ``frame`` and never see them.
-        if _operation_publishes_to_context():
-            _clear_optimizer_context(getattr(execution_context, "context", None))
+        if operation_publishes_to_context():
+            clear_optimizer_context(getattr(execution_context, "context", None))
         try:
             yield
         finally:
-            _end_execution_frame(frame)
+            end_execution_frame(frame)
 
     @override
     def resolve(
@@ -969,8 +928,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
 
         Handles both sync and async resolvers: when ``_next`` returns a
         coroutine (async resolver), returns an async wrapper that awaits
-        the result before running ``_optimize_async``, which builds a plan off
-        the event loop. Strawberry's
+        the result and then builds a plan off the event loop. Strawberry's
         ``SchemaExtension.resolve`` returns ``AwaitableOrValue`` for
         exactly this reason. Which thread builds a plan follows the executor,
         not the resolver's color: under the asynchronous executor a plain
@@ -988,7 +946,10 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         if is_awaitable(result):
 
             async def _async_optimize() -> object:
-                return await self._optimize_async(await result, info)
+                value = await result
+                if self._needs_sync_boundary(value, info):
+                    return await run_in_one_sync_boundary(self._optimize, value, info)
+                return self._optimize(value, info)
 
             return _async_optimize()
         if operation_is_async() and self._needs_sync_boundary(result, info):
@@ -1074,26 +1035,6 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         root_queryset = cast("models.QuerySet[models.Model]", inner_result)
         return finish(self.apply_to(resolved.origin, resolved.model, root_queryset, info))
 
-    async def _optimize_async(self, result: object, info: "GraphQLResolveInfo[object]") -> object:
-        """``_optimize`` for a root the asynchronous executor awaited.
-
-        Building a plan runs consumer code: the walker applies each planned
-        relation target's ``get_queryset`` to its prefetch child
-        (``walker.py::_build_child_queryset``), and a hook may read the database,
-        which Django refuses on the event-loop thread. So a plan the walker must
-        build is built, applied and published in ONE sync boundary off the loop;
-        a plan already cached (or memoized for this execution) is applied here,
-        because applying a plan runs no consumer code. A plan that embeds a hook
-        result is never cached, so every request that plans one hops. Reconciling
-        a memoized plan can run a hook too: a consumer ``Prefetch`` on a path whose
-        target type declares ``get_queryset`` is sealed through that hook
-        (``plans.py::diff_plan_for_queryset``), so such a reuse hops as well
-        (``_builds_plan``).
-        """
-        if self._needs_sync_boundary(result, info):
-            return await run_in_one_sync_boundary(self._optimize, result, info)
-        return self._optimize(result, info)
-
     def _needs_sync_boundary(self, result: object, info: "GraphQLResolveInfo[object]") -> bool:
         """Whether ``_optimize(result, info)`` would build a plan and so must leave the loop.
 
@@ -1102,6 +1043,19 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         the return-type resolution - then asks ``_builds_plan``. Reading the
         coerced ``Manager`` here never fetches a row: ``.all()`` builds a fresh
         unevaluated queryset.
+
+        Building a plan runs consumer code: the walker applies each planned
+        relation target's ``get_queryset`` to its prefetch child
+        (``walker.py::_build_child_queryset``), and a hook may read the database,
+        which Django refuses on the event-loop thread. So a plan the walker must
+        build is built, applied and published in ONE sync boundary off the loop;
+        a plan already cached (or memoized for this execution) is applied on the
+        loop, because applying a plan runs no consumer code. A plan that embeds a
+        hook result is never cached, so every request that plans one hops.
+        Reconciling a memoized plan can run a hook too: a consumer ``Prefetch`` on
+        a path whose target type declares ``get_queryset`` is sealed through that
+        hook (``plans.py::diff_plan_for_queryset``), so such a reuse hops as well
+        (``_builds_plan``).
         """
         inner_result, _ = unwrap_async_queryset_adapter(result)
         normalized = normalize_query_source(inner_result)
@@ -1136,7 +1090,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         cache_key = self._build_cache_key(info, target_model, origin)
         reused = self._plan_cache.get(cache_key)
         if reused is None:
-            exec_memo = _execution_plan_memo()
+            exec_memo = execution_plan_memo()
             if exec_memo is None:
                 return True
             reused = exec_memo.get(cache_key)
@@ -1291,7 +1245,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # Per-execution reuse of an uncacheable plan already built this execution
         # (the nested-fallback per-parent-row case). ``None`` outside an
         # ``on_execute`` lifecycle, so direct/test callers skip this entirely.
-        exec_memo = _execution_plan_memo()
+        exec_memo = execution_plan_memo()
         if exec_memo is not None:
             memoized_plan = exec_memo.get(cache_key)
             if memoized_plan is not None:
@@ -1349,7 +1303,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # ``DST_OPTIMIZER_PLAN`` stays LAST-WINS introspection data (not a
         # correctness sentinel - do not union it).
         context = read_attr(info, "context")
-        _stash_for_optimizer(context, DST_OPTIMIZER_PLAN, plan)
+        stash_for_optimizer(context, DST_OPTIMIZER_PLAN, plan)
         fk_id_elisions = plan.finalized_fk_id_elisions
         if fk_id_elisions is None:
             fk_id_elisions = frozenset(plan.fk_id_elisions)
@@ -1361,19 +1315,19 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # the request context: the generated relation resolvers' visibility
         # attribution is live under the default strictness and must also survive
         # an execution that carries no ``context_value`` at all.
-        _publish_scoped_relations(planned_resolver_keys)
+        publish_scoped_relations(planned_resolver_keys)
         # Likewise frame-published on every execution: the bounds each planned
         # window was fetched under, and the vocabulary a keyset window mints
         # under, are correctness inputs of the relation-connection resolver,
         # not strictness sentinels.
-        _publish_planned_windows(plan.planned_windows)
+        publish_planned_windows(plan.planned_windows)
         if self.strictness != "off":
             plan_lookup_paths = plan.finalized_lookup_paths
             if plan_lookup_paths is None:
                 plan_lookup_paths = frozenset(lookup_paths(plan))
             self._stash_union(context, DST_OPTIMIZER_PLANNED, planned_resolver_keys)
             self._stash_union(context, DST_OPTIMIZER_LOOKUP_PATHS, plan_lookup_paths)
-            _stash_for_optimizer(context, DST_OPTIMIZER_STRICTNESS, self.strictness)
+            stash_for_optimizer(context, DST_OPTIMIZER_STRICTNESS, self.strictness)
 
     @staticmethod
     def _stash_union(context: object, key: str, new: frozenset[str]) -> None:
@@ -1387,7 +1341,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         pipeline's publish coexist with the parent's planned set rather than
         overwriting it (spec-033 Decision 8).
         """
-        existing = _optimizer_value(context, key)
+        existing = optimizer_value(context, key)
         if is_set_or_frozenset(existing):
             # Subset early-out: a nested fallback connection re-publishes the
             # SAME plan once per parent row, so after the first row ``new`` is
@@ -1399,7 +1353,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
             merged = existing | new
         else:
             merged = new
-        _stash_for_optimizer(context, key, merged)
+        stash_for_optimizer(context, key, merged)
 
     @staticmethod
     def check_schema(schema: object) -> list[str]:
@@ -1515,7 +1469,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # invoked outside an ``on_execute`` lifecycle (some test fixtures call
         # ``_build_cache_key`` directly), fall back to recomputing -- spec-033
         # Decision 7.
-        memo = _cache_key_parts_memo()
+        memo = cache_key_parts_memo()
         parts = memo.get(id(operation)) if memo is not None else None
         if parts is None:
             schema_record = _schema_cache_record(info.schema)
@@ -1599,7 +1553,7 @@ def apply_connection_optimization(
     target_model = registry.model_for_type(target_type)
     if target_model is None:
         return queryset
-    optimizer = _active_optimizer()
+    optimizer = active_optimizer()
     if optimizer is None:
         return queryset
     # The connection resolver receives Strawberry's wrapped ``Info``; the plan
@@ -1632,11 +1586,11 @@ async def apply_connection_optimization_async(
 
     A plan the walker must build runs the planned targets' ``get_queryset`` hooks,
     so it is built in ONE sync boundary off the event loop
-    (``DjangoOptimizerExtension._optimize_async`` states the rule); a reusable plan
+    (``DjangoOptimizerExtension._needs_sync_boundary`` states the rule); a reusable plan
     is applied here.
     """
     target_model = registry.model_for_type(target_type)
-    optimizer = _active_optimizer()
+    optimizer = active_optimizer()
     if (
         target_model is not None
         and optimizer is not None

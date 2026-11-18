@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from django.db import models
 from django.db.models import Prefetch
@@ -25,11 +25,6 @@ from django_strawberry_framework.utils._narrowing import (
     read_attr,
     require,
     require_instance,
-)
-from django_strawberry_framework.utils._queryset_private import (
-    queryset_db,
-    queryset_hints,
-    queryset_prefetch_lookups,
 )
 from django_strawberry_framework.utils.querysets import (
     _COMBINED_WHAT,
@@ -55,7 +50,11 @@ from .field_meta import FieldMeta
 from .hints import OptimizerHint, _PrefetchAny, hint_is_skip
 from .join_taxonomy import classify_relation_join
 from .nested_planner import (
-    plan_connection_relation as _plan_nested_connection_relation,
+    _resolve_relation_target,
+    _resolver_identities_for,
+    _selection_runtime_prefixes,
+    _target_has_custom_get_queryset,
+    plan_connection_relation,
 )
 from .plans import (
     JoinPrefix,
@@ -66,7 +65,6 @@ from .plans import (
     append_unique,
     append_unique_many,
     diff_plan_for_queryset,
-    resolver_key,
     runtime_path_from_info,
 )
 from .selections import (
@@ -76,7 +74,6 @@ from .selections import (
     included_field_selections,
     python_arguments,
     response_key,
-    response_keys,
     selection_python_name,
 )
 
@@ -95,34 +92,16 @@ if TYPE_CHECKING:
     from .selections import ConvertedSelection, FieldSelection
 
 
-# The selection-traversal primitives live in ``optimizer/selections.py`` so the
-# walker and the AST seam in ``extension.py`` share ONE
-# fragment/directive/response-key implementation. The underscore aliases below
-# are consumed by this module's own bodies.
-_response_key = response_key
-_response_keys = response_keys
-_included_field_selections = included_field_selections
-
-
 def _record_path_resolver_keys(
     path_map: dict[str, tuple[str, ...]],
     lookup_path: str,
     keys: tuple[str, ...],
 ) -> None:
-    """Append unique resolver keys onto one path ledger entry."""
+    """Append unique resolver keys onto one path ledger entry (a select or a prefetch one)."""
     if not keys:
         return
     recorded = path_map.get(lookup_path, ())
     path_map[lookup_path] = recorded + tuple(key for key in keys if key not in recorded)
-
-
-def _record_prefetch_path_keys(
-    plan: OptimizationPlan,
-    lookup_path: str,
-    keys: tuple[str, ...],
-) -> None:
-    """Attribute resolver / FK-id keys to a ``prefetch_related`` lookup path."""
-    _record_path_resolver_keys(plan.prefetch_path_resolver_keys, lookup_path, keys)
 
 
 def _introduces_projection_for_operation(info: GraphQLResolveInfo[object] | None) -> bool:
@@ -132,18 +111,10 @@ def _introduces_projection_for_operation(info: GraphQLResolveInfo[object] | None
     ``.defer()`` into a projected one. ``MUTATION`` and ``SUBSCRIPTION`` plans
     record the same columns but only widen a projection the queryset already
     carries (``OptimizationPlan.apply``), so a mutation-returned queryset never
-    gains a deferred-field set of the optimizer's making.
-
-    Defensive by design (the package's ``getattr`` posture, mirroring
-    ``runtime_path_from_info`` and ``relay_max_results_from_info``): a
-    ``None`` ``info`` *or* a partial test-double whose ``operation`` (or
-    ``operation.operation``) is absent falls to the introducing default rather
-    than raising. During real execution ``info.operation`` is always present
-    (``extension.py::_build_cache_key`` reads it directly), so the defensive
-    arm exists only for direct / test callers of ``plan_optimizations``.
+    gains a deferred-field set of the optimizer's making. A walk with no resolve
+    info (a direct caller of ``plan_optimizations``) introduces.
     """
-    operation = getattr(getattr(info, "operation", None), "operation", None)
-    return operation is None or operation is OperationType.QUERY
+    return info is None or info.operation.operation is OperationType.QUERY
 
 
 def plan_optimizations(
@@ -183,55 +154,6 @@ def plan_optimizations(
     return plan.finalize()
 
 
-def plan_relation(
-    field: FieldMeta,
-    target_type: type[DjangoType] | None,
-    *,
-    target_definition: DjangoTypeDefinition | None = None,
-) -> tuple[str, str]:
-    """Return relation traversal kind without constructing querysets.
-
-    ``target_definition`` is the walker's captured child definition
-    (``_resolve_relation_target``'s second answer). The walk always supplies
-    it; a direct caller may omit it and the predicate falls back to the
-    target's own report.
-    """
-    if _target_has_custom_get_queryset(target_type, target_definition):
-        logger.debug(
-            "Optimizer: will downgrade %s to Prefetch because %s overrides get_queryset.",
-            field.name,
-            truth.name(target_type),
-        )
-        return ("prefetch", "custom_get_queryset")
-    if is_many_side_relation_kind(relation_kind(field)):
-        return ("prefetch", "default")
-    return ("select", "default")
-
-
-def _target_has_custom_get_queryset(
-    target_type: type[DjangoType] | None,
-    target_definition: DjangoTypeDefinition | None = None,
-) -> bool:
-    """Report whether a relation target overrides ``get_queryset``.
-
-    Answers from the CAPTURED definition when the walk resolved one, so the
-    verdict that decides ``select_related`` versus ``Prefetch`` - and, through
-    ``_build_child_queryset``, whether the child's visibility hook runs at all -
-    comes from the same object the relation was resolved through, not from a
-    second request-time read of the target class.
-
-    The class fallback is reached only for a registration the registry holds
-    WITHOUT a definition. ``DjangoType.__init_subclass__`` registers the type
-    and its definition in one atomic call, so no real ``DjangoType`` can
-    present that shape; a bare class registered directly through
-    ``registry.register`` carries no definition to read, and its own report is
-    the only answer there is.
-    """
-    if target_definition is not None:
-        return target_definition.has_custom_get_queryset
-    return target_type is not None and target_type.has_custom_get_queryset()
-
-
 # The GlobalID field ``relay.Node`` declares, its only field. Every Relay type's definition
 # holds this same field object, so a selection of it carries the Python name the field
 # was declared under whatever wire name the schema's converter publishes; a Strawberry
@@ -241,30 +163,6 @@ _RELAY_ID_PYTHON_NAME: str = _RELAY_ID_FIELD.python_name
 # The name ``relay.Node`` declares the field under (``id``), fixed by the declaration and
 # never a converter's answer: an id no column holds resolves through the field map under it.
 _RELAY_ID_DECLARED_NAME: str = require_instance(_RELAY_ID_FIELD.graphql_name, str)
-
-
-def _resolve_selection_target(
-    python_name: str | None,
-    field_map: Mapping[str, FieldMeta],
-    relation_connections: Mapping[str, str],
-) -> tuple[str, str, FieldMeta | None] | None:
-    """Resolve a selection across model-field and synthesized-connection namespaces.
-
-    Matches by the Python name the executing schema published the selected field
-    from (``selections.py::selection_python_name``): a synthesized connection's
-    generated attribute name (a key of ``relation_connections``) outranks a model
-    field of the same name (a key of ``field_map``). ``None`` for a selection the
-    schema publishes from neither namespace.
-    """
-    if python_name is None:
-        return None
-    relation_field_name = relation_connections.get(python_name)
-    if relation_field_name is not None:
-        return "connection", relation_field_name, None
-    field = field_map.get(python_name)
-    if field is not None:
-        return "field", python_name, field
-    return None
 
 
 def _resolve_field_map(
@@ -281,7 +179,7 @@ def _resolve_field_map(
     definition. Centralizes the brittle Django-private ``_meta`` access
     used by the walker. Both paths key the map by the raw Django
     ``f.name``, the Python name a ``DjangoType`` publishes the field from, so
-    ``_resolve_selection_target`` matches a selection's published Python name
+    ``_walk_selections`` matches a selection's published Python name
     against it.
 
     ``source_type`` carries the root resolver's actual return type when
@@ -305,51 +203,6 @@ def _resolve_field_map(
     else:
         field_map = {f.name: FieldMeta.from_django_field(f) for f in model._meta.get_fields()}
     return type_cls, definition, field_map
-
-
-def _resolve_relation_target(
-    definition: DjangoTypeDefinition | None,
-    django_name: str,
-    django_field: FieldMeta,
-) -> tuple[type[DjangoType] | None, DjangoTypeDefinition | None]:
-    """Return one relation target as ``(origin, definition)``.
-
-    The owner definition's ``related_target_for`` already resolved the child
-    ``DjangoTypeDefinition``; both halves of that one answer are returned
-    together so every later decision about the target - the ``get_queryset``
-    downgrade, the child visibility model, the declared cursor vocabulary -
-    spends this resolution instead of asking the target class again at request
-    time. Collapsing the pair to its ``origin`` here is what forced those
-    re-reads, and a target whose metadata changes between them is exactly the
-    threat the one-definition rule exists for.
-
-    The unresolved-relation fallback stays registry-only and answers in the
-    same shape: the registry's type for the related model plus the registry's
-    definition for that type (``registry.get_definition``, the same canonical
-    lookup ``_has_custom_id_resolver`` uses). A model with no registered type
-    yields ``(None, None)``; a type the registry holds without a definition
-    yields its origin and ``None``, and each consumer degrades on its own
-    documented contract rather than reaching for a class attribute.
-    """
-    if definition is not None:
-        resolved = definition.related_target_for(django_name)
-        if resolved is not None:
-            target_definition, _model_field = resolved
-            return target_definition.origin, target_definition
-    related_model = django_field.related_model
-    if related_model is None:
-        return None, None
-    origin = registry.get(related_model)
-    if origin is None:
-        return None, None
-    return origin, registry.get_definition(origin)
-
-
-def _resolve_optimizer_hints(definition: DjangoTypeDefinition | None) -> dict[str, OptimizerHint]:
-    """Return optimizer hints from the resolved ``DjangoTypeDefinition``."""
-    if definition is None:
-        return {}
-    return definition.optimizer_hints or {}
 
 
 def _hook_info(info: GraphQLResolveInfo[object] | None, target_type: type[DjangoType]) -> Info:
@@ -394,26 +247,11 @@ _WALKER_ASYNC_RECOURSE = (
 )
 
 
-def _relation_child_seed(field: FieldMeta) -> QuerySet[models.Model]:
-    """Return the rows Django reads ``field``'s relation through, keyed on its related model.
-
-    A many-side relation (reverse FK, many-to-many, generic relation) reads
-    through a related manager, which subclasses the target's default manager
-    class, so its child seeds from that manager (``utils/querysets.py::base_queryset``);
-    a single-valued relation's descriptor loads its row through
-    ``_base_manager``, so its child seeds from every row, in the default
-    manager's class (``utils/querysets.py::related_queryset``).
-    """
-    related_model = require(field.related_model, is_model_class)
-    return base_queryset(related_model) if field.is_many_side else related_queryset(related_model)
-
-
 def _build_child_queryset(
     field: FieldMeta,
     target_type: type[DjangoType] | None,
     info: GraphQLResolveInfo[object] | None,
     *,
-    has_custom_qs: bool,
     target_definition: DjangoTypeDefinition | None = None,
     policy: _SealPolicy[models.Model] = _LIST_RELATION_CHILD_POLICY,
     seed: QuerySet[models.Model] | None = None,
@@ -427,9 +265,9 @@ def _build_child_queryset(
     and on nothing else, because one thing differs between the paths: only the
     connection path has a gate that classifies a sliced child.
 
-    ``has_custom_qs`` is the caller's verdict from the captured child
-    definition (``_target_has_custom_get_queryset``), so the question is
-    answered once per relation rather than once per consumer of the answer.
+    Whether the target's hook runs is answered from the captured child
+    definition (``_target_has_custom_get_queryset``), the same verdict every
+    caller reads for the relation.
 
     ``target_definition`` is that same definition, spent here for its model:
     both seals of this visibility call validate against the model the
@@ -451,10 +289,14 @@ def _build_child_queryset(
     connection field's documented "nested async ``get_queryset`` ->
     ``relation_shapes = list``" recourse. The base queryset is the one Django
     reads the relation through, keyed on ``field.related_model`` (NOT
-    ``initial_queryset(target_type)``; ``_relation_child_seed``), so a planned
-    child reads the rows the unplanned path reads: a related manager's for a
-    many-side relation, every row for a single-valued one
-    (``types/resolvers.py::_visible_related_object``). It carries no explicit
+    ``initial_queryset(target_type)``), so a planned child reads the rows the
+    unplanned path reads: a many-side relation (reverse FK, many-to-many, generic
+    relation) reads through a related manager, which subclasses the target's
+    default manager class, so its child seeds from that manager
+    (``utils/querysets.py::base_queryset``); a single-valued relation's descriptor
+    loads its row through ``_base_manager``, so its child seeds from every row, in
+    the default manager's class (``utils/querysets.py::related_queryset``,
+    ``types/resolvers.py::_visible_related_object``). It carries no explicit
     ``.using(...)``. A plan walk is a read with no write pipeline in force, so
     nothing pins an alias ahead of that seed either: the child's effective
     alias entering the hook is ``None`` on this path, and the hook cannot pin
@@ -468,8 +310,14 @@ def _build_child_queryset(
     seed routed by an explicit ``.using(...)`` is refused as an ``alias`` defect
     before the hook runs; without a hook the seed is installed as given.
     """
-    queryset = seed if seed is not None else _relation_child_seed(field)
-    if has_custom_qs:
+    if seed is not None:
+        queryset = seed
+    else:
+        related_model = require(field.related_model, is_model_class)
+        queryset = (
+            base_queryset(related_model) if field.is_many_side else related_queryset(related_model)
+        )
+    if _target_has_custom_get_queryset(target_type, target_definition):
         # The slice axis is the one axis the two child policies differ on, and it
         # differs because the paths do.
         #
@@ -500,7 +348,7 @@ def _build_child_queryset(
         # scheduling the parent and its related rows on two connections; an unrouted
         # child inherits the parent's connection at fetch time, so a routed parent
         # still carries its children.
-        # ``has_custom_qs`` is True only for a resolved target type.
+        # A custom verdict comes only from a resolved target type.
         if target_type is None:
             raise TypeError("a custom get_queryset verdict reached a relation with no target type")
         queryset = apply_type_visibility_sync(
@@ -519,7 +367,6 @@ def _build_connection_child_queryset(
     target_type: type[DjangoType] | None,
     info: GraphQLResolveInfo[object] | None,
     *,
-    has_custom_qs: bool,
     target_definition: DjangoTypeDefinition | None = None,
 ) -> QuerySet[models.Model]:
     """Build a nested-connection child queryset under ``_PREFETCH_CHILD_POLICY``.
@@ -538,49 +385,9 @@ def _build_connection_child_queryset(
         field,
         target_type,
         info,
-        has_custom_qs=has_custom_qs,
         target_definition=target_definition,
         policy=_PREFETCH_CHILD_POLICY,
     )
-
-
-def _resolver_identities_for(
-    sel: FieldSelection,
-    field_name: str,
-    type_cls: type[DjangoType] | None,
-    runtime_prefixes: tuple[tuple[str, ...], ...],
-) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...]]:
-    """Return ``(runtime_paths, resolver_identities)`` for one selection.
-
-    Shared by the list-relation walk (``_walk_selections``, keyed on the
-    Django field name) and the nested-connection planner
-    (``_plan_connection_relation``, keyed on ``relation_field_name`` - the
-    underlying relation field, NOT the generated ``<field>_connection``
-    accessor). ``field_name`` is the resolver-key vocabulary, so passing
-    ``relation_field_name`` at the connection site keeps the walker's emitted
-    key MATCHING the resolve-time key ``connection.py``'s
-    ``_check_n1(kind="connection_to_attr")`` rebuilds via
-    ``resolver_key(type_cls, relation_field_name, runtime_path)`` - the
-    load-bearing "planned -> silent" parity (``connection.py`` resolver doc).
-
-    A selection-specific ``RUNTIME_PREFIXES_ATTR`` (set by connection
-    extraction) overrides the inherited ``runtime_prefixes``; the runtime path
-    is the cartesian product over those prefixes and ``_response_keys(sel)``.
-    """
-    # Only the walker's ``SimpleNamespace`` clones carry runtime prefixes.
-    carried_prefixes = _selection_runtime_prefixes(sel)
-    selection_runtime_prefixes: tuple[tuple[str, ...], ...] = (
-        tuple(carried_prefixes) if carried_prefixes is not None else runtime_prefixes
-    )
-    runtime_paths = tuple(
-        (*runtime_prefix, response_key)
-        for runtime_prefix in selection_runtime_prefixes
-        for response_key in _response_keys(sel)
-    )
-    resolver_identities = tuple(
-        resolver_key(type_cls, field_name, runtime_path) for runtime_path in runtime_paths
-    )
-    return runtime_paths, resolver_identities
 
 
 def _relay_id_field(node_type: type[_RelayDjangoType]) -> ConcreteField | None:
@@ -592,8 +399,10 @@ def _relay_id_field(node_type: type[_RelayDjangoType]) -> ConcreteField | None:
     read from a column: a consumer ``resolve_id`` anywhere in the type's MRO, or
     an id attribute no concrete model field holds (a property, an attribute
     ``get_queryset`` annotates). The one answer both GlobalID readers in this
-    module share: ``_relay_id_column`` projects the field's column, and
-    ``_selected_scalar_names`` counts the selection as the field it reads.
+    module share: ``_walk_selections`` projects the field's column (its
+    ``attname``: a forward key's column, or the key column of a primary key that
+    is a one-to-one key; spec-015 Decision 7), and ``_selected_scalar_names``
+    counts the selection as the field it reads.
     """
     # Lazy imports: ``relay`` imports ``list_field``, whose ``types`` import
     # loads this walker; ``types.definition`` pulls in ``optimizer.field_meta``.
@@ -608,20 +417,6 @@ def _relay_id_field(node_type: type[_RelayDjangoType]) -> ConcreteField | None:
     if truth.is_instance(field, models.Field) and field.concrete:
         return field
     return None
-
-
-def _relay_id_column(node_type: type[_RelayDjangoType]) -> str | None:
-    """Return the column a Relay type's GlobalID is read from, for ``only()``.
-
-    Strawberry's ``Node.resolve_id`` reads ``resolve_id_attr()`` off the row
-    with ``getattr``, which Django loads lazily when the column was deferred, so
-    a row that did not load that column pays one query per row for its id
-    (spec-015 Decision 7). The ``_relay_id_field`` field is projected by ``attname`` (a
-    forward key named by its ``attname``, or a primary key that is a one-to-one
-    key, projects its key column); ``None`` when that helper names no field.
-    """
-    field = _relay_id_field(node_type)
-    return field.attname if field is not None else None
 
 
 def _walk_selections(
@@ -661,7 +456,7 @@ def _walk_selections(
     plan is applied.
     """
     type_cls, definition, field_map = _resolve_field_map(model, source_type=source_type)
-    hints_map = _resolve_optimizer_hints(definition)
+    hints_map = definition.optimizer_hints if definition is not None else {}
     # TODO(BACKLOG polymorphic_interface_connections - the abstract-return optimizer entry card): supply
     # a registry-only type-condition classifier to ``included_field_selections`` at this planning
     # seam. Design contract: spec-035 Decision 6 (the tri-state classifier and its accept set) and
@@ -673,7 +468,7 @@ def _walk_selections(
     # fragments-only for unknown composite/union names; never accept the model
     # primary type merely because the Django model matches. The classifier must
     # not call into graphql-core schema introspection.
-    merged = _merge_aliased_selections(_included_field_selections(selections))
+    merged = _merge_aliased_selections(included_field_selections(selections))
     relation_connections: Mapping[str, str] = (
         getattr(definition, "relation_connections", None) or {}
     )
@@ -684,16 +479,20 @@ def _walk_selections(
     # (spec-015 Decision 7); an id no column holds resolves through the field map under
     # the name ``relay.Node`` declares the field as, like any selection.
     relay_type = type_cls if type_cls is not None and implements_relay_node(type_cls) else None
-    relay_id_column = _relay_id_column(relay_type) if relay_type is not None else None
+    relay_id_field = _relay_id_field(relay_type) if relay_type is not None else None
     for sel in merged:
         python_name = selection_python_name(sel)
         if relay_type is not None and python_name == _RELAY_ID_PYTHON_NAME:
-            if relay_id_column is not None:
-                append_unique(plan.only_fields, f"{prefix}{relay_id_column}")
+            if relay_id_field is not None:
+                append_unique(plan.only_fields, f"{prefix}{relay_id_field.attname}")
                 continue
             python_name = _RELAY_ID_DECLARED_NAME
-        # Resolve the selection through the ONE selection resolver, by the
-        # Python name the schema published its field from. It recognizes a
+        if python_name is None:
+            continue
+        # Resolve the selection by the Python name the schema published its
+        # field from: a synthesized connection's generated attribute name (a key
+        # of ``relation_connections``) outranks a model field of the same name
+        # (a key of ``field_map``). It recognizes a
         # synthesized nested connection BEFORE the field namespace and BEFORE
         # the unknown-name guard below: ``books_connection`` /
         # ``line_2_connection`` name no model field, so without this branch the
@@ -705,12 +504,12 @@ def _walk_selections(
         # is the model's PRIMARY type, so a divergent secondary type's
         # connection is out of scope for windowed planning and falls through to
         # per-parent (Decision 3 primary contract).
-        resolved = _resolve_selection_target(python_name, field_map, relation_connections)
-        if resolved is not None and resolved[0] == "connection":
+        relation_field_name = relation_connections.get(python_name)
+        if relation_field_name is not None:
             _plan_connection_relation(
                 sel,
                 definition,
-                relation_field_name=resolved[1],
+                relation_field_name=relation_field_name,
                 field_map=field_map,
                 plan=plan,
                 prefix=prefix,
@@ -721,10 +520,11 @@ def _walk_selections(
                 model=model,
             )
             continue
-        if resolved is None or resolved[2] is None:
+        django_field = field_map.get(python_name)
+        if django_field is None:
             # Neither namespace matched: an unknown name plans nothing.
             continue
-        django_name, django_field = resolved[1], resolved[2]
+        django_name = python_name
         if not django_field.is_relation:
             append_unique(
                 plan.only_fields,
@@ -799,13 +599,9 @@ def _walk_selections(
             ):
                 continue
 
-        relation_plan_kind, _ = plan_relation(
-            django_field,
-            target_type,
-            target_definition=target_definition,
-        )
         _dispatch_single_relation(
-            prefer_prefetch=relation_plan_kind == "prefetch",
+            prefer_prefetch=_target_has_custom_get_queryset(target_type, target_definition)
+            or is_many_side_relation_kind(relation_kind(django_field)),
             sel=sel,
             django_field=django_field,
             target_type=target_type,
@@ -838,10 +634,11 @@ def _dispatch_single_relation(
     """Route one relation selection to the prefetch or the select planner.
 
     The single owner of the ``_plan_prefetch_relation`` /
-    ``_plan_select_relation`` argument threading its three deciders share:
-    the cardinality dispatch in ``_walk_selections`` (``plan_relation``'s
-    verdict), and the two hint branches in ``_apply_hint`` (``force_select``'s
-    custom-``get_queryset`` downgrade and ``force_prefetch``). Only the
+    ``_plan_select_relation`` argument threading its two deciders share:
+    the cardinality dispatch in ``_walk_selections`` (a custom target
+    ``get_queryset`` or a many-side relation prefetches), and the
+    ``force_select`` / ``force_prefetch`` hint branch in ``_apply_hint``
+    (``force_select``'s custom-``get_queryset`` downgrade included). Only the
     DECISION (``prefer_prefetch``) differs per site; ``full_path`` is a
     select-only concern (``select_related`` resolves query paths), and
     ``lookup_prefix`` the accessor spelling of ``prefix`` (``_walk_selections``).
@@ -916,7 +713,8 @@ def _plan_select_relation(
         and not _has_custom_id_resolver(
             target_type,
             target_pk_name,
-            pk_is_relation=_pk_is_relation(django_field.related_model),
+            pk_is_relation=django_field.related_model is not None
+            and django_field.related_model._meta.pk.is_relation,
         )
         and _selected_scalar_names(sel.selections, django_field.related_model) == {target_pk_name}
     ):
@@ -987,7 +785,11 @@ def _plan_prefetch_relation(
     if has_custom_get_queryset:
         plan.cacheable = False
     if django_field.related_model is None:
-        _record_prefetch_path_keys(plan, lookup_path, resolver_identities)
+        _record_path_resolver_keys(
+            plan.prefetch_path_resolver_keys,
+            lookup_path,
+            resolver_identities,
+        )
         append_unique(plan.prefetch_related, lookup_path)
         return
 
@@ -1009,12 +811,15 @@ def _plan_prefetch_relation(
             django_field,
             target_type,
             info,
-            has_custom_qs=has_custom_get_queryset,
             target_definition=target_definition,
         ),
     )
     nested_keys = tuple(k for k in plan.planned_resolver_keys if k not in prior_planned)
-    _record_prefetch_path_keys(plan, lookup_path, (*resolver_identities, *nested_keys))
+    _record_path_resolver_keys(
+        plan.prefetch_path_resolver_keys,
+        lookup_path,
+        (*resolver_identities, *nested_keys),
+    )
     if has_custom_get_queryset:
         _record_prefetch_seal(
             plan,
@@ -1056,7 +861,6 @@ def _record_prefetch_seal(
             django_field,
             target_type,
             info,
-            has_custom_qs=True,
             target_definition=target_definition,
             seed=seed,
         )
@@ -1274,7 +1078,11 @@ def _apply_hint(
         # Queryset-diffing coupling: attribute the relation's resolver keys to the rebased
         # lookup so a later consumer-wins drop strips them from strictness.
         hinted_lookup = rebased_prefetch.prefetch_to or rebased_prefetch.prefetch_through
-        _record_prefetch_path_keys(plan, hinted_lookup, resolver_identities)
+        _record_path_resolver_keys(
+            plan.prefetch_path_resolver_keys,
+            hinted_lookup,
+            resolver_identities,
+        )
         # A consumer ``Prefetch`` that wins on this path is sealed through the
         # target's hook only when the generated resolver reads the relation
         # itself: a consumer-assigned resolver owns its rows (and may read a
@@ -1297,32 +1105,17 @@ def _apply_hint(
             rebased_prefetch,
         )
         return True
-    if hint.force_select:
+    if hint.force_select or hint.force_prefetch:
         kind = relation_kind(django_field)
-        if is_many_side_relation_kind(kind):
+        if hint.force_select and is_many_side_relation_kind(kind):
             raise ConfigurationError(
                 f"OptimizerHint.select_related() on {truth.name(type_cls)}.{django_name}: "
                 f"Django requires prefetch_related for {kind} relations; "
                 "use OptimizerHint.prefetch_related() or OptimizerHint.prefetch(obj) instead.",
             )
         _dispatch_single_relation(
-            prefer_prefetch=_target_has_custom_get_queryset(target_type, target_definition),
-            sel=sel,
-            django_field=django_field,
-            target_type=target_type,
-            target_definition=target_definition,
-            plan=plan,
-            prefix=prefix,
-            lookup_prefix=lookup_prefix,
-            full_path=full_path,
-            info=info,
-            runtime_paths=runtime_paths,
-            resolver_identities=resolver_identities,
-        )
-        return True
-    if hint.force_prefetch:
-        _dispatch_single_relation(
-            prefer_prefetch=True,
+            prefer_prefetch=hint.force_prefetch
+            or _target_has_custom_get_queryset(target_type, target_definition),
             sel=sel,
             django_field=django_field,
             target_type=target_type,
@@ -1366,7 +1159,6 @@ def _scoped_hint_prefetch(
         django_field,
         target_type,
         info,
-        has_custom_qs=True,
         target_definition=target_definition,
         seed=prefetch.queryset,
     )
@@ -1394,22 +1186,16 @@ def _hint_prefetch_over_pk_set(
     inner = prefetch.queryset
     if inner is None or not inner.query.combinator:
         return prefetch
-    rewritten, defect = _pk_membership_query_or_defect(inner.query, inner.model)
-    if defect is not None:
+    rewritten = _pk_membership_query_or_defect(inner.query, inner.model)
+    if rewritten[1] is not None:
+        detail = rewritten[1][1]
         raise ConfigurationError(
             f"OptimizerHint.prefetch(obj) on {type_name}.{django_name}: the hinted "
-            f"Prefetch queryset is combined ({defect[1]}); "
-            + _COMBINED_WHAT.format(model=truth.name(inner.model), detail=defect[1]),
+            f"Prefetch queryset is combined ({detail}); "
+            + _COMBINED_WHAT.format(model=truth.name(inner.model), detail=detail),
         )
-    rebuilt: models.QuerySet[models.Model] = models.QuerySet(
-        model=inner.model,
-        query=rewritten,
-        using=queryset_db(inner),
-        # django-stubs types hint values as model instances (the ``instance`` hint Django
-        # itself writes); a router hint can carry any value.
-        hints=cast("dict[str, models.Model]", dict(queryset_hints(inner))),
-    )
-    queryset = rebuilt.prefetch_related(*queryset_prefetch_lookups(inner))
+    queryset = inner.all()
+    queryset.query = rewritten[0]
     return Prefetch(prefetch.prefetch_through, queryset=queryset, to_attr=prefetch.to_attr)
 
 
@@ -1501,7 +1287,7 @@ def _selected_scalar_names(
     # fire (the common case: any non-pk scalar selected).
     relay_id_field = _relay_id_field(relay_type) if relay_type is not None else None
     scalar_names: set[str] = set()
-    for sel in _included_field_selections(selections):
+    for sel in included_field_selections(selections):
         python_name = selection_python_name(sel)
         if relay_type is not None and python_name == _RELAY_ID_PYTHON_NAME:
             if relay_id_field is not None:
@@ -1515,11 +1301,6 @@ def _selected_scalar_names(
             return None
         scalar_names.add(python_name)
     return scalar_names
-
-
-def _pk_is_relation(model: type[models.Model] | None) -> bool:
-    """Return whether ``model``'s primary key is a relation (a one-to-one key, say)."""
-    return model is not None and model._meta.pk.is_relation
 
 
 def _has_custom_id_resolver(
@@ -1610,7 +1391,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
     overwhelmingly common query shape - each field selected once), there is
     nothing to merge, so the input list is returned unchanged instead of
     rebuilding it into per-selection ``SimpleNamespace`` clones. Downstream
-    readers (``_response_keys`` / ``_selection_runtime_prefixes`` /
+    readers (``response_keys`` / ``_selection_runtime_prefixes`` /
     ``_aliased_arguments_diverge``) all ``getattr``-default the ``_optimizer_*``
     markers a raw selection lacks, so the passthrough is shape-compatible.
     """
@@ -1634,11 +1415,11 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
             merged.selections = list_of(read_attr(merged, "selections")) + list(
                 getattr(sel, "selections", None) or [],
             )
-            response_key = _response_key(sel)
+            key_name = response_key(sel)
             # The first-seen branch below built this as a list of response keys.
             merged_keys = require(read_attr(merged, "_optimizer_response_keys"), is_list)
-            if response_key not in merged_keys:
-                merged_keys.append(response_key)
+            if key_name not in merged_keys:
+                merged_keys.append(key_name)
             _merge_runtime_prefixes(merged, sel)
             # Preserve per-response-key argument payloads so a synthesized
             # connection sibling's pagination/sidecar arguments stay
@@ -1660,7 +1441,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
                 directives=getattr(sel, "directives", None) or {},
                 arguments=getattr(sel, "arguments", None) or {},
                 selections=list(getattr(sel, "selections", None) or []),
-                _optimizer_response_keys=[_response_key(sel)],
+                _optimizer_response_keys=[response_key(sel)],
                 **{
                     RUNTIME_PREFIXES_ATTR: _selection_runtime_prefixes(sel),
                     PYTHON_NAME_ATTR: selection_python_name(sel),
@@ -1669,7 +1450,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
                 # Per-response-key argument payloads (spec-033 Decision 6), by
                 # Python name; see the merge branch above and
                 # ``_aliased_arguments_diverge``.
-                _optimizer_response_key_arguments={_response_key(sel): python_arguments(sel)},
+                _optimizer_response_key_arguments={response_key(sel): python_arguments(sel)},
             )
             seen[key] = merged
             result.append(merged)
@@ -1698,63 +1479,12 @@ def _record_response_key_arguments(merged: _MergedSelection, selection: FieldSel
     fully-unplanned fallback. Payloads are graphql-core-coerced, so an inline
     literal and an equal resolved variable compare equal.
     """
-    response_key = _response_key(selection)
+    key = response_key(selection)
     payload = python_arguments(selection)
     per_key = merged._optimizer_response_key_arguments
-    if response_key in per_key and per_key[response_key] != payload:
+    if key in per_key and per_key[key] != payload:
         merged._optimizer_response_key_argument_conflict = True
-    per_key[response_key] = payload
-
-
-def _response_key_arguments_conflict(selection: FieldSelection) -> bool:
-    """Return whether one response key carries two DIFFERENT argument payloads.
-
-    Set by ``_record_response_key_arguments`` when parent-alias subtrees were
-    union-merged (the only reachable source - graphql-core validation rules
-    the shape out within one selection set). Selections built outside
-    ``_merge_aliased_selections`` never carry the flag.
-    """
-    return getattr(selection, "_optimizer_response_key_argument_conflict", False)
-
-
-def _aliased_arguments_diverge(selection: FieldSelection) -> bool:
-    """Return whether a merged selection's aliases carry divergent arguments.
-
-    ``True`` when two response keys of the same field were selected with
-    different argument payloads (e.g. ``a: books(first: 2)`` +
-    ``b: books(first: 5)``). The scheme selector for
-    ``_plan_connection_relation``: divergent aliases plan one window PER
-    RESPONSE KEY (each under its own ``to_attr``), while agreeing
-    aliases share one window. Payloads are graphql-core-coerced,
-    so the literal ``first: 2`` and a variable resolving to ``2`` agree. Selections built
-    outside ``_merge_aliased_selections`` (direct test/helper callers) carry
-    no per-response-key map and never diverge.
-    """
-    # ``_merge_aliased_selections`` built this map from response keys to payloads.
-    per_key: dict[str, Mapping[str, object]] | None = getattr(
-        selection,
-        "_optimizer_response_key_arguments",
-        None,
-    )
-    if not per_key:
-        return False
-    payloads = list(per_key.values())
-    first = payloads[0]
-    return any(payload != first for payload in payloads[1:])
-
-
-def _selection_runtime_prefixes(selection: FieldSelection) -> list[tuple[str, ...]] | None:
-    """Return selection-specific runtime prefixes carried by connection extraction."""
-    # Every writer (``with_runtime_prefix`` and the merge below) stores a list of
-    # runtime-path tuples.
-    prefixes: Iterable[tuple[str, ...]] | None = getattr(
-        selection,
-        RUNTIME_PREFIXES_ATTR,
-        None,
-    )
-    if prefixes is None:
-        return None
-    return list(prefixes)
+    per_key[key] = payload
 
 
 def _merge_runtime_prefixes(merged: SimpleNamespace, selection: FieldSelection) -> None:
@@ -1788,7 +1518,7 @@ def _plan_connection_relation(
     model: type[models.Model],
 ) -> None:
     """Delegate one normalized nested connection and atomically merge its result."""
-    result = _plan_nested_connection_relation(
+    nested_plan = plan_connection_relation(
         sel,
         definition,
         relation_field_name=relation_field_name,
@@ -1799,13 +1529,7 @@ def _plan_connection_relation(
         type_cls=type_cls,
         model=model,
         introduce_projection=plan.introduce_projection,
-        resolve_optimizer_hints=_resolve_optimizer_hints,
-        resolve_relation_target=_resolve_relation_target,
-        response_key_arguments_conflict=_response_key_arguments_conflict,
-        aliased_arguments_diverge=_aliased_arguments_diverge,
-        target_has_custom_get_queryset=_target_has_custom_get_queryset,
-        resolver_identities_for=_resolver_identities_for,
         build_child_queryset=_build_connection_child_queryset,
         build_prefetch_child_queryset_from_base=_build_prefetch_child_queryset_from_base,
     )
-    plan.merge_from(result.plan)
+    plan.merge_from(nested_plan)

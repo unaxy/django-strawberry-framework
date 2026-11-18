@@ -48,7 +48,6 @@ from django_strawberry_framework.filters import _helper_referenced_filtersets
 from django_strawberry_framework.optimizer.extension import apply_connection_optimization
 from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER,
-    _keyset_order_ref,
 )
 from django_strawberry_framework.optimizer.selections import connection_total_count_selected
 from django_strawberry_framework.orders import _helper_referenced_ordersets
@@ -1015,22 +1014,6 @@ def test_connection_field_directives_iteration_error_propagates() -> None:
         DjangoConnectionField(node, directives=HostileIter())
     with pytest.raises(AttributeError, match="hostile attr"):
         DjangoConnectionField(node, directives=HostileAttr())
-
-
-def test_keyset_order_ref_unparseable_entry_returns_none() -> None:
-    """``_keyset_order_ref`` answers ``None`` for an entry with no resolvable name."""
-    assert _keyset_order_ref(None) is None
-
-
-def test_keyset_order_ref_attribute_read_error_propagates() -> None:
-    """An entry whose attribute read raises lets that error through, never ``None``."""
-
-    class Hostile:
-        def __getattr__(self, name: str) -> NoReturn:
-            raise ValueError("hostile getattr")
-
-    with pytest.raises(ValueError, match="hostile getattr"):
-        _keyset_order_ref(Hostile())
 
 
 def test_consume_window_malformed_pagination_is_graphql_error() -> None:

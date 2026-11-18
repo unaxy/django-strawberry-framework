@@ -636,10 +636,10 @@ The generated-connection cache
 cold cache generates the class from the caller's definition, and a warm hit returns that class.
 
 The optimizer plans the same field from the same one answer.
-`django_strawberry_framework/optimizer/walker.py::_resolve_relation_target` returns the child
+`django_strawberry_framework/optimizer/nested_planner.py::_resolve_relation_target` returns the child
 definition beside its origin rather than collapsing the pair, and the nested planner spends
 that object on every decision it makes about the target: whether the visibility hook runs over
-the child queryset (`django_strawberry_framework/optimizer/walker.py::_target_has_custom_get_queryset`),
+the child queryset (`django_strawberry_framework/optimizer/nested_planner.py::_target_has_custom_get_queryset`),
 which model that queryset's seals validate against (the same `model=` seam, threaded through
 `django_strawberry_framework/optimizer/walker.py::_build_child_queryset`), and which cursor
 vocabulary the window derives through. A relation the walker PLANS is served to the generated

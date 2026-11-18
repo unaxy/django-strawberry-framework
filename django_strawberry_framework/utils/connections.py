@@ -582,8 +582,8 @@ def assert_window_fetch_mode(range_plan: WindowRangePlan, *, with_total_count: b
 
     The single owner of the boundary check every window entry point shares
     (``plans.py::apply_window_pagination`` for the ORM window,
-    ``nested_fetch.py::NestedConnectionRequest`` and
-    ``lateral_fetch.py::LateralWindowSpec`` at construction). Raises the loud
+    ``nested_fetch.py::NestedConnectionRequest`` at construction, which every
+    strategy's window, the lateral spec included, is built from). Raises the loud
     ``OptimizerError`` - never silently normalizes one flag - so a planner or
     strategy bug surfaces at its origin instead of corrupting a page. It is not a
     ``ValueError`` / ``TypeError``, so the planner's leave-unplanned pagination
@@ -616,12 +616,12 @@ class _RawWindowArguments(Protocol):
 def assert_window_fetch_mode_for(window: _RawWindowArguments) -> None:
     """``assert_window_fetch_mode`` for callers holding RAW window arguments.
 
-    ``NestedConnectionRequest`` and ``LateralWindowSpec`` carry
+    ``NestedConnectionRequest`` carries
     ``(offset, limit, reverse, next_page_probe, with_total_count)`` rather than a
     resolved ``WindowRangePlan``; this reads those attributes, resolves the plan
     through the shared ``window_range_plan``, and delegates, so the
-    effective-state rule is spelled exactly once. Both dataclasses pass
-    ``self`` from ``__post_init__``.
+    effective-state rule is spelled exactly once. The dataclass passes ``self``
+    from ``__post_init__``.
     """
     assert_window_fetch_mode(
         window_range_plan(

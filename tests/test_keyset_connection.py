@@ -34,17 +34,12 @@ The private contracts in this module include:
   ``test_keyset_order_terms_api.py::test_keyset_hook_order_by_an_annotation_alias_is_refused``),
   and related-path acceptance too
   (``test_root_keyset_order_by_related_path_seeks_via_annotation``).
-- Pure ``plans.py`` helpers ``_keyset_order_ref`` and ``_resolve_order_path_field``
+- Pure ``plans.py`` helper ``_resolve_order_path_field``
   (including detached / virtual fields, and the ``LendingDesk.venue_ptr``
   parent link no keyset type orders through).
 - Nested-planner ``_keyset_window_slice_from_arguments`` returning ``None`` /
   ``UnwindowableConnection`` (the walker swallows those internally). Live
   nested first/after/last rows pin the consumer consequence.
-- ``_extend_only_projection`` passthrough arms. The consumer-visible restore
-  of a deferred cursor column is live
-  (``test_nested_keyset_unselected_cursor_column_is_not_lazy_loaded_per_edge``)
-  and on the async holder
-  (``test_async_keyset_deferred_cursor_column_is_loaded``).
 
 Related-value visibility and ForeignObject carrier paging have HTTP owners in
 ``examples/fakeshop/test_query/test_keyset_order_terms_api.py``. Exact derived
@@ -58,7 +53,7 @@ import pytest
 import strawberry
 from apps.library.models import Issue, LendingDesk, Patron, Periodical
 from django.contrib.auth.models import AnonymousUser
-from django.db.models import F, Model
+from django.db.models import Model
 from django.http import HttpRequest
 from strategy_schemas import make_django_type
 from strawberry.schema.config import StrawberryConfig
@@ -93,10 +88,7 @@ from django_strawberry_framework.optimizer.plans import (
     WINDOW_ROW_NUMBER,
     WINDOW_TOTAL_COUNT,
     PlannedWindow,
-    _extend_only_projection,
-    _keyset_order_ref,
     _resolve_order_path_field,
-    deferred_loading_of,
 )
 from django_strawberry_framework.orders import Ordering, OrderSet, RelatedOrder
 from django_strawberry_framework.utils.connections import (
@@ -429,28 +421,6 @@ def test_related_keyset_order_state_names_the_identity_paths(spelling: str) -> N
     assert [column.name for column in columns] == ["periodical__name", "number"]
 
 
-@pytest.mark.parametrize(
-    ("entry", "expected"),
-    [
-        ("-number", ("-number", "number", True)),
-        (F("number").asc(), ("number", "number", False)),
-        (F("number").desc(nulls_first=True), None),
-        (SimpleNamespace(expression=None, descending=False), None),
-    ],
-    ids=[
-        "descending-name",
-        "ascending-expression",
-        "explicit-nulls",
-        "no-expression",
-    ],
-)
-def test_keyset_order_ref_parses_strings_and_rejects_nulls(
-    entry: object,
-    expected: tuple[str, str, bool] | None,
-) -> None:
-    assert _keyset_order_ref(entry) == expected
-
-
 def _resolved_name(model: type[Model], path: str) -> str:
     """Resolve ``path`` on ``model`` and return the terminal field's name, failing on ``None``."""
     field = _resolve_order_path_field(model, path)
@@ -646,32 +616,3 @@ def test_keyset_window_slice_from_arguments_arms(
     else:
         assert seek is not None
         assert seek.cursor.values == (1, 17)
-
-
-@pytest.mark.django_db
-def test_extend_only_projection_passthrough_arms() -> None:
-    """Identity / no-op arms of ``_extend_only_projection`` have no wire shape.
-
-    Restoring a deferred or ``only()``-masked cursor column is live:
-    ``test_nested_keyset_unselected_cursor_column_is_not_lazy_loaded_per_edge``
-    (optimizer ``only()``) and
-    ``test_async_keyset_deferred_cursor_column_is_loaded`` (async ``defer()``).
-    """
-    plain = Issue.objects.all()
-    assert _extend_only_projection(plain, ("number",)) is plain
-    only_empty = Issue.objects.only()
-    assert _extend_only_projection(only_empty, ("number",)) is only_empty
-    deferred = Issue.objects.defer("title")
-    assert _extend_only_projection(deferred, ("number",)) is deferred
-    masked_deferred = Issue.objects.defer("number", "title")
-    extended_deferred = _extend_only_projection(masked_deferred, ("number",))
-    names, defer_flag = deferred_loading_of(extended_deferred)
-    assert defer_flag is True
-    assert names == frozenset({"title"})
-    covered = Issue.objects.only("number", "id")
-    assert _extend_only_projection(covered, ("number",)) is covered
-    only_qs = Issue.objects.only("title")
-    extended_only = _extend_only_projection(only_qs, ("number",))
-    names, defer_flag = deferred_loading_of(extended_only)
-    assert defer_flag is False
-    assert names == frozenset({"number", "title"})

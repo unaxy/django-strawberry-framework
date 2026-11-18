@@ -74,10 +74,10 @@ def test_consumer_provided_prefetch_via_optimizer_hint_round_trips_using_alias()
                 fields = ("id", "name", "items")
                 optimizer_hints = {"items": OptimizerHint.prefetch(explicit)}
 
-        # ``source_type=ParentType`` so the walker's
-        # ``_resolve_optimizer_hints(ParentType)``
-        # (``django_strawberry_framework/optimizer/walker.py::_resolve_optimizer_hints``)
-        # finds the consumer's hint instead of falling back to the
+        # ``source_type=ParentType`` so the walker reads ``ParentType``'s
+        # ``optimizer_hints``
+        # (``django_strawberry_framework/optimizer/walker.py::_walk_selections``)
+        # and finds the consumer's hint instead of falling back to the
         # primary type lookup.
         plan = plan_optimizations(
             [_sel("items", selections=[_sel("id")])],

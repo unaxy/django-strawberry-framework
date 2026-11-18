@@ -334,7 +334,7 @@ Every plan attribute translates to the SQL fact it implies:
 
 An attribute w/ no translation was never a contract; drop it, don't promote it.
 
-Failability: delete the `optimizer_hints` line on `LoanType` → row fails. Deleting the walker's elision guard for a hooked target changes NOTHING: `django_strawberry_framework/optimizer/walker.py::plan_relation` downgrades to `Prefetch` first, so that guard is unreachable on this path. A row whose only failing mutation is that guard pins a dead guard.
+Failability: delete the `optimizer_hints` line on `LoanType` → row fails. Deleting the walker's elision guard for a hooked target changes NOTHING: `django_strawberry_framework/optimizer/walker.py::_walk_selections` downgrades to `Prefetch` first, so that guard is unreachable on this path. A row whose only failing mutation is that guard pins a dead guard.
 
 ### Optimizer-less is a configuration: one query per parent
 
@@ -415,7 +415,7 @@ Same procedure; listed so the shapes are known. Rows in [`test_products_api.py`]
 - **Relation-seeded `pageInfo` / `last`+`before`** → [`test_library_api.py`][test-library-api]`::test_genre_books_connection_page_info_four_fields` and `::test_genre_books_connection_backward_pagination_last_before` on `allLibraryGenres { booksConnection(...) }`. The root-pipeline twins (`test_page_info_four_fields`, `test_backward_pagination_last_before`) don't make them redundant: the per-parent relation-manager pipeline is a different code path.
 - **`nodes(ids:)` hidden arm** → [`test_library_api.py`][test-library-api]`::test_nodes_batch_mixed_types_order_and_null`: a `repair` Book in the mixed batch; same document anonymous → positional `null`, via `_post_graphql_as_staff` → resolves. Proves the null is visibility, not absence, in two lines.
 - **Relay id-only projection** → [`test_products_visibility_api.py`][test-products-visibility-api]`::test_relay_id_only_connection_page_costs_one_query_and_emits_decodable_ids`: staff `allCategories(first: 5) { edges { node { id } } }`: one `products_category` query, each id equals `global_id_for(CategoryType, pk)`.
-- **Cascading-hook target blocks elision** → [`test_products_visibility_api.py`][test-products-visibility-api]`::test_cascading_target_hook_blocks_fk_id_elision_over_http`. Failability boundary = `django_strawberry_framework/optimizer/walker.py::plan_relation`'s downgrade, not the elision guard ([the hint pair](#sql-beats-the-plan-object-the-hint-pair)).
+- **Cascading-hook target blocks elision** → [`test_products_visibility_api.py`][test-products-visibility-api]`::test_cascading_target_hook_blocks_fk_id_elision_over_http`. Failability boundary = `django_strawberry_framework/optimizer/walker.py::_walk_selections`'s downgrade, not the elision guard ([the hint pair](#sql-beats-the-plan-object-the-hint-pair)).
 - **Async multibyte body** → [`test_transport_api.py`][test-transport-api]`::test_the_async_package_view_parses_a_multibyte_utf8_body_unchanged` on `/async-graphql/`; the variable must be USED (`allItems(first: $value)`) or validation reports "never used" before coercion echoes the value. Spell the multibyte literal w/ `\u` escapes: ASCII-only `.py` is enforced by the `source-layout` hook, not ruff.
 - **List-field introspection** → [`test_list_field_api.py`][test-list-field-api]`::test_shipped_branches_introspection_return_types` on the shipped `allLibraryBranchesViaListField`: every `ofType` level asserted needs its nesting level IN THE DOCUMENT, or the assert reads `None`.
 

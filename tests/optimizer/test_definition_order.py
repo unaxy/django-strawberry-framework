@@ -1,6 +1,6 @@
 """Optimizer tests for definition-order-independent DjangoType relation graphs.
 
-``plan_relation`` return tuples after cyclic finalize, ``check_schema`` warning
+The walker's select / prefetch verdict per relation after cyclic finalize, ``check_schema`` warning
 absence, definition ``field_map`` identity, and annotation-only relation
 metadata have no wire shape. Reverse-O2O JOIN SQL is
 ``examples/fakeshop/test_query/test_library_api.py::test_library_optimizer_reverse_o2o_card_joins_in_root_sql``;
@@ -19,9 +19,11 @@ from django.db.models import Model, QuerySet
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoOptimizerExtension, DjangoType, finalize_django_types
-from django_strawberry_framework.optimizer.field_meta import FieldMeta
+from django_strawberry_framework.optimizer.nested_planner import (
+    _target_has_custom_get_queryset,
+)
 from django_strawberry_framework.optimizer.selections import PYTHON_NAME_ATTR
-from django_strawberry_framework.optimizer.walker import plan_optimizations, plan_relation
+from django_strawberry_framework.optimizer.walker import plan_optimizations
 from django_strawberry_framework.registry import registry
 
 
@@ -45,17 +47,19 @@ def _sel(name: str, selections: list[object] | None = None) -> SimpleNamespace:
     )
 
 
-def _model_field(model: type[Model], name: str) -> FieldMeta:
-    """Return a Django field by name, including reverse relations, as the walker wraps it."""
-    return FieldMeta.from_django_field(
-        next(field for field in model._meta.get_fields() if field.name == name),
-    )
+def _relation_plan(model: type[Model], name: str, child_column: str) -> str:
+    """Return ``"select"`` or ``"prefetch"``: how the walker plans ``model.name``."""
+    plan = plan_optimizations([_sel(name, [_sel(child_column)])], model)
+    if plan.select_related:
+        return "select"
+    assert plan.prefetch_related
+    return "prefetch"
 
 
-def test_plan_relation_decisions_match_cardinality_after_finalization() -> None:
-    """Cyclic finalization still returns the cardinality ``plan_relation`` tuples.
+def test_relation_plans_match_cardinality_after_finalization() -> None:
+    """Cyclic finalization still plans each relation by its cardinality.
 
-    The callable's return pair is not a wire value. Reverse-O2O JOIN SQL is
+    The plan is not a wire value. Reverse-O2O JOIN SQL is
     ``examples/fakeshop/test_query/test_library_api.py::test_library_optimizer_reverse_o2o_card_joins_in_root_sql``.
     """
 
@@ -90,24 +94,23 @@ def test_plan_relation_decisions_match_cardinality_after_finalization() -> None:
             fields = ("id", "name", "books")
 
     finalize_django_types()
+    # The registry holds the types; the walk reads them through it.
+    del CategoryType, ItemType, MembershipCardType, PatronType, BookType, GenreType
 
-    assert plan_relation(_model_field(Item, "category"), CategoryType) == ("select", "default")
-    assert plan_relation(_model_field(Category, "items"), ItemType) == ("prefetch", "default")
-    assert plan_relation(_model_field(MembershipCard, "patron"), PatronType) == (
-        "select",
-        "default",
-    )
-    assert plan_relation(_model_field(Patron, "card"), MembershipCardType) == ("select", "default")
-    assert plan_relation(_model_field(Book, "genres"), GenreType) == ("prefetch", "default")
-    assert plan_relation(_model_field(Genre, "books"), BookType) == ("prefetch", "default")
+    assert _relation_plan(Item, "category", "name") == "select"
+    assert _relation_plan(Category, "items", "name") == "prefetch"
+    assert _relation_plan(MembershipCard, "patron", "name") == "select"
+    assert _relation_plan(Patron, "card", "barcode") == "select"
+    assert _relation_plan(Book, "genres", "name") == "prefetch"
+    assert _relation_plan(Genre, "books", "title") == "prefetch"
 
 
-def test_plan_relation_class_fallback_downgrades_custom_get_queryset_target() -> None:
-    """A direct call that omits ``target_definition`` reads the target class's own report.
+def test_custom_get_queryset_verdict_falls_back_to_the_target_class() -> None:
+    """With no captured definition, the target class's own report decides the downgrade.
 
-    A target that overrides ``get_queryset`` still turns a forward FK into a
-    ``Prefetch`` when no captured definition is passed. The walk always passes
-    one; that captured arm is executed by
+    A target that overrides ``get_queryset`` turns a forward FK into a
+    ``Prefetch``. The walk always passes a definition; that captured arm is
+    executed by
     ``examples/fakeshop/test_query/test_scalars_api.py::test_scalars_optimizer_downgrade_to_prefetch_for_custom_get_queryset_in_http_query``.
     """
 
@@ -125,10 +128,7 @@ def test_plan_relation_class_fallback_downgrades_custom_get_queryset_target() ->
         ) -> QuerySet[Category]:
             return queryset
 
-    assert plan_relation(_model_field(Item, "category"), FilteredCategoryType) == (
-        "prefetch",
-        "custom_get_queryset",
-    )
+    assert _target_has_custom_get_queryset(FilteredCategoryType) is True
 
 
 def test_check_schema_returns_no_warnings_for_registered_cyclic_targets() -> None:
