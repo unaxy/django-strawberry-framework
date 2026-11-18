@@ -13315,10 +13315,18 @@ def test_dynamic_csv_shape_off_the_audited_bases_fails_closed(shape: str) -> Non
     assert not _is_audited_family(object.__new__(variants[shape]))
 
 
+# Sorted by a stable key: the registry is a frozenset of classes, whose iteration
+# order follows object addresses and differs between xdist worker processes.
+_REGISTRY_FAMILIES = sorted(
+    _FILTER_FAMILY_REGISTRY,
+    key=lambda cls: (cls.__module__, cls.__qualname__),
+)
+
+
 @pytest.mark.parametrize(
     "family_cls",
-    list(_FILTER_FAMILY_REGISTRY),
-    ids=[cls.__name__ for cls in _FILTER_FAMILY_REGISTRY],
+    _REGISTRY_FAMILIES,
+    ids=[cls.__name__ for cls in _REGISTRY_FAMILIES],
 )
 def test_registry_is_a_closed_exact_allowlist(family_cls: type[Filter]) -> None:
     """An audited family's identity is accepted, while an arbitrary subclass is refused."""

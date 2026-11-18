@@ -2,8 +2,9 @@
 
 Two claims a package-only schema cannot make, each reached from a real request:
 
-- a schema whose factory entry resolves to an enforcement authority raises
-  ``ConfigurationError`` when the request's operation resolves it;
+- a schema whose factory entry returns an enforcement extension serves the
+  request as an ordinary entry: the schema's own policies still bound and mask
+  it, and the entry's own narrower policy configures nothing;
 - the optimizer entry every deployment is documented to write - one module-level
   singleton behind a factory - keeps its published plan on the request it
   belongs to when a consumer extension runs an operation of its own.
@@ -35,12 +36,13 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.error_policy import DEFAULT_ERROR_POLICY
 from django_strawberry_framework.extensions import DjangoResourcePolicyExtension
 from django_strawberry_framework.optimizer._context import (
     DST_OPTIMIZER_KEYS,
     get_context_value,
 )
+from django_strawberry_framework.resource_policy import DEFAULT_RESOURCE_POLICY
 from django_strawberry_framework.testing import TestClient
 from django_strawberry_framework.views import DjangoGraphQLView
 
@@ -48,17 +50,25 @@ pytestmark = pytest.mark.urls(__name__)
 
 
 def _narrow_resource_factory() -> DjangoResourcePolicyExtension:
-    """A factory resolving to the bounding authority the schema builds itself."""
+    """A factory returning a resource-policy extension whose own policy is narrower."""
     return DjangoResourcePolicyExtension(policy=ResourcePolicy(max_aliases=1))
 
 
 @strawberry.type
 class _ResourceQuery:
-    """One scalar for the authority-factory schema to serve."""
+    """A scalar and a failing field for the authority-factory schema to serve."""
 
     @strawberry.field
     def hello(self) -> str:
         return "hi"
+
+    @strawberry.field
+    def fail(self) -> str:
+        raise RuntimeError(_SENSITIVE)
+
+
+#: What the failing field raises; a masked response never carries it.
+_SENSITIVE = "internal tenant secret /srv/private/tenant-42.key"
 
 
 class _Nester(SchemaExtension):
@@ -141,7 +151,7 @@ _NESTER = _Nester()
 
 
 def _authority_factory_schema() -> DjangoSchema:
-    """A schema whose one entry is a factory resolving to an enforcement authority."""
+    """A schema whose one entry is a factory returning an enforcement extension."""
     return DjangoSchema(query=_ResourceQuery, extensions=[_narrow_resource_factory])
 
 
@@ -180,9 +190,31 @@ def test_an_operation_a_consumer_extension_starts_leaves_the_request_its_optimiz
     assert nesting["changed"] == []
 
 
-def test_a_schema_whose_factory_claims_an_authority_raises_on_the_request() -> None:
-    """A factory cannot be an enforcement authority; resolving it raises ``ConfigurationError``."""
+def test_a_factory_returning_an_authority_is_an_ordinary_entry_on_the_request() -> None:
+    """The factory's instance configures nothing; the schema's own policies govern.
+
+    The factory's ``max_aliases=1`` would refuse two aliases, yet the request is
+    served; the schema's default bound still refuses one alias past its ceiling,
+    and its default error policy still masks a resolver failure.
+    """
     client = TestClient(path="/iso-chain/")
 
-    with pytest.raises(ConfigurationError, match="builds itself"):
-        client.query("{ hello }")
+    served = client.query("{ a: hello b: hello }")
+    assert served.data == {"a": "hi", "b": "hi"}
+
+    over = DEFAULT_RESOURCE_POLICY.max_aliases + 1
+    refused = client.query(
+        "{ " + " ".join(f"a{index}: hello" for index in range(over)) + " }",
+        assert_no_errors=False,
+    )
+    assert refused.errors is not None
+    assert len(refused.errors) == 1, refused.errors
+    refusal = refused.errors[0]
+    assert json_at(refusal, "extensions", "code") == "RESOURCE_LIMIT_EXCEEDED", refusal
+    assert "alias" in str(refusal.get("message")), refusal
+
+    masked = client.query("{ fail }", assert_no_errors=False)
+    assert masked.errors is not None
+    assert len(masked.errors) == 1, masked.errors
+    assert masked.errors[0].get("message") == DEFAULT_ERROR_POLICY.message, masked.errors
+    assert _SENSITIVE not in str(masked.errors), masked.errors
