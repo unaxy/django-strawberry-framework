@@ -5,6 +5,8 @@
   ``classmethod`` or ``staticmethod`` wrapped around the same function is the same stored
   function, so a re-wrap is not an override. ``class_mro_attr`` reads the class's own MRO
   alone, so a name only the metaclass carries (``mro``) is absent.
+- ``defined_in`` reads which top-level package defines a class or function, a method
+  unwrapped from its ``__func__``.
 - ``mro_entry`` finds the nearest registered ancestor by identity, never by ``==`` or
   ``hash`` on the class.
 - ``kind`` and ``text`` spell a value for an error message: a class names itself, any other
@@ -35,10 +37,11 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils.typing import object_result
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Container, Mapping
 
 __all__ = (
     "class_mro_attr",
+    "defined_in",
     "describe",
     "kind",
     "mro_attr",
@@ -93,6 +96,17 @@ def overrides(cls: object, base: type[object], *names: str) -> bool:
         if read_attr(own, "__func__", own) is not read_attr(inherited, "__func__", inherited):
             return True
     return False
+
+
+def defined_in(obj: object, packages: Container[str]) -> bool:
+    """Whether the class or function ``obj`` is defined in one of the top-level ``packages``.
+
+    A ``classmethod`` / ``staticmethod`` or bound method is read for the function its
+    ``__func__`` holds; a C callable naming no module of its own (``str.strip``, a bound
+    builtin) is in none.
+    """
+    module = read_attr(read_attr(obj, "__func__", obj), "__module__", None)
+    return is_str(module) and module.partition(".")[0] in packages
 
 
 def mro_entry(mapping: Mapping[_K, _V], cls: object) -> tuple[_K, _V] | None:

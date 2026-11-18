@@ -2879,6 +2879,7 @@ def test_globalid_decoder_returns_the_targets_integer_python_key() -> None:
         global_id_for(BookIdentityNode, 42),
         filter_,
         alias=DEFAULT_DB_ALIAS,
+        target=_globalid_target(filter_),
     )
 
     assert type(key) is int
@@ -2889,12 +2890,21 @@ def test_filter_model_strategy_reads_the_model_name_case_insensitively() -> None
     owner = _owner("model")
     f = _global_id_filter_with_owner("id", owner)
     encoded = relay.to_base64("library.BOOK", "42")
-    assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == 42
+    assert (
+        _decode_and_validate_global_id(
+            encoded,
+            f,
+            alias=DEFAULT_DB_ALIAS,
+            target=_globalid_target(f),
+        )
+        == 42
+    )
     with pytest.raises(GraphQLError, match="GlobalID type mismatch"):
         _decode_and_validate_global_id(
             relay.to_base64("Library.book", "42"),
             f,
             alias=DEFAULT_DB_ALIAS,
+            target=_globalid_target(f),
         )
 
 
@@ -2913,7 +2923,12 @@ def test_filter_encode_only_strategy_rejects_fail_closed(strategy: str) -> None:
     f = _global_id_filter_with_owner("id", owner)
     encoded = relay.to_base64("AnythingAtAll", "99")
     with pytest.raises(GraphQLError, match="encode-only") as exc_info:
-        _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS)
+        _decode_and_validate_global_id(
+            encoded,
+            f,
+            alias=DEFAULT_DB_ALIAS,
+            target=_globalid_target(f),
+        )
     assert exc_info.value.extensions == {"code": "GLOBALID_UNVALIDATABLE"}
     assert strategy in str(exc_info.value)
 
@@ -2941,9 +2956,25 @@ def test_filter_unbound_owner_node_id_only() -> None:
     """
     f = _bound(GlobalIDFilter(field_name="id"), None)
     encoded = relay.to_base64("WhateverType", "5")
-    assert _decode_and_validate_global_id(encoded, f, alias=DEFAULT_DB_ALIAS) == 5
+    assert (
+        _decode_and_validate_global_id(
+            encoded,
+            f,
+            alias=DEFAULT_DB_ALIAS,
+            target=_globalid_target(f),
+        )
+        == 5
+    )
     loose = GlobalIDFilter(field_name="id")
-    assert _decode_and_validate_global_id(encoded, loose, alias=DEFAULT_DB_ALIAS) == "5"
+    assert (
+        _decode_and_validate_global_id(
+            encoded,
+            loose,
+            alias=DEFAULT_DB_ALIAS,
+            target=_globalid_target(loose),
+        )
+        == "5"
+    )
 
 
 def _unresolved_relation_owner(kind: str) -> DjangoTypeDefinition | None:
@@ -3425,6 +3456,7 @@ def test_related_filter_relation_branch_strategy_aware() -> None:
             relay.to_base64("library.genre", "3"),
             f,
             alias=DEFAULT_DB_ALIAS,
+            target=_globalid_target(f),
         )
         == 3
     )
@@ -3433,6 +3465,7 @@ def test_related_filter_relation_branch_strategy_aware() -> None:
             relay.to_base64("GenreType", "3"),
             f,
             alias=DEFAULT_DB_ALIAS,
+            target=_globalid_target(f),
         )
 
 

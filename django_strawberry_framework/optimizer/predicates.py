@@ -24,7 +24,7 @@ never globally deduplicated.
 of THIS queryset through a relation path", built from the given rows and
 correlated to the outer row by the relation's own link columns. A declared
 ``RelatedFilter`` branch restricts its parent with it
-(``filters/sets.py::_restrict_to_related``), so a nested branch and a flat leaf
+(``filters/sets.py::_restrict_through_branch``), so a nested branch and a flat leaf
 walking the branch read the related rows the same way.
 
 ``visible_row_exists`` is the order-side sibling: "the row an outer join

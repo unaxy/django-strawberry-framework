@@ -89,7 +89,7 @@ opt-out, landed; its plan is `git show 771c299f:docs/related-filter-flat-opt-out
   `branch: {}`, which then constrains nothing, so "has some" must be spelled `branchIsNull: false`.
 - What counts as to-one: a declaration whose relation path has only forward FK or O2O hops. Any to-many hop (reverse
   FK, M2M, reverse O2O through a multi-segment `field_name` that fans out) makes it to-many. R1 pins this against
-  `_require_relation_path`.
+  `utils/relations.py::require_relation_path`.
 
 ### D4: flat copies, unaffected
 
@@ -157,7 +157,7 @@ opt-out, landed; its plan is `git show 771c299f:docs/related-filter-flat-opt-out
   - what introspection shows, a before-and-after SDL diff for fakeshop;
   - a census of every live and package test and doc example sending a nested to-many branch: the migration count.
 - **R2 (evaluation):**
-  - whether `none` and `every` fit `_restrict_through_branch` / `_restrict_to_related` without a new evaluator;
+  - whether `none` and `every` fit `_restrict_through_branch` / `_reaches_related` without a new evaluator;
   - gate firing per operator;
   - the sync/async twin path;
   - the SQL each operator emits, with query counts;

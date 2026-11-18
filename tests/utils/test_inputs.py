@@ -428,13 +428,13 @@ def test_make_set_input_namespace_returns_heavy_ledger_field_specs_materialize_c
 
 def test_filter_and_order_input_namespaces_ride_make_set_input_namespace() -> None:
     """Both set families unpack the same factory closures."""
-    assert read_attr(filter_inputs._materialize_input, "__code__") is read_attr(
-        order_inputs._materialize_input,
+    assert read_attr(filter_inputs.materialize_input_class, "__code__") is read_attr(
+        order_inputs.materialize_input_class,
         "__code__",
     )
     assert (
-        filter_inputs._clear_input_namespace.__code__
-        is order_inputs._clear_input_namespace.__code__
+        filter_inputs.clear_filter_input_namespace.__code__
+        is order_inputs.clear_order_input_namespace.__code__
     )
 
 

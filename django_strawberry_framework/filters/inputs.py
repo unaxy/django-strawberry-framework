@@ -162,7 +162,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
 
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
-    from django_strawberry_framework.utils.inputs import SetInputNamespace
+    from django_strawberry_framework.utils.inputs import MaterializeFn, SetInputNamespace
     from django_strawberry_framework.utils.typing import ModelField
 
     from .sets import ChildProjection, FilterSet, _LeafDeclaration
@@ -244,13 +244,6 @@ def lookup_leaf_names(lookup: str) -> tuple[str, str | None]:
     return "_".join(attr if wire_name is None else wire_name for attr, wire_name in named), None
 
 
-def _compose_not(branch_qs: list[models.Q]) -> models.Q:
-    """Compose branch Q objects with logical NOT."""
-    if not branch_qs:
-        return models.Q()
-    return ~branch_qs[0]
-
-
 @dataclass(frozen=True, slots=True)
 class LogicOperatorDescriptor:
     """Authoritative descriptor for a filter logical operator.
@@ -293,7 +286,7 @@ LOGIC_OP_NOT = LogicOperatorDescriptor(
     python_attr="not_",
     wire_name="not",
     is_sequence=False,
-    compose=_compose_not,
+    compose=lambda branch_qs: ~branch_qs[0] if branch_qs else models.Q(),
 )
 
 LOGIC_OPERATORS: tuple[LogicOperatorDescriptor, ...] = (LOGIC_OP_AND, LOGIC_OP_OR, LOGIC_OP_NOT)
@@ -319,12 +312,21 @@ LOGIC_OPERATORS_BY_PYTHON_ATTR: Mapping[str, LogicOperatorDescriptor] = MappingP
 # spec-027 Decision 9 namespace lifecycle. Mechanics live in
 # ``utils/inputs.py::make_set_input_namespace`` (heavy clear: ledger +
 # field_specs + factory caches + ``_lifecycle`` binding). This module keeps
-# the spec-named public wrappers and the disjoint per-subsystem ledgers.
-# ``clear_filter_input_namespace`` leaves class objects parked in
+# the spec-named public callables and the disjoint per-subsystem ledgers.
+# ``materialize_input_class(name, cls)`` sets ``cls`` as a real module global of
+# ``filters.inputs`` (``utils/inputs.py::materialize_generated_input_class``:
+# idempotent per ``(name, cls)``, a distinct class under a taken name raises).
+# ``clear_filter_input_namespace()`` resets the ledger, ``_field_specs``, the
+# ``FilterArgumentsFactory`` caches and every ``FilterSet`` subclass's
+# ``_lifecycle`` binding attrs for a fresh build, and leaves class objects parked in
 # ``filters.inputs.__dict__``, per the parked-globals lifecycle stated on
-# ``utils/inputs.py::make_input_namespace``.
+# ``utils/inputs.py::make_input_namespace``: that keeps a held
+# ``strawberry.lazy(...)`` LazyType resolving across a reload that does not also
+# reload the holder.
 _materialized_names: dict[str, type[object]]
 _field_specs: dict[tuple[type[object], str], FieldSpec]
+materialize_input_class: MaterializeFn
+clear_filter_input_namespace: Callable[[], None]
 _namespace: SetInputNamespace = make_set_input_namespace(
     INPUTS_MODULE_PATH,
     "FilterSet",
@@ -334,7 +336,9 @@ _namespace: SetInputNamespace = make_set_input_namespace(
     set_module="django_strawberry_framework.filters.sets",
     set_class_name="FilterSet",
 )
-_materialized_names, _field_specs, _materialize_input, _clear_input_namespace = _namespace
+_materialized_names, _field_specs, materialize_input_class, clear_filter_input_namespace = (
+    _namespace
+)
 
 
 # ---------------------------------------------------------------------------
@@ -818,15 +822,6 @@ _SHIPPED_FORM_PACKAGES = frozenset(
 )
 
 
-def _is_shipped_code(obj: object) -> bool:
-    """Whether the class or function ``obj`` is defined in a ``_SHIPPED_FORM_PACKAGES`` package.
-
-    A C callable naming no module of its own (``str.strip``, a bound builtin) is not.
-    """
-    module = read_attr(obj, "__module__", None)
-    return isinstance(module, str) and module.partition(".")[0] in _SHIPPED_FORM_PACKAGES
-
-
 def _cleans_in_shipped_code(form_field: object) -> bool:
     """Whether every cleaning ``form_field`` runs is Django's or django-filter's own code.
 
@@ -844,10 +839,10 @@ def _cleans_in_shipped_code(form_field: object) -> bool:
     form_class: type[object] = type(form_field)
     if any(issubclass(form_class, base) for base in _COERCING_FORM_FIELDS):
         coerce = read_attr(form_field, "coerce", None)
-        if not is_class(coerce) and not _is_shipped_code(coerce):
+        if not is_class(coerce) and not introspection.defined_in(coerce, _SHIPPED_FORM_PACKAGES):
             return False
     return all(
-        _is_shipped_code(klass)
+        introspection.defined_in(klass, _SHIPPED_FORM_PACKAGES)
         for klass in form_class.__mro__
         if any(name in class_namespace(klass) for name in _CLEANING_METHODS)
     )
@@ -1149,10 +1144,7 @@ def _django_resolves(owner: type[object], *names: str) -> bool:
     ``__func__``), for the module that defines it.
     """
     stored = [introspection.mro_attr(owner, name) for name in names]
-    return all(
-        read_attr(entry, "__func__", entry).__module__.partition(".")[0] == "django"
-        for entry in stored
-    )
+    return all(introspection.defined_in(entry, ("django",)) for entry in stored)
 
 
 def _django_converts(column: ModelField) -> bool:
@@ -1334,6 +1326,12 @@ def _is_hidden_flat_copy(filterset_cls: type[FilterSet], filter_instance: Filter
     return bool(hide_flat_filters_setting()) and _is_flat_copy(filterset_cls, filter_instance)
 
 
+def _related_filters(filterset_cls: type[object]) -> dict[str, RelatedFilter]:
+    """Return the ``RelatedFilter`` map ``sets_mixins.py::collect_related_declarations`` stores."""
+    stored = introspection.mro_attr(filterset_cls, "related_filters", OrderedDict[str, object]())
+    return declaration_map(stored, RelatedFilter)
+
+
 def _served_reach(
     served: Iterable[type[FilterSet]],
 ) -> Iterator[tuple[type[FilterSet], type[FilterSet], tuple[str, ...]]]:
@@ -1371,10 +1369,7 @@ def _served_reach(
             if (record := _expansion_record(leaf)) is not None
             and not _is_hidden_flat_copy(filterset_cls, leaf)
         ]
-        related_filters = declaration_map(
-            introspection.mro_attr(filterset_cls, "related_filters", OrderedDict[str, object]()),
-            RelatedFilter,
-        )
+        related_filters = _related_filters(filterset_cls)
         branches.extend(
             (related_filter.filterset, name)
             for name, related_filter in related_filters.items()
@@ -1624,7 +1619,7 @@ def _validates_its_keys(form_field: forms.ChoiceField) -> bool:
     """
     form_class = type(form_field)
     stored = [introspection.mro_attr(form_class, name) for name in _CHOICE_VALIDATION_METHODS]
-    return all(_is_shipped_code(read_attr(entry, "__func__", entry)) for entry in stored)
+    return all(introspection.defined_in(entry, _SHIPPED_FORM_PACKAGES) for entry in stored)
 
 
 def _form_choice_samples(filter_instance: Filter, form_field: object) -> tuple[object, ...] | None:
@@ -2183,12 +2178,6 @@ def convert_filter_to_input_annotation(
         )
     required = bool(dict_of(filter_instance.extra).get("required", False))
 
-    def _gid_multi(_filter: Filter) -> object:
-        return list[str]
-
-    def _gid(_filter: Filter) -> object:
-        return str
-
     def _pk_multi(matched: Filter) -> object:
         element = _relation_identity_annotation(matched, model_field, filterset_cls)
         return GenericAlias(list, (element,))
@@ -2298,8 +2287,8 @@ def convert_filter_to_input_annotation(
     annotation = convert_with_mro(
         filter_instance,
         isinstance_prechecks=_filter_input_prechecks(
-            _one_key(_gid_multi),
-            _one_key(_gid),
+            _one_key(lambda _filter: list[str]),
+            _one_key(lambda _filter: str),
             _one_key(_pk_multi),
             _one_key(_pk),
             _one_key(_model_choice),
@@ -3041,12 +3030,7 @@ def _build_input_fields(
     paths, one bag attr per lookup the table holds. Populates ``_field_specs``
     for the active-field walk and the permission gates.
     """
-    # The metaclass stores ``related_filters`` from
-    # ``sets_mixins.py::collect_related_declarations`` (``RelatedFilter`` only).
-    related_filters = declaration_map(
-        introspection.mro_attr(filterset_cls, "related_filters", OrderedDict[str, object]()),
-        RelatedFilter,
-    )
+    related_filters = _related_filters(filterset_cls)
     lookup_table = filter_lookup_table(filterset_cls)
 
     # ``HIDE_FLAT_FILTERS`` (default ``False``, the default of
@@ -3182,33 +3166,6 @@ def construct_search(all_filters: Mapping[str, object]) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Module-global materialization (spec-027 Decision 9)
 # ---------------------------------------------------------------------------
-
-
-def materialize_input_class(name: str, cls: type[object]) -> None:
-    """Set ``cls`` as a real module global of ``filters.inputs`` under ``name``.
-
-    Thin family wrapper over the ``make_set_input_namespace`` materializer.
-    See ``utils/inputs.py::materialize_generated_input_class`` for the
-    Strawberry ``LazyType.resolve_type`` contract, the ``(name, cls)``
-    idempotency clause, and the distinct-class collision raise (spec-027
-    Decision 9).
-    """
-    _materialize_input(name, cls)
-
-
-def clear_filter_input_namespace() -> None:
-    """Reset the filter-input ledger and per-filterset binding state for a fresh build.
-
-    Thin family wrapper over the ``make_set_input_namespace`` heavy clear
-    (ledger, ``_field_specs``, ``FilterArgumentsFactory`` caches, every
-    ``FilterSet`` subclass's ``_lifecycle`` binding attrs). Materialized class
-    objects stay parked in ``filters.inputs.__dict__`` per the parked-globals
-    lifecycle stated on ``utils/inputs.py::make_input_namespace`` - which is what
-    keeps held ``strawberry.lazy(...)`` LazyTypes resolving across an autouse
-    reload that does not also reload the holder (``test_scalars_api.py`` reloads
-    only its own app's schema).
-    """
-    _clear_input_namespace()
 
 
 register_subsystem_clear(

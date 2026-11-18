@@ -7377,18 +7377,14 @@ def test_async_annotation_readiness_uses_constructor_selected_shard(family: str)
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("transport", ["sync", "async"])
-@pytest.mark.parametrize("policy", ["form", "filterset"])
-def test_consumer_form_validation_policy_keeps_accepted_root_logical_arms(
-    transport: str,
-    policy: str,
-) -> None:
+def test_consumer_form_validation_policy_keeps_accepted_root_logical_arms(transport: str) -> None:
     cleaned_specimen("kept", kept=True)
     cleaned_specimen("other", kept=False)
 
     class AcceptingForm(Form):
         @override
         def is_valid(self) -> bool:
-            return True if policy == "form" else super().is_valid()
+            return True
 
     class Criteria(FilterSet):
         label = CharFilter(field_name="label")
@@ -7398,12 +7394,6 @@ def test_consumer_form_validation_policy_keeps_accepted_root_logical_arms(
             model = scalar_models.ScalarSpecimen
             fields = []
             form = AcceptingForm
-
-        @classmethod
-        @override
-        def _validate_form_or_raise(cls, filterset_instance: FilterSet) -> None:
-            if policy != "filterset":
-                super()._validate_form_or_raise(filterset_instance)
 
     schema = _schema(
         Criteria,
@@ -7524,10 +7514,8 @@ def test_plain_cached_consumer_form_receives_its_missing_annotation_parser(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("transport", ["sync", "async"])
 @pytest.mark.parametrize("logical", [False, True])
-@pytest.mark.parametrize("policy", ["form", "filterset"])
 def test_accepted_native_field_error_keeps_active_annotation_binding(
     transport: str,
-    policy: str,
     *,
     logical: bool,
 ) -> None:
@@ -7548,19 +7536,13 @@ def test_accepted_native_field_error_keeps_active_annotation_binding(
 
         @override
         def is_valid(self) -> bool:
-            return set(self.errors).issubset({"bad"}) if policy == "form" else super().is_valid()
+            return set(self.errors).issubset({"bad"})
 
     class Criteria(_UndeclaredAnnotationCriteriaSet):
         bad = NumberFilter(field_name="signed_big")
 
         class Meta(_UndeclaredAnnotationCriteriaSet.Meta):
             form = AcceptingForm
-
-        @classmethod
-        @override
-        def _validate_form_or_raise(cls, filterset_instance: FilterSet) -> None:
-            if policy != "filterset":
-                super()._validate_form_or_raise(filterset_instance)
 
     def owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
         events.append("hook")

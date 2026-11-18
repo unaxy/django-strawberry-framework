@@ -36,10 +36,8 @@
 "django_strawberry_framework/filters/inputs.py::_refuse_form_serving_no_value" = { PLC0415 = 1 }
 "django_strawberry_framework/filters/inputs.py::_served_reach" = { PLC0415 = 1 }
 "django_strawberry_framework/filters/inputs.py::_unscalared_field_refusal" = { PLC0415 = 1 }
-"django_strawberry_framework/filters/sets.py::FilterSet._apply_flat_leaves" = { S101 = 2 }
-"django_strawberry_framework/filters/sets.py::FilterSet._apply_relation_leaf" = { S101 = 1 }
-"django_strawberry_framework/filters/sets.py::FilterSet._filter_child_rows" = { S101 = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSetMetaclass.__new__" = { PYI034 = 1 }
+"django_strawberry_framework/filters/sets.py::_returned_queryset" = { S101 = 1 }
 "django_strawberry_framework/filters/sets.py::_widget_keys" = { BLE001 = 1 }
 "django_strawberry_framework/forms/resolvers.py::_blank_type_errors" = { BLE001 = 1 }
 "django_strawberry_framework/keyset.py::_cursor_crypto_types" = { PLC0415 = 2 }

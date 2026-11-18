@@ -45,9 +45,9 @@ From the full entries, 2026-10-21. Item numbers are that file's.
   - Research: reproduced for copy, deepcopy and pickle. Fix instead of documenting: `if name == "_request": raise
     AttributeError(name)` at the top of `__getattr__`, plus a round-trip test in `tests/utils/test_permissions.py`.
     Optional: refuse dunder names too. Size S
-- [ ] 13. `django_strawberry_framework/utils/sessions.py::scope_singleton` reads `scope.get(key)`, where
-  `utils/permissions.py` deliberately avoids `Mapping.get`; a scope subclass overriding `get` could hand back a forged
-  `ConnectionActorState` (hostile scope only)
+- [ ] 13. `django_strawberry_framework/utils/sessions.py::scope_singleton` reads `scope.get(key)`, as
+  `utils/permissions.py` reads the scope's `user` and `session`; a scope subclass overriding `get` could hand back a
+  forged `ConnectionActorState` (hostile scope only)
   - Research: holds, but `scope.get` also appears in `consumers.py` (the revalidation `user` read and the window cache)
     and `auth/sessions.py`, so fixing this one site is partial. A hostile scope is in-process consumer code. Decide:
     document the trust boundary in the `scope_singleton` docstring (S) or sweep every site through one helper (M)

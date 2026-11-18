@@ -77,7 +77,11 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.imports import loaded_attr
 from django_strawberry_framework.utils.permissions import set_bound_definition
-from django_strawberry_framework.utils.relations import instance_accessor, is_model_class
+from django_strawberry_framework.utils.relations import (
+    instance_accessor,
+    is_model_class,
+    require_relation_path,
+)
 from django_strawberry_framework.utils.typing import object_result
 
 from .base import DEFAULT_RELATION_SHAPE
@@ -1597,7 +1601,7 @@ def _audit_related_order_targets(wired: list[type[OrderSet]]) -> None:
     The walk starts at each wired set with the model of each type serving it (the
     model its paths resolve against, spec-028 Decision 8) and crosses every
     declaration, transitively, with the model that declaration's relation reached:
-    ``orders/sets.py::_require_order_relation_path`` refuses a ``field_name`` that is
+    ``utils/relations.py::require_relation_path`` refuses a ``field_name`` that is
     not a path of relations, and ``orders/sets.py::_require_scoped_order_target`` a
     target bound to a type whose rows the hop cannot read as the reached model's.
     ``OrderSet._scoped_hops`` asks the same at every apply, for an order applied
@@ -1606,7 +1610,6 @@ def _audit_related_order_targets(wired: list[type[OrderSet]]) -> None:
     """
     from django_strawberry_framework.orders.base import RelatedOrder  # noqa: PLC0415 - binds only a subsystem the consumer imported
     from django_strawberry_framework.orders.sets import (  # noqa: PLC0415 - binds only a subsystem the consumer imported
-        _require_order_relation_path,
         _require_scoped_order_target,
     )
 
@@ -1625,7 +1628,13 @@ def _audit_related_order_targets(wired: list[type[OrderSet]]) -> None:
         )
         for name, related in related_orders.items():
             relation = str(related.field_name or name)
-            reached = _require_order_relation_path(orderset_cls, name, relation, model)
+            reached = require_relation_path(
+                ("OrderSet", "RelatedOrder"),
+                orderset_cls,
+                name,
+                relation,
+                model,
+            )
             target = related.orderset
             _ = _require_scoped_order_target(orderset_cls, name, relation, reached, target)
             if target is not None and (target, reached) not in seen:

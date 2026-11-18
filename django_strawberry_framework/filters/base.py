@@ -564,7 +564,7 @@ def _model_unresolved_query(
     operand: _LookupOperand,
     query: Query | None = None,
 ) -> Query | None:
-    """Return ``_bound_query`` for a per-request filter its model's walk answers no field for.
+    """Return the query of the queryset a per-request filter's ``FilterSet`` was handed.
 
     ``operand`` is the model's answer (``_filterset_lookup_operand``), which reads every
     path a fresh ``Query`` of the model resolves, cached per key; only a path it answers no
@@ -573,29 +573,18 @@ def _model_unresolved_query(
     ``query`` when given: the query of the queryset a bound filter is applied to, which
     holds what a consumer ``filter_queryset`` added. ``None`` for every other filter, a
     ``method=`` filter included (its own method receives the value, so it keeps the
-    model's answer), and for a filter bound to no ``FilterSet`` instance.
+    model's answer), for a filter bound to no ``FilterSet`` instance (a class-level
+    declaration, a standalone filter) and for one whose ``queryset`` is no ``QuerySet``.
+    django-filter's ``BaseFilterSet.__init__`` stores the queryset (the model's default
+    one when handed none) before it stamps each per-request filter's ``parent``.
     """
     if read_attr(filter_instance, "method", None) is not None or operand.field is not None:
         return None
-    bound = _bound_query(filter_instance)
-    return bound if bound is None or query is None else query
-
-
-def _bound_query(filter_instance: Filter) -> Query | None:
-    """Return the query of the queryset a per-request filter's ``FilterSet`` was handed.
-
-    django-filter's ``BaseFilterSet.__init__`` stores the queryset (the model's default
-    one when handed none) before it stamps each per-request filter's ``parent``, so a
-    path only that queryset resolves (a queryset annotation or alias, a
-    ``FilteredRelation`` alias and the columns past it) is read where it is held. ``None``
-    for a filter bound to no ``FilterSet`` instance (a class-level declaration, a
-    standalone filter) and for one whose ``queryset`` is no ``QuerySet``.
-    """
     parent = read_attr(filter_instance, "parent", None)
-    if not isinstance(parent, BaseFilterSet):
+    queryset = read_attr(parent, "queryset", None) if isinstance(parent, BaseFilterSet) else None
+    if not isinstance(queryset, models.QuerySet):
         return None
-    queryset = read_attr(parent, "queryset", None)
-    return queryset.query if isinstance(queryset, models.QuerySet) else None
+    return queryset.query if query is None else query
 
 
 def _query_path_field(query: Query, field_path: str) -> ModelField | None:
@@ -644,10 +633,9 @@ def _query_lookup_operand(
             query,
             LOOKUP_SEP.join((field_path, lookup_expr)),
         )
-        if isinstance(start, models.ForeignObjectRel):
-            walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover) or "exact")
-            return _LookupOperand.resolved(start, walk.lookup, walk.node_types)
         walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover) or "exact")
+        if isinstance(start, models.ForeignObjectRel):
+            return _LookupOperand.resolved(start, walk.lookup, walk.node_types)
         output = read_attr(walk.lhs, "output_field", None)
     except (FieldError, LookupValidationError):
         return None
@@ -666,8 +654,8 @@ def _bound_lookup_operand(filter_instance: Filter, query: Query | None = None) -
     ``_filterset_lookup_operand`` over the filterset django-filter stamps as
     ``filter_.parent``, read on its model; a path the model names no field for (a queryset
     annotation or alias, a ``FilteredRelation`` alias) is read over the queryset that
-    filterset was handed (``_bound_query``, ``_query_lookup_operand``), the queryset the
-    filter's predicate is built on, or over ``query`` when one is given: the rows a
+    filterset was handed (``_model_unresolved_query``, ``_query_lookup_operand``), the
+    queryset the filter's predicate is built on, or over ``query`` when one is given: the rows a
     consumer ``filter_queryset`` passes on (``filters/sets.py::FilterSet._clean_late_comparisons``).
     A ``method=`` filter keeps the model's answer: its own method receives the value.
     """
@@ -2057,9 +2045,7 @@ def _django_prepares(lookup: type[models.lookups.Lookup] | None) -> bool:
     cleaned, as a ``method=`` filter does.
     """
     return (
-        lookup is not None
-        and lookup.prepare_rhs
-        and lookup.__module__.partition(".")[0] == "django"
+        lookup is not None and lookup.prepare_rhs and introspection.defined_in(lookup, ("django",))
     )
 
 
@@ -2134,12 +2120,11 @@ def _identifying_members(
     validators are not run, so a member they would refuse still matches a row that holds
     it.
     """
-    kept: list[object] = []
-    for member in members:
-        coerced = coerce_field_value_or_none(model_field, member, alias=alias)
-        if coerced is not None:
-            kept.append(coerced)
-    return kept
+    return [
+        coerced
+        for member in members
+        if (coerced := coerce_field_value_or_none(model_field, member, alias=alias)) is not None
+    ]
 
 
 class ListFilterMethod(_EmptyListAwareFilterMethod):
@@ -2246,8 +2231,7 @@ def membership_in_filter_class(in_filter_class: type[BaseInFilter]) -> type[Memb
 
     ``class ConcreteInFilter(MembershipInFilter, in_filter_class): pass`` over whatever
     ``BaseInFilter`` subclass ``BaseFilterSet.filter_for_lookup`` returned, keeping its
-    name: a ``class`` statement, so the body carries exactly the interpreter's
-    structural dunders the dynamic-CSV validator
+    name: the two-base shape the dynamic-CSV validator
     (``filters/sets.py::_is_dynamic_csv_class``) unwraps, and a NEW class per call,
     as upstream builds, so a class one filter set's instantiation has deep-copied (which
     stamps ``copyreg``'s ``__slotnames__`` on it) is never another filter set's.
@@ -2816,7 +2800,7 @@ def _decode_and_validate_global_id(
     filter_instance: Filter,
     *,
     index: int | None = None,
-    target: _GlobalIDTarget | None = None,
+    target: _GlobalIDTarget | None,
     alias: str,
     query: Query | None = None,
 ) -> object:
@@ -2887,9 +2871,8 @@ def _decode_and_validate_global_id(
     ``query``, the queryset the filter is applied to, which holds a ``FilteredRelation``
     alias wherever it was added (a ``filter_queryset`` override included). A filter whose
     path names no model field (no FilterSet model, no field on it), or whose lookup applies
-    a transform, passes the decoded node id through. ``target``
-    threads the filter's ``_globalid_target`` through a list so it resolves once per
-    call; when omitted it is resolved here.
+    a transform, passes the decoded node id through. ``target`` is the filter's
+    ``_globalid_target``, threaded through a list so it resolves once per call.
     """
     suffix = "" if index is None else f" at index {index}"
     if isinstance(value, relay.GlobalID):
@@ -2905,8 +2888,6 @@ def _decode_and_validate_global_id(
                 f"base64 or not a 'type_name:node_id' shape){suffix}.",
                 extensions=coded_error_extensions(GLOBALID_INVALID_ERROR_CODE),
             ) from exc
-    if target is None:
-        target = _globalid_target(filter_instance)
     definition = None if target is None else target.definition
     if definition is not None:
         strategy = definition.effective_globalid_strategy
@@ -3352,66 +3333,39 @@ _SHIPPED_FILTER_PACKAGES = frozenset(
 )
 
 
-def _multiple_choice_predicate_hook(filter_instance: Filter) -> str | None:
-    """``get_filter_predicate``, whatever the filter's lookup.
-
-    django-filter's ``MultipleChoiceFilter.filter`` builds every value's predicate there,
-    its documented custom-predicate seam reading each value's lookup and operand.
-    """
-    del filter_instance
-    return "get_filter_predicate"
+#: The shipped ``filter`` functions that build each value's predicate through
+#: ``get_filter_predicate``, a method a subclass may override: django-filter's
+#: ``MultipleChoiceFilter.filter``, and the package's ``GlobalIDMultipleChoiceFilter.filter``.
+_MULTIPLE_CHOICE_FILTER = class_namespace(MultipleChoiceFilter)["filter"]
+_GLOBALID_MULTIPLE_FILTER = class_namespace(GlobalIDMultipleChoiceFilter)["filter"]
 
 
-def _globalid_predicate_hook(filter_instance: Filter) -> str | None:
-    """``get_filter_predicate`` for a lookup other than ``in``; ``None`` for ``in``.
+def _through_filter_predicate(filter_instance: Filter, method: object) -> bool:
+    """Whether the shipped ``method`` builds ``filter_instance``'s predicate through ``get_filter_predicate``.
 
+    django-filter's ``MultipleChoiceFilter.filter`` does for every lookup, its documented
+    custom-predicate seam reading each value's lookup and operand.
     ``GlobalIDMultipleChoiceFilter.filter`` hands the decoded ids of any lookup but ``in``
-    to ``MultipleChoiceFilter.filter``, which builds each predicate through the hook; an
-    ``in`` it applies itself, in one package predicate
-    (``_apply_lookup_predicate``). The lookup read is the one applied
-    where the path ends (``_bound_lookup_expr``), as the filter reads it.
+    to it; an ``in`` it applies itself, in one package predicate
+    (``_apply_lookup_predicate``), the lookup read where the path ends
+    (``_bound_lookup_expr``), as the filter reads it.
     """
-    return None if _bound_lookup_expr(filter_instance) == "in" else "get_filter_predicate"
-
-
-#: Each shipped ``filter`` that builds its predicate through a method a subclass may override,
-#: and the reading naming that method for a filter (``None`` where the ``filter`` builds the
-#: predicate itself): django-filter's ``MultipleChoiceFilter.filter`` and the package's
-#: ``GlobalIDMultipleChoiceFilter.filter`` off its ``in`` arm.
-_PREDICATE_HOOKS: Mapping[object, Callable[[Filter], str | None]] = MappingProxyType(
-    {
-        class_namespace(MultipleChoiceFilter)["filter"]: _multiple_choice_predicate_hook,
-        class_namespace(GlobalIDMultipleChoiceFilter)["filter"]: _globalid_predicate_hook,
-    },
-)
-
-
-def _predicate_hook(filter_instance: Filter, method: object) -> str | None:
-    """Return the overridable method the shipped ``method`` builds the predicate through.
-
-    ``None`` where ``method`` builds the predicate itself (``_PREDICATE_HOOKS``).
-    """
-    reading = _PREDICATE_HOOKS.get(method)
-    return None if reading is None else reading(filter_instance)
-
-
-def _is_shipped_function(function: object) -> bool:
-    """Whether ``function`` is defined in django-filter or this package (``_SHIPPED_FILTER_PACKAGES``)."""
-    return function.__module__.partition(".")[0] in _SHIPPED_FILTER_PACKAGES
+    return method is _MULTIPLE_CHOICE_FILTER or (
+        method is _GLOBALID_MULTIPLE_FILTER and _bound_lookup_expr(filter_instance) != "in"
+    )
 
 
 def _builds_consumer_predicate(filter_instance: Filter, method: object) -> bool:
     """Whether the shipped ``method`` builds ``filter_instance``'s predicate through consumer code.
 
-    ``method`` reads an overridable predicate method (``_predicate_hook``) the class of
-    ``filter_instance`` resolves to a function neither django-filter nor this package
+    ``method`` reads ``get_filter_predicate`` (``_through_filter_predicate``) and the class
+    of ``filter_instance`` resolves it to a function neither django-filter nor this package
     defines: the predicate, path and value included, is the override's.
     """
-    hook = _predicate_hook(filter_instance, method)
-    if hook is None:
+    if not _through_filter_predicate(filter_instance, method):
         return False
-    stored = introspection.mro_attr(type(filter_instance), hook)
-    return not _is_shipped_function(read_attr(stored, "__func__", stored))
+    stored = introspection.mro_attr(type(filter_instance), "get_filter_predicate")
+    return not introspection.defined_in(stored, _SHIPPED_FILTER_PACKAGES)
 
 
 def _class_filter(filter_instance: Filter) -> object:
@@ -3430,7 +3384,7 @@ def _runs_shipped_filter(filter_instance: Filter) -> bool:
     for the module that defines it, so a consumer subclass that keeps an upstream or
     package ``filter`` runs shipped code, and one that overrides ``filter`` (a
     class-level override) runs its own. A shipped ``filter`` that builds its predicate
-    through an overridable method (``_PREDICATE_HOOKS``: ``MultipleChoiceFilter``'s
+    through an overridable method (``_through_filter_predicate``: ``MultipleChoiceFilter``'s
     ``get_filter_predicate``, which ``GlobalIDMultipleChoiceFilter`` calls through it for
     any lookup but ``in``) runs consumer code where the class resolves that method to a
     function neither django-filter nor this package defines: the predicate, path
@@ -3439,7 +3393,10 @@ def _runs_shipped_filter(filter_instance: Filter) -> bool:
     if _own_filter(filter_instance) is not None:
         return False
     method = _class_filter(filter_instance)
-    return _is_shipped_function(method) and not _builds_consumer_predicate(filter_instance, method)
+    return introspection.defined_in(
+        method,
+        _SHIPPED_FILTER_PACKAGES,
+    ) and not _builds_consumer_predicate(filter_instance, method)
 
 
 def relation_identity_column(relation: object) -> ConcreteField | None:
@@ -3833,7 +3790,7 @@ def _field_needs_a_queryset(field_class: object) -> bool:
         return False
     before = takewhile(lambda klass: klass is not ModelChoiceField, field_class.__mro__)
     return all(
-        read_attr(init, "__func__", init).__module__.partition(".")[0] in _SHIPPED_FORM_PACKAGES
+        introspection.defined_in(init, _SHIPPED_FORM_PACKAGES)
         for klass in before
         if (init := class_namespace(klass).get("__init__")) is not None
     )
@@ -4049,8 +4006,8 @@ def refuse_listless_lookup(
     if (
         lookup is None
         or field is None
-        or lookup.__module__.partition(".")[0] != "django"
-        or type(field).__module__.partition(".")[0] != "django"
+        or not introspection.defined_in(lookup, ("django",))
+        or not introspection.defined_in(type(field), ("django",))
         or array_element_field(field) is not None
         or _takes_list(lookup, field)
     ):

@@ -48,10 +48,12 @@ from django_strawberry_framework.utils.relations import carrier_backed_link, is_
 from .base import RelatedOrder
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from django.db.models.expressions import Expression, OrderBy
 
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
-    from django_strawberry_framework.utils.inputs import SetInputNamespace
+    from django_strawberry_framework.utils.inputs import MaterializeFn, SetInputNamespace
 
     from .sets import OrderSet
 
@@ -140,11 +142,19 @@ class Ordering(enum.Enum):
 #
 # Decision-9 namespace lifecycle. Mechanics live in
 # ``utils/inputs.py::make_set_input_namespace`` (heavy clear). This module
-# keeps the spec-named public wrappers and a ledger disjoint from
-# ``filters.inputs`` per spec-028 Decision 9. ``clear_order_input_namespace``
-# leaves class objects parked in ``orders.inputs.__dict__``.
+# keeps the spec-named public callables and a ledger disjoint from
+# ``filters.inputs`` per spec-028 Decision 9. ``materialize_input_class(name, cls)``
+# sets ``cls`` as a real module global of ``orders.inputs``
+# (``utils/inputs.py::materialize_generated_input_class``).
+# ``clear_order_input_namespace()`` resets the ledger, ``_field_specs``, the
+# ``OrderArgumentsFactory`` caches and every ``OrderSet`` subclass's ``_lifecycle``
+# binding attrs, and leaves class objects parked in ``orders.inputs.__dict__``. It
+# does NOT touch ``_helper_referenced_ordersets``, which clears through its own
+# ``register_subsystem_clear`` row (owner ``orders.helper_references``).
 _materialized_names: dict[str, type[object]]
 _field_specs: dict[tuple[type[object], str], FieldSpec]
+materialize_input_class: MaterializeFn
+clear_order_input_namespace: Callable[[], None]
 _namespace: SetInputNamespace = make_set_input_namespace(
     INPUTS_MODULE_PATH,
     "OrderSet",
@@ -154,7 +164,9 @@ _namespace: SetInputNamespace = make_set_input_namespace(
     set_module="django_strawberry_framework.orders.sets",
     set_class_name="OrderSet",
 )
-_materialized_names, _field_specs, _materialize_input, _clear_input_namespace = _namespace
+_materialized_names, _field_specs, materialize_input_class, clear_order_input_namespace = (
+    _namespace
+)
 
 
 def _get_concrete_field_names_for_order(model: object) -> list[str]:
@@ -370,31 +382,6 @@ def _ensure_field_specs(orderset_cls: type[OrderSet], input_value: object) -> No
         owner for owner, _ in _field_specs
     ):
         _ = _build_input_fields(orderset_cls)
-
-
-def materialize_input_class(name: str, input_cls: type[object]) -> None:
-    """Set ``input_cls`` as a real module global of ``orders.inputs`` under ``name``.
-
-    Thin family wrapper over the ``make_set_input_namespace`` materializer.
-    See ``utils/inputs.py::materialize_generated_input_class`` for the
-    Strawberry ``LazyType.resolve_type`` contract, the ``(name, input_cls)``
-    idempotency clause, and the distinct-class collision raise
-    (spec-028 Decision 9).
-    """
-    _materialize_input(name, input_cls)
-
-
-def clear_order_input_namespace() -> None:
-    """Reset the order-input ledger and per-orderset binding state for a fresh build.
-
-    Thin family wrapper over the ``make_set_input_namespace`` heavy clear
-    (ledger, ``_field_specs``, ``OrderArgumentsFactory`` caches, every
-    ``OrderSet`` subclass's ``_lifecycle`` binding attrs). Does NOT touch
-    ``_helper_referenced_ordersets`` -- that ledger lives in
-    ``orders/__init__.py`` and clears through its own
-    ``register_subsystem_clear`` row (owner ``orders.helper_references``).
-    """
-    _clear_input_namespace()
 
 
 register_subsystem_clear(

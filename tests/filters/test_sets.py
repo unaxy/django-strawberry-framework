@@ -159,7 +159,6 @@ from django_strawberry_framework.filters.inputs import (
 )
 from django_strawberry_framework.filters.sets import (
     _AUDITED_DJANGO_FILTER_RANGE,
-    _EMPTY_BODY_DYNAMIC_CSV_ATTRS,
     _FILTER_FAMILY_REGISTRY,
     _GENERATION_PROVENANCE_ATTR,
     _MODEL_CHOICE_ONLY_EXTRAS,
@@ -174,7 +173,6 @@ from django_strawberry_framework.filters.sets import (
     _is_audited_family,
     _lookups_for_field,
     _normalize_policy_entry,
-    _NormalizedPolicyEntry,
     _queryset_integer_column,
     _release_is_audited,
     _stamp_generation_provenance,
@@ -9193,8 +9191,8 @@ def test_evaluate_logic_tree_caps_a_non_int_knob_at_the_neutral_default() -> Non
         )
 
 
-def test_evaluate_logic_tree_and_direct_branch_treat_inactive_values_as_identity() -> None:
-    """Inactive AND arms and direct branch calls return the identity query."""
+def test_evaluate_logic_tree_treats_inactive_arms_as_identity() -> None:
+    """Inactive AND arms return the identity query."""
 
     class CategoryFilter(FilterSet):
         class Meta:
@@ -9206,7 +9204,6 @@ def test_evaluate_logic_tree_and_direct_branch_treat_inactive_values_as_identity
         CategoryFilter._evaluate_logic_tree(queryset, {"and": [None]}, _flat_hop_visibility={})
         == Q()
     )
-    assert CategoryFilter._q_for_branch(queryset, UNSET, _flat_hop_visibility={}) == Q()
 
 
 def test_collect_nested_visibility_querysets_async_caps_recursion_depth() -> None:
@@ -11075,18 +11072,6 @@ def test_apply_async_caps_related_recursion_depth() -> None:
     assert "_MAX_LOGIC_DEPTH" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("operator", ["and", "not"], ids=["multi-branch", "single-branch"])
-def test_validate_logic_branch_shape_accepts_inactive_value(operator: str) -> None:
-    """An inactive logical value is accepted by either container-shape validator."""
-
-    class CategoryFilter(FilterSet):
-        class Meta:
-            model = Category
-            fields = {"name": ["exact"]}
-
-    CategoryFilter._validate_logic_branch_shape(operator, None)
-
-
 @pytest.mark.parametrize(
     ("operator", "value"),
     [
@@ -12629,11 +12614,10 @@ def test_normalize_policy_entry_none_returns_none() -> None:
     and compares it against upstream's normalized entry from ``try_dbfield``, which returns
     ``None`` when a selection class has no matching entry along its MRO. Both sides must
     therefore represent absence as ``None`` so a present-vs-absent comparison is unequal;
-    a present entry normalizes to a record.
+    a present entry normalizes to its ``(filter_class, extra)`` pair.
     """
     assert _normalize_policy_entry(None) is None
-    present = _normalize_policy_entry({"filter_class": CharFilter})
-    assert present == _NormalizedPolicyEntry(CharFilter, None)
+    assert _normalize_policy_entry({"filter_class": CharFilter}) == (CharFilter, None)
 
 
 def test_a_consumer_ordering_override_keeps_override_provenance_and_no_candidate() -> None:
@@ -13223,9 +13207,9 @@ def test_genuine_dynamic_concrete_in_and_range_resolve_to_sequence_profile(looku
     assert _is_audited_family(object.__new__(concrete)) is True
 
 
-@pytest.mark.parametrize("shape", ["unaudited-inner", "audited-inner", "wrapper-body"])
-def test_membership_wrapper_only_unwraps_an_audited_empty_body(shape: str) -> None:
-    """An unaudited inner scalar or an added wrapper body prevents sequence-family routing."""
+@pytest.mark.parametrize("shape", ["unaudited-inner", "audited-inner"])
+def test_membership_wrapper_only_unwraps_an_audited_scalar(shape: str) -> None:
+    """An unaudited inner scalar prevents sequence-family routing."""
 
     class UnauditedScalar(Filter):
         pass
@@ -13236,13 +13220,9 @@ def test_membership_wrapper_only_unwraps_an_audited_empty_body(shape: str) -> No
     class GenuineIn(BaseInFilter, CharFilter):
         pass
 
-    class WrapperWithBody(MembershipInFilter, GenuineIn):
-        extra_state = 1
-
     wrapped = {
         "unaudited-inner": membership_in_filter_class(UnauditedIn),
         "audited-inner": membership_in_filter_class(GenuineIn),
-        "wrapper-body": WrapperWithBody,
     }[shape]
     assert _is_audited_family(object.__new__(wrapped)) is (shape == "audited-inner")
 
@@ -13305,8 +13285,7 @@ def test_unregistered_subclass_of_registered_category_fails_closed(base_cls: typ
     The dangerous case: a subclass of a registered base (with an overridden
     ``.filter`` and added state) is NOT accepted through its ancestor. Exact match misses
     (it is not a registry key) and the structural validator refuses it (a single-base
-    subclass is not the ``(BaseInFilter|BaseRangeFilter, <scalar>)`` 2-tuple shape, and a
-    behavior-bearing body fails the empty-body check).
+    subclass is not the ``(BaseInFilter|BaseRangeFilter, <scalar>)`` 2-tuple shape).
     """
 
     class _UnauditedSubclass(base_cls):
@@ -13319,105 +13298,21 @@ def test_unregistered_subclass_of_registered_category_fails_closed(base_cls: typ
     assert not _is_audited_family(object.__new__(_UnauditedSubclass))
 
 
-@pytest.mark.parametrize(
-    "shape",
-    [
-        "added-state",
-        "added-method",
-        "range-state",
-        "dunder-state",
-        "dunder-behavior",
-        "init-subclass",
-        "slots",
-        "unaudited-scalar",
-        "non-csv-first-base",
-    ],
-    ids=[
-        "added-state",
-        "added-method",
-        "range-state",
-        "dunder-state",
-        "dunder-behavior",
-        "init-subclass",
-        "slots",
-        "unaudited-scalar",
-        "non-csv-first-base",
-    ],
-)
-def test_dynamic_csv_subclass_with_added_behavior_fails_closed(shape: str) -> None:
-    """A dynamic-CSV-shaped class with ONE added body member fails closed.
-
-    The structural validator accepts ONLY genuine empty-body dynamic classes over an
-    exact-audited scalar. Each variant below violates exactly one condition and must
-    resolve to ``None``. Crucially this covers DUNDER-NAMED state and behavior, not just
-    non-dunder members: an exact own-name-set compare against a ``pass``-body reference is
-    what closes the gap where a
-    "startswith/endswith ``__``" test let ``__evil_state__`` / an overridden
-    ``__getattribute__`` / ``__init_subclass__`` / ``__slots__`` slip through.
-    """
-
-    class _EvilInAddedState(BaseInFilter, CharFilter):
-        reverse = True
-
-    class _EvilInAddedMethod(BaseInFilter, CharFilter):
-        @override
-        def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
-            return qs
-
-    class _EvilRangeAddedState(BaseRangeFilter, NumberFilter):
-        descending = True
-
-    class _EvilInDunderState(BaseInFilter, CharFilter):
-        __evil_state__ = True
-
-    class _EvilInDunderBehavior(BaseInFilter, CharFilter):
-        @override
-        def __getattribute__(self, name: str) -> object:
-            return object_result(object.__getattribute__, self, name)
-
-    class _EvilInInitSubclass(BaseInFilter, CharFilter):
-        def __init_subclass__(cls, **kwargs: object) -> None:
-            super().__init_subclass__(**kwargs)
-
-    class _EvilRangeSlots(BaseRangeFilter, NumberFilter):
-        __slots__ = ()
+@pytest.mark.parametrize("shape", ["unaudited-scalar", "non-csv-first-base"])
+def test_dynamic_csv_shape_off_the_audited_bases_fails_closed(shape: str) -> None:
+    """A dynamic-CSV-shaped class whose bases are not ``(CSV base, audited scalar)`` fails closed."""
 
     class _UnauditedScalar(Filter):
         pass
 
-    class _EvilInUnauditedScalar(BaseInFilter, _UnauditedScalar):
+    class _InUnauditedScalar(BaseInFilter, _UnauditedScalar):
         pass
 
-    _TwoBaseFirstNotCsv = type("_TwoBaseFirstNotCsv", (CharFilter, BooleanFilter), {})
-
     variants = {
-        "added-state": _EvilInAddedState,
-        "added-method": _EvilInAddedMethod,
-        "range-state": _EvilRangeAddedState,
-        "dunder-state": _EvilInDunderState,
-        "dunder-behavior": _EvilInDunderBehavior,
-        "init-subclass": _EvilInInitSubclass,
-        "slots": _EvilRangeSlots,
-        "unaudited-scalar": _EvilInUnauditedScalar,
-        "non-csv-first-base": _TwoBaseFirstNotCsv,
+        "unaudited-scalar": _InUnauditedScalar,
+        "non-csv-first-base": type("_TwoBaseFirstNotCsv", (CharFilter, BooleanFilter), {}),
     }
     assert not _is_audited_family(object.__new__(variants[shape]))
-
-
-@pytest.mark.parametrize("lookup", ["in", "range"], ids=["in", "range"])
-def test_empty_body_dynamic_csv_reference_matches_genuine_class_own_names(lookup: str) -> None:
-    """The empty-body reference name-set equals a GENUINE dynamic CSV class's own ``vars``.
-
-    ``_EMPTY_BODY_DYNAMIC_CSV_ATTRS`` is derived from a live ``pass``-body ``class`` statement,
-    so it tracks the running interpreter's structural dunders (``__firstlineno__`` /
-    ``__static_attributes__`` on 3.13+) instead of hardcoding a version-coupled allowlist.
-    This pins that derivation to what django-filter actually produces: a genuine
-    ``ConcreteInFilter`` / ``ConcreteRangeFilter`` has EXACTLY these own names -- so the
-    exact-set compare in ``_is_dynamic_csv_class`` neither false-closes a real dynamic
-    class nor admits an extra member.
-    """
-    genuine = _genuine_dynamic_csv_class(lookup)
-    assert frozenset(vars(genuine)) == _EMPTY_BODY_DYNAMIC_CSV_ATTRS
 
 
 @pytest.mark.parametrize(
@@ -16355,7 +16250,6 @@ def test_a_declared_filter_hop_reads_its_declaring_set_and_relation() -> None:
     owner, declaration = sets_module._filter_declaration(hop)
     assert owner is _HopBranchFilter
     assert declaration is _HopBranchFilter.related_filters["shelves"]
-    assert sets_module._hop_target_set(hop) is _HopShelfFilter
     assert sets_module._hop_relation(hop) == "shelves"
     assert sets_module._hop_model(hop) is library_models.Shelf
     assert sets_module._hop_source_model((hop,), 0) is library_models.Branch
@@ -16386,8 +16280,6 @@ def test_a_declared_filter_hop_off_the_filter_family_is_refused(hop: DeclaredHop
 def test_a_declared_hop_with_no_target_set_is_refused(target: type[object] | None) -> None:
     """A hop's target set is read only once the walk resolved it to a ``FilterSet``."""
     hop = _declared_hop(target=target)
-    with pytest.raises(TypeError, match="expected the type the source guarantees"):
-        sets_module._hop_target_set(hop)
     with pytest.raises(TypeError, match="expected the type the source guarantees"):
         sets_module._hop_model(hop)
 

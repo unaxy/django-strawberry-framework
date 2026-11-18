@@ -1039,7 +1039,7 @@ the `GeneratedField` itself for a lookup on the computed column and the
 transform's output past a transform. The class tests of
 `FilterSet.filter_for_lookup` and
 `django_strawberry_framework/filters/sets.py::_lookups_for_field`
-(`_is_text_column`, `_without_foreign_postgres_lookups`) read the computed
+(`_is_text_column` and its foreign `django.contrib.postgres` exclusion) read the computed
 column, so a choice-bearing generated column gets the enum filters a choice
 column gets (`exact` is `EnumChoiceFilter`, never django-filter's
 empty-value skip that would widen `BLANK` to every row). Its per-field

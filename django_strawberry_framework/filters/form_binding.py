@@ -20,6 +20,7 @@ from django.utils.datastructures import MultiValueDict
 from typing_extensions import override
 
 from django_strawberry_framework.utils._narrowing import (
+    instance_state,
     is_class,
     is_list_or_tuple,
     read_attr,
@@ -407,7 +408,7 @@ class BindAskingFilterForm(forms.Form):
         asks = self._filter_asks
         refusals = self._text_refusals()
         if refusals:
-            self._add_preflight_errors(refusals)
+            add_preflight_errors(self, refusals)
             return
         asks.prepare_comparisons(self)
         self._filter_asking_active = True
@@ -455,19 +456,32 @@ class BindAskingFilterForm(forms.Form):
                 refusals = self._filter_asks.unstorable_text(self)
                 if not any(refusal == error for refusal in refusals.values()):
                     raise
-                self._add_preflight_errors(refusals)
+                add_preflight_errors(self, refusals)
                 route = None
         self._filter_cleaning_route = route
         self._filter_cleaning_cached = True
         return route
 
-    def _add_preflight_errors(self, refusals: Mapping[str, ValidationError]) -> None:
-        # Adapted from Django BaseForm.full_clean (BSD-3-Clause; LICENSE.django):
-        # reset errors and cleaned data before adding field errors.
-        self._errors = ErrorDict(renderer=self.renderer)
-        self.cleaned_data = {}
-        for name, refusal in refusals.items():
-            self.add_error(name, refusal)
+
+def add_preflight_errors(form: forms.BaseForm, refusals: Mapping[str, ValidationError]) -> None:
+    """Enter ``refusals`` as ``form``'s errors in place of a clean."""
+    # Adapted from Django BaseForm.full_clean (BSD-3-Clause; LICENSE.django):
+    # reset errors and cleaned data before adding field errors.
+    instance_state(form)["_errors"] = ErrorDict(renderer=form.renderer)
+    form.cleaned_data = {}
+    for name, refusal in refusals.items():
+        form.add_error(name, refusal)
+
+
+def cleaning_route(form: forms.BaseForm) -> bool | None:
+    """Whether ``form``'s fields clean (``BindAskingFilterForm._field_cleaning_route``).
+
+    A plain form answers Django's own ``BaseForm.full_clean`` test: bound, and not an
+    unchanged ``empty_permitted`` form.
+    """
+    if isinstance(form, BindAskingFilterForm):
+        return form._field_cleaning_route()
+    return form.is_bound and not (form.empty_permitted and not form.has_changed())
 
 
 def _is_bind_asking_form_class(value: object) -> TypeIs[type[BindAskingFilterForm]]:

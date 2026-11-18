@@ -42,7 +42,7 @@
 "django_strawberry_framework/filters/base.py::_EnumChoiceField" = { reportUnsafeMultipleInheritance = 1 }
 "django_strawberry_framework/filters/base.py::_GlobalIDMultipleChoiceField.to_python" = { reportIncompatibleMethodOverride = 1 }
 "django_strawberry_framework/filters/base.py::_MembershipCSVWidget.value_from_datadict" = { reportIncompatibleMethodOverride = 1 }
-"django_strawberry_framework/filters/sets.py::FilterSet.__init__" = { reportArgumentType = 2 }
+"django_strawberry_framework/filters/sets.py::FilterSet.__init__" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._build_stashed_instance" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._filter_child_rows" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._generation_origin_for_field" = { reportArgumentType = 1 }

@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from functools import cache, partial
+from functools import cache, partial, reduce
 from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
@@ -54,7 +54,6 @@ from django.db.models.sql.constants import INNER
 from django.db.models.sql.query import Query
 from django.db.models.sql.where import WhereNode
 from django.forms import ModelChoiceField
-from django.forms.utils import ErrorDict
 from django.utils.functional import Promise
 from django_filters import (
     BaseInFilter,
@@ -202,6 +201,7 @@ from django_strawberry_framework.utils.relations import (
     non_pk_forward_link,
     path_traverses_to_many,
     relation_kind,
+    require_relation_path,
 )
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.widgets import widget_keys
@@ -244,12 +244,12 @@ from .base import (
     _integer_compared_column,
     _KeyLeaf,
     _own_filter,
-    _predicate_hook,
     _query_aliases,
     _query_lookup_operand,
     _reads_integer_transform,
     _RelationView,
     _runs_shipped_filter,
+    _through_filter_predicate,
     comparison_form_field,
     copied_declared_filter,
     copied_filter,
@@ -264,8 +264,10 @@ from .form_binding import (
     FilterFormAsks,
     FilterFormBindings,
     NormalizedFormValue,
+    add_preflight_errors,
     bind_asking_form_class,
     bound_filter_form_class,
+    cleaning_route,
 )
 from .inputs import (
     LOGIC_OPERATORS,
@@ -376,6 +378,18 @@ else:
 _QUERYSET: type[models.QuerySet[models.Model, object]] = models.QuerySet
 
 
+def _returned_queryset(result: object, named: str) -> models.QuerySet[models.Model, object]:
+    """Return a filter's ``result``, asserted a ``QuerySet`` as ``filter_queryset`` asserts it.
+
+    django-filter's ``BaseFilterSet.filter_queryset`` assertion, with its message; ``named``
+    spells the filter it names.
+    """
+    assert isinstance(result, _QUERYSET), (  # noqa: S101 - same assertion as django-filter's filter_queryset
+        f"Expected {named} to return a QuerySet, but got a {introspection.kind(result)} instead."
+    )
+    return result
+
+
 # Every operator-bag lookup attr ``LOOKUP_NAME_MAP`` can generate; with the attrs the
 # field's own bag carries (a transform chain's ``year_gt``), a mapping whose keys all
 # name one is an operator bag (``FilterSet._operator_bag_items``).
@@ -437,7 +451,7 @@ def _lookups_for_field(
     consumer lists the lookups it wants.
 
     Lookups ``django.contrib.postgres`` registers onto a field that is not its
-    own are EXCLUDED too (``_without_foreign_postgres_lookups``): importing its
+    own are EXCLUDED too: importing its
     range module registers ``contained_by`` (a range-operand lookup) onto the
     core integer, float, decimal, date and datetime fields, and installing the
     app registers ``search`` / ``trigram_*`` onto the core text fields. None of
@@ -468,22 +482,34 @@ def _lookups_for_field(
         return []
     field_class = type(generated_column(model_field) or model_field)
     registered = lookup_registry(model_field).get_lookups()
-    lookups = _non_transform_lookups(
-        {
-            lookup_expr: lookup
-            for lookup_expr, lookup in _without_foreign_postgres_lookups(
-                field_class,
-                registered,
-            ).items()
-            if is_class(lookup) and _type_is_genuinely_django(lookup)
-        },
-    )
+    lookups = _published_lookups(field_class, registered)
     if not package_default or _is_text_column(field_class):
         return lookups
     return [
         lookup_expr
         for lookup_expr in lookups
         if not _is_text_pattern_lookup(registered.get(lookup_expr))
+    ]
+
+
+def _published_lookups(
+    field_class: type[ModelField],
+    registered: Mapping[str, object],
+) -> list[str]:
+    """Return the names of ``registered``'s Django lookups ``_lookups_for_field`` publishes.
+
+    No ``Transform``, no lookup a project registers, and no ``django.contrib.postgres``
+    lookup on a field not its own.
+    """
+    postgres = "django.contrib.postgres."
+    own_postgres_field = any(cls.__module__.startswith(postgres) for cls in field_class.__mro__)
+    return [
+        lookup_expr
+        for lookup_expr, lookup in registered.items()
+        if is_class(lookup)
+        and _type_is_genuinely_django(lookup)
+        and not issubclass(lookup, models.Transform)
+        and (own_postgres_field or not lookup.__module__.startswith(postgres))
     ]
 
 
@@ -571,30 +597,6 @@ def _is_text_pattern_on_non_text(field: ModelField, lookup_type: str) -> bool:
     )
 
 
-# Package prefix every ``django.contrib.postgres`` module name starts with.
-_CONTRIB_POSTGRES_PREFIX = "django.contrib.postgres."
-
-
-def _without_foreign_postgres_lookups(
-    field_class: type[ModelField],
-    lookups: Mapping[str, object],
-) -> dict[str, object]:
-    """Return ``lookups`` minus ``django.contrib.postgres`` lookups on a field not its own.
-
-    Every lookup is kept when ``field_class`` (or a class on its MRO) is defined
-    under ``django.contrib.postgres``; otherwise a lookup class defined there is
-    dropped.
-    """
-    own_field = any(
-        cls.__module__.startswith(_CONTRIB_POSTGRES_PREFIX) for cls in field_class.__mro__
-    )
-    return {
-        lookup_expr: lookup
-        for lookup_expr, lookup in lookups.items()
-        if own_field or not lookup.__module__.startswith(_CONTRIB_POSTGRES_PREFIX)
-    }
-
-
 # Constructor kwargs that only make sense on django-filter's model-choice
 # family (``ModelChoiceFilter`` / ``ModelMultipleChoiceFilter`` backed by
 # ``ModelChoiceField`` / ``ModelMultipleChoiceField``). Upstream's relation
@@ -655,32 +657,17 @@ def _strip_model_choice_extras(extra: Mapping[str, object]) -> dict[str, object]
 # selection re-derives upstream's (filter_class, provider) pair, so it is
 # ``framework_default``; a ``filter_class`` OR ``extra``-provider override (whole entry)
 # diverges, so it is ``override_generated``.
-@dataclass(frozen=True)
-class _NormalizedPolicyEntry:
-    """Immutable normalized record of one generation-policy entry.
-
-    The ownership-bearing content django-filter selects off a ``FILTER_DEFAULTS``
-    entry: the ``filter_class`` (a class identity) and the ``extra`` provider (a
-    function identity, or ``None``). Two entries are ownership-equal iff both members
-    are equal -- so a pristine selection equals django-filter's own table's, while any
-    consumer ``filter_class`` swap OR ``extra``-provider swap diverges.
-    """
-
-    filter_class: object = None
-    extra: object = None
-
-
-def _normalize_policy_entry(entry: Mapping[str, object] | None) -> _NormalizedPolicyEntry | None:
-    """Return the ``_NormalizedPolicyEntry`` for a raw ``FILTER_DEFAULTS`` entry.
+def _normalize_policy_entry(entry: Mapping[str, object] | None) -> tuple[object, object] | None:
+    """Return the ``(filter_class, extra provider)`` pair of a raw ``FILTER_DEFAULTS`` entry.
 
     ``None`` for a missing entry (no policy for the class), so a missing selection on
     one side compares unequal to a present entry on the other. The two ownership
-    members (``filter_class`` / ``extra`` provider) are read by key exactly as
-    django-filter reads them, so the normalized value captures the whole selection.
+    members are read by key exactly as django-filter reads them, so two entries are
+    ownership-equal iff both members are equal.
     """
     if entry is None:
         return None
-    return _NormalizedPolicyEntry(entry.get("filter_class"), entry.get("extra"))
+    return entry.get("filter_class"), entry.get("extra")
 
 
 def _entry_by_mro(
@@ -908,7 +895,7 @@ _FRAMEWORK_GENERATED_ORIGINS: frozenset[FilterOrigin] = frozenset(
 # base is a CONSUMER-owned class whose behavior this package has not reviewed, so
 # it is no member -- it stays fully supported and simply runs on the outer
 # queryset. The only two recognized shapes are (a) exact audited / package-owned
-# classes (registry keys) and (b) django-filter's genuine empty-body dynamic
+# classes (registry keys) and (b) django-filter's dynamic
 # ``in`` / ``range`` CSV classes over an exact-audited scalar family, validated
 # structurally in ``_is_audited_family``.
 #
@@ -982,7 +969,7 @@ _FILTER_FAMILY_REGISTRY: frozenset[type[object]] = frozenset(
         # ``FilterMethod``) is signed by the core descriptor pair; a set ``method``
         # also makes the leaf ineligible outright. These are STATIC package classes
         # (they carry their own ``.filter`` etc.), so they are matched by exact key
-        # here -- they would FAIL the empty-body dynamic-CSV check and MUST be caught
+        # here -- they are not of the dynamic-CSV bases shape and MUST be caught
         # before it.
         IntegerInFilter,
         IntegerRangeFilter,
@@ -1018,27 +1005,6 @@ _FILTER_FAMILY_REGISTRY: frozenset[type[object]] = frozenset(
 )
 
 
-# The exact own-attribute-name set of a GENUINE empty-body dynamic CSV class. django-filter
-# builds ``ConcreteInFilter`` / ``ConcreteRangeFilter`` with a ``class ... : pass`` statement,
-# so such a class's OWN ``vars`` carry only the interpreter's structural dunders (``__doc__`` /
-# ``__module__`` always; ``__firstlineno__`` / ``__static_attributes__`` on 3.13+). This
-# reference is computed ONCE from a ``pass``-body ``class`` statement over ``Filter`` (which,
-# like every scalar family, provides ``__dict__`` / ``__weakref__``, so a subclass inherits
-# rather than owns them) -- matching how a real dynamic class is built. Comparing against it
-# tracks the RUNNING interpreter's structural dunders instead of hardcoding a version-coupled
-# allowlist, so any body member that adds state or behavior -- dunder-named (``__evil_state__``,
-# an overridden ``__getattribute__`` / ``__init_subclass__``, ``__slots__``) OR not
-# (``reverse``, ``filter``) -- surfaces as an extra own name and fails the check closed
-# (a dunder-named member must not slip through).
-class _EmptyBodyDynamicCsvReference(Filter):
-    pass
-
-
-_EMPTY_BODY_DYNAMIC_CSV_ATTRS: frozenset[str] = frozenset(
-    class_namespace(_EmptyBodyDynamicCsvReference),
-)
-
-
 def _is_dynamic_csv_class(klass: type[object]) -> bool:
     """Return whether ``klass`` is a genuine dynamic ``in``/``range`` CSV class.
 
@@ -1046,52 +1012,29 @@ def _is_dynamic_csv_class(klass: type[object]) -> bool:
     ``BaseRangeFilter`` variant) per consumer ``in`` / ``range`` lookup on a scalar field
     -- a NEW class object each call, so it can never be a ``_FILTER_FAMILY_REGISTRY`` key,
     yet it is genuine framework machinery and must still route. Rather than trust every
-    descendant of ``BaseInFilter`` / ``BaseRangeFilter`` (an open
-    ancestry allowlist), this validates the EXACT MRO and class body, so anything a
-    future django-filter release or a consumer adds fails closed:
+    descendant of ``BaseInFilter`` / ``BaseRangeFilter`` (an open ancestry allowlist), this
+    checks the EXACT bases: ``klass.__bases__`` is exactly a 2-tuple whose FIRST element IS
+    ``BaseInFilter`` or ``BaseRangeFilter`` and whose SECOND (the ``<scalar>``) is itself an
+    EXACT key in ``_FILTER_FAMILY_REGISTRY`` -- an audited scalar family, never an unaudited
+    one. A class only routes once the ownership oracle independently marks it
+    framework-origin, which a consumer-declared class never is.
 
-    - ``klass.__bases__`` is exactly a 2-tuple whose FIRST element IS ``BaseInFilter`` or
-      ``BaseRangeFilter`` (a genuine dynamic class has exactly ``(BaseInFilter, <scalar>)``);
-    - the SECOND base (the ``<scalar>``) is itself an EXACT key in
-      ``_FILTER_FAMILY_REGISTRY`` -- an audited scalar family, never an unaudited one; and
-    - the dynamic class introduces NO own body beyond the interpreter's structural dunders:
-      the NAME set of ``vars(klass)`` equals ``_EMPTY_BODY_DYNAMIC_CSV_ATTRS`` (the own-name
-      set of a ``pass``-body reference built the same way) EXACTLY. A genuine dynamic class is
-      a ``class ... : pass`` (only structural dunders in its own ``vars``); ANY added member --
-      whether non-dunder (``reverse``, ``filter``) OR dunder-named state/behavior
-      (``__evil_state__``, an overridden ``__getattribute__`` / ``__init_subclass__``,
-      ``__slots__``) -- surfaces as an extra own name and fails closed. An exact-set compare
-      (not a "startswith/endswith ``__``" test) is what keeps dunder-named members from
-      slipping through, and deriving the reference from a live ``pass``-body class keeps the
-      check immune to per-version structural dunders instead of hardcoding an allowlist.
-
-    A consumer hand-crafting this exact empty-body shape over an audited scalar is
-    behaviorally identical to a package-generated one (pure CSV-of-scalar semantics, no
-    added state), so admitting it is safe -- and it cannot route
-    anyway unless the ownership oracle independently marks it framework-origin.
-
-    The generated ``in`` class is an empty-body ``(MembershipInFilter, <django-filter's
-    class>)`` wrapper (``filters/base.py::membership_in_filter_class``); it is unwrapped
-    one level first, so it resolves exactly as the class django-filter built does.
+    The generated ``in`` class is a ``(MembershipInFilter, <django-filter's class>)``
+    wrapper (``filters/base.py::membership_in_filter_class``); it is unwrapped one level
+    first, so it resolves exactly as the class django-filter built does.
     """
-    bases = klass.__bases__
-    empty_body = frozenset(class_namespace(klass)) == _EMPTY_BODY_DYNAMIC_CSV_ATTRS
-    match bases:
-        case (wrapper_base, wrapped) if wrapper_base is MembershipInFilter and empty_body:
+    match klass.__bases__:
+        case (wrapper_base, wrapped) if wrapper_base is MembershipInFilter:
             klass = wrapped
-            bases = klass.__bases__
         case _:
             pass
-    match bases:
+    match klass.__bases__:
         case (csv_base, scalar_base):
-            pass
+            return (
+                csv_base is BaseInFilter or csv_base is BaseRangeFilter
+            ) and scalar_base in _FILTER_FAMILY_REGISTRY
         case _:
             return False
-    return (
-        (csv_base is BaseInFilter or csv_base is BaseRangeFilter)
-        and scalar_base in _FILTER_FAMILY_REGISTRY
-        and frozenset(class_namespace(klass)) == _EMPTY_BODY_DYNAMIC_CSV_ATTRS
-    )
 
 
 def _is_audited_family(filter_instance: object) -> bool:
@@ -1103,10 +1046,9 @@ def _is_audited_family(filter_instance: object) -> bool:
        walk, so an unregistered subclass of an audited base is NOT accepted through its
        ancestor: a consumer subclass may override ``.filter`` or add state this package
        has never reviewed against the correlated rewrite.
-    2. Otherwise, structurally-validated dynamic-CSV recognition -- django-filter's genuine
-       empty-body ``ConcreteInFilter`` / ``ConcreteRangeFilter`` over an exact-audited
-       scalar family is admitted (see ``_is_dynamic_csv_class``); anything that adds a
-       method, descriptor, or state-bearing attribute fails closed.
+    2. Otherwise, structurally-validated dynamic-CSV recognition -- django-filter's
+       ``ConcreteInFilter`` / ``ConcreteRangeFilter`` over an exact-audited scalar family
+       is admitted (see ``_is_dynamic_csv_class``).
     3. Otherwise ``False``.
 
     ``False`` is the fail-closed signal ``_candidate_metadata_for`` consumes: the leaf is
@@ -2027,37 +1969,25 @@ def _stands_for_own_key(set_cls: type[FilterSet], filter_instance: Filter) -> bo
     return LOOKUP_SEP not in _filterset_walked_lookup(declaring, declaration.declared)[0]
 
 
-def _restrict_to_related(
-    queryset: models.QuerySet[_M],
-    relation: str,
-    related_rows: models.QuerySet[models.Model],
-    via: Sequence[models.QuerySet[models.Model] | None] = (),
-) -> models.QuerySet[_M]:
-    """Keep the rows of ``queryset`` whose ``relation`` reaches a row of ``related_rows``.
-
-    The restriction is ``optimizer/predicates.py::related_rows_exist``: a
-    correlated ``EXISTS`` built from ``related_rows`` (the target side), never a
-    join onto ``queryset``, so a parent with N matching children is kept once
-    (no duplicate nodes, no corrupted pagination counts) without a
-    ``.distinct()`` that would mutate consumer-visible queryset state. It reads
-    neither the parent table again nor anything ``queryset`` already applied,
-    so each restriction a filter set adds is one semi-join of its own. A nested
-    branch and a flat leaf walking the branch both restrict through it, so the
-    two spellings answer alike. The subquery compiles on ``queryset``'s
-    database alias, the one its intermediate rows are read on too. ``via``
-    holds the rows each intermediate model of a ``relation`` spanning several
-    relations may pass through (``FilterSet._via_rows``).
-    """
-    return queryset.filter(_reaches_related(queryset, relation, related_rows, via))
-
-
 def _reaches_related(
     queryset: models.QuerySet[_M],
     relation: str,
     related_rows: models.QuerySet[models.Model],
     via: Sequence[models.QuerySet[models.Model] | None] = (),
 ) -> Exists:
-    """Return the ``_restrict_to_related`` test itself, for a caller that composes or negates it."""
+    """Return the test that ``queryset``'s row reaches a row of ``related_rows`` through ``relation``.
+
+    The test is ``optimizer/predicates.py::related_rows_exist``: a correlated
+    ``EXISTS`` built from ``related_rows`` (the target side), never a join onto
+    ``queryset``, so a parent with N matching children is kept once (no duplicate
+    nodes, no corrupted pagination counts) without a ``.distinct()`` that would
+    mutate consumer-visible queryset state. It reads neither the parent table again
+    nor anything ``queryset`` already applied, so each restriction a filter set adds
+    is one semi-join of its own. The subquery compiles on ``queryset``'s database
+    alias, the one its intermediate rows are read on too. ``via`` holds the rows
+    each intermediate model of a ``relation`` spanning several relations may pass
+    through (``FilterSet._via_rows``).
+    """
     return related_rows_exist(queryset.model, relation, related_rows, using=queryset.db, via=via)
 
 
@@ -2167,7 +2097,7 @@ def _restrict_through_branch(
     and a flat leaf walking the branch alike: ``_admitted_rows`` intersects
     ``child_rows`` with the declaration's explicit ``queryset=`` (a callable one
     called with ``request``), then
-    ``_restrict_to_related`` keeps the parents reaching a row of the result,
+    ``_reaches_related`` keeps the parents reaching a row of the result,
     through the ``via`` rows of each intermediate model a multi-relation
     ``field_name`` crosses. With neither ``child_rows`` nor an explicit
     queryset, ``queryset`` is returned unchanged.
@@ -2189,7 +2119,8 @@ def _restrict_through_branch(
     )
     if admitted is None:
         return queryset
-    return _restrict_to_related(queryset, _declared_field_name(related_filter), admitted, via)
+    relation = _declared_field_name(related_filter)
+    return queryset.filter(_reaches_related(queryset, relation, admitted, via))
 
 
 def _model_choice_members(value: object) -> list[models.Model] | None:
@@ -2655,7 +2586,7 @@ def _hop_model(hop: RelationHop) -> type[models.Model]:
     if isinstance(hop, UndeclaredHop):
         return hop.model
     # A resolved branch target is a ``FilterSet`` declaring ``Meta.model``.
-    return require(_hop_target_set(hop)._meta.model, is_model_class)
+    return require(require(hop.target, _is_filterset_class)._meta.model, is_model_class)
 
 
 def _hop_relation(hop: RelationHop) -> str:
@@ -2723,18 +2654,6 @@ def _hop_source_model(hops: tuple[RelationHop, ...], index: int) -> type[models.
         return require(require(owner, _is_filterset_class)._meta.model, is_model_class)
     # Only an undeclared hop following another undeclared hop has no owner.
     return _hop_model(hops[index - 1])
-
-
-def _scoped_seed_rows(
-    scope: type[DjangoType],
-    parent_db: str | None,
-) -> models.QuerySet[models.Model]:
-    """Return the unscoped seed rows ``scope``'s visibility hook filters on ``parent_db``.
-
-    One body serves the sync derive (``FilterSet._scoped_rows``) and the async pre-fill
-    (``FilterSet._await_scoped_rows``), so the two colorings seed the same rows.
-    """
-    return related_queryset(model_for(scope), using=parent_db)
 
 
 @dataclass
@@ -2874,32 +2793,6 @@ def _face_of_set(set_cls: type[FilterSet]) -> FilterSet:
     return object.__new__(set_cls)
 
 
-def _require_relation_path(owner: type[FilterSet], declared_attr: str, f: RelatedFilter) -> None:
-    """Refuse a ``RelatedFilter`` whose ``field_name`` is not a path of relations on ``owner``'s model.
-
-    A branch restricts its parent through every segment of its ``field_name``
-    (``optimizer/predicates.py::related_rows_exist``), so each segment must be a
-    relation Django can join (``utils/relations.py::leading_relation_hops`` covers
-    them all): a column (``title__shelf``), a name the model does not carry, or
-    a ``GenericForeignKey`` is a declaration error, raised when the expansion is
-    built rather than on the first request that supplies the branch. Reads the
-    owner's model and the declaration's ``field_name`` only, never the target
-    filter set, so a lazily resolved target is unaffected.
-    """
-    field_name = _declared_field_name(f)
-    # Only model-backed sets expand their ``related_filters`` (see ``get_filters``).
-    model = require(owner._meta.model, is_model_class)
-    hops = leading_relation_hops(model, field_name)
-    segments = field_name.split(LOOKUP_SEP)
-    if len(hops) < len(segments):
-        raise ConfigurationError(
-            f"FilterSet {owner.__qualname__}: RelatedFilter {declared_attr!r} has "
-            f"field_name {field_name!r}, but {segments[len(hops)]!r} is not a relation "
-            f"of the model the path has reached from {model.__qualname__}. A "
-            "RelatedFilter's field_name must name a path of relations.",
-        )
-
-
 def _require_correlated_target(
     owner: type[FilterSet],
     declared_attr: str,
@@ -2933,7 +2826,7 @@ def _require_correlated_target(
     target_model: type[models.Model] | None = target._meta.model
     if target_model is not None and correlates_related_rows(model, field_name, target_model):
         return
-    # ``_require_relation_path`` proved every segment a relation hop.
+    # ``utils/relations.py::require_relation_path`` proved every segment a relation hop.
     reached = leading_relation_hops(model, field_name)[-1].target_model
     keyed_on = (
         f"is keyed on {target_model.__qualname__}"
@@ -3126,15 +3019,6 @@ def _flat_filter_limit() -> int:
     return limit
 
 
-def _non_transform_lookups(lookups: Mapping[str, object]) -> list[str]:
-    """Return the lookup names in ``lookups`` whose class is not a ``Transform``."""
-    return [
-        lookup_expr
-        for lookup_expr, lookup in lookups.items()
-        if not (isinstance(lookup, type) and issubclass(lookup, models.Transform))
-    ]
-
-
 def _cleaned_items(form: forms.BaseForm) -> ItemsView[str, object]:
     """Return the bound filter form's ``cleaned_data`` items; django-stubs types the values ``Any``."""
     return form.cleaned_data.items()
@@ -3175,7 +3059,7 @@ def _conjoined_reading(
     gives each value a join of its own across a multi-valued relation: a parent is kept when
     SOME related row matches EACH value. ``method`` is the ``filter`` that runs for
     ``filter_instance`` (its class's, or the shipped comparison a class-level override
-    replaces); only a ``method`` reaching that per-value loop (``_predicate_hook``:
+    replaces); only a ``method`` reaching that per-value loop (``_through_filter_predicate``:
     ``MultipleChoiceFilter.filter``, and ``GlobalIDMultipleChoiceFilter.filter`` off its
     ``in`` lookup, which applies the whole list in one predicate) reads its values one at a
     time, and never one the filter holds of its own (``_own_filter``). A value the loop
@@ -3186,7 +3070,7 @@ def _conjoined_reading(
         return None
     if (
         _own_filter(filter_instance) is not None
-        or _predicate_hook(filter_instance, method) is None
+        or not _through_filter_predicate(filter_instance, method)
         or not isinstance(value, Iterable)
     ):
         return None
@@ -3261,16 +3145,9 @@ def _shipped_filter_class(filter_instance: Filter) -> type[Filter]:
     return next(
         klass
         for klass in type(filter_instance).__mro__
-        if issubclass(klass, Filter) and _defines_shipped_filter(klass)
-    )
-
-
-def _defines_shipped_filter(klass: type) -> bool:
-    """Whether ``klass``'s own namespace defines a ``filter`` django-filter or this package ships."""
-    stored = class_namespace(klass).get("filter")
-    function = read_attr(stored, "__func__", stored)
-    return (
-        function is not None and function.__module__.partition(".")[0] in _SHIPPED_FILTER_PACKAGES
+        if issubclass(klass, Filter)
+        and (stored := class_namespace(klass).get("filter")) is not None
+        and introspection.defined_in(stored, _SHIPPED_FILTER_PACKAGES)
     )
 
 
@@ -3763,24 +3640,6 @@ def _filter_declaration(hop: DeclaredHop) -> tuple[type[FilterSet], RelatedFilte
     )
 
 
-def _branch_child_set(related_filter: RelatedFilter) -> type[FilterSet]:
-    """Return the ``FilterSet`` an active branch's declaration resolves.
-
-    Read after the branch's hop rows (``FilterSet._declared_hop_rows``), whose seed
-    (``FilterSet._branch_visibility_seed``) raised the branch's ``ConfigurationError``
-    for a declaration resolving none; ``TypeError`` otherwise.
-    """
-    return require(related_filter.filterset, _is_filterset_class)
-
-
-def _hop_target_set(hop: DeclaredHop) -> type[FilterSet]:
-    """Return the ``FilterSet`` ``hop``'s declaration resolves; ``TypeError`` when it resolves none.
-
-    A caller reads only a hop whose target the walk resolved (it stops after one that does not).
-    """
-    return require(hop.target, _is_filterset_class)
-
-
 def _reachable_filtersets(filterset: type[FilterSet], scope: _ExpansionScope) -> frozenset[int]:
     """Return the ids of ``filterset`` and every filter set its ``RelatedFilter`` declarations reach.
 
@@ -4175,40 +4034,36 @@ class FilterSet(
             # read the actor off ``info.context.request`` as they do under GraphQL. The
             # pipeline stashes the resolver's own ``info`` (``_build_stashed_instance``).
             self._apply_info = _DirectRequestInfo(_DirectRequestContext(request))
-        if snapshot is None or not snapshot.deferred_copies or not pipeline_built:
-            # ``BaseFilterSet.__init__`` deep-copies ``self.base_filters``: an unpublished
-            # set's instance attribute shadows the class-creation table for that one read.
-            instance_attrs = instance_state(self)
-            if unpublished is not None:
-                instance_attrs["base_filters"] = OrderedDict(unpublished)
-            try:
-                # basedpyright: typeshed types ``data`` as a ``dict`` or ``QueryDict``; upstream
-                # stores the mapping and its form reads it as one. It rejects a ``Mapping``
-                super().__init__(data, queryset, request=request, prefix=prefix)  # pyright: ignore[reportArgumentType]
-            finally:
-                if unpublished is not None:
-                    del instance_attrs["base_filters"]
-            return
-        source = snapshot.filters
-        deferred = snapshot.deferred_copies
-        named = frozenset(_named_flat_copies(data, snapshot.copy_keys, prefix) if data else ())
-        if data is not None and self._form_bindings is not None:
-            named |= self._form_bindings.names(data) & deferred
-        self._unnamed_copies = deferred - named
-        # ``BaseFilterSet.__init__`` deep-copies ``self.base_filters`` into
-        # ``self.filters`` and binds each copy; an instance attribute shadows the
-        # class's for that one read.
+        # The table ``base_filters`` reads for ``BaseFilterSet.__init__``'s one deep copy into
+        # ``self.filters``: an unpublished set's table, or a deferring instance's own filters
+        # and named flat copies; ``None`` keeps the class's.
+        shadow = None if unpublished is None else OrderedDict(unpublished)
+        copy_source: Mapping[str, Filter] | None = None
+        if snapshot is not None and snapshot.deferred_copies and pipeline_built:
+            copy_source = snapshot.filters
+            deferred = snapshot.deferred_copies
+            named = frozenset(_named_flat_copies(data, snapshot.copy_keys, prefix) if data else ())
+            if data is not None and self._form_bindings is not None:
+                named |= self._form_bindings.names(data) & deferred
+            self._unnamed_copies = deferred - named
+            shadow = OrderedDict(
+                (name, f)
+                for name, f in copy_source.items()
+                if name not in deferred or name in named
+            )
         instance_attrs = instance_state(self)
-        instance_attrs["base_filters"] = OrderedDict(
-            (name, f) for name, f in source.items() if name not in deferred or name in named
-        )
+        if shadow is not None:
+            instance_attrs["base_filters"] = shadow
         try:
-            # basedpyright: typeshed's ``dict`` | ``QueryDict`` ``data``, as in the call above
+            # basedpyright: typeshed types ``data`` as a ``dict`` or ``QueryDict``; upstream
+            # stores the mapping and its form reads it as one. It rejects a ``Mapping``
             super().__init__(data, queryset, request=request, prefix=prefix)  # pyright: ignore[reportArgumentType]
         finally:
-            del instance_attrs["base_filters"]
-        self._copy_source = source
-        self._filters_settled = False
+            if shadow is not None:
+                del instance_attrs["base_filters"]
+        if copy_source is not None:
+            self._copy_source = copy_source
+            self._filters_settled = False
 
     @property
     @override
@@ -4543,11 +4398,7 @@ class FilterSet(
         form: forms.BaseForm,
     ) -> tuple[tuple[str, forms.Field, Filter], ...]:
         """Ask the actual route and widget before acquiring a missing parser owner."""
-        if isinstance(form, BindAskingFilterForm):
-            route = form._field_cleaning_route()
-        else:
-            route = form.is_bound and not (form.empty_permitted and not form.has_changed())
-        if route is not True or read_attr(form, "_errors", None):
+        if cleaning_route(form) is not True or read_attr(form, "_errors", None):
             return ()
         fields: list[tuple[str, forms.Field, Filter]] = []
         for name, raw_field in form.fields.items():
@@ -4637,25 +4488,15 @@ class FilterSet(
         form = self.form
         if read_attr(form, "_errors", None) is not None:
             return form
-        route = (
-            form._field_cleaning_route()
-            if isinstance(form, BindAskingFilterForm)
-            else form.is_bound and not (form.empty_permitted and not form.has_changed())
-        )
+        if cleaning_route(form) is not True:
+            return form
         refusals = (
             form._text_refusals()
-            if isinstance(form, BindAskingFilterForm) and route is True
+            if isinstance(form, BindAskingFilterForm)
             else _unstorable_text_errors(self, form)
-            if route is True
-            else {}
         )
         if refusals:
-            # Adapted from Django BaseForm.full_clean (BSD-3-Clause;
-            # LICENSE.django): initialize the error generation before add_error.
-            instance_state(form)["_errors"] = ErrorDict(renderer=form.renderer)
-            form.cleaned_data = {}
-            for name, refusal in refusals.items():
-                form.add_error(name, refusal)
+            add_preflight_errors(form, refusals)
         return form
 
     def _native_form(self) -> forms.Form:
@@ -5092,7 +4933,7 @@ class FilterSet(
         """Return this set's filters with every ``RelatedFilter`` expanded along ``path``.
 
         ``path`` is the chain of filter sets expanding from the root, this set
-        last. Each declaration is checked (``_require_relation_path`` /
+        last. Each declaration is checked (``utils/relations.py::require_relation_path`` /
         ``_require_correlated_target``) and its target's filters along ``path``
         copied on under the declaration's name (``_expand_related_filter``),
         unless the declaration is ``flat=False``, which is checked and copies
@@ -5119,7 +4960,13 @@ class FilterSet(
         declarations = _own_related_filters(cls)
         own = len(filters)
         for filter_name, f in declarations.items():
-            _require_relation_path(cls, filter_name, f)
+            _ = require_relation_path(
+                ("FilterSet", "RelatedFilter"),
+                cls,
+                filter_name,
+                _declared_field_name(f),
+                require(cls._meta.model, is_model_class),
+            )
             _require_correlated_target(cls, filter_name, f)
             if not f.flat:
                 continue
@@ -6305,7 +6152,8 @@ class FilterSet(
             # Equality on one identity, cardinality-selected: the scalar class for a
             # forward FK / O2O / reverse O2O, the list class for a many-side relation.
             if relay_target:
-                return cls._relay_filter_class_for_field(field), _strip_model_choice_extras(params)
+                relay_class = GlobalIDMultipleChoiceFilter if many_side else GlobalIDFilter
+                return relay_class, _strip_model_choice_extras(params)
             pk_class = RelationPkMultipleFilter if many_side else RelationPkFilter
             return pk_class, _strip_model_choice_extras(params)
         # Exhaustive classification: a PROVEN framework-default relation key
@@ -6375,33 +6223,6 @@ class FilterSet(
             return False
         return implements_relay_node(owner_type)
 
-    @staticmethod
-    def _relay_filter_class_for_field(
-        field: ModelField,
-    ) -> type[GlobalIDFilter | GlobalIDMultipleChoiceFilter]:
-        """Pick the Relay-aware filter class matching the relation cardinality.
-
-        Multi-valued relations (`ManyToManyField`, reverse FK
-        `ManyToOneRel`, reverse M2M `ManyToManyRel`) - every Django
-        relation field that sets `many_to_many=True` or `one_to_many=True`
-        - map to `GlobalIDMultipleChoiceFilter`; single-valued relations
-        (forward `ForeignKey` / `OneToOneField` and reverse `OneToOneRel`)
-        map to `GlobalIDFilter`. This mirrors `django-filter`'s upstream
-        choice between `ModelChoiceFilter` and `ModelMultipleChoiceFilter`
-        and matches Decision 4's parity-floor split between the two
-        Relay-aware primitives.
-
-        The many-side test is the shared cardinality classifier in
-        ``utils/relations.py`` (``is_many_side_relation_kind(relation_kind(field))``),
-        the same call the optimizer walker, the mutation write kind
-        (``mutations/inputs.py::model_column_write_kind``), and the relation
-        resolvers route through, so the "rendered as a GraphQL list" decision
-        cannot drift between the filter family and its siblings.
-        """
-        if is_many_side_relation_kind(relation_kind(field)):
-            return GlobalIDMultipleChoiceFilter
-        return GlobalIDFilter
-
     # ------------------------------------------------------------------
     # spec-027 Decision 8 apply pipeline.
     # ------------------------------------------------------------------
@@ -6420,14 +6241,14 @@ class FilterSet(
         - Validates container and element shapes fail-closed.
         - Filters inactive (``None`` / ``UNSET``) elements.
         - Yields ``(operator, active_children)`` for non-empty branches.
+
+        ``_extract_branch_value`` reads an inactive input or branch as ``None``.
         """
-        if is_inactive_value(input_value, unset_sentinel=UNSET):
-            return
         for op in LOGIC_OPERATORS:
             branch_value = cls._extract_branch_value(input_value, op.python_attr)
             if branch_value is None:
                 branch_value = cls._extract_branch_value(input_value, op.wire_name)
-            if branch_value is None or is_inactive_value(branch_value, unset_sentinel=UNSET):
+            if branch_value is None:
                 continue
             cls._validate_logic_branch_shape(op.wire_name, branch_value)
             if op.is_sequence:
@@ -6437,11 +6258,7 @@ class FilterSet(
                     if not is_inactive_value(child, unset_sentinel=UNSET)
                 ]
             else:
-                children = (
-                    [branch_value]
-                    if not is_inactive_value(branch_value, unset_sentinel=UNSET)
-                    else []
-                )
+                children = [branch_value]
             if children:
                 yield op, children
 
@@ -6472,14 +6289,11 @@ class FilterSet(
         ``ConfigurationError`` instead. A filter input is a mapping or a
         Strawberry-input dataclass -- exactly ``iter_input_items(x) is not None``.
 
-        An inactive value (``None`` / ``UNSET``) is a no-op branch everywhere it
-        is read (``tree_data.get(key) or []`` / ``if not_branch is not None``, and
-        the per-element inactive skip in ``_evaluate_logic_tree``), so it is
-        accepted here -- both as the whole branch value and as a list element --
-        rather than treated as a shape error.
+        Both callers pass an active branch value; an inactive list element
+        (``None`` / ``UNSET``) is a no-op everywhere it is read (the per-element
+        inactive skip in ``_iter_logic_branches``), so it is accepted rather than
+        treated as a shape error.
         """
-        if is_inactive_value(value, unset_sentinel=UNSET):
-            return
         op = LOGIC_OPERATORS_BY_WIRE.get(wire_key)
         is_sequence = is_list_or_tuple(value)
         if op is not None and not op.is_sequence:
@@ -6810,29 +6624,10 @@ class FilterSet(
         the shape upstream uses to introspect input classes.
         ``RelatedFilter`` boundary values are handled separately via
         ``_apply_related_constraints`` so this helper does NOT see them.
-        Returns ``None`` for scalar inputs that are not operator bags.
+        Returns ``None`` for scalar inputs that are not operator bags
+        (``utils/input_values.py::iter_input_items`` walks only a dict or an input
+        dataclass).
         """
-        if isinstance(
-            raw_value,
-            (
-                str,
-                bytes,
-                int,
-                float,
-                bool,
-            ),
-        ):
-            return None
-        if isinstance(
-            raw_value,
-            (
-                list,
-                tuple,
-                set,
-                frozenset,
-            ),
-        ):
-            return None
         # A dict reaches a direct ``apply_*`` caller in two shapes that
         # must NOT be conflated:
         #   * an operator bag - ``{"i_contains": "x", "gt": 3}`` - whose
@@ -7036,7 +6831,7 @@ class FilterSet(
                 hop_visibility,
                 parent_db,
             )
-            result[field_name] = _branch_child_set(related_filter).apply_sync(
+            result[field_name] = require(related_filter.filterset, _is_filterset_class).apply_sync(
                 child_input,
                 scoped,
                 info,
@@ -7079,7 +6874,10 @@ class FilterSet(
                 hop_visibility,
                 parent_db,
             )
-            result[field_name] = await _branch_child_set(related_filter).apply_async(
+            result[field_name] = await require(
+                related_filter.filterset,
+                _is_filterset_class,
+            ).apply_async(
                 child_input,
                 scoped,
                 info,
@@ -7612,7 +7410,7 @@ class FilterSet(
             return None
         return hop
 
-    def _named_annotation_hops(self, _input_value: object) -> tuple[RelationHop, ...]:
+    def _named_annotation_hops(self) -> tuple[RelationHop, ...]:
         """Return only owners needed to install an actual missing parser before clean."""
         return tuple(
             hop
@@ -7659,13 +7457,13 @@ class FilterSet(
                 return True
         return False
 
-    def _prepare_annotation_hops_sync(self, input_value: object) -> None:
+    def _prepare_annotation_hops_sync(self) -> None:
         """Resolve only sources needed by missing automatic parsers before field cleaning."""
         _ = self._preflight_form()
         if self._suppress_new_bind_hooks:
             return
         parent_db = self._annotation_owner_alias()
-        for hop in self._named_annotation_hops(input_value):
+        for hop in self._named_annotation_hops():
             _ = self._hop_visible_rows(hop, parent_db)
         initial_fields = self._disabled_initial_annotation_fields()
         for _name, hop in initial_fields:
@@ -7696,51 +7494,39 @@ class FilterSet(
 
     def _stage_known_annotation_validation(
         self,
-        input_value: object,
         *,
         native_only: bool = False,
-    ) -> tuple[tuple[RelationHop, ...], tuple[str, ...], bool]:
+    ) -> tuple[tuple[RelationHop, ...], bool]:
         """Expose parser or postclean bind owners for async awaiting on one form.
 
         A cached owner can be used immediately. Otherwise the caller awaits
         outside this worker and resumes this same instance and form.
         """
         _ = self._preflight_form()
-        named_hops = self._named_annotation_hops(input_value)
+        named_hops = self._named_annotation_hops()
         initial_fields = self._disabled_initial_annotation_fields()
         hops = (*named_hops, *(hop for _name, hop in initial_fields if hop is not None))
         names = tuple(name for name, _hop in initial_fields)
         if not self._suppress_new_bind_hooks and self._annotation_hops_uncached(hops):
-            return hops, names, False
+            return hops, False
         if native_only:
             self._install_disabled_initial_comparisons(names)
             self._refresh_materialized_form_comparisons()
             _ = self._native_form()
-            return (), names, True
+            return (), True
         bind_hops = self._finish_known_annotation_validation(names, defer_bind=True)
-        return bind_hops, names, not bind_hops
-
-    @classmethod
-    def _supplied_leaf_filters(cls, input_value: object) -> list[tuple[str, Filter]]:
-        """Return ``(name, filter)`` for every supplied leaf of one input level, in input order.
-
-        The supplied leaves are read through ``inputs.py::filter_lookup_table``,
-        the one input-leaf to filter mapping. A leaf is supplied when present and
-        not ``None`` / ``UNSET``, whether or not the filter then skips its value
-        or its form data names it (a range naming no bound is supplied, not
-        named: ``_named_leaf_filters``).
-        """
-        return [
-            (form_key, filter_instance)
-            for form_key, filter_instance, _value in cls._supplied_leaf_entries(input_value)
-        ]
+        return bind_hops, not bind_hops
 
     @classmethod
     def _supplied_leaf_entries(cls, input_value: object) -> list[tuple[str, Filter, object]]:
         """Return ``(form key, filter, value)`` for every supplied leaf lookup of one input level.
 
-        The one walk ``_supplied_leaf_filters`` and ``_named_leaf_filters`` read:
-        each active ``LEAF`` field's lookups through ``_leaf_form_entries``.
+        In input order, through ``inputs.py::filter_lookup_table``, the one
+        input-leaf to filter mapping: each active ``LEAF`` field's lookups
+        (``_leaf_form_entries``). A leaf is supplied when present and not ``None`` /
+        ``UNSET``, whether or not the filter then skips its value or its form data
+        names it (a range naming no bound is supplied, not named:
+        ``_named_leaf_filters``).
         """
         lookups_by_attr = cls._leaf_lookups_by_attr()
         entries: list[tuple[str, Filter, object]] = []
@@ -7755,13 +7541,13 @@ class FilterSet(
     def _named_leaf_filters(cls, input_value: object) -> list[tuple[str, Filter]]:
         """Return ``(name, filter)`` for every leaf of one input level the form data names.
 
-        In input order, as ``_supplied_leaf_filters``. A leaf is named when the
+        In input order, as ``_supplied_leaf_entries``. A leaf is named when the
         normalization keys it writes (``_leaf_form_data``) are not empty.
         A pipeline construction retains these logical names alongside its plain
         data; the actual bound form supplies the widget keys and prefix. Direct
         form construction still names copies by actual keys (``_named_flat_copies``).
         Both readers agree with ``_leaf_absent``.
-        Every supplied leaf (``_supplied_leaf_filters``) is named except a range
+        Every supplied leaf (``_supplied_leaf_entries``) is named except a range
         naming no bound (``{start: null, end: null}``, ``{}``), which writes no
         key, so the form reads it as absent.
         """
@@ -7782,7 +7568,7 @@ class FilterSet(
         (``_gate_path_walk_gates``).
         """
         gates: list[tuple[type[object], str]] = []
-        for name, filter_instance in cls._supplied_leaf_filters(input_value):
+        for name, filter_instance, _value in cls._supplied_leaf_entries(input_value):
             if not cls._gate_path_spells_relations(leaf_gate_path(cls, name, filter_instance)):
                 gates.extend(cls._gate_path_walk_gates(name, filter_instance))
             gates.extend(cls._leaf_gates(filter_instance))
@@ -8073,10 +7859,9 @@ class FilterSet(
         key = (scope, parent_db)
         rows = visibility.get(key)
         if rows is None:
-            seed = _scoped_seed_rows(scope, parent_db)
             rows = apply_type_visibility_sync(
                 scope,
-                seed,
+                related_queryset(model_for(scope), using=parent_db),
                 info,
                 async_recourse=_FILTER_ASYNC_RECOURSE,
             )
@@ -8093,7 +7878,7 @@ class FilterSet(
         """Await ``_scoped_rows``'s rows of ``scope`` into the hop map; nothing for ``None``."""
         if scope is None or (scope, parent_db) in into:
             return
-        seed = _scoped_seed_rows(scope, parent_db)
+        seed = related_queryset(model_for(scope), using=parent_db)
         into[scope, parent_db] = await apply_type_visibility_async(scope, seed, info)
 
     def _hop_visibility(self) -> dict[_HopKey, models.QuerySet[models.Model]]:
@@ -8205,11 +7990,8 @@ class FilterSet(
         """
         with _joinless_restated(type(self), filter_instance, rows):
             result = self._invoke_suppressing_framework_distinct(filter_instance, rows, value)
-        assert isinstance(result, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
-            f"Expected '{introspection.kind(self)}' filter {filter_instance.field_name!r} "
-            f"to return a QuerySet, but got a {introspection.kind(result)} instead."
-        )
-        return cast("models.QuerySet[_M]", result)
+        named = f"'{introspection.kind(self)}' filter {filter_instance.field_name!r}"
+        return cast("models.QuerySet[_M]", _returned_queryset(result, named))
 
     def _bound_terminal(
         self,
@@ -8246,7 +8028,7 @@ class FilterSet(
         """
         target_set = (
             # The walk continues only past a declared hop whose target resolved to a set class.
-            self._projection_child(_hop_target_set(hop), hop)
+            self._projection_child(require(hop.target, _is_filterset_class), hop)
             if isinstance(hop, DeclaredHop)
             else _UndeclaredHopSet(hop, self.request, self)
         )
@@ -8272,7 +8054,7 @@ class FilterSet(
 
         def bind(leaf: Filter, hop: RelationHop, field_name: str) -> Filter:
             face = (
-                _face_of_set(_hop_target_set(hop))
+                _face_of_set(require(hop.target, _is_filterset_class))
                 if isinstance(hop, DeclaredHop)
                 else _UndeclaredHopSet(hop, None)
             )
@@ -8413,7 +8195,7 @@ class FilterSet(
             if (
                 target_path in {target_pk.name, "pk"}
                 and isinstance(last, DeclaredHop)
-                and set_bound_definition(_hop_target_set(last)) is None
+                and set_bound_definition(require(last.target, _is_filterset_class)) is None
                 and not _stands_for_own_key(cls, filter_instance)
             ):
                 # A leaf walking a relation onto the target's primary key names a row of the
@@ -8445,13 +8227,17 @@ class FilterSet(
         if not path_traverses_to_many(owner_model, relation):
             # A forward path reaches one row per hop, so the leaf's match is tied to the
             # rows its own path reads: consumer code runs as declared, the rows it keeps
-            # reaching a visible last-hop row through each hop's visible rows.
-            return replace(
-                cls._folded_key_chain(filter_instance, hops, relation, bind)
-                if shipped
-                else _LeafChain((), filter_instance, key_hop=last, key_via=hops[:-1]),
-                null_view=_head_null_view(filter_instance, hops),
-            )
+            # reaching a visible last-hop row through each hop's visible rows. A shipped
+            # leaf compares ``relation`` on the rows of the hop before the last (on this
+            # set's own rows for a one-hop path).
+            chain = _LeafChain((), filter_instance, key_hop=last, key_via=hops[:-1])
+            if shipped:
+                folded = hops[:-1]
+                terminal = (
+                    bind(filter_instance, folded[-1], relation) if folded else filter_instance
+                )
+                chain = _LeafChain(folded, terminal, key_hop=last)
+            return replace(chain, null_view=_head_null_view(filter_instance, hops))
         # The relation's last link names the target column Django's relation lookup
         # compares: the target's primary key, or a single non-key ``to_field``. A
         # GlobalID / raw-key leaf marked for a non-pk ``to_field`` carries the pk.
@@ -8649,24 +8435,6 @@ class FilterSet(
         view.field_name = names[-1]
         return rows.alias(**aliases), view
 
-    @classmethod
-    def _folded_key_chain(
-        cls,
-        filter_instance: Filter,
-        hops: tuple[RelationHop, ...],
-        relation: str,
-        bind: Callable[[Filter, RelationHop, str], Filter],
-    ) -> _LeafChain:
-        """Return the chain of a forward relation-key leaf comparing the stored key it holds.
-
-        The leaf compares ``relation`` on the rows of the hop before the last (on this
-        set's own rows for a one-hop path) and a row it matches must reach a visible row
-        of the last hop (``_LeafChain.key_hop``).
-        """
-        folded = hops[:-1]
-        terminal = bind(filter_instance, folded[-1], relation) if folded else filter_instance
-        return _LeafChain(folded, terminal, key_hop=hops[-1])
-
     def _reaches_hop(
         self,
         outer: models.QuerySet[_M],
@@ -8737,8 +8505,9 @@ class FilterSet(
         """
         if not (isinstance(hop, UndeclaredHop) and hop.alias is not None):
             return ~Q(self._reaches_hop(outer, hop, visible))
-        return self._alias_nulls(outer, hop) | (
-            Q(self._alias_rows_exist(outer, hop)) & ~Q(self._reaches_alias(outer, hop, visible))
+        return Q(self._alias_probe(outer, hop, null=True)) | (
+            Q(self._alias_probe(outer, hop, null=False))
+            & ~Q(self._reaches_alias(outer, hop, visible))
         )
 
     def _alias_joins(self, outer: models.QuerySet[_M], hop: RelationHop) -> Q:
@@ -8750,28 +8519,19 @@ class FilterSet(
         """
         if not (isinstance(hop, UndeclaredHop) and hop.alias is not None):
             return Q()
-        return self._alias_nulls(outer, hop) | Q(self._alias_rows_exist(outer, hop))
-
-    @staticmethod
-    def _alias_nulls(outer: models.QuerySet[_M], hop: UndeclaredHop) -> Q:
-        """Return "Django reads the alias ``hop`` crosses as ``NULL`` on the ``outer`` row"."""
-        return Q(
-            Exists(
-                refuse_rebound_annotations(
-                    correlated_inner_root(outer).filter(
-                        **{f"{hop.alias}{LOOKUP_SEP}isnull": True},
-                    ),
-                    outer,
-                ),
-            ),
+        return Q(self._alias_probe(outer, hop, null=True)) | Q(
+            self._alias_probe(outer, hop, null=False),
         )
 
     @staticmethod
-    def _alias_rows_exist(outer: models.QuerySet[_M], hop: UndeclaredHop) -> Exists:
-        """Return "the alias ``hop`` crosses joins some row to the ``outer`` row", every row read."""
+    def _alias_probe(outer: models.QuerySet[_M], hop: UndeclaredHop, *, null: bool) -> Exists:
+        """Return "Django reads the alias ``hop`` crosses as ``NULL`` on the ``outer`` row" (``null``).
+
+        Otherwise "the alias joins some row to the ``outer`` row", every row read.
+        """
         return Exists(
             refuse_rebound_annotations(
-                correlated_inner_root(outer).filter(**{f"{hop.alias}{LOOKUP_SEP}isnull": False}),
+                correlated_inner_root(outer).filter(**{f"{hop.alias}{LOOKUP_SEP}isnull": null}),
                 outer,
             ),
         )
@@ -8852,7 +8612,7 @@ class FilterSet(
         rows, or, when the chain walks no hop (a relation-key leaf on one forward
         hop, other than a GlobalID key into an id an annotation holds, or one
         running consumer code), the rows this set was built over
-        (``self.queryset``, ``_chain_base``), a to-many key's leaf reading its
+        (``self.queryset``), a to-many key's leaf reading its
         relation there through Django's own joins (``_LeafChain.view``, every
         ``_relation_view`` alias unconditioned), never the rows the leaves before
         it left, so the answer is the same whenever it is asked, on ``apply_sync``
@@ -8898,7 +8658,9 @@ class FilterSet(
             lambda hop, using: related_queryset(_hop_model(hop), using=using),
             built.db,
         )
-        rows = self._chain_base(chain, built)
+        rows = (
+            related_queryset(_hop_model(chain.hops[-1]), using=built.db) if chain.hops else built
+        )
         terminal = chain.terminal
         if chain.view:
             rows, terminal = self._relation_view(chain.view, terminal, rows, None)
@@ -8916,36 +8678,24 @@ class FilterSet(
     ) -> bool:
         """Whether leaf ``name`` takes the branch path (``_apply_relation_leaf``) on this request.
 
-        Every leaf ``_walks_relation_hops`` reads, except a ``RelatedFilter`` head the
-        request left absent (``_leaf_absent``), which runs as declared: its shipped
-        ``filter`` skips the absent value, and GraphQL names no head, so a set the request
-        pipeline builds never walks one.
+        A leaf whose walk reads visibility (``_flat_leaf_walk``) and a
+        ``ProjectedChildFilter``, which always carries its projection hop, except a
+        ``RelatedFilter`` head the request left absent (``_leaf_absent``), which runs as
+        declared: its shipped ``filter`` skips the absent value, and GraphQL names no
+        head, so a set the request pipeline builds never walks one.
         """
         if isinstance(filter_instance, RelatedFilter) and self._leaf_absent(name):
             return False
-        return type(self)._walks_relation_hops(filter_instance, self._leaf_aliases(aliases))
-
-    @classmethod
-    def _walks_relation_hops(
-        cls,
-        filter_instance: Filter,
-        aliases: Mapping[str, str] = _NO_ALIASES,
-    ) -> bool:
-        """Whether a leaf of this set takes the branch path (``_apply_relation_leaf``).
-
-        A leaf whose walk reads visibility (``_flat_leaf_walk``) and a
-        ``ProjectedChildFilter``, which always carries its projection hop.
-        """
         return (
             isinstance(filter_instance, ProjectedChildFilter)
-            or cls._flat_leaf_walk(filter_instance, aliases) is not None
+            or type(self)._flat_leaf_walk(filter_instance, self._leaf_aliases(aliases)) is not None
         )
 
     def _probe_absent_relation_leaves(self) -> tuple[RelationHop, ...]:
         """Ask each absent walking leaf whether it constrains; return the hops of those that do.
 
         The leaves ``_apply_flat_leaves`` runs (``_cleaned_leaf_items``) that
-        walk a hop (``_walks_relation_hops``) and that the request left absent
+        walk a hop (``_walks_on_request``) and that the request left absent
         (``_leaf_absent``), each asked with the value it cleaned to
         (``_absent_leaf_applies``, whose answer does not depend on when it is
         asked) unless this set's map already answers for that value (a logical
@@ -8954,7 +8704,7 @@ class FilterSet(
         value it answers for (``_absent_leaf_verdicts``: a verdict is per
         (leaf, cleaned value)) for this set's ``.qs`` read. Both colors run it
         on the request's root set once the form has validated and on every
-        logical-arm sibling (``_probed_filterset``); ``apply_async`` runs it
+        logical-arm sibling (``apply_sync``); ``apply_async`` runs it
         inside the sync boundary and awaits the returned hops
         (``_visibility_hops`` of every leaf that constrains) into the
         request-wide hop map before the ``.qs`` read, so that read never derives
@@ -9005,7 +8755,6 @@ class FilterSet(
 
     async def _await_annotations_ready(
         self,
-        input_value: object,
         needed: tuple[RelationHop, ...],
         *,
         ready: bool,
@@ -9024,12 +8773,8 @@ class FilterSet(
                 self._hop_visibility(),
                 parent_db=self._annotation_owner_alias(),
             )
-            needed, _names, ready = await run_in_one_sync_boundary(
-                partial(
-                    self._stage_known_annotation_validation,
-                    input_value,
-                    native_only=native_only,
-                ),
+            needed, ready = await run_in_one_sync_boundary(
+                partial(self._stage_known_annotation_validation, native_only=native_only),
             )
 
     def _settle_sibling_bind_hooks(self, arms: dict[str, _ProbedArm]) -> None:
@@ -9109,15 +8854,6 @@ class FilterSet(
             self._suppress_new_bind_hooks = True
             self._prepare_postclean_binding_sync(form)
             type(self)._validate_form_or_raise(self)
-            # A consumer FilterSet validation override may accept errors the
-            # form's own policy rejects. Its accepted domain may acquire owners.
-            self._native_policy_invalid = False
-            self._suppress_new_bind_hooks = False
-            if self._bind_unavailable_names:
-                self._bind_asked_form = None
-                if isinstance(form, BindAskingFilterForm):
-                    form._filter_bind_finalized = False
-                self._bind_unavailable_names = set()
 
     def _build_logic_arms_native(
         self,
@@ -9131,8 +8867,8 @@ class FilterSet(
             self._validate_native_errors()
         for path, child_input in self._own_arms():
             arm = self._new_logic_arm(child_input, path, rows, arms)
-            arm._prepare_annotation_hops_sync(child_input)
-            _ = arm._stage_known_annotation_validation(child_input, native_only=True)
+            arm._prepare_annotation_hops_sync()
+            _ = arm._stage_known_annotation_validation(native_only=True)
             arm._build_logic_arms_native(arms, rows, stop_on_error=stop_on_error)
             if any(
                 probed.instance._native_form_is_invalid(probed.instance.form)
@@ -9154,16 +8890,13 @@ class FilterSet(
                 path: str,
             ) -> tuple[FilterSet, tuple[RelationHop, ...], bool]:
                 arm = self._new_logic_arm(child_input, path, rows, arms)
-                needed, _names, ready = arm._stage_known_annotation_validation(
-                    child_input,
-                    native_only=True,
-                )
+                needed, ready = arm._stage_known_annotation_validation(native_only=True)
                 return arm, needed, ready
 
             arm, needed, ready = await run_in_one_sync_boundary(
                 partial(stage_arm, child_input, path),
             )
-            await arm._await_annotations_ready(child_input, needed, ready=ready, native_only=True)
+            await arm._await_annotations_ready(needed, ready=ready, native_only=True)
             await arm._build_logic_arms_native_async(arms, rows)
 
     async def _probe_logic_arms_async(
@@ -9173,27 +8906,15 @@ class FilterSet(
     ) -> tuple[RelationHop, ...]:
         """Finalize prebuilt logical siblings, awaiting postclean bind owners once."""
         hops: list[RelationHop] = []
-        for path, child_input in self._own_arms():
+        for path, _child_input in self._own_arms():
             arm = arms[path].instance
             arm._absent_leaf_verdicts = self._absent_leaf_verdicts
-            needed, _initial_names, ready = await run_in_one_sync_boundary(
-                partial(arm._stage_known_annotation_validation, child_input),
-            )
-            await arm._await_annotations_ready(child_input, needed, ready=ready)
+            needed, ready = await run_in_one_sync_boundary(arm._stage_known_annotation_validation)
+            await arm._await_annotations_ready(needed, ready=ready)
             absent = await run_in_one_sync_boundary(arm._probe_absent_relation_leaves)
             hops.extend(absent)
             hops.extend(await arm._probe_logic_arms_async(arms, rows))
         return tuple(hops)
-
-    def _chain_base(
-        self,
-        chain: _LeafChain,
-        queryset: models.QuerySet[models.Model, object],
-    ) -> models.QuerySet[models.Model, object]:
-        """Return the unscoped rows for ``chain``'s terminal: the last hop target's, else ``queryset``."""
-        if not chain.hops:
-            return queryset
-        return related_queryset(_hop_model(chain.hops[-1]), using=queryset.db)
 
     def _apply_relation_leaf(
         self,
@@ -9370,9 +9091,9 @@ class FilterSet(
             if chain.view:
                 source, terminal = self._relation_view(chain.view, terminal, queryset, using)
             matched = terminal.filter(source, value)
-            assert isinstance(matched, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
-                f"Expected '{introspection.kind(self)}' filter {terminal.field_name!r} "
-                f"to return a QuerySet, but got a {introspection.kind(matched)} instead."
+            _ = _returned_queryset(
+                matched,
+                f"'{introspection.kind(self)}' filter {terminal.field_name!r}",
             )
             if matched is source:
                 return queryset
@@ -9415,10 +9136,7 @@ class FilterSet(
         if negate:
             # A negated terminal is unconjoined (above): one row set, negated at the parent.
             return queryset.filter(~conditions[0] & self._alias_joins(queryset, chain.hops[0]))
-        kept = conditions[0]
-        for condition in conditions[1:]:
-            kept &= condition
-        return queryset.filter(kept)
+        return queryset.filter(reduce(Q.__and__, conditions))
 
     def _apply_walked_leaf(
         self,
@@ -9702,10 +9420,7 @@ class FilterSet(
             if not routed:
                 with _joinless_restated(type(self), filter_instance, queryset):
                     queryset = filter_instance.filter(queryset, value)
-                assert isinstance(queryset, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
-                    f"Expected '{introspection.kind(self)}.{name}' to return a QuerySet, "
-                    f"but got a {introspection.kind(queryset)} instead."
-                )
+                _ = _returned_queryset(queryset, f"'{introspection.kind(self)}.{name}'")
                 continue
             inner_root = correlated_inner_root(queryset)
             result = self._invoke_suppressing_framework_distinct(
@@ -9713,10 +9428,7 @@ class FilterSet(
                 inner_root,
                 value,
             )
-            assert isinstance(result, _QUERYSET), (  # noqa: S101 - same assertion as django-filter's filter_queryset
-                f"Expected '{introspection.kind(self)}.{name}' to return a QuerySet, "
-                f"but got a {introspection.kind(result)} instead."
-            )
+            result = _returned_queryset(result, f"'{introspection.kind(self)}.{name}'")
             if result is inner_root:
                 continue
             queryset, positive = attach_exists(queryset, result)
@@ -9792,9 +9504,9 @@ class FilterSet(
         # visibility map is shared with every sibling the logic tree builds (one per request), and
         # so is the map of the siblings the probe built (``_probed_arms``), which ``_q_for_branch``
         # reuses; a sibling it builds afresh starts from this set's absent-leaf verdicts.
-        depth = getattr(self, "_logic_depth", 0)
-        info = getattr(self, "_apply_info", None)
-        nested_map = getattr(self, "_nested_qs_by_branch_id", None)
+        depth = self._logic_depth
+        info = self._apply_info
+        nested_map = self._nested_qs_by_branch_id
         q = type(self)._evaluate_logic_tree(
             qs,
             self.data or {},
@@ -9971,12 +9683,6 @@ class FilterSet(
         means reaching into upstream's per-instance copy semantics. Profile
         before optimizing if a deeply-nested query ever shows up hot.
         """
-        # Defensive identity for direct callers: an inactive child must not
-        # materialize as ``pk__in=<full queryset>`` (match-all). ``_evaluate_logic_tree``
-        # already skips inactive arms; returning empty ``Q()`` here keeps AND/OR
-        # identity if this helper is reached alone.
-        if is_inactive_value(child_input, unset_sentinel=UNSET):
-            return models.Q()
         child_qs_by_branch = (
             None
             if _nested_qs_by_branch_id is None
@@ -10031,7 +9737,7 @@ class FilterSet(
             child_set._probed_arms = _probed_arms
             if probed is not None:
                 child_set._suppress_new_bind_hooks = probed.instance._suppress_new_bind_hooks
-            child_set._prepare_annotation_hops_sync(child_input)
+            child_set._prepare_annotation_hops_sync()
             _ = child_set._finish_known_annotation_validation((), defer_bind=False)
         if introspection.overrides(type(child_set), filterset.BaseFilterSet, "qs"):
             # A consumer ``qs`` override (django-filter's seam) runs inside the arm as it
@@ -10107,7 +9813,7 @@ class FilterSet(
 
         Captures the verbatim normalize / request / related-constraints
         sequence both apply paths run identically, before the filterset is
-        built by ``_apply_common_finalize``. ``hop_visibility`` is the
+        built. ``hop_visibility`` is the
         request-wide hop visibility map the filter set instance reads next.
         """
         bindings: dict[str, NormalizedFormValue] = {}
@@ -10170,156 +9876,6 @@ class FilterSet(
         return instance
 
     @classmethod
-    def _apply_common_finalize(
-        cls,
-        input_value: object,
-        constrained: models.QuerySet[_M],
-        data: dict[str, object],
-        request: object,
-        info: object,
-        *,
-        nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None = None,
-        flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
-        run_permissions: bool = True,
-        branch_path: str = "",
-        form_bindings: FilterFormBindings | None = None,
-    ) -> models.QuerySet[_M]:
-        """Build the filterset, run the perm check + form validate + absent-leaf probe, read ``.qs``.
-
-        The filterset is built over ``constrained`` with ``info`` stashed as
-        ``_apply_info`` and the pre-derived ``nested_qs_by_branch_id`` map (every
-        ``and`` / ``or`` / ``not`` arm's related branches, derived by either
-        color before this runs) and the request-wide ``flat_hop_visibility`` map
-        (pre-filled on the async color, filled on first use on the sync one)
-        stashed as ``_nested_qs_by_branch_id`` and ``_flat_hop_visibility``.
-        Its ``.qs`` is
-        ``filter_queryset(constrained.all())`` (django-filter's
-        ``BaseFilterSet.qs``), a filtered clone over ``constrained``'s own
-        model, so the result keeps the model of the queryset passed in.
-
-        Sync ``apply_sync`` calls this directly: ``_probed_filterset`` records
-        the absent-leaf verdicts of the root set and of every logical-arm sibling
-        it builds (``_probe_absent_relation_leaves``, ``_probe_logic_arms``),
-        which the ``.qs`` read reuses, and the hops of an absent leaf that
-        constrains are derived synchronously as the ``.qs`` read reaches them.
-        Async ``apply_async`` stages and resumes the same built forms through
-        ``run_in_one_sync_boundary`` (the neutral ``sync_to_async(thread_sensitive=True)``
-        owner in ``utils/querysets.py``) so a consumer's filterset constructor /
-        ``check_*_permission`` hook / custom ``method=`` filter body /
-        leaf-clause ORM evaluation does not block the event loop.
-
-        ``run_permissions=False`` skips the ``_run_permission_checks`` pass.
-        The related-visibility derivation invokes the child filterset's
-        ``apply_*`` purely to compute the child's filtered queryset; the
-        child's gates are already fired ONCE by the top-level pass that
-        recurses into every active related branch, so re-running them here
-        would double-fire nested gates (compounding with nesting depth).
-        Form validation still runs so a malformed nested clause still raises
-        ``FILTER_INVALID``.
-        """
-        filterset_instance, _hops, rows = cls._probed_filterset(
-            input_value,
-            constrained,
-            data,
-            request,
-            info,
-            nested_qs_by_branch_id=nested_qs_by_branch_id,
-            flat_hop_visibility=flat_hop_visibility,
-            run_permissions=run_permissions,
-            branch_path=branch_path,
-            form_bindings=form_bindings,
-        )
-        return filterset_instance.qs if rows is None else rows
-
-    @classmethod
-    def _validated_filterset(
-        cls,
-        input_value: object,
-        constrained: models.QuerySet[_M],
-        data: dict[str, object],
-        request: object,
-        info: object,
-        *,
-        nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
-        flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
-        run_permissions: bool,
-        branch_path: str,
-        form_bindings: FilterFormBindings | None,
-    ) -> Self:
-        """Build the filterset, run permissions, and clean its native form once.
-
-        The start of ``_probed_filterset``. New bind-only sources wait until
-        every logical sibling has also completed native cleaning.
-        """
-        filterset_instance = cls._build_stashed_instance(
-            data,
-            constrained,
-            request,
-            info,
-            nested_qs_by_branch_id,
-            flat_hop_visibility,
-            input_value=input_value,
-            branch_path=branch_path,
-            form_bindings=form_bindings,
-        )
-        if run_permissions:
-            cls._run_permission_checks(input_value, request)
-        filterset_instance._prepare_annotation_hops_sync(input_value)
-        _ = filterset_instance._stage_known_annotation_validation(input_value, native_only=True)
-        return filterset_instance
-
-    @classmethod
-    def _probed_filterset(
-        cls,
-        input_value: object,
-        constrained: models.QuerySet[_M],
-        data: dict[str, object],
-        request: object,
-        info: object,
-        *,
-        nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
-        flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
-        run_permissions: bool,
-        branch_path: str,
-        form_bindings: FilterFormBindings | None,
-    ) -> tuple[Self, tuple[RelationHop, ...], models.QuerySet[_M] | None]:
-        """Return the validated filterset (``_validated_filterset``), its absent leaves' hops, its rows.
-
-        The work both colors run before the ``.qs`` read (``apply_async`` inside
-        its sync boundary, ``apply_sync`` through ``_apply_common_finalize``): the
-        hops of every absent walking leaf whose filter constrains on the value it
-        cleaned to, the root set's (``_probe_absent_relation_leaves``) and every
-        ``and`` / ``or`` / ``not`` arm's. The native stage builds their siblings
-        before any new bind-only owner runs; the probe reuses them for the
-        ``.qs`` read (``_probe_logic_arms``). With none, the ``.qs`` read
-        runs here and its rows come back; otherwise the rows are ``None`` and the
-        caller reads ``.qs`` itself: ``apply_async`` awaits the hops first and
-        reads it in a second worker.
-        """
-        filterset_instance = cls._validated_filterset(
-            input_value,
-            constrained,
-            data,
-            request,
-            info,
-            nested_qs_by_branch_id=nested_qs_by_branch_id,
-            flat_hop_visibility=flat_hop_visibility,
-            run_permissions=run_permissions,
-            branch_path=branch_path,
-            form_bindings=form_bindings,
-        )
-        arms: dict[str, _ProbedArm] = {}
-        filterset_instance._probed_arms = arms
-        filterset_instance._build_logic_arms_native(arms, constrained)
-        filterset_instance._settle_sibling_bind_hooks(arms)
-        _ = filterset_instance._finish_known_annotation_validation((), defer_bind=False)
-        hops = (
-            *filterset_instance._probe_absent_relation_leaves(),
-            *filterset_instance._probe_logic_arms(arms, constrained),
-        )
-        return filterset_instance, hops, None if hops else filterset_instance.qs
-
-    @classmethod
     def apply_sync(
         cls,
         input_value: object,
@@ -10339,14 +9895,25 @@ class FilterSet(
         does), resolve the request, apply related constraints
         BEFORE constructing the filterset (so the constraints land in
         `self.queryset` and propagate through to `.qs`), then permission
-        check, form validate, the absent-leaf probe
-        (``_probe_absent_relation_leaves``, through ``_apply_common_finalize``),
-        and return the lazy queryset.
+        build the filterset over the constrained rows (``_build_stashed_instance``,
+        stashing ``info`` and both pre-derived maps), permission check, clean its
+        native form once and every logical sibling's (new bind-only sources wait
+        until every sibling has completed native cleaning), the absent-leaf probe
+        of the root set and every ``and`` / ``or`` / ``not`` arm
+        (``_probe_absent_relation_leaves``, ``_probe_logic_arms``), whose recorded
+        verdicts the ``.qs`` read reuses, deriving their hops as it reaches them,
+        and return the lazy queryset: ``filter_queryset(constrained.all())``
+        (django-filter's ``BaseFilterSet.qs``), a filtered clone over the
+        constrained queryset's own model.
 
         ``run_permissions`` defaults to ``True`` for every consumer entry
-        point; the related-visibility derivation passes ``False`` so a nested
-        child filterset's gates are fired only by the single top-level
-        ``_run_permission_checks`` pass (see ``_apply_common_finalize``).
+        point; the related-visibility derivation passes ``False``: it invokes
+        the child filterset's ``apply_*`` purely to compute the child's filtered
+        queryset, and the child's gates are already fired ONCE by the top-level
+        ``_run_permission_checks`` pass that recurses into every active related
+        branch, so re-running them would double-fire nested gates. Form
+        validation still runs, so a malformed nested clause still raises
+        ``FILTER_INVALID``.
 
         ``_depth`` is the internal related-recursion budget: the visibility
         derivation re-enters this method (``run_permissions=False``) once per
@@ -10389,18 +9956,29 @@ class FilterSet(
             child_qs_by_branch,
             hop_visibility,
         )
-        return cls._apply_common_finalize(
-            input_value,
-            constrained,
+        filterset_instance = cls._build_stashed_instance(
             data,
+            constrained,
             request,
             info,
-            nested_qs_by_branch_id=nested_qs_by_branch_id,
-            flat_hop_visibility=hop_visibility,
-            run_permissions=run_permissions,
+            nested_qs_by_branch_id,
+            hop_visibility,
+            input_value=input_value,
             branch_path=_branch_path,
             form_bindings=form_bindings,
         )
+        if run_permissions:
+            cls._run_permission_checks(input_value, request)
+        filterset_instance._prepare_annotation_hops_sync()
+        _ = filterset_instance._stage_known_annotation_validation(native_only=True)
+        arms: dict[str, _ProbedArm] = {}
+        filterset_instance._probed_arms = arms
+        filterset_instance._build_logic_arms_native(arms, constrained)
+        filterset_instance._settle_sibling_bind_hooks(arms)
+        _ = filterset_instance._finish_known_annotation_validation((), defer_bind=False)
+        _ = filterset_instance._probe_absent_relation_leaves()
+        _ = filterset_instance._probe_logic_arms(arms, constrained)
+        return filterset_instance.qs
 
     @classmethod
     async def apply_async(
@@ -10459,7 +10037,7 @@ class FilterSet(
         ``run_permissions`` defaults to ``True`` for consumer entry points;
         the related-visibility derivation passes ``False`` so a nested child
         filterset's gates fire only once, via the top-level pass (see
-        ``_apply_common_finalize`` / ``_derive_related_visibility_querysets_sync``).
+        ``apply_sync`` / ``_derive_related_visibility_querysets_sync``).
 
         ``_depth`` (related-recursion cap, report Defect 5), the parent
         ``queryset.db`` alias (report Defect 3), ``_branch_path`` and
@@ -10494,14 +10072,7 @@ class FilterSet(
             aliases=aliases,
         )
 
-        def constrained_stage() -> tuple[
-            Self,
-            models.QuerySet[_M],
-            tuple[RelationHop, ...],
-            tuple[str, ...],
-            bool,
-            tuple[RelationHop, ...],
-        ]:
+        def constrained_stage() -> tuple[Self, models.QuerySet[_M], tuple[RelationHop, ...], bool]:
             data, request, constrained, form_bindings = cls._apply_common_prelude(
                 input_value,
                 queryset,
@@ -10522,39 +10093,23 @@ class FilterSet(
             )
             if run_permissions:
                 cls._run_permission_checks(input_value, request)
-            needed, initial_names, ready = instance._stage_known_annotation_validation(
-                input_value,
-                native_only=True,
-            )
-            return instance, constrained, needed, initial_names, ready, ()
+            needed, ready = instance._stage_known_annotation_validation(native_only=True)
+            return instance, constrained, needed, ready
 
-        (
-            filterset_instance,
-            constrained,
-            needed,
-            _initial_names,
-            ready,
-            root_absent,
-        ) = await run_in_one_sync_boundary(constrained_stage)
-        await filterset_instance._await_annotations_ready(
-            input_value,
-            needed,
-            ready=ready,
-            native_only=True,
+        filterset_instance, constrained, needed, ready = await run_in_one_sync_boundary(
+            constrained_stage,
         )
+        await filterset_instance._await_annotations_ready(needed, ready=ready, native_only=True)
         arms: dict[str, _ProbedArm] = {}
         filterset_instance._probed_arms = arms
         await filterset_instance._build_logic_arms_native_async(arms, constrained)
 
         def prepare_bind_phase() -> tuple[tuple[RelationHop, ...], bool]:
             filterset_instance._settle_sibling_bind_hooks(arms)
-            needed, _names, ready = filterset_instance._stage_known_annotation_validation(
-                input_value,
-            )
-            return needed, ready
+            return filterset_instance._stage_known_annotation_validation()
 
         needed, ready = await run_in_one_sync_boundary(prepare_bind_phase)
-        await filterset_instance._await_annotations_ready(input_value, needed, ready=ready)
+        await filterset_instance._await_annotations_ready(needed, ready=ready)
         root_absent = await run_in_one_sync_boundary(
             filterset_instance._probe_absent_relation_leaves,
         )

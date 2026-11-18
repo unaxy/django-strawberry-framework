@@ -23,6 +23,7 @@ from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.reverse_related import ForeignObjectRel
 
 from django_strawberry_framework.exceptions import (
+    ConfigurationError,
     LookupValidationError,
     PathResolutionError,
 )
@@ -647,6 +648,35 @@ def leading_relation_hops(
         if hops is not None:
             return hops
     return ()
+
+
+def require_relation_path(
+    labels: tuple[str, str],
+    owner: type[object],
+    declared_attr: str,
+    relation: str,
+    model: type[models.Model],
+) -> type[models.Model]:
+    """Return the model ``relation`` reaches from ``model``, refusing a path that is not all relations.
+
+    A related declaration (``RelatedFilter`` / ``RelatedOrder``) reads its target
+    across every segment of its ``field_name``, so each must be a relation Django
+    can join (``leading_relation_hops``): a column, a name ``model`` does not carry,
+    or a ``GenericForeignKey`` is a declaration error. ``labels`` is the
+    ``(set family, declaration)`` pair the message names, such as
+    ``("FilterSet", "RelatedFilter")``.
+    """
+    family, declaration = labels
+    hops = leading_relation_hops(model, relation)
+    segments = relation.split(LOOKUP_SEP)
+    if len(hops) < len(segments):
+        raise ConfigurationError(
+            f"{family} {owner.__qualname__}: {declaration} {declared_attr!r} has field_name "
+            f"{relation!r}, but {segments[len(hops)]!r} is not a relation of the model the "
+            f"path has reached from {model.__qualname__}. A {declaration}'s field_name must "
+            "name a path of relations.",
+        )
+    return hops[-1].target_model
 
 
 def descendant_relation_path(

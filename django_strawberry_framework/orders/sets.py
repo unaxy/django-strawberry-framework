@@ -207,33 +207,6 @@ def _require_scoped_order_target(
     )
 
 
-def _require_order_relation_path(
-    owner: type[object],
-    declared_attr: str,
-    relation: str,
-    model: type[models.Model],
-) -> type[models.Model]:
-    """Return the model ``relation`` reaches from ``model``, refusing a path that is not all relations.
-
-    A ``RelatedOrder``'s target terms are read across every segment of its
-    ``field_name``, so each must be a relation Django can join
-    (``utils/relations.py::leading_relation_hops``): a column, a name ``model``
-    does not carry, or a ``GenericForeignKey`` is a declaration error. ``model``
-    is the model the path resolves against: the type the walking set serves, or
-    the model an outer declaration reached.
-    """
-    hops = leading_relation_hops(model, relation)
-    segments = relation.split(LOOKUP_SEP)
-    if len(hops) < len(segments):
-        raise ConfigurationError(
-            f"OrderSet {owner.__qualname__}: RelatedOrder {declared_attr!r} has field_name "
-            f"{relation!r}, but {segments[len(hops)]!r} is not a relation of the model the "
-            f"path has reached from {model.__qualname__}. A RelatedOrder's field_name must "
-            "name a path of relations.",
-        )
-    return hops[-1].target_model
-
-
 #: The ``Meta`` keys an ``OrderSet`` reads (``OrderSet._expand_meta_fields``); a class
 #: body's own ``Meta`` declaring any other key is refused at class creation.
 _ALLOWED_ORDERSET_META_KEYS: frozenset[str] = frozenset({"model", "fields", "exclude"})
@@ -947,8 +920,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         """Apply the prepared orderings to ``queryset`` - the un-colored tail.
 
         The shared body behind ``apply_sync`` / ``apply_async`` (the order-side
-        mirror of the filter side's ``_apply_common_prelude`` /
-        ``_apply_common_finalize`` split): ``prepared`` is
+        mirror of the filter side's ``_apply_common_prelude``): ``prepared`` is
         ``_prepared_orderings``'s normalized input and flat orders, and
         ``visible_rows`` reads each scoping type's rows (``_visible_rows_sync``,
         or ``_visible_rows_async``'s awaited map). Empty-out ->

@@ -2214,12 +2214,9 @@ schemas (below).
   custom-`USERNAME_FIELD` / custom-`REQUIRED_FIELDS` model (a test-scoped model
   passed as the argument — no second Django project, no `AUTH_USER_MODEL` swap;
   fakeshop pins the default `auth.User`), including the protected-field raise, the
-  unknown / non-editable rejection delegating to `editable_input_fields`, the
-  non-string `USERNAME_FIELD` raise, the malformed-declaration rows (a
-  `REQUIRED_FIELDS` that is not a list or tuple, a non-string entry), and the
-  plain-text rows (`str`-subclass names derive a base-`str` tuple deduplicated by
-  value, and a list / tuple subclass is read through the base iteration slot); the
-  protected-field raise reaching the consumer
+  unknown / non-editable rejection delegating to `editable_input_fields`, and the
+  malformed-declaration rows (a `REQUIRED_FIELDS` that is not a list or tuple, a
+  non-string entry); the protected-field raise reaching the consumer
   through `register_mutation()` itself at declaration time; the exclusion-seam helper
   test — `password`'s value captured out of the constructed attrs **while its
   provided-marker is preserved**, and the no-exclusion decode keeping its three-tuple;

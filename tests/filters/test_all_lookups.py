@@ -38,8 +38,6 @@ from django_strawberry_framework.filters.base import EnumChoiceFilter, TextPatte
 from django_strawberry_framework.filters.inputs import convert_filter_to_input_annotation
 from django_strawberry_framework.filters.sets import (
     _lookups_for_field,
-    _non_transform_lookups,
-    _without_foreign_postgres_lookups,
     filter_generation_provenance,
 )
 from django_strawberry_framework.utils._narrowing import is_list
@@ -485,9 +483,8 @@ def test_explicit_text_pattern_on_a_column_with_no_default_filter_stays_unrecogn
 
 
 def _parent_bag(field: "ModelField") -> set[str]:
-    """Every non-transform lookup the field registers, minus foreign ``contrib.postgres`` ones."""
-    lookups = _without_foreign_postgres_lookups(type(field), field.get_lookups())
-    return set(_non_transform_lookups(lookups))
+    """The field's whole ``"__all__"`` catalog, read as for a consumer-supplied filter."""
+    return set(_lookups_for_field(field, package_default=False))
 
 
 def _all_bag(filterset: type[FilterSet], name: str) -> set[str]:
