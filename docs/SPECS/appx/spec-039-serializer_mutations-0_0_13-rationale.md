@@ -123,7 +123,7 @@ DRF-absent consumer who never writes a serializer mutation.
 
 - **A net-new `DjangoSerializerMutationField` factory.** Rejected: the generic
   [`DjangoMutationField`][glossary-djangomutationfield] already exposes any
-  mutation-family member through its duck-typed target check and `resolve_sync` /
+  mutation-family member through its check on the target's own validated `Meta` and `resolve_sync` /
   `resolve_async` / `input_type_name` dispatch; a parallel factory would duplicate the
   dispatch + input-ref logic for no gain.
 - **Exporting from a `django_strawberry_framework.rest_framework` namespace only.**

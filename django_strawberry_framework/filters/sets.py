@@ -171,6 +171,7 @@ from django_strawberry_framework.utils.permissions import (
     RelationHop,
     UndeclaredHop,
     descendant_relation_path_of,
+    invoke_permission_method,
     relation_path_gates,
     set_bound_definition,
     set_bound_type,
@@ -1346,8 +1347,7 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
     Expansion of related filters into per-lookup ORM paths is deferred to
     `FilterSet.get_filters` so circular `RelatedFilter` references
     declared in the same module are legal. ``Meta.filter_fields`` aliasing
-    is ``utils/inputs.py::promote_set_meta_fields`` (shared with
-    ``OrderSetMetaclass``).
+    is ``utils/inputs.py::promote_set_meta_fields``.
     """
 
     if not TYPE_CHECKING:
@@ -1393,8 +1393,7 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
 
         # ``filter_fields`` is the cookbook / graphene-django synonym for
         # ``Meta.fields``. Write-back is
-        # ``utils/inputs.py::promote_set_meta_fields`` so ``OrderSetMetaclass``
-        # cannot drift from class-Meta aliasing. The consumer's
+        # ``utils/inputs.py::promote_set_meta_fields``. The consumer's
         # ``filter_fields`` attribute is left in place. Presence is read from
         # the Meta class's real MRO namespaces (inherited Meta attributes count).
         _ = promote_set_meta_fields(attrs.get("Meta"), fields_alias=FILTERSET_FIELDS_ALIAS)
@@ -7137,7 +7136,7 @@ class FilterSet(
         # cookbook's contract for explicit callers.
         if requested_fields:
             for field_path in requested_fields:
-                self._invoke_permission_method(self, field_path, request)
+                invoke_permission_method(self, field_path, request)
             return
         # No explicit set supplied - fall through to the active-input
         # variant. `_run_permission_checks` is a classmethod; route the

@@ -63,7 +63,7 @@
 "django_strawberry_framework/optimizer/nested_planner.py::plan_connection_relation" = { B009 = 1 }
 "django_strawberry_framework/optimizer/walker.py::_has_custom_id_resolver" = { PLC0415 = 1 }
 "django_strawberry_framework/optimizer/walker.py::_relay_id_field" = { PLC0415 = 2 }
-"django_strawberry_framework/orders/base.py::_order_set_class" = { PLC0415 = 1 }
+"django_strawberry_framework/orders/base.py::RelatedOrder._family_class" = { PLC0415 = 1 }
 "django_strawberry_framework/registry.py::TypeRegistry.definition_for_graphql_name" = { PLC0415 = 1 }
 "django_strawberry_framework/relay.py::DjangoNodeField" = { N802 = 1 }
 "django_strawberry_framework/relay.py::DjangoNodesField" = { N802 = 1 }

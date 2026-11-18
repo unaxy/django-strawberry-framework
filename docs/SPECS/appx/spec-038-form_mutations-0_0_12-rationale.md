@@ -106,8 +106,8 @@ matches [`DjangoMutation`][glossary-djangomutation]'s placement.
   same job once the seams exist.
 - **An `issubclass(DjangoMutation)` target check.** Rejected: the plain form is not a
   `DjangoMutation`, and importing the form bases into
-  [`mutations/fields.py`][mutations-fields] would close a load cycle; the duck-typed
-  protocol check accepts every flavor.
+  [`mutations/fields.py`][mutations-fields] would close a load cycle; a check on the
+  target's own validated `Meta` accepts every flavor.
 - **Exposing only from `django_strawberry_framework.forms`.** Rejected: the bases are
   used in schema modules alongside root-exported types, exactly as
   [`DjangoMutation`][glossary-djangomutation] is root-exported.

@@ -66,7 +66,6 @@ _SHARED_PERMISSION_METHODS = (
     "_request_from_info",
     "_extract_branch_value",
     "_iter_active_related_branches",
-    "_invoke_permission_method",
     "_active_permission_targets",
     "_run_permission_checks",
 )
@@ -335,14 +334,14 @@ def test_related_set_target_mixin() -> None:
     assert item._resolved_target() is _AlternativeStub
 
 
-def test_related_set_target_mixin_hook_is_abstract_without_a_family_validator() -> None:
-    """The base ``_validate_target`` fails loud: a hookless subclass cannot read targets.
+def test_related_set_target_mixin_hook_is_abstract_without_a_family_class() -> None:
+    """The base ``_family_class`` fails loud: a hookless subclass cannot read targets.
 
     The resolution seam is the one site every consumer's resolved target flows
     through (the Layer-5 BFS enqueue reads the family property, which resolves
-    through ``_resolved_target``), so the family TYPE gate lives on the hook
-    the mixin fires: a future set family that forgets to supply it fails at
-    first resolved read instead of silently accepting any target.
+    through ``_resolved_target``), so the family TYPE gate reads the hook
+    there: a future set family that forgets to supply it fails at first
+    resolved read instead of silently accepting any target.
     """
 
     class _Hookless(RelatedSetTargetMixin[object]):
@@ -352,7 +351,7 @@ def test_related_set_target_mixin_hook_is_abstract_without_a_family_validator() 
         def __init__(self, target: object) -> None:
             self._target = target
 
-    with pytest.raises(NotImplementedError, match="_validate_target"):
+    with pytest.raises(NotImplementedError, match="_family_class"):
         _Hookless(object())._resolved_target()
 
 
@@ -465,15 +464,15 @@ def test_resolved_target_validates_each_distinct_value_once() -> None:
     ]
 
 
-def test_both_families_supply_their_own_target_validator() -> None:
+def test_both_families_supply_their_own_family_class() -> None:
     """The shipped families override the hook (a deleted override fails this pin).
 
     Identity of the override vs the mixin's abstract ``NotImplementedError``.
     A request never sees a hookless ``RelatedFilter``.
     """
-    mixin_hook = _unbound(RelatedSetTargetMixin, "_validate_target")
-    assert _unbound(RelatedFilter, "_validate_target") is not mixin_hook
-    assert _unbound(RelatedOrder, "_validate_target") is not mixin_hook
+    mixin_hook = _unbound(RelatedSetTargetMixin, "_family_class")
+    assert _unbound(RelatedFilter, "_family_class") is not mixin_hook
+    assert _unbound(RelatedOrder, "_family_class") is not mixin_hook
 
 
 def test_collect_related_declarations() -> None:

@@ -3,9 +3,7 @@
 The metaclass is a direct port of
 ``django_graphene_filters/orderset.py::OrderSetMetaclass``: inherited
 declarations are collected through the shared
-``sets_mixins.py::collect_related_declarations`` walk and ``Meta.fields``
-resolution is ``utils/inputs.py::promote_set_meta_fields`` (shared
-write-back with ``FilterSetMetaclass``); ``OrderSet`` mixes the
+``sets_mixins.py::collect_related_declarations`` walk; ``OrderSet`` mixes the
 cookbook's cycle-safe ``get_fields`` (the Layer-4 expansion) over
 ``ClassBasedTypeNameMixin`` from ``..sets_mixins``.
 
@@ -23,8 +21,7 @@ On top of that skeleton the module carries:
   ``apply_async`` (no ``apply(...)`` dispatcher per spec-028 Decision 8).
 - The classmethod permission pipeline, inherited from
   ``ActiveInputPermissionMixin`` (``_run_permission_checks`` /
-  ``_active_permission_targets`` / ``_invoke_permission_method`` /
-  ``_request_from_info``) that drives
+  ``_active_permission_targets`` / ``_request_from_info``) that drives
   active-input-only per-field ``check_<field>_permission`` dispatch per
   spec-028 Decision 8.
 - The cookbook-style ``get_flat_orders`` classmethod walking the
@@ -63,11 +60,9 @@ from django_strawberry_framework.sets_mixins import (
     should_cache_expansion,
 )
 from django_strawberry_framework.utils import introspection
-from django_strawberry_framework.utils._narrowing import is_exact_list, is_exact_pair
 from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
 from django_strawberry_framework.utils.inputs import (
     plain_set_meta_fields,
-    promote_set_meta_fields,
     read_set_meta_fields,
     reject_unknown_meta_keys,
 )
@@ -104,8 +99,6 @@ from .inputs import (
 )
 
 if TYPE_CHECKING:
-    from typing import TypeGuard
-
     from django.db.models.expressions import OrderBy
 
     from django_strawberry_framework.types.base import DjangoType
@@ -123,41 +116,6 @@ _ORDER_ASYNC_RECOURSE = (
     "OrderSet.apply_async from an async resolver instead, or redefine get_queryset "
     "as a sync method."
 )
-
-
-def _are_normalized_terms(terms: list[object]) -> TypeGuard[list[tuple[str, Ordering | None]]]:
-    """Return whether every member of ``terms`` is a ``(field_path, direction)`` 2-tuple.
-
-    A ``TypeGuard`` (``list`` is invariant, so no ``TypeIs`` can narrow
-    ``list[object]``): a passing list is the caller's own list, never a copy.
-    """
-    return all(is_exact_pair(term) for term in terms)
-
-
-def _validate_normalized_terms(
-    cls: type[OrderSet],
-    data: object,
-) -> list[tuple[str, Ordering | None]]:
-    """Hold ``OrderSet._normalize_input``'s return to the shape the apply pipeline reads.
-
-    The pipeline truth-tests the data, iterates it and unpacks each term, so the data
-    must be a list of ``(field_path, direction)`` 2-tuples; any other shape raises an
-    actionable ``ConfigurationError`` naming ``_normalize_input``. A conforming list is
-    returned as given, never copied.
-    """
-    if not is_exact_list(data):
-        raise ConfigurationError(
-            f"OrderSet {cls.__qualname__}._normalize_input returned invalid data "
-            f"{data!r}; expected a list of (field_path, direction) tuples.",
-        )
-    if _are_normalized_terms(data):
-        return data
-    # The guard failed, so some term is invalid: name the first one.
-    term = next(term for term in data if not is_exact_pair(term))
-    raise ConfigurationError(
-        f"OrderSet {cls.__qualname__}._normalize_input returned invalid term "
-        f"{term!r}; expected a (field_path, direction) 2-tuple.",
-    )
 
 
 def _classify_declared_path(model: object, field_path: str) -> None:
@@ -220,9 +178,8 @@ class OrderSetMetaclass(type):
     ``related_orders`` are collected in MRO order with the current class's
     own declarations overriding same-named inherited ones (standard Python
     MRO semantics); every collected ``RelatedOrder`` is bound back to the
-    new class via ``bind_orderset``. ``Meta.fields`` resolution is
-    ``utils/inputs.py::promote_set_meta_fields`` (no cookbook synonym;
-    shared write-back with ``FilterSetMetaclass``).
+    new class via ``bind_orderset``. ``Meta.fields`` has no cookbook synonym, so the
+    expansion reads it as declared (``OrderSet._expand_meta_fields``).
     """
 
     def __new__(
@@ -240,10 +197,6 @@ class OrderSetMetaclass(type):
                 attrs["Meta"],
                 _ALLOWED_ORDERSET_META_KEYS,
             )
-        # No cookbook ``order_fields`` synonym (``fields_alias=None``); the
-        # call still goes through the shared write-back so FilterSet / OrderSet
-        # class Meta cannot grow divergent field-fingerprint rules.
-        _ = promote_set_meta_fields(attrs.get("Meta"))
         new_class = super().__new__(cls, name, bases, attrs)
 
         # Collect the ``RelatedOrder`` declarations and bind each to the new
@@ -457,46 +410,31 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         """
         fields: OrderedDict[str, RelatedOrder | None] = OrderedDict()
         meta = introspection.mro_attr(cls, "Meta", None)
-        # No write-back: the metaclass owns alias promotion; expansion must not mutate class Meta.
         meta_fields = read_set_meta_fields(meta)
         excluded = cls._read_meta_exclude(meta)
         if meta_fields is None and excluded is None:
             return fields
-        if meta_fields == "__all__" or meta_fields is None:
-            # ``_get_concrete_field_names_for_order`` is a module-level import:
-            # ``inputs.py`` only TYPE_CHECKING-imports ``OrderSet``, so the
-            # runtime cycle stays inert without a deferred local import.
+        sweep = meta_fields == "__all__" or meta_fields is None
+        if sweep:
             model = require_sweep_model(
                 cls,
                 introspection.mro_attr(meta, "model", None),
                 fields_declared=meta_fields is not None,
                 noun="order",
             )
-            if excluded is not None:
-                reject_unknown_exclude_names(
-                    cls,
-                    excluded,
-                    subject="OrderSet",
-                    model=model,
-                    listed=(),
-                    declared=cls._declared_order_names(),
-                    declared_kind="RelatedOrder branches",
-                )
-            for name in _get_concrete_field_names_for_order(model):
-                if excluded is None or name not in excluded:
-                    fields[name] = None
-            return fields
-        names = require_re_readable_field_declaration(
-            cls,
-            meta_fields,
-            subject="OrderSet",
-            accepted="'__all__' or a re-readable collection of field names",
-        )
-        model = introspection.mro_attr(meta, "model", None)
-        listed = [
-            require_field_name(cls, field_path, subject="OrderSet", meta_attr="fields")
-            for field_path in names
-        ]
+            listed: list[str] = []
+        else:
+            names = require_re_readable_field_declaration(
+                cls,
+                meta_fields,
+                subject="OrderSet",
+                accepted="'__all__' or a re-readable collection of field names",
+            )
+            model = introspection.mro_attr(meta, "model", None)
+            listed = [
+                require_field_name(cls, field_path, subject="OrderSet", meta_attr="fields")
+                for field_path in names
+            ]
         if excluded is not None:
             reject_unknown_exclude_names(
                 cls,
@@ -507,10 +445,10 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
                 declared=cls._declared_order_names(),
                 declared_kind="RelatedOrder branches",
             )
-        for field_path in listed:
+        for field_path in _get_concrete_field_names_for_order(model) if sweep else listed:
             if excluded is not None and field_path in excluded:
                 continue
-            if model is not None:
+            if not sweep and model is not None:
                 try:
                     _classify_declared_path(model, field_path)
                 except PathResolutionError as exc:
@@ -569,9 +507,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
     @classmethod
     def _input_has_active_terms(cls, input_value: object) -> bool:
         """Return True if input_value contains at least one non-null ordering direction."""
-        data = _validate_normalized_terms(cls, cls._normalize_input(input_value))
-        flat_orders = cls.get_flat_orders(data)
-        return any(direction is not None for _, direction in flat_orders)
+        return any(direction is not None for _, direction in cls._prepared_orderings(input_value))
 
     @classmethod
     def _normalize_input(cls, input_value: object) -> list[tuple[str, Ordering | None]]:
@@ -902,28 +838,24 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         return derived.__getitem__
 
     @classmethod
-    def _prepared_orderings(
-        cls,
-        input_value: object,
-    ) -> tuple[list[tuple[str, Ordering | None]], list[tuple[str, Ordering | None]]]:
-        """Return ``(normalized terms, flat orders)`` for ``input_value``; flat orders empty when no term."""
-        data = _validate_normalized_terms(cls, cls._normalize_input(input_value))
-        return data, (cls.get_flat_orders(data) if data else [])
+    def _prepared_orderings(cls, input_value: object) -> list[tuple[str, Ordering | None]]:
+        """Return the flat ``(field_path, direction)`` orders for ``input_value``."""
+        return cls.get_flat_orders(cls._normalize_input(input_value))
 
     @classmethod
     def _apply_orderings(
         cls,
         queryset: models.QuerySet[_M],
-        prepared: tuple[list[tuple[str, Ordering | None]], list[tuple[str, Ordering | None]]],
+        flat_orders: list[tuple[str, Ordering | None]],
         visible_rows: _VisibleRows,
     ) -> models.QuerySet[_M]:
         """Apply the prepared orderings to ``queryset`` - the un-colored tail.
 
         The shared body behind ``apply_sync`` / ``apply_async`` (the order-side
-        mirror of the filter side's ``_apply_common_prelude``): ``prepared`` is
-        ``_prepared_orderings``'s normalized input and flat orders, and
+        mirror of the filter side's ``_apply_common_prelude``): ``flat_orders`` is
+        ``_prepared_orderings``'s result, and
         ``visible_rows`` reads each scoping type's rows (``_visible_rows_sync``,
-        or ``_visible_rows_async``'s awaited map). Empty-out ->
+        or ``_visible_rows_async``'s awaited map).
         ``_resolve_order_expressions`` (``None`` directions filtered; hidden
         related rows read as missing; to-many paths ordered via the
         row-preserving ``Min`` / ``Max`` aggregate annotation) -> conditional
@@ -934,9 +866,6 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         that do no I/O, so the sync and async colorings differ ONLY in the
         permission-check and visibility colorings they run before this.
         """
-        data, flat_orders = prepared
-        if not data:
-            return queryset
         annotations, expressions = cls._resolve_order_expressions(
             flat_orders,
             model=queryset.model,
@@ -981,8 +910,8 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         """
         request = cls._request_from_info(info)
         cls._run_permission_checks(input_value, request)
-        prepared = cls._prepared_orderings(input_value)
-        return cls._apply_orderings(queryset, prepared, cls._visible_rows_sync(queryset, info))
+        flat_orders = cls._prepared_orderings(input_value)
+        return cls._apply_orderings(queryset, flat_orders, cls._visible_rows_sync(queryset, info))
 
     @classmethod
     async def apply_async(
@@ -1005,6 +934,6 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         """
         request = cls._request_from_info(info)
         await run_in_one_sync_boundary(cls._run_permission_checks, input_value, request)
-        prepared = cls._prepared_orderings(input_value)
-        visible_rows = await cls._visible_rows_async(prepared[1], queryset, info)
-        return cls._apply_orderings(queryset, prepared, visible_rows)
+        flat_orders = cls._prepared_orderings(input_value)
+        visible_rows = await cls._visible_rows_async(flat_orders, queryset, info)
+        return cls._apply_orderings(queryset, flat_orders, visible_rows)

@@ -34,7 +34,7 @@ re-spelled copy.
 ``resolve_sync`` / ``resolve_async`` overrides delegate to the
 ``forms/resolvers.py`` pipeline; both flavors carry the overridable
 ``get_form_kwargs`` / ``get_form`` construction hooks (the plain flavor adds
-``perform_mutate`` + its own ``check_permission``), the ``get_form_kwargs``
+``perform_mutate`` and binds ``DjangoMutation.check_permission``), the ``get_form_kwargs``
 waiver is wired into ``build_input`` (the create-required guard is skipped when a
 consumer overrides the construction hook), and the reverse-map
 ``field_specs`` are stashed at bind (``_input_field_specs``) for the decode.

@@ -10,8 +10,7 @@ the BFS collision check and the namespace-clear lifecycle have one definition.
 What lives here is mechanics only. Domain semantics stay at the call sites:
 ``filters/inputs.py`` keeps ``convert_filter_to_input_annotation`` /
 ``normalize_input_value`` and the operator-bag / logic-field builders;
-``orders/inputs.py`` keeps ``convert_order_field_to_input_annotation`` /
-``normalize_input_value`` and the ``Ordering`` enum. The two ``inputs`` modules
+``orders/inputs.py`` keeps ``normalize_input_value`` and the ``Ordering`` enum. The two ``inputs`` modules
 re-export ``GeneratedInputFieldSpec`` / ``build_strawberry_input_class`` under their
 spec-named aliases (``FieldSpec`` / ``build_input_class``), so both names also import
 from the family module. A set's generated input name is
@@ -936,12 +935,11 @@ def promote_set_meta_fields(source: object, *, fields_alias: str | None = None) 
     """Resolve ``fields`` and copy an alias onto class Meta when needed.
 
     Returns the resolved fields value. A class Meta that supplied only
-    ``fields_alias`` gets ``.fields`` written so django-filter / OrderSet
-    expansion see one key; the consumer alias attribute stays in place.
+    ``fields_alias`` gets ``.fields`` written so django-filter sees one key;
+    the consumer alias attribute stays in place.
 
-    ``FilterSetMetaclass`` and ``OrderSetMetaclass`` both call this so the
-    write-back rule cannot drift. OrderSet passes ``fields_alias=None`` (no
-    cookbook synonym); the call is then a pure read.
+    ``FilterSetMetaclass`` calls this with ``FILTERSET_FIELDS_ALIAS``; OrderSet has no
+    cookbook synonym, so its expansion reads ``read_set_meta_fields`` alone.
     """
     fields, from_alias = resolve_set_meta_fields(source, fields_alias=fields_alias)
     if from_alias:

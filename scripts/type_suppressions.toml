@@ -320,8 +320,6 @@
 "tests/orders/test_sets.py::test_metaclass_none_removal_survives_diamond_inheritance.CombinedOwner" = { reportIncompatibleVariableOverride = 1 }
 "tests/orders/test_sets.py::test_metaclass_none_removal_survives_diamond_inheritance.RemovedOwner.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/orders/test_sets.py::test_orderset_clear_order_input_namespace_clears_subclass_caches.SubOrder.Meta" = { reportIncompatibleVariableOverride = 1 }
-"tests/orders/test_sets.py::test_orderset_normalize_input_validation_contract.NonListOrder._normalize_input" = { reportIncompatibleMethodOverride = 1 }
-"tests/orders/test_sets.py::test_orderset_normalize_input_validation_contract.NonTupleTermOrder._normalize_input" = { reportIncompatibleMethodOverride = 1 }
 "tests/rest_framework/test_converter.py::test_consumer_declared_list_field_over_json_column_names_both_scalars.ListOverJsonSer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/rest_framework/test_converter.py::test_model_field_without_wrapped_field_raises" = { reportArgumentType = 1 }
 "tests/rest_framework/test_converter.py::test_register_converter_rejects_non_callable" = { reportArgumentType = 1 }

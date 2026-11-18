@@ -21,7 +21,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, NoReturn, SupportsIndex, TypeAlias, TypeVar, overload
+from typing import TYPE_CHECKING, NoReturn, TypeAlias, TypeVar
 
 import pytest
 from apps.library.models import (
@@ -54,17 +54,12 @@ from django_strawberry_framework.orders.inputs import (
     _materialized_names,
     clear_order_input_namespace,
 )
-from django_strawberry_framework.orders.sets import (
-    OrderSetMetaclass,
-    _validate_normalized_terms,
-)
 from django_strawberry_framework.types.base import DjangoType
 from django_strawberry_framework.utils import introspection, relations
 from django_strawberry_framework.utils._narrowing import is_class
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
     _type_name_claims,
-    promote_set_meta_fields,
     read_set_meta_fields,
 )
 from django_strawberry_framework.utils.querysets import model_for
@@ -322,13 +317,9 @@ def test_orderset_meta_fields_none_returns_only_related_orders() -> None:
     assert fields["shelf"] is BookOrder.related_orders["shelf"]
 
 
-def test_orderset_metaclass_and_expansion_share_factory_fields_owner() -> None:
-    """Class Meta write-back and Layer-4 expansion ride the shared fingerprint."""
-    assert "promote_set_meta_fields" in OrderSetMetaclass.__new__.__code__.co_names
+def test_orderset_expansion_shares_the_fields_reader() -> None:
+    """Layer-4 expansion reads ``Meta.fields`` through the shared fingerprint."""
     assert "read_set_meta_fields" in OrderSet._expand_meta_fields.__code__.co_names
-    assert (
-        OrderSetMetaclass.__new__.__globals__["promote_set_meta_fields"] is promote_set_meta_fields
-    )
     assert (
         OrderSet._expand_meta_fields.__func__.__globals__["read_set_meta_fields"]
         is read_set_meta_fields
@@ -1898,59 +1889,6 @@ def test_public_apply_never_writes_the_consumer_context(*, guarded: bool) -> Non
     assert context["consumer_marker"] is marker
 
 
-def test_validate_normalized_terms_rejects_hostile_container_and_string_subclasses() -> None:
-    """The data and each term are pinned by EXACT type, so no consumer hook can fire.
-
-    A ``list`` subclass would run its ``__iter__`` in the validation loop and a
-    ``tuple`` subclass its ``__len__`` / ``__getitem__`` while the term is read. Each
-    is rejected before the member it would hook is touched, as the promised
-    ``ConfigurationError`` naming ``_normalize_input``.
-    """
-    fired: list[str] = []
-
-    class HostileList(list[object]):
-        @override
-        def __iter__(self) -> Iterator[object]:
-            fired.append("list.__iter__")
-            return super().__iter__()
-
-    class HostileTuple(tuple[object, ...]):
-        @override
-        def __len__(self) -> int:
-            fired.append("tuple.__len__")
-            return super().__len__()
-
-        @overload
-        def __getitem__(self, index: SupportsIndex) -> object: ...
-        @overload
-        def __getitem__(self, index: slice) -> tuple[object, ...]: ...
-        @override
-        def __getitem__(self, index: SupportsIndex | slice) -> object:
-            fired.append("tuple.__getitem__")
-            return super().__getitem__(index)
-
-    class HostileOrder(OrderSet):
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"HostileOrder\._normalize_input returned invalid data",
-    ):
-        _validate_normalized_terms(HostileOrder, HostileList([("title", Ordering.ASC)]))
-    with pytest.raises(
-        ConfigurationError,
-        match=r"HostileOrder\._normalize_input returned invalid term",
-    ):
-        _validate_normalized_terms(HostileOrder, [HostileTuple(("title", Ordering.ASC))])
-    assert fired == []
-
-    # Exact builtins with the same content are accepted and returned as given.
-    good = [("title", Ordering.ASC), ("shelf__code", None)]
-    assert _validate_normalized_terms(HostileOrder, good) is good
-
-
 def test_input_has_active_terms_public_apply_override_independence() -> None:
     """Overriding public apply without delegating leaves the helper an independent post-success query."""
 
@@ -1990,44 +1928,6 @@ def test_input_has_active_terms_public_apply_override_independence() -> None:
     assert CustomApplyOrder._input_has_active_terms(active_input) is True
     assert CustomApplyOrder._input_has_active_terms(empty_input) is False
     assert CustomApplyOrder._input_has_active_terms(None) is False
-
-
-def test_orderset_normalize_input_validation_contract() -> None:
-    """_validate_normalized_terms enforces the declared return contract at the pipeline boundary."""
-
-    class NonListOrder(OrderSet):
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-        @classmethod
-        @override
-        # basedpyright: deliberately a dict, the invalid data the boundary refuses
-        def _normalize_input(cls, input_value: object) -> dict[str, Ordering]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return {"title": Ordering.ASC}
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"NonListOrder\._normalize_input returned invalid data",
-    ):
-        NonListOrder._input_has_active_terms([{"title": "ASC"}])
-
-    class NonTupleTermOrder(OrderSet):
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-        @classmethod
-        @override
-        # basedpyright: deliberately list terms, the invalid term shape the boundary refuses
-        def _normalize_input(cls, input_value: object) -> list[list[str | Ordering]]:  # pyright: ignore[reportIncompatibleMethodOverride]
-            return [["title", Ordering.ASC]]
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"NonTupleTermOrder\._normalize_input returned invalid term",
-    ):
-        NonTupleTermOrder._input_has_active_terms([{"title": "ASC"}])
 
 
 # ---------------------------------------------------------------------------

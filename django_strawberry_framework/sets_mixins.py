@@ -24,8 +24,8 @@ future set family does not copy the related-declaration +
 metaclass + expansion lifecycle a third time:
 
 - ``RelatedSetTargetMixin`` -- the idempotent owner-bind + lazy target-class
-  property machinery, parameterized by the per-family attr names and the
-  family-supplied ``_validate_target`` resolved-target gate.
+  property machinery and the resolved-target gate, parameterized by the
+  per-family attr names, gate wording and family class.
 - ``collect_related_declarations`` -- the metaclass collect-and-bind step.
 - ``expanded_once`` -- the class-level expansion cache + reentry-guard skeleton
   shared by ``FilterSet.get_filters`` / ``OrderSet.get_fields``.
@@ -76,7 +76,6 @@ from .utils.permissions import (
     active_permission_targets,
     active_related_branches,
     extract_branch_value,
-    invoke_permission_method,
     request_from_info,
     run_active_input_permission_checks,
     verbatim_path,
@@ -217,27 +216,30 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin, Generic[_SetT_co]):
     the validated result so a repeat access of an identical value skips
     re-validation (a substituted value re-resolves and re-validates).
 
-    Parameterized by two instance-attribute names a subclass sets as class
-    attributes:
+    Parameterized by class attributes a subclass sets:
 
     - ``_target_attr`` -- the slot holding the possibly-lazy target
       (``"_filterset"`` / ``"_orderset"``).
     - ``_owner_attr`` -- the slot the bind records the owner under, and the
       resolution scope for an unqualified string target
       (``"bound_filterset"`` / ``"bound_orderset"``).
+    - ``_gate_words`` -- the refusal's wording: the declaration class name, the
+      family set with its article, the twin set with its article, and the verb.
 
-    Plus one family-supplied hook: ``_validate_target`` is the resolved-target
-    TYPE gate (raise ``ConfigurationError`` for anything outside the family, return
-    the set class it proved, so the mixin is generic over that class).
-    Firing it inside ``_resolved_target`` -- not inline in each family's
-    property getter -- means every distinct value is family-checked
+    Plus one family-supplied hook: ``_family_class`` returns the family's set
+    base (a deferred import, since each family's ``sets`` module imports its
+    ``base``). ``_validate_target`` is the resolved-target TYPE gate (a
+    ``ConfigurationError`` for anything outside the family, else the set class
+    it proved). Firing it inside ``_resolved_target`` -- not inline in each
+    family's property getter -- means every distinct value is family-checked
     at the one seam all of them share (the Layer-5 BFS enqueue in
     ``utils/inputs.py::GeneratedInputArgumentsFactory._ensure_built``, the
     families' expansions, the finalizer's target audit, the permission
-    traversal), and a future set family cannot lose the gate by writing its
-    property getter as a bare ``_resolved_target()`` read. The base
-    implementation is abstract on purpose: a hookless subclass fails loud at
-    first resolved read instead of silently accepting any target.
+    traversal). Without the gate the mis-wiring survives declaration, binding
+    and expansion and first detonates inside a consumer (the BFS builder's
+    ``target.type_name_for()``) as a raw ``AttributeError``, or, for a target
+    shaped like the twin family, walks the twin's fields through the wrong
+    input builder.
 
     Subclasses keep their family-named public surface (``bind_filterset`` +
     ``.filterset`` / ``bind_orderset`` + ``.orderset``) as thin wrappers over
@@ -247,6 +249,7 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin, Generic[_SetT_co]):
 
     _target_attr: str
     _owner_attr: str
+    _gate_words: tuple[str, str, str, str]
     # The last resolved target the family gate accepted (set per instance, read by identity).
     _validated_target_memo: type[_SetT_co] | None = None
 
@@ -281,22 +284,31 @@ class RelatedSetTargetMixin(LazyRelatedClassMixin, Generic[_SetT_co]):
         self._validated_target_memo = validated
         return validated
 
-    def _validate_target(self, _resolved: object, /) -> type[_SetT_co]:
-        """Family hook: return a resolved target as the family's set class, or reject it.
+    def _family_class(self) -> type[_SetT_co]:
+        """Family hook: return the family's set base for the target gate."""
+        raise NotImplementedError(f"{introspection.kind(self)} must supply `_family_class()`.")
+
+    def _validate_target(self, resolved: object) -> type[_SetT_co]:
+        """Return a resolved target as the family's set class, or raise ``ConfigurationError``.
 
         Called with every non-``None`` RESOLVED target -- strings / callables
-        have already been through ``resolve_lazy_class``. Families override
-        this with their ``issubclass`` check (returning the class it proved) and
-        declaration-naming ``ConfigurationError``; the base raises so a hookless subclass (a
-        future set family that forgot the gate) fails loud at first resolved
-        read instead of accepting any target.
+        have already been through ``resolve_lazy_class``.
         """
-        raise NotImplementedError(
-            f"{introspection.kind(self)} must supply a `_validate_target()` family gate "
-            "(raise ConfigurationError for a resolved target outside the family); "
-            "the resolution seam validates every distinct value, so a hookless related "
-            "declaration would otherwise accept any target.",
-        )
+        family_class = self._family_class()
+        if not (is_class(resolved) and issubclass(resolved, family_class)):
+            # ``_bind_owner`` is the one writer of the owner slot, and it stores a set class.
+            owner: type[object] | None = getattr(self, self._owner_attr, None)
+            owner_label = owner.__qualname__ if is_class(owner) else "<unbound>"
+            declaration, family, twin, verb = self._gate_words
+            raise ConfigurationError(
+                f"{owner_label} declares {declaration} {read_attr(self, 'field_name')!r} "
+                f"targeting {introspection.kind(resolved)}, which is not {family} subclass. "
+                f"{declaration} targets must resolve to {family} subclass (a class, "
+                "an import-path string, or a zero-arg factory returning one); "
+                f"{twin} or unrelated class cannot {verb} a relation branch. "
+                f"Declare the branch with {family} or remove it.",
+            )
+        return resolved
 
     def _set_target(self, value: object) -> None:
         """Substitute the target class (the ``.<target>`` setter seam).
@@ -982,20 +994,6 @@ class ActiveInputPermissionMixin:
             unset_sentinel=cfg.traversal.unset_sentinel,
             handle_top_level_list=cfg.traversal.handle_top_level_list,
         )
-
-    @staticmethod
-    def _invoke_permission_method(
-        bare_instance: ActiveInputPermissionMixin,
-        field_path: str,
-        request: object,
-        *,
-        fired: set[str] | None = None,
-    ) -> None:
-        """Call ``check_<field_path>_permission(request)`` if defined.
-
-        Thin delegate to ``utils/permissions.py::invoke_permission_method``.
-        """
-        invoke_permission_method(bare_instance, field_path, request, fired=fired)
 
     @classmethod
     def _permission_fallback_path(cls, python_attr: str) -> str:

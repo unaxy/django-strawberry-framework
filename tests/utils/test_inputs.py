@@ -705,7 +705,6 @@ def test_set_metaclasses_share_the_fields_alias_owner() -> None:
     """Both set families promote and read ``Meta.fields`` through one rule."""
     assert module_binding(filter_sets, "FILTERSET_FIELDS_ALIAS") is FILTERSET_FIELDS_ALIAS
     assert module_binding(filter_sets, "promote_set_meta_fields") is promote_set_meta_fields
-    assert module_binding(order_sets, "promote_set_meta_fields") is promote_set_meta_fields
     assert module_binding(order_sets, "read_set_meta_fields") is read_set_meta_fields
 
 

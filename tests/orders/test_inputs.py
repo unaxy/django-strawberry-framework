@@ -8,8 +8,7 @@ a different class). Consumer ``NULLS_*`` payload order lives in
 ``examples/fakeshop/test_query/test_library_api.py::
 test_library_books_order_by_subtitle_null_positioning``.
 
-The sections below cover ``convert_order_field_to_input_annotation`` /
-``normalize_input_value`` / ``clear_order_input_namespace`` /
+The sections below cover ``normalize_input_value`` / ``clear_order_input_namespace`` /
 ``order_input_type`` / ``OrderInput``.
 """
 
@@ -20,7 +19,6 @@ import sys
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from typing import get_args
 
 import pytest
 import strawberry
@@ -48,7 +46,6 @@ from django_strawberry_framework.orders.inputs import (
     _materialized_names,
     build_input_class,
     clear_order_input_namespace,
-    convert_order_field_to_input_annotation,
     materialize_input_class,
     normalize_input_value,
 )
@@ -208,24 +205,6 @@ def test_materialize_input_class_raises_on_collision() -> None:
     message = str(exc_info.value)
     assert "FooA" in message
     assert "FooB" in message
-
-
-# ---------------------------------------------------------------------------
-# convert_order_field_to_input_annotation
-# ---------------------------------------------------------------------------
-
-
-def test_convert_order_field_to_input_annotation_returns_ordering_or_none() -> None:
-    """``Ordering | None`` regardless of the ``model_field`` argument."""
-    title_field = Book._meta.get_field("title")
-    annotation = convert_order_field_to_input_annotation(title_field, None)
-    args = set(get_args(annotation))
-    assert Ordering in args
-    assert type(None) in args
-    # Also accepts ``None`` for ``model_field`` -- same shape.
-    annotation2 = convert_order_field_to_input_annotation(None, None)
-    args2 = set(get_args(annotation2))
-    assert args == args2
 
 
 # ---------------------------------------------------------------------------

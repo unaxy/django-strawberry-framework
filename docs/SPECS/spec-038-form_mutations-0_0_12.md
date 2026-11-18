@@ -391,7 +391,8 @@ package-internal; Slice 4 is the live consumer surface.
     [`DjangoMutationField`][glossary-djangomutationfield] is generic along three axes
     ([Decision 5](#decision-5--public-surface-djangoformmutation--djangomodelformmutation-exported-from-the-root)) —
     (a) the `_validate_mutation_target` check accepts the whole mutation family
-    (duck-typed, not `issubclass(DjangoMutation)`); (b) `_resolve` dispatches to
+    (it needs only the target's own validated `Meta`, recorded in a declaration
+    ledger, not `issubclass(DjangoMutation)`); (b) `_resolve` dispatches to
     `mutation_cls.resolve_sync` / `resolve_async`, so a form flavor routes to
     [`forms/resolvers.py`][forms-resolvers]; (c) the synthesized `data:` lazy ref
     consults `mutation_cls.input_type_name(meta)` + `input_module_path`.

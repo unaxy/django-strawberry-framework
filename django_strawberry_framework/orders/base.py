@@ -28,10 +28,7 @@ from typing import TYPE_CHECKING
 
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin
-from django_strawberry_framework.utils import introspection
-from django_strawberry_framework.utils._narrowing import is_class
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -41,21 +38,6 @@ if TYPE_CHECKING:
 
     # Every target shape the constructor and setter store; resolution happens on read.
     _OrderSetTarget: TypeAlias = str | type[OrderSet] | Callable[[], type[OrderSet] | None] | None
-
-
-def _order_set_class() -> type[OrderSet]:
-    """Return the ``OrderSet`` family base for the target-type gate.
-
-    Deferred so the ``orders.sets -> orders.base`` module-load edge stays
-    one-directional: ``orders.sets`` imports this module at module scope
-    (the metaclass needs ``RelatedOrder``), so a module-level import back
-    would re-enter a partially-initialized ``orders.sets`` at import time
-    -- the same cycle-keeping contract as
-    ``types/base.py::_validate_orderset_class``'s local import.
-    """
-    from .sets import OrderSet  # noqa: PLC0415 - import cycle
-
-    return OrderSet
 
 
 class RelatedOrder(RelatedSetTargetMixin["OrderSet"]):
@@ -93,6 +75,12 @@ class RelatedOrder(RelatedSetTargetMixin["OrderSet"]):
     # twin uses ``("_filterset", "bound_filterset")``.
     _target_attr: str = "_orderset"
     _owner_attr: str = "bound_orderset"
+    _gate_words: tuple[str, str, str, str] = (
+        "RelatedOrder",
+        "an OrderSet",
+        "a FilterSet",
+        "order",
+    )
     # The owning set the bind records under ``_owner_attr``. Annotation only: the slot stays
     # absent until the bind, which is how ``_bind_owner`` tells a first bind from a re-bind.
     bound_orderset: type[OrderSet]
@@ -116,35 +104,11 @@ class RelatedOrder(RelatedSetTargetMixin["OrderSet"]):
         self._bind_owner(orderset)
 
     @override
-    def _validate_target(self, resolved: object) -> type[OrderSet]:
-        """Enforce the ``RelatedSetTargetMixin`` family gate: target must be an ``OrderSet``.
+    def _family_class(self) -> type[OrderSet]:
+        """Return ``OrderSet``, imported here: ``orders.sets`` imports this module at load."""
+        from .sets import OrderSet  # noqa: PLC0415 - import cycle
 
-        Fired by ``sets_mixins.py::RelatedSetTargetMixin._resolved_target`` on
-        every non-``None`` resolved read -- the one seam every consumer routes
-        through (Layer-5 BFS enqueue, input-triple emission, runtime
-        ``normalize_input_value`` recursion, permission-branch recursion).
-        Without the gate the mis-wiring survives declaration, binding, and
-        expansion and first detonates inside the BFS input builder
-        (its ``target.type_name_for()`` call) -- at
-        finalize subpass 4, OUTSIDE the uniform subpass-2 rewrap, leaking a raw
-        ``AttributeError`` (or, for a structurally FilterSet-shaped target,
-        silently walking the filter family's fields through the order input
-        builder). Mirrors the filter twin's
-        ``filters/base.py::RelatedFilter._validate_target``.
-        """
-        if not (is_class(resolved) and issubclass(resolved, _order_set_class())):
-            # ``_bind_owner`` is the one writer of the owner slot, and it stores a set class.
-            owner: type[object] | None = getattr(self, self._owner_attr, None)
-            owner_label = owner.__qualname__ if is_class(owner) else "<unbound>"
-            raise ConfigurationError(
-                f"{owner_label} declares RelatedOrder {self.field_name!r} targeting "
-                f"{introspection.kind(resolved)}, which is not an OrderSet subclass. "
-                "RelatedOrder targets must resolve to an OrderSet subclass (a class, "
-                "an import-path string, or a zero-arg factory returning one); "
-                "a FilterSet or unrelated class cannot order a relation branch. "
-                "Declare the branch with an OrderSet or remove it.",
-            )
-        return resolved
+        return OrderSet
 
     @property
     def orderset(self) -> type[OrderSet] | None:

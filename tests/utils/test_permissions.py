@@ -399,17 +399,6 @@ def test_invoke_permission_method_rejects_a_non_callable_gate_slot() -> None:
         ) -> tuple[list[str], list[tuple[str, object, object]]]:
             return ["name"], [("duck", _DuckRelated(), {"x": 1})]
 
-        @override
-        @staticmethod
-        def _invoke_permission_method(
-            bare_instance: ActiveInputPermissionMixin,
-            field_path: str,
-            request: object,
-            *,
-            fired: set[str] | None = None,
-        ) -> None:
-            invoke_permission_method(bare_instance, field_path, request, fired=fired)
-
     # ``bare`` must be an instance of the set class (the mixin's
     # ``object.__new__(cls)`` contract) for the class-declared gate slot to be
     # visible through instance attribute access.
@@ -560,17 +549,6 @@ def test_nested_branch_gate_denies_on_a_false_return() -> None:
             input_value: object,
         ) -> tuple[list[str], list[tuple[str, object, object]]]:
             return ["name"], [("child", related_obj, {"x": 1})]
-
-        @override
-        @staticmethod
-        def _invoke_permission_method(
-            bare_instance: ActiveInputPermissionMixin,
-            field_path: str,
-            request: object,
-            *,
-            fired: set[str] | None = None,
-        ) -> None:
-            invoke_permission_method(bare_instance, field_path, request, fired=fired)
 
         def check_name_permission(self, _request: object) -> bool:
             calls.append("parent.name")
@@ -1173,17 +1151,6 @@ def test_run_active_input_permission_checks_double_dispatch_and_dedup() -> None:
             # paths (repeated ``name`` -> must dedup) and the related branches.
             return ["name", "name"], [("child", related_obj, {"x": 1})]
 
-        @override
-        @staticmethod
-        def _invoke_permission_method(
-            bare_instance: ActiveInputPermissionMixin,
-            field_path: str,
-            request: object,
-            *,
-            fired: set[str] | None = None,
-        ) -> None:
-            invoke_permission_method(bare_instance, field_path, request, fired=fired)
-
         def check_name_permission(self, _request: object) -> None:
             calls.append("parent.name")
 
@@ -1252,17 +1219,6 @@ def test_run_active_input_permission_checks_caps_related_recursion() -> None:
             # Always yields a related branch pointing back at THIS class -- the
             # runtime shape of ``CardFilter.dependencies`` -> ``CardFilter``.
             return [], [("child", _rel, {"x": 1})]
-
-        @override
-        @staticmethod
-        def _invoke_permission_method(
-            bare_instance: ActiveInputPermissionMixin,
-            field_path: str,
-            request: object,
-            *,
-            fired: set[str] | None = None,
-        ) -> None:
-            pass
 
         @override
         @classmethod
@@ -1592,17 +1548,8 @@ def test_run_active_input_permission_checks_safely_handles_missing_target_attr()
         ) -> tuple[list[str], list[tuple[str, object, object]]]:
             return [], [("duck", _DuckRelatedObj(), {"sub": 1})]
 
-        @override
-        @staticmethod
-        def _invoke_permission_method(
-            bare_instance: ActiveInputPermissionMixin,
-            field_path: str,
-            request: object,
-            *,
-            fired: set[str] | None = None,
-        ) -> None:
-            if fired is not None:
-                fired.add(f"check_{field_path}_permission")
+        def check_duck_permission(self, _request: object) -> None:
+            """The per-branch gate; its fire is recorded in ``fired``."""
 
     fired: dict[type[object], set[str]] = {}
     run_active_input_permission_checks(
@@ -1674,17 +1621,6 @@ def test_a_related_target_that_is_not_a_permission_set_is_refused_before_the_bra
             input_value: object,
         ) -> tuple[list[str], list[tuple[str, object, object]]]:
             return ["name"], [("child", related_obj, {"x": 1})]
-
-        @override
-        @staticmethod
-        def _invoke_permission_method(
-            bare_instance: ActiveInputPermissionMixin,
-            field_path: str,
-            request: object,
-            *,
-            fired: set[str] | None = None,
-        ) -> None:
-            invoke_permission_method(bare_instance, field_path, request, fired=fired)
 
         def check_name_permission(self, _request: object) -> bool:
             calls.append("parent.name")

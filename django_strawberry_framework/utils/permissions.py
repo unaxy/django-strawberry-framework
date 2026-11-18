@@ -1091,7 +1091,7 @@ def run_active_input_permission_checks(
     # field across all its lookups).
     field_paths, related_branches = cls._active_permission_targets(input_value)
     for field_path in field_paths:
-        cls._invoke_permission_method(bare, field_path, request, fired=class_fired)
+        invoke_permission_method(bare, field_path, request, fired=class_fired)
         # A flat relation-traversal leaf (``category__name``) must ALSO fire the
         # target set's gate chain its nested twin (``category: {name}``) fires, or
         # the flat spelling silently bypasses the target gate. A gate path that
@@ -1144,4 +1144,4 @@ def run_active_input_permission_checks(
             )
         # Per-branch gate on the parent (e.g. ``check_shelves_permission`` when
         # the ``shelves`` branch is active), deduped against the parent's set.
-        cls._invoke_permission_method(bare, field_name, request, fired=class_fired)
+        invoke_permission_method(bare, field_name, request, fired=class_fired)

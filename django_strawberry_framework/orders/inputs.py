@@ -7,8 +7,7 @@ pairs the constant (``INPUTS_MODULE_PATH``) and the public direction enum
 (``Ordering``) with the module-global materialization / ledger /
 namespace-clear trio (``materialize_input_class`` / ``_materialized_names`` /
 ``clear_order_input_namespace``), the input-data adapters
-(``_build_input_fields`` / ``convert_order_field_to_input_annotation`` /
-``normalize_input_value`` / ``build_input_class``), the
+(``_build_input_fields`` / ``normalize_input_value`` / ``build_input_class``), the
 ``Meta.fields = "__all__"`` helper (``_get_concrete_field_names_for_order``),
 and the per-(orderset, attr) provenance ledger (``_field_specs``).
 
@@ -31,11 +30,7 @@ from django.db.models import F
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear
 from django_strawberry_framework.utils import introspection
-from django_strawberry_framework.utils._narrowing import (
-    list_of,
-    read_attr,
-    require_instance,
-)
+from django_strawberry_framework.utils._narrowing import require_instance
 from django_strawberry_framework.utils.input_values import RELATED, iter_active_fields
 from django_strawberry_framework.utils.inputs import (
     GeneratedInputFieldSpec,
@@ -43,7 +38,11 @@ from django_strawberry_framework.utils.inputs import (
     emit_set_input_field_triples,
     make_set_input_namespace,
 )
-from django_strawberry_framework.utils.relations import carrier_backed_link, is_stored_column
+from django_strawberry_framework.utils.relations import (
+    carrier_backed_link,
+    is_model_class,
+    is_stored_column,
+)
 
 from .base import RelatedOrder
 
@@ -187,40 +186,16 @@ def _get_concrete_field_names_for_order(model: object) -> list[str]:
     ``ForeignObject`` links, in model field order; it excludes reverse
     relations, M2M managers, ``GenericRelation`` and ``GenericForeignKey``.
     """
-    meta = introspection.mro_attr(model, "_meta", None)
-    fields = read_attr(meta, "fields", None)
-    if fields is None:
+    if not is_model_class(model):
         raise ConfigurationError(
             f"Expected a Django Model class with '_meta.fields'; "
             f"got {introspection.kind(model)} ({model!r}).",
         )
     return [
-        require_instance(read_attr(f, "name"), str)
-        for f in list_of(fields)
+        f.name
+        for f in model._meta.fields
         if is_stored_column(f) or carrier_backed_link(f) is not None
     ]
-
-
-def convert_order_field_to_input_annotation(
-    model_field: object,
-    owner_definition: DjangoTypeDefinition | None = None,
-) -> object:
-    """Return the Strawberry annotation for an order leaf field.
-
-    Per spec-028 Decision 5: the ordering converter always returns
-    ``Ordering | None`` regardless of the underlying model field type
-    -- the only legal input value for a leaf is a direction, NOT the
-    field's value, so the converter does not differentiate scalar /
-    choice / FK / PK / ``BigIntegerField`` columns.
-
-    The ``model_field`` and ``owner_definition`` arguments are unused at
-    the body level; they are kept in the signature for shape-symmetry
-    with ``filters/inputs.py::convert_filter_to_input_annotation``, not
-    for a DISTINCT ON extension -- per spec-028 Decision 12 no DISTINCT
-    ON surface ships.
-    """
-    del model_field, owner_definition  # unused; kept for shape-symmetry (see docstring).
-    return Ordering | None
 
 
 def _build_input_fields(
@@ -251,17 +226,14 @@ def _build_input_fields(
     no ``HIDE_FLAT_FILTERS`` skip (the order side does not expose flat
     ``*__lookup`` paths through ``django-filter`` expansion).
     """
-    del owner_definition  # reserved -- see ``convert_order_field_to_input_annotation``.
+    del owner_definition  # every leaf is ``Ordering | None`` (spec-028 Decision 5)
 
     def _leaf_of(
         top_name: str,
         _python_attr: str,
         _entry: RelatedOrder | None,
     ) -> tuple[object, str]:
-        # Leaf field: ``Ordering | None`` regardless of model-field type per
-        # spec-028 Decision 5. ``model_field`` discovery is a future-extension
-        # affordance the converter ignores today.
-        return convert_order_field_to_input_annotation(None, None), top_name
+        return Ordering | None, top_name
 
     # The per-field emission scaffold (python-attr flatten ->
     # optional kwargs -> related lazy-ref with the ``RelatedOrder(None, ...)``

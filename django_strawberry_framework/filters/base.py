@@ -4201,7 +4201,7 @@ def _filter_set_class() -> type[FilterSet]:
     (the ``FilterSet`` base needs ``RelatedFilter``), so a module-level import
     back would re-enter a partially-initialized ``filters.sets`` at import
     time -- the same cycle-keeping contract as
-    ``orders/base.py::_order_set_class``.
+    ``orders/base.py::RelatedOrder._family_class``.
     """
     from .sets import FilterSet  # noqa: PLC0415 - import cycle
 
@@ -4269,6 +4269,12 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
     # twin uses ``("_orderset", "bound_orderset")``.
     _target_attr: str = "_filterset"
     _owner_attr: str = "bound_filterset"
+    _gate_words: tuple[str, str, str, str] = (
+        "RelatedFilter",
+        "a FilterSet",
+        "an OrderSet",
+        "filter",
+    )
     # The owning set the bind records under ``_owner_attr``. Annotation only: the slot stays
     # absent until the bind, which is how ``_bind_owner`` tells a first bind from a re-bind.
     bound_filterset: type[FilterSet]
@@ -4354,36 +4360,9 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
         self._bind_owner(filterset)
 
     @override
-    def _validate_target(self, resolved: object) -> type[FilterSet]:
-        """Enforce the ``RelatedSetTargetMixin`` family gate: target must be a ``FilterSet``.
-
-        Fired by ``sets_mixins.py::RelatedSetTargetMixin._resolved_target`` on
-        every non-``None`` resolved read -- the one seam every consumer routes
-        through (the Layer-5 BFS enqueue in
-        ``utils/inputs.py::GeneratedInputArgumentsFactory._ensure_built``,
-        ``filters/sets.py::_expand_related_filter``, the finalizer's
-        unregistered-target audit, ``get_queryset``'s fallback, and the
-        permission traversal). Without the gate the mis-wiring survives
-        declaration, binding, and expansion and first detonates inside a
-        consumer (``target._filters_along(path, scope)`` or ``target._filter_table()``, or
-        the BFS builder's ``target.type_name_for()``) as a raw ``AttributeError``, or -- for an
-        OrderSet-shaped target -- silently walks the ORDER family's fields
-        through the filter input builder. Mirrors the order twin's
-        ``orders/base.py::RelatedOrder._validate_target``.
-        """
-        if not (is_class(resolved) and issubclass(resolved, _filter_set_class())):
-            # ``_bind_owner`` is the one writer of the owner slot, and it stores a set class.
-            owner: type[object] | None = getattr(self, self._owner_attr, None)
-            owner_label = owner.__qualname__ if is_class(owner) else "<unbound>"
-            raise ConfigurationError(
-                f"{owner_label} declares RelatedFilter {self.field_name!r} targeting "
-                f"{introspection.kind(resolved)}, which is not a FilterSet subclass. "
-                "RelatedFilter targets must resolve to a FilterSet subclass (a class, "
-                "an import-path string, or a zero-arg factory returning one); "
-                "an OrderSet or unrelated class cannot filter a relation branch. "
-                "Declare the branch with a FilterSet or remove it.",
-            )
-        return resolved
+    def _family_class(self) -> type[FilterSet]:
+        """Return ``FilterSet`` for the shared target gate."""
+        return _filter_set_class()
 
     @property
     def filterset(self) -> type[FilterSet] | None:
