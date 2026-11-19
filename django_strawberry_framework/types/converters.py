@@ -49,11 +49,11 @@ Public surface:
   cached) Strawberry ``Enum`` from a Django choice field; called from
   ``convert_scalar`` when ``field.choices`` is set and also importable
   directly for tests / custom resolvers.
-- ``resolved_relation_annotation(field, target_type, *, field_meta=None)``
-  - render the final relation annotation for ``field`` pointing at a
-  resolved ``DjangoType`` (``target_type``). Cardinality / null widening
-  is sourced from ``FieldMeta``; reused by ``types/finalizer.py``'s
-  deferred-resolution path.
+- ``resolved_relation_annotation(field_meta, target_type)``
+  - render the final relation annotation for the relation ``field_meta``
+  describes, pointing at a resolved ``DjangoType`` (``target_type``).
+  Cardinality / null widening is sourced from ``FieldMeta``; reused by
+  ``types/finalizer.py``'s deferred-resolution path.
 - ``SCALAR_MAP`` - module-level ``dict[type[models.Field], TypeForm[object]]`` mapping
   Django field classes to their Python / Strawberry scalar. Mutable,
   last-write-wins, read on every ``convert_scalar`` call (no caching), so
@@ -90,7 +90,6 @@ from django.utils.choices import flatten_choices
 from graphql import GraphQLError, assert_enum_value_name
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.optimizer.field_meta import FieldMeta
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.scalars import BigInt
 from django_strawberry_framework.utils import introspection
@@ -114,6 +113,7 @@ if TYPE_CHECKING:
     from django.contrib.postgres.fields import HStoreField
     from typing_extensions import TypeForm
 
+    from django_strawberry_framework.optimizer.field_meta import FieldMeta
     from django_strawberry_framework.utils.typing import (
         ConcreteField,
         ModelField,
@@ -1169,15 +1169,12 @@ def convert_choices_to_enum(field: "ConcreteField", type_name: str) -> type[Enum
 
 
 def resolved_relation_annotation(
-    field: "ModelField",
+    field_meta: "FieldMeta",
     target_type: "type[DjangoType]",
-    *,
-    field_meta: FieldMeta | None = None,
 ) -> object:
-    """Return the concrete annotation for ``field`` pointing at ``target_type``."""
-    meta = field_meta or FieldMeta.from_django_field(field)
-    if meta.is_many_side:
+    """Return the concrete annotation for the relation ``field_meta`` describes, at ``target_type``."""
+    if field_meta.is_many_side:
         return GenericAlias(list, (target_type,))
-    if meta.nullable:
+    if field_meta.nullable:
         return target_type | None
     return target_type

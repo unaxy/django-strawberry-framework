@@ -7,8 +7,7 @@
   alone, so a name only the metaclass carries (``mro``) is absent.
 - ``defined_in`` reads which top-level package defines a class or function, a method
   unwrapped from its ``__func__``.
-- ``mro_entry`` finds the nearest registered ancestor by identity, never by ``==`` or
-  ``hash`` on the class.
+- ``mro_entry`` finds the nearest registered ancestor in a class's MRO.
 - ``kind`` and ``text`` spell a value for an error message: a class names itself, any other
   value names its type, and a ``str`` subclass such as a ``(str, Enum)`` member spells as
   its own text. ``plain_str`` passes any other value through unchanged.
@@ -116,16 +115,14 @@ def mro_entry(mapping: Mapping[_K, _V], cls: object) -> tuple[_K, _V] | None:
     subclass answers through its nearest registered ancestor. A key mapped to ``None``
     answers ``(key, None)``. ``None`` when no class in the MRO is a key, and for a non-class
     ``cls``. ``mapping`` is copied once, so a registration on another thread cannot change it
-    during the scan, and keys are matched by identity.
+    during the scan.
     """
     if not is_class(cls):
         return None
-    entries = dict(mapping)
-    for klass in cls.__mro__:
-        for key, value in entries.items():
-            if key is klass:
-                return key, value
-    return None
+    entries: dict[object, tuple[_K, _V]] = {
+        key: (key, value) for key, value in dict(mapping).items()
+    }
+    return next((entries[klass] for klass in cls.__mro__ if klass in entries), None)
 
 
 def kind(value: object) -> str:

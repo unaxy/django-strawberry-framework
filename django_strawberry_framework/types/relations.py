@@ -19,8 +19,6 @@ from typing_extensions import override
 if TYPE_CHECKING:
     from django.db import models
 
-    from django_strawberry_framework.utils.typing import ModelField
-
     from .base import DjangoType
 
 
@@ -34,8 +32,8 @@ class PendingRelation:
     ``DjangoType`` has registered.
 
     Records compare and hash by identity (``eq=False``): two records built from the same
-    values stay distinct, a record hashes whatever ``django_field`` holds, and
-    ``TypeRegistry.discard_pending()`` removes exactly the instances finalization hands back.
+    values stay distinct, and ``TypeRegistry.discard_pending()`` removes exactly the instances
+    finalization hands back.
 
     ``field_name`` is the raw Django ``field.name`` as stored on the model, the same string
     that keys ``DjangoTypeDefinition.field_map``; finalization reads the relation's
@@ -45,7 +43,6 @@ class PendingRelation:
     source_type: type[DjangoType]
     source_model: type[models.Model]
     field_name: str
-    django_field: ModelField
     related_model: type[models.Model]
 
 

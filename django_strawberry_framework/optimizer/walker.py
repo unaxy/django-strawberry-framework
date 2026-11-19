@@ -191,10 +191,6 @@ def _resolve_field_map(
     relation targets to the primary (the spec-018 nested contract).
 
     Map values are ``FieldMeta`` on both paths.
-    ``types/resolvers.py::_field_meta_for_resolver`` shares the same
-    policy and the same shape -- prefer the canonical definition-backed
-    metadata, fall back when it is unreachable -- so callers on either
-    site read every attribute directly. Keep the policy in sync.
     """
     type_cls = source_type if source_type is not None else registry.get(model)
     definition = registry.get_definition(type_cls) if type_cls is not None else None

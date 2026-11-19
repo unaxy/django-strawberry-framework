@@ -227,9 +227,8 @@ def test_from_django_field_duck_typed_double_keeps_attname_without_concrete() ->
 
     The gate drops a poisoned attname when the field POSITIVELY declares
     ``concrete = False`` or ``many_to_many`` (Django 5.2 forward M2M is
-    concrete). Resolver test doubles routed through
-    ``_field_meta_for_resolver`` carry ``attname`` without a ``concrete``
-    attribute and must keep it, or the FK-id stub builder
+    concrete). Resolver test doubles recorded in a type's ``field_map`` carry
+    ``attname`` without a ``concrete`` attribute and must keep it, or the FK-id stub builder
     (``_build_fk_id_stub``) would silently stop firing for them.
     """
     double = SimpleNamespace(

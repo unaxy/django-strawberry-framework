@@ -591,7 +591,6 @@ class PendingRelation:
     source_type: type[DjangoType]
     source_model: type[models.Model]
     field_name: str
-    django_field: models.Field | ForeignObjectRel
     related_model: type[models.Model]
 ```
 

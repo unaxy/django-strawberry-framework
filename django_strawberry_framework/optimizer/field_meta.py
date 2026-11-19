@@ -249,9 +249,8 @@ class FieldMeta:
             target_field = link.targets[0] if len(link.targets) == 1 else None
         else:
             target_field = read_attr(field, "target_field", None)
-        # Trusted, not checked: a Django relation's ``related_model`` is a model class
-        # or ``None`` (a duck-typed descriptor may carry a lighter class that
-        # ``_target_pk_name`` reads defensively).
+        # Trusted, not checked: a Django relation's ``related_model`` is a model class,
+        # or ``None`` for a relation with no single target model.
         related_model = cast("type[models.Model] | None", read_attr(field, "related_model", None))
         target_pk_name = _target_pk_name(related_model)
         target_field_name = optional_instance(read_attr(target_field, "name", None), str)
@@ -273,8 +272,6 @@ class FieldMeta:
         # the projection Django silently drops at compile time. Drop the
         # poisoned value when the field POSITIVELY declares itself non-concrete
         # OR is many-to-many (no source-table column on any supported Django).
-        # A duck-typed descriptor that omits ``concrete`` and is not M2M keeps
-        # its attname.
         if is_relation and (getattr(field, "concrete", None) is False or is_m2m):
             attname = None
         content_type_field_name = relation_name(field, "content_type_field_name")
@@ -340,10 +337,8 @@ class FieldMeta:
 def _target_pk_name(model: type[models.Model] | None) -> str | None:
     """Return ``model``'s concrete primary-key field name, or ``None``.
 
-    ``FieldMeta.from_django_field`` accepts duck-typed descriptors, whose
-    ``related_model`` may be a lightweight stand-in without ``_meta``. A
-    missing ``_meta`` simply means "no resolvable target pk", which disables
-    FK-id elision rather than raising.
+    ``None`` for a relation with no target model (``related_model`` is
+    ``None``), which disables FK-id elision for it.
     """
     if model is None:
         return None

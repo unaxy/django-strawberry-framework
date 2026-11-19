@@ -1598,8 +1598,8 @@ def test_strictness_silent_when_off(caplog: pytest.LogCaptureFixture) -> None:
 
     ``strictness == "off"`` is the resolver's no-op: the extension arms that
     value on the per-execution strictness ``ContextVar`` at ``on_execute``
-    entry, so ``types/resolvers.py::_strictness_for`` answers ``"off"`` and
-    ``_check_n1``'s prelude returns immediately - before any sentinel or
+    entry, so ``types/resolvers.py::_check_n1`` reads ``"off"`` and its
+    prelude returns immediately - before any sentinel or
     ``to_attr`` probe - even on the unplanned sidecar fallback.
     """
     _seed_library_books(["apple", "banana", "avocado"])
@@ -1627,8 +1627,8 @@ def test_strictness_silent_no_optimizer(caplog: pytest.LogCaptureFixture) -> Non
 
     The root-shaped no-op: with no extension nothing arms the per-execution
     strictness ``ContextVar`` and nothing stashes ``DST_OPTIMIZER_STRICTNESS``,
-    so ``types/resolvers.py::_strictness_for`` falls back to its ``"off"``
-    default and the prelude returns before any probe - the per-parent pipeline
+    so ``types/resolvers.py::_check_n1`` reads the stash's ``"off"`` default
+    and the prelude returns before any probe - the per-parent pipeline
     runs byte-identically to a tree with no optimizer installed, no flag.
     """
     _seed_library_books(["apple", "banana", "avocado"])

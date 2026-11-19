@@ -671,7 +671,7 @@ referenced symbols. Key parameterize-don't-average obligations, restated:
 - D1: Decision-4/5/8 strictness accounting (malformed keys record
   identities; fallbacks must not), per-shape log *reasons*, and the
   `last: 0` quirk survive. Log *keys* thread
-  `[resp_key] if resp_key is not None else _response_keys(sel)` — a naive
+  `[resp_key] if resp_key is not None else response_keys(sel)` — a naive
   `[None]` logs the literal. The helper takes the payload map as a
   parameter; the shared-window caller passes `{None: arguments}` because
   unmerged selections never carry `_optimizer_response_key_arguments`. One

@@ -2207,7 +2207,6 @@ def _build_annotations(
                     source_type=cls,
                     source_model=source_model,
                     field_name=field.name,
-                    django_field=field,
                     related_model=related_model,
                 ),
             )

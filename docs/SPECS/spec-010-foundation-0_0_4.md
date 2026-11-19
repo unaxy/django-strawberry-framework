@@ -133,8 +133,6 @@ class PendingRelation:
     source_model: type[models.Model]
     # the raw Django field.name; keys DjangoTypeDefinition.field_map
     field_name: str
-    # models.Field | ForeignObjectRel
-    django_field: Any
     related_model: type[models.Model]
 ```
 The record carries no cardinality or nullability: finalization reads both from the owning definition's `field_map[field_name]`. The same module holds `PendingRelationAnnotation`, the sentinel annotation collection writes in place of every deferred relation; its metaclass repr names the missing `finalize_django_types()` call if Strawberry meets it.
@@ -355,9 +353,8 @@ def finalize_django_types() -> None:
     resolved_pending: list[PendingRelation] = []
     for p, target_type, field_meta in resolved:
         p.source_type.__annotations__[p.field_name] = resolved_relation_annotation(
-            p.django_field,
+            field_meta,
             target_type,
-            field_meta=field_meta,
         )
         resolved_pending.append(p)
     # Every pending relation resolved. Drop them so post-finalization
@@ -436,7 +433,7 @@ We take one concept and explicitly reject everything else.
 - **Reject**: Graphene's connection / mounted-type / `MountedType` lifecycle.
 
 ## Where the contract lives
-- `django_strawberry_framework/types/converters.py::resolved_relation_annotation` returns the concrete annotation for a relation whose target is registered. It takes the owning definition's `FieldMeta` as the keyword-only `field_meta=` argument, and re-derives from the Django field only when a caller has no definition. Class creation never raises [`ConfigurationError`][glossary-configurationerror] for a missing target; the unresolved-target message is `django_strawberry_framework/types/finalizer.py::_format_unresolved_targets_error`, raised at finalization.
+- `django_strawberry_framework/types/converters.py::resolved_relation_annotation` returns the concrete annotation for a relation whose target is registered. It takes the owning definition's `FieldMeta` and the resolved target type. Class creation never raises [`ConfigurationError`][glossary-configurationerror] for a missing target; the unresolved-target message is `django_strawberry_framework/types/finalizer.py::_format_unresolved_targets_error`, raised at finalization.
 - `django_strawberry_framework/types/base.py::_build_annotations` is a per-field dispatch: non-relation fields convert through `convert_field_output` (which delegates to `convert_scalar`), and every auto-synthesized relation appends a `PendingRelation` to the returned list.
 - `django_strawberry_framework/registry.py::TypeRegistry.add_pending_relation`, `iter_pending_relations` and `discard_pending` are the registry's only forward-reference mechanism; the registry carries no lazy-reference placeholder.
 - `DjangoTypeDefinition.field_map` and `.optimizer_hints` are the **only** store for field metadata and hints: no class attribute carries either. The walker resolves both through the registered definition per planning entry (`optimizer/walker.py::_resolve_field_map`, then `::_walk_selections` for the hints), and the [schema audit][glossary-schema-audit] reads `registry.get_definition(type_cls).field_map` directly. Resolving per entry rather than off the class is what lets a nested branch plan against the metadata of the type it is descending into rather than the root's.

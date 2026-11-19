@@ -821,9 +821,8 @@ def finalize_django_types() -> None:
 
     for pending, target_type, field_meta in resolved:
         pending.source_type.__annotations__[pending.field_name] = resolved_relation_annotation(
-            pending.django_field,
+            field_meta,
             target_type,
-            field_meta=field_meta,
         )
     registry.discard_pending([pending for pending, _, _ in resolved])
 

@@ -4,7 +4,7 @@ Target release: `0.0.6` (per [KANBAN.md][kanban] card `DONE-016-0.0.6`).
 Status: shipped.
 Owner: package maintainer.
 
-Why relation shape has one store, what the bounded exception to that rule buys and costs, and why the free relation classifiers are deliberately called on raw Django fields lives in its companion [rationale file][spec-016-rationale].
+Why relation shape has one store and why the free relation classifiers are deliberately called on raw Django fields lives in its companion [rationale file][spec-016-rationale].
 
 ## Card snapshot
 
@@ -19,8 +19,8 @@ Why relation shape has one store, what the bounded exception to that rule buys a
 
 Six reader sites hold that rule, two in `types/` and four in `optimizer/`. `django_strawberry_framework/types/base.py::_build_annotations` reads none: the `PendingRelation` record it builds for each auto-synthesized relation carries only the raw `field_name` that keys `field_map`, and no cardinality or nullability.
 
-- `django_strawberry_framework/types/finalizer.py::finalize_django_types` #"field_meta = definition.field_map[pending.field_name]" — performs the canonical read and passes it explicitly into `django_strawberry_framework/types/converters.py::resolved_relation_annotation` via its keyword-only `field_meta` parameter. `resolved_relation_annotation` itself reads only `meta.is_many_side` / `meta.nullable` and derives nothing.
-- `django_strawberry_framework/types/resolvers.py::_field_meta_for_resolver` — resolves `registry.get_definition(parent_type)` then `definition.field_map.get(field.name)`; `::_make_relation_resolver` consumes the returned `FieldMeta`'s `relation_kind`, `is_many_side`, `related_model`, and `attname`. Production callers MUST pass `parent_type=cls`.
+- `django_strawberry_framework/types/finalizer.py::finalize_django_types` #"field_meta = definition.field_map[pending.field_name]" — performs the canonical read and passes it explicitly into `django_strawberry_framework/types/converters.py::resolved_relation_annotation` as its first argument. `resolved_relation_annotation` itself reads only `field_meta.is_many_side` / `field_meta.nullable` and derives nothing.
+- `django_strawberry_framework/types/resolvers.py::_make_relation_resolver` — reads `registry.get_definition(parent_type).field_map[field.name]` for the registered `parent_type` it is built for, and consumes that `FieldMeta`'s `relation_kind`, `is_many_side`, `related_model`, and `attname`.
 - `django_strawberry_framework/optimizer/walker.py::_resolve_field_map` — resolves the registered `DjangoType` and returns `definition.field_map`. When no type is registered, the same helper stamps `FieldMeta.from_django_field` over `model._meta.get_fields()`, keyed by raw `f.name`. Both paths yield `FieldMeta`; the brittle Django-private `_meta` access is centralized here.
 - `django_strawberry_framework/optimizer/walker.py::_walk_selections` reads `definition.optimizer_hints`, and the nested-connection planner reads the same slot off the same definition (`django_strawberry_framework/optimizer/nested_planner.py` #"hints_map = definition.optimizer_hints if definition is not None else {}"), so the planner reads the canonical store rather than opening a second source.
 - `django_strawberry_framework/optimizer/extension.py::_collect_schema_reachable_types` — gates schema reachability on `registry.get_definition(origin) is not None`.
@@ -28,9 +28,7 @@ Six reader sites hold that rule, two in `types/` and four in `optimizer/`. `djan
 
 ### Bounded exceptions to the single-source rule
 
-One exception exists by design. It is documented at its site, and is not drift:
-
-- **Test-double fallbacks.** `types/resolvers.py::_field_meta_for_resolver` falls back to `FieldMeta.from_django_field(field)`; `types/converters.py::resolved_relation_annotation` re-derives via `FieldMeta.from_django_field` when its `field_meta` argument is `None`. Both paths exist ONLY for direct callers exercising cardinality branches without a registered `DjangoType`, and both produce a `FieldMeta` observably identical to the canonical builder's on the same descriptor. No production call site reaches either.
+None exists: every reader above takes its `FieldMeta` from the owning definition, with no fallback that re-derives it.
 
 Unregistered-model planning is not an exception: `optimizer/walker.py::_resolve_field_map` stamps the fallback map through `FieldMeta.from_django_field` over every `get_fields()` entry, a multi-column forward `ForeignObject` included (`tests/optimizer/test_walker.py::test_unregistered_field_map_stamps_a_multi_column_forward_foreign_object`), so walker callers read the same shape as the registered path. The nested-connection window partition re-fetches the live descriptor through `model._meta.get_field` in `optimizer/nested_planner.py::plan_connection_relation` because the forward-M2M reverse query name lives only on the descriptor's `remote_field`, which `FieldMeta` does not carry.
 

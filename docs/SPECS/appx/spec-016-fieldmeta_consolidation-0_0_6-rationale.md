@@ -23,25 +23,14 @@ outlive `registry.clear()`, and a cleared registry with a live class attribute i
 one type with nothing to reconcile them, so the registry is the only lifetime field metadata has.
 
 - **Every reader site is named by `path::QualifiedName`.** An audit that finds a re-derivation inside
-  a cited function can then tell drift from design: the spec lists the readers and the one bounded
-  exception, so anything else is drift.
+  a cited function can then tell drift from design: the spec lists the readers, so anything else
+  is drift.
 - **`_build_annotations` is not a reader.** The pending record carries only the raw field name that
   keys `field_map`; finalization reads cardinality and nullability from the map, so the record cannot
   hold a stale copy.
 - **Unregistered-model planning stamps `FieldMeta` too.** The walker's fallback builds the map
   through `FieldMeta.from_django_field`, so every walker consumer reads one shape whether or not the
   model has a registered type.
-
-## Why the test-double fallbacks are a bounded exception
-
-Bears on [Bounded exceptions to the single-source rule][spec-016-exceptions].
-
-The fallbacks in `types/resolvers.py::_field_meta_for_resolver` and
-`types/converters.py::resolved_relation_annotation` let unit tests exercise the cardinality branches
-without constructing a registered `DjangoType`. They stay honest because
-the resolver fallback is `FieldMeta.from_django_field` itself, so it yields the value the canonical
-path yields on the same descriptor. Production callers pass
-`parent_type=cls` and never reach them.
 
 ## Why the classifiers are called on raw descriptors
 
@@ -64,7 +53,6 @@ duplication as "calls to `relation_kind(field)`" would make those sites read as 
 <!-- docs/SPECS/ -->
 [spec-016]: ../spec-016-fieldmeta_consolidation-0_0_6.md
 [spec-016-card-snapshot]: ../spec-016-fieldmeta_consolidation-0_0_6.md#card-snapshot
-[spec-016-exceptions]: ../spec-016-fieldmeta_consolidation-0_0_6.md#bounded-exceptions-to-the-single-source-rule
 [spec-016-mirror]: ../spec-016-fieldmeta_consolidation-0_0_6.md#no-class-attribute-mirror
 [spec-016-out-of-scope]: ../spec-016-fieldmeta_consolidation-0_0_6.md#out-of-scope
 [spec-016-ssot]: ../spec-016-fieldmeta_consolidation-0_0_6.md#single-source-of-truth

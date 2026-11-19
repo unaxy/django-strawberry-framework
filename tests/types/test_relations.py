@@ -1,10 +1,8 @@
 """PendingRelation tests for identity semantics, frozen fields and the sentinel annotation repr.
 
 ``PendingRelation`` is ``@dataclass(frozen=True, eq=False)``, so records compare
-and hash by identity: two records built from the same values stay distinct, and a
-record whose ``django_field`` refuses ``hash()`` (malformed metadata, such as a
-custom field class defining ``__eq__`` without ``__hash__``) still hashes and
-joins a set. ``TypeRegistry.discard_pending`` matches records by identity too.
+and hash by identity: two records built from the same values stay distinct.
+``TypeRegistry.discard_pending`` matches records by identity too.
 
 No GraphQL request observes record identity or hashing. Live relation fields
 live in ``examples/fakeshop/test_query/test_library_api.py``.
@@ -14,25 +12,12 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 from apps.products.models import Category, Item
-from typing_extensions import override
 
 from django_strawberry_framework import DjangoType
 from django_strawberry_framework.types.relations import (
     PendingRelation,
     PendingRelationAnnotation,
 )
-
-
-class _NonHashableField:
-    """Stand-in for relation metadata whose ``__hash__`` is ``None``."""
-
-    @override
-    def __eq__(self, other: object) -> bool:
-        return self is other
-
-    # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-    __hash__ = None  # pyright: ignore[reportAssignmentType]
-
 
 # Each record's source type registers; the shared fixture clears it after the test.
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
@@ -47,33 +32,8 @@ def _build_pending() -> PendingRelation:
         ),
         source_model=Category,
         field_name="items",
-        # basedpyright: the unhashable field is the hostile input under test; PendingRelation types
-        # django_field as ModelField
-        django_field=_NonHashableField(),  # pyright: ignore[reportArgumentType]
         related_model=Item,
     )
-
-
-def test_pending_relation_hash_supports_non_hashable_django_field() -> None:
-    """``hash(pending)`` does not require a hashable Django relation field.
-
-    Records hash by identity, so the field's own ``__hash__`` is never called;
-    a value-based dataclass hash would raise ``TypeError`` for non-hashable
-    relation metadata.
-    """
-    pending = _build_pending()
-
-    assert isinstance(hash(pending), int)
-
-
-def test_pending_relation_is_set_member_with_non_hashable_django_field() -> None:
-    """``set([pending])`` and set membership work without raising."""
-    pending = _build_pending()
-
-    bucket = {pending}
-
-    assert pending in bucket
-    assert len(bucket) == 1
 
 
 def test_equal_valued_pending_relations_stay_distinct() -> None:

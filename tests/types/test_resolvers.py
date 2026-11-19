@@ -72,7 +72,6 @@ from django_strawberry_framework.types.resolvers import (
     _attach_relation_resolvers,
     _build_fk_id_stub,
     _check_n1,
-    _fk_attname_is_deferred,
     _make_relation_resolver,
     _visible_related_object,
 )
@@ -89,7 +88,7 @@ if TYPE_CHECKING:
 def _parent_type(
     model: type[Model],
     name: str | None = None,
-    fields: tuple[str, ...] = ("id",),
+    fields: tuple[str, ...] | str = "__all__",
 ) -> type[DjangoType]:
     """Declare a real ``DjangoType`` over ``model``, the parent a relation resolver is built for.
 
@@ -97,6 +96,22 @@ def _parent_type(
     """
     meta = type("Meta", (), {"model": model, "fields": fields})
     return type(name or f"{model.__name__}Type", (DjangoType,), {"Meta": meta})
+
+
+def _stand_in_resolver(
+    stand_in: object,
+    parent_type: type[DjangoType] | None = None,
+) -> Callable[[object, Info[object, object]], object]:
+    """Build the relation resolver for a stand-in field recorded in ``parent_type``'s field map.
+
+    ``parent_type`` defaults to a fresh ``DjangoType`` over ``Item``.
+    """
+    parent = parent_type or _parent_type(Item)
+    field = _as_field(stand_in)
+    definition = registry.get_definition(parent)
+    assert definition is not None
+    definition.field_map[field.name] = FieldMeta.from_django_field(field)
+    return _make_relation_resolver(field, parent)
 
 
 def _as_field(stand_in: object) -> "ModelField":
@@ -128,7 +143,10 @@ def test_make_relation_resolver_many_side_is_named_resolve_field() -> None:
     services.seed_data(1)
     category = Category.objects.first()
     assert category is not None
-    resolver = _make_relation_resolver(Category._meta.get_field("items"))
+    resolver = _make_relation_resolver(
+        Category._meta.get_field("items"),
+        _parent_type(Category, fields=("id", "items")),
+    )
     assert resolver.__name__ == "resolve_items"
     rows = resolver(category, make_info())
     assert is_iterable(rows)
@@ -148,7 +166,7 @@ def test_make_relation_resolver_forward_is_named_resolve_field() -> None:
         one_to_many=False,
         one_to_one=False,
     )
-    resolver = _make_relation_resolver(_as_field(fake_field))
+    resolver = _stand_in_resolver(fake_field)
     assert resolver.__name__ == "resolve_category"
 
     sentinel = object()
@@ -583,7 +601,7 @@ def test_make_relation_resolver_reverse_one_to_one_returns_none_on_doesnotexist(
         auto_created=True,
         related_model=FakeProfile,
     )
-    resolver = _make_relation_resolver(_as_field(fake_field))
+    resolver = _stand_in_resolver(fake_field)
 
     class RootMissingProfile:
         @property
@@ -708,7 +726,7 @@ def test_reverse_one_to_one_propagates_plain_attribute_error() -> None:
         auto_created=True,
         related_model=FakeProfile,
     )
-    resolver = _make_relation_resolver(_as_field(fake_field))
+    resolver = _stand_in_resolver(fake_field)
 
     class RootHostileProfile:
         @property
@@ -837,7 +855,7 @@ def test_reverse_one_to_one_without_related_model_propagates_attribute_error() -
         one_to_one=True,
         auto_created=True,
     )
-    resolver = _make_relation_resolver(_as_field(fake_field))
+    resolver = _stand_in_resolver(fake_field)
 
     class RootHostileProfile:
         @property
@@ -862,7 +880,7 @@ def test_forward_resolver_without_related_model_propagates_attribute_error() -> 
         one_to_many=False,
         one_to_one=False,
     )
-    resolver = _make_relation_resolver(_as_field(fake_field))
+    resolver = _stand_in_resolver(fake_field)
 
     class HostileRoot:
         @property
@@ -1242,7 +1260,7 @@ def test_fk_id_elision_falls_back_on_real_deferred_only_instance(
     assert isinstance(result, Category)
 
 
-def test_fk_attname_is_deferred_and_stub_exceptions() -> None:
+def test_build_fk_id_stub_exceptions() -> None:
     class BrokenDeferred:
         def get_deferred_fields(self) -> NoReturn:
             raise RuntimeError("consumer get_deferred_fields")
@@ -1250,7 +1268,10 @@ def test_fk_attname_is_deferred_and_stub_exceptions() -> None:
     # A consumer ``get_deferred_fields`` override is consumer behaviour: its
     # exception propagates to the schema's error policy.
     with pytest.raises(RuntimeError, match="consumer get_deferred_fields"):
-        _fk_attname_is_deferred(BrokenDeferred(), "category_id")
+        _build_fk_id_stub(
+            BrokenDeferred(),
+            FieldMeta.from_django_field(Item._meta.get_field("category")),
+        )
 
     # _visible_related_object(None, ...) -> None
     assert _visible_related_object(None, DjangoType, unread_info()) is None
@@ -1290,7 +1311,7 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
     class CustomCategoryType(DjangoType):
         class Meta:
             model = Category
-            fields = ("id", "name")
+            fields = ("id", "name", "items")
 
         @classmethod
         @override
@@ -1302,7 +1323,7 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
     class CustomItemType(DjangoType):
         class Meta:
             model = Item
-            fields = ("id", "name")
+            fields = ("id", "name", "category")
 
         @classmethod
         @override
@@ -1328,10 +1349,7 @@ async def test_async_resolvers_optimizer_scoped_and_visibility() -> None:
 
         # Reverse one-to-one resolver (scoped and unscoped)
         rev_field = FakeRevRel()
-        rev_resolver = _make_relation_resolver(
-            _as_field(rev_field),
-            parent_type=CustomItemType,
-        )
+        rev_resolver = _stand_in_resolver(rev_field, CustomItemType)
 
         key = resolver_key(CustomItemType, "profile", ("item", "profile"))
         publish_scoped_relations({key})
@@ -1503,7 +1521,7 @@ def test_sync_forward_and_many_resolver_visibility() -> None:
     class CustomCategoryType(DjangoType):
         class Meta:
             model = Category
-            fields = ("id", "name")
+            fields = ("id", "name", "items")
 
         @classmethod
         @override
@@ -1515,7 +1533,7 @@ def test_sync_forward_and_many_resolver_visibility() -> None:
     class CustomItemType(DjangoType):
         class Meta:
             model = Item
-            fields = ("id", "name")
+            fields = ("id", "name", "category")
 
         @classmethod
         @override
@@ -1579,10 +1597,7 @@ def test_sync_forward_and_many_resolver_visibility() -> None:
                 def get_accessor_name(self) -> str:
                     return "profile"
 
-            rev_resolver = _make_relation_resolver(
-                _as_field(FakeRevRel()),
-                parent_type=CustomItemType,
-            )
+            rev_resolver = _stand_in_resolver(FakeRevRel(), CustomItemType)
             rev_key = resolver_key(CustomItemType, "profile", ("item", "profile"))
             publish_scoped_relations({rev_key, fwd_key})
 

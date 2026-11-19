@@ -37,7 +37,6 @@ from apps.library.models import Book
 from apps.products.models import Category, Item, Property
 from django.db import models
 from strawberry import relay
-from typing_extensions import override
 
 from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.connection import (
@@ -377,7 +376,6 @@ def test_clear_drops_all_state(fresh_registry: TypeRegistry) -> None:
         source_type=CategoryType,
         source_model=Category,
         field_name="items",
-        django_field=Category._meta.get_field("items"),
         related_model=Item,
     )
     fresh_registry.register(Category, CategoryType)
@@ -976,7 +974,6 @@ def test_discard_pending_uses_identity_match_with_real_pending_relation(
         source_type=source_type,
         source_model=Category,
         field_name="items",
-        django_field=Category._meta.get_field("items"),
         related_model=Item,
     )
     record_a = build_record()
@@ -991,37 +988,6 @@ def test_discard_pending_uses_identity_match_with_real_pending_relation(
     remaining = list(fresh_registry.iter_pending_relations())
     assert len(remaining) == 1
     assert remaining[0] is record_b
-
-
-def test_discard_pending_tolerates_non_hashable_django_field(fresh_registry: TypeRegistry) -> None:
-    """``discard_pending`` removes pending records by identity without hashing them.
-
-    Registry lifecycle: isolated ``TypeRegistry`` maps. A live request cannot show map identity. No
-    live sibling.
-    """
-
-    class _NonHashableField:
-        @override
-        def __eq__(self, other: object) -> bool:
-            return self is other
-
-        # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-        __hash__ = None  # pyright: ignore[reportAssignmentType]
-
-    pending = PendingRelation(
-        source_type=_as_django_type(type("Src", (), {})),
-        source_model=Category,
-        field_name="items",
-        # basedpyright: the unhashable field is the hostile input under test; PendingRelation types
-        # django_field as ModelField
-        django_field=_NonHashableField(),  # pyright: ignore[reportArgumentType]
-        related_model=Item,
-    )
-
-    fresh_registry.add_pending_relation(pending)
-    fresh_registry.discard_pending([pending])
-
-    assert list(fresh_registry.iter_pending_relations()) == []
 
 
 def test_mutators_reject_calls_after_mark_finalized(fresh_registry: TypeRegistry) -> None:
@@ -1047,7 +1013,6 @@ def test_mutators_reject_calls_after_mark_finalized(fresh_registry: TypeRegistry
         source_type=CategoryType,
         source_model=Category,
         field_name="items",
-        django_field=Category._meta.get_field("items"),
         related_model=Item,
     )
 
@@ -2009,14 +1974,12 @@ def test_unregister_removes_pending_relations_sourced_from_type(
         source_type=CategoryType,
         source_model=Category,
         field_name="items",
-        django_field=Category._meta.get_field("items"),
         related_model=Item,
     )
     pending_drop = PendingRelation(
         source_type=ItemType,
         source_model=Item,
         field_name="category",
-        django_field=Item._meta.get_field("category"),
         related_model=Category,
     )
     fresh_registry.add_pending_relation(pending_keep)

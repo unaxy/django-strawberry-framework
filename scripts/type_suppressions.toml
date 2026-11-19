@@ -371,8 +371,6 @@
 "tests/test_permissions.py::test_root_queryset_shape_rejections" = { reportArgumentType = 1 }
 "tests/test_registry.py::_as_definition" = { reportReturnType = 1 }
 "tests/test_registry.py::_as_django_type" = { reportReturnType = 1 }
-"tests/test_registry.py::test_discard_pending_tolerates_non_hashable_django_field" = { reportArgumentType = 1 }
-"tests/test_registry.py::test_discard_pending_tolerates_non_hashable_django_field._NonHashableField" = { reportAssignmentType = 1 }
 "tests/test_relay_connection.py::_as_django_type" = { reportReturnType = 1 }
 "tests/test_relay_connection.py::_consumer_edge_book_connection_class" = { cast = 1 }
 "tests/test_relay_connection.py::test_consume_window_serves_the_connections_own_prefix_cursor" = { cast = 1 }
@@ -422,8 +420,6 @@
 "tests/types/test_definition_relations.py::test_custom_id_detection_propagates_and_flags_consumer_relay_resolver._NonStringNode.resolve_id_attr" = { reportIncompatibleMethodOverride = 1 }
 "tests/types/test_finalizer.py::test_finalize_rerun_after_phase3_raise_keeps_finalized_sets_wired" = { reportAttributeAccessIssue = 1 }
 "tests/types/test_finalizer.py::test_incomplete_registry_registration_is_typed_at_finalize" = { reportArgumentType = 2 }
-"tests/types/test_relations.py::_NonHashableField.__hash__" = { reportAssignmentType = 1 }
-"tests/types/test_relations.py::_build_pending" = { reportArgumentType = 1 }
 "tests/types/test_relations.py::test_pending_relation_is_frozen_dataclass" = { reportAttributeAccessIssue = 1 }
 "tests/types/test_relay_interfaces.py::_as_definition" = { reportReturnType = 1 }
 "tests/types/test_relay_interfaces.py::_as_django_type" = { reportReturnType = 1 }
@@ -441,7 +437,7 @@
 "tests/types/test_relay_interfaces.py::test_sync_misuse_raises_sync_misuse_error_subclass.CategoryNode.get_queryset" = { reportIncompatibleMethodOverride = 1 }
 "tests/types/test_relay_interfaces.py::test_type_strategy_child_shadows_inherited_framework_closure.TypeScopedChild.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/types/test_resolvers.py::_as_field" = { reportReturnType = 1 }
-"tests/types/test_resolvers.py::test_fk_attname_is_deferred_and_stub_exceptions" = { reportArgumentType = 1 }
+"tests/types/test_resolvers.py::test_build_fk_id_stub_exceptions" = { reportArgumentType = 1 }
 "tests/utils/test_canonical.py::_LyingDict.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/utils/test_canonical.py::_LyingDict.keys" = { reportIncompatibleMethodOverride = 1 }
 "tests/utils/test_canonical.py::_LyingDict.values" = { reportIncompatibleMethodOverride = 1 }
