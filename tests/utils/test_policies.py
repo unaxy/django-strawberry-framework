@@ -13,7 +13,7 @@ wire-visible wording end to end.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import NoReturn
 
@@ -93,29 +93,8 @@ def test_unknown_keys_are_rejected_naming_the_valid_vocabulary() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Override mappings: one materialization; the mapping's own errors propagate
+# Override mappings: the mapping's own errors propagate
 # ---------------------------------------------------------------------------
-
-
-class _DivergentMapping(Mapping[str, object]):
-    """A stateful Mapping that yields a different key set on every full iteration."""
-
-    def __init__(self, passes: list[list[tuple[str, object]]]) -> None:
-        self._passes = [dict(pass_) for pass_ in passes]
-        self._current: dict[str, object] = {}
-
-    @override
-    def __iter__(self) -> Iterator[str]:
-        self._current = self._passes.pop(0) if self._passes else {}
-        return iter(self._current)
-
-    @override
-    def __getitem__(self, key: str) -> object:
-        return self._current[key]
-
-    @override
-    def __len__(self) -> int:
-        return len(self._current)
 
 
 class _RaisingIterMapping(Mapping[str, object]):
@@ -136,24 +115,6 @@ _FLAVORS = [
     pytest.param(resolve_error_policy, "message", "From hostile mapping.", id="error-policy"),
     pytest.param(resolve_resource_policy, "max_page_size", 20, id="resource-policy"),
 ]
-
-
-@pytest.mark.parametrize(("resolver", "key", "value"), _FLAVORS)
-def test_a_divergent_one_shot_mapping_resolves_from_one_consumed_pass(
-    resolver: Callable[[Mapping[str, object]], object],
-    key: str,
-    value: object,
-) -> None:
-    """The mapping is consumed ONCE: a second pass cannot smuggle unknown keys.
-
-    The resolver validates and constructs from one materialized copy, so a
-    mapping whose second pass yields ``bogus`` resolves from its first pass. A
-    resolver that iterated it again for ``policy_cls(**dict(overrides))`` would
-    let ``bogus`` escape the typed unknown-key rejection as a raw
-    ``TypeError: ErrorPolicy.__init__() got an unexpected keyword argument 'bogus'``.
-    """
-    policy = resolver(_DivergentMapping([[(key, value)], [("bogus", 1), ("x", 1)]]))
-    assert getattr(policy, key) == value
 
 
 @pytest.mark.parametrize(
@@ -235,39 +196,8 @@ def test_a_key_that_is_not_really_a_string_is_typed_rejected(slot: str, key: obj
     )
 
 
-class _ComparisonHostileKey(str):
-    """A key whose comparisons raise, so membership and ``sorted`` cannot read it directly."""
-
-    __hash__ = str.__hash__
-
-    @override
-    def __eq__(self, other: object) -> NoReturn:
-        raise RuntimeError("hostile __eq__")
-
-    @override
-    def __lt__(self, other: str) -> NoReturn:
-        raise RuntimeError("hostile __lt__")
-
-
-@pytest.mark.parametrize("slot", ["explicit", "setting"])
-def test_a_comparison_hostile_valid_key_resolves(slot: str) -> None:
-    """A valid name resolves through its base ``str`` copy: the membership test never compares it."""
-    assert _resolve_through(slot, {_ComparisonHostileKey("width"): 5}) == _ProbePolicy(width=5)
-
-
-@pytest.mark.parametrize("slot", ["explicit", "setting"])
-def test_comparison_hostile_unknown_keys_are_named_in_the_typed_rejection(slot: str) -> None:
-    """Unknown keys are sorted and joined as base ``str`` copies, so the typed message is built."""
-    with pytest.raises(ConfigurationError) as excinfo:
-        _resolve_through(
-            slot,
-            {_ComparisonHostileKey("bbb"): 1, _ComparisonHostileKey("aaa"): 2},
-        )
-    assert str(excinfo.value) == "Unknown probe-policy bound(s): aaa, bbb. Valid bounds: width."
-
-
 # ---------------------------------------------------------------------------
-# Key names: read by real class, copied to exact strings
+# Key names: read by real class
 # ---------------------------------------------------------------------------
 
 
@@ -276,6 +206,6 @@ class _NameStr(str):
 
 
 def test_a_str_subclass_key_resolves_by_its_string_value() -> None:
-    """Subclass keys are copied to exact strings, so a valid name names its bound."""
+    """A ``str`` subclass key names its bound like the string it carries."""
     resolved = _resolve({_NameStr("width"): 4})
     assert resolved.width == 4

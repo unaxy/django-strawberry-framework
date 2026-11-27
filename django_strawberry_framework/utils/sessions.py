@@ -97,15 +97,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from importlib import import_module
 from typing import TYPE_CHECKING, TypeVar, cast
-
-from django.utils.module_loading import import_string
 
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import introspection
-from ._narrowing import is_str, require_instance
+from ._narrowing import read_attr, require_instance
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -173,50 +172,23 @@ def scope_singleton(
 def session_store_class() -> type[SessionBase]:
     """Resolve the configured ``SESSION_ENGINE``'s ``SessionStore`` class.
 
-    The ONE expression that reads the deployment's session engine
-    (``import_string(f"{settings.SESSION_ENGINE}.SessionStore")``) for both
-    callers named in the module docstring. The resolution goes through Django's
-    own ``import_string``, so a consumer-authored engine subclass resolves
-    identically to a shipped one. ``settings`` is read at CALL time, never
-    captured, so ``override_settings(SESSION_ENGINE=...)`` is honored.
+    The ONE expression that reads the deployment's session engine for both
+    callers named in the module docstring: the one Django's
+    ``SessionMiddleware.__init__`` uses (``import_module(SESSION_ENGINE).SessionStore``),
+    so a consumer-authored engine resolves exactly as Django resolves it.
+    ``settings`` is read at CALL time, never captured, so
+    ``override_settings(SESSION_ENGINE=...)`` is honored.
     """
+    engine = django_setting("SESSION_ENGINE")
     try:
-        engine = django_setting("SESSION_ENGINE")
-    except (
-        AttributeError,
-        KeyError,
-        TypeError,
-        ValueError,
-        IndexError,
-    ) as exc:
-        raise ConfigurationError(
-            "SESSION_ENGINE could not be read from settings "
-            f"({introspection.name(type(exc))}); check settings.SESSION_ENGINE.",
-        ) from exc
-    if not is_str(engine):
-        raise ConfigurationError(
-            f"SESSION_ENGINE must be a string; got {introspection.describe(engine)}.",
-        )
-    if not engine:
-        raise ConfigurationError(
-            "SESSION_ENGINE must be a non-empty string; got empty value.",
-        )
-    try:
-        # Django's session-engine contract: the module exports a ``SessionBase`` subclass.
-        return cast("type[SessionBase]", import_string(f"{engine}.SessionStore"))
-
-    except (
-        ImportError,
-        TypeError,
-        ValueError,
-        AttributeError,
-        KeyError,
-        IndexError,
-    ) as exc:
+        store = read_attr(import_module(str(engine)), "SessionStore")
+    except (ImportError, AttributeError, ValueError) as exc:
         raise ConfigurationError(
             f"Could not resolve SESSION_ENGINE {engine!r}'s SessionStore "
             f"({introspection.name(type(exc))}); check settings.SESSION_ENGINE.",
         ) from exc
+    # Django's session-engine contract: the module exports a ``SessionBase`` subclass.
+    return cast("type[SessionBase]", store)
 
 
 #: The private scope key one connection's ``ConnectionActorState`` is stored

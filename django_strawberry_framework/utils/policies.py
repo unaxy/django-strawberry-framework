@@ -84,33 +84,20 @@ def resolve_policy(
             f"{introspection.name(policy_cls)} or a mapping of {unit} names to values; "
             f"got {introspection.describe(overrides)}.",
         )
-    # Materialize ONCE, and read only the plain copy afterwards. A ``Mapping``
-    # may be stateful: validating unknown keys over one iteration and then
-    # calling ``policy_cls(**dict(overrides))`` over a second would let a
-    # one-shot generator-style mapping diverge between the two passes - the
-    # unknown-key check could pass keys the constructor then rejects (a bare
-    # ``TypeError`` instead of the typed rejection) or never see at all. One
-    # consumption point is the same hardening ``conf.py::
-    # upstream_patches_enabled`` applies to its own settings mapping.
-    plain = dict(overrides)
-    # Key-type guard FIRST: a non-string key must reach this typed rejection,
-    # not a bare ``TypeError`` from a ``sorted()`` over mixed unorderable names
-    # (the ``conf.py::upstream_patches_enabled`` key-guard precedent). A string
-    # key is recognised by its real class.
-    for name in plain:
+    named: dict[str, object] = {}
+    for name, value in overrides.items():
+        # A key is a name only if its real class is ``str``, so a lazy proxy
+        # key is the typed rejection, not a bare ``TypeError`` from ``sorted()``.
         if not is_str(name):
             raise ConfigurationError(
                 f"The {display_name} {unit} names must be strings; got {introspection.describe(name)}.",
             )
-    # Subclass keys are copied to the base ``str`` before anything compares or
-    # orders them, so the constructor below receives exact strings carrying
-    # the name the deployment wrote.
-    normalized = {introspection.text(name): value for name, value in plain.items()}
+        named[name] = value
     known = {field.name for field in fields(policy_cls)}
-    unknown = sorted(name for name in normalized if name not in known)
+    unknown = sorted(name for name in named if name not in known)
     if unknown:
         raise ConfigurationError(
             f"Unknown {display_name.replace(' ', '-')} {unit}(s): {', '.join(unknown)}. "
             f"Valid {unit}s: {', '.join(sorted(known))}.",
         )
-    return policy_cls(**normalized)
+    return policy_cls(**named)

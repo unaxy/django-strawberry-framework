@@ -75,7 +75,6 @@ from django_strawberry_framework.optimizer._context import (
     DST_OPTIMIZER_LOOKUP_PATHS,
     DST_OPTIMIZER_PLAN,
     DST_OPTIMIZER_PLANNED,
-    DST_OPTIMIZER_STRICTNESS,
     active_strictness,
     begin_execution_frame,
     clear_optimizer_context,
@@ -89,7 +88,6 @@ from django_strawberry_framework.optimizer._context import (
     publish_scoped_relations,
     relation_is_optimizer_scoped,
     stash_on_context,
-    stashed_strictness,
 )
 from django_strawberry_framework.optimizer._context import (
     active_optimizer as _active_optimizer,
@@ -144,6 +142,7 @@ from tests._definition import make_definition
 from tests._idioms import (
     ClaimsClassBase,
     ClassReadRaisesBase,
+    armed_strictness,
     definition_raises,
     is_object_dict,
     is_object_list,
@@ -2486,18 +2485,73 @@ def test_strictness_warn_logs_unplanned_relation(caplog: pytest.LogCaptureFixtur
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query)
-    ctx = SimpleNamespace(
-        dst_optimizer_planned=set(),
-        dst_optimizer_strictness="warn",
-    )
+    ctx = SimpleNamespace(dst_optimizer_planned=set())
 
     caplog.set_level("WARNING", logger="django_strawberry_framework")
-    result = schema.execute_sync(
-        "{ allItems { name category { name } } }",
-        context_value=ctx,
-    )
+    with armed_strictness("warn"):
+        result = schema.execute_sync(
+            "{ allItems { name category { name } } }",
+            context_value=ctx,
+        )
     assert result.errors is None
     assert any("Potential N+1 on category" in r.message for r in caplog.records)
+
+
+@pytest.mark.django_db
+def test_strictness_arms_a_nested_execution_and_its_enclosing_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A nested execution reports under its own strictness; the outer one keeps its own after.
+
+    The list roots return lists the walker cannot plan, so each ``category``
+    read is an unplanned lazy load. The nested ``"raise"`` execution refuses
+    it, and once it returns the enclosing ``"warn"`` execution logs its own.
+    """
+    services.seed_data(1)
+
+    class CategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    assert registry.get(Category) is CategoryType
+
+    class ItemType(DjangoType):
+        class Meta:
+            model = Item
+            fields = ("id", "name", "category")
+
+    def _items() -> list[Item]:
+        return list(Item.objects.all()[:1])
+
+    @strawberry.type
+    class InnerQuery:
+        items: list[Item] = strawberry.field(resolver=_items, graphql_type=list[ItemType])
+
+    finalize_django_types()
+    inner_extension = DjangoOptimizerExtension(strictness="raise")
+    inner = strawberry.Schema(query=InnerQuery, extensions=[lambda: inner_extension])
+
+    @strawberry.type
+    class OuterQuery:
+        @strawberry.field
+        def nested_errors(self) -> list[str]:
+            result = inner.execute_sync("{ items { category { name } } }")
+            return [error.message for error in result.errors or ()]
+
+        items: list[Item] = strawberry.field(resolver=_items, graphql_type=list[ItemType])
+
+    outer_extension = DjangoOptimizerExtension(strictness="warn")
+    outer = strawberry.Schema(query=OuterQuery, extensions=[lambda: outer_extension])
+    caplog.set_level("WARNING", logger="django_strawberry_framework")
+    result = outer.execute_sync("{ nestedErrors items { category { name } } }")
+
+    assert result.errors is None
+    assert result.data is not None
+    assert result.data["nestedErrors"] == ["Unplanned N+1: category"]
+    assert [r.message for r in caplog.records if "Potential N+1" in r.message] == [
+        "Potential N+1 on category",
+    ]
 
 
 @pytest.mark.django_db
@@ -2569,7 +2623,6 @@ def test_strictness_warn_stashes_sentinel() -> None:
     planned = getattr(ctx, "dst_optimizer_planned", None)
     assert planned is not None
     assert "ItemType.category@allItems.category" in planned
-    assert read_attr(ctx, DST_OPTIMIZER_STRICTNESS) == "warn"
 
 
 @pytest.mark.django_db
@@ -2578,7 +2631,7 @@ def test_strictness_with_empty_plan_still_stashes_its_sentinels(mode: str) -> No
     """An empty plan still publishes the strictness sentinels, with an empty planned set.
 
     ``_publish_plan_to_context`` stashes the strictness sentinels (planned set,
-    lookup paths, mode) before ``_optimize`` short-circuits on ``plan.is_empty``.
+    lookup paths) before ``_optimize`` short-circuits on ``plan.is_empty``.
     That a typename-only selection then neither raises nor warns is pinned live by
     ``examples/fakeshop/test_query/test_library_api.py::test_library_typename_only_selection_is_clean_under_armed_strictness``;
     this row keeps the private stash.
@@ -2607,7 +2660,6 @@ def test_strictness_with_empty_plan_still_stashes_its_sentinels(mode: str) -> No
     result = schema.execute_sync("{ allCategories { __typename } }", context_value=ctx)
     assert result.errors is None
     assert _stashed_plan(ctx).is_empty
-    assert read_attr(ctx, DST_OPTIMIZER_STRICTNESS) == mode
     assert _stashed_keys(ctx, DST_OPTIMIZER_PLANNED) == set()
 
 
@@ -3382,13 +3434,11 @@ def test_clear_optimizer_context_removes_all_keys_from_object_and_dict(
     stash_on_context(context, DST_OPTIMIZER_FK_ID_ELISIONS, frozenset({"k"}))
     stash_on_context(context, DST_OPTIMIZER_PLANNED, frozenset({"k"}))
     stash_on_context(context, DST_OPTIMIZER_LOOKUP_PATHS, frozenset({"p"}))
-    stash_on_context(context, DST_OPTIMIZER_STRICTNESS, "warn")
     clear_optimizer_context(context)
     assert get_context_value(context, DST_OPTIMIZER_PLAN) is None
     assert get_context_value(context, DST_OPTIMIZER_FK_ID_ELISIONS) is None
     assert get_context_value(context, DST_OPTIMIZER_PLANNED) is None
     assert get_context_value(context, DST_OPTIMIZER_LOOKUP_PATHS) is None
-    assert get_context_value(context, DST_OPTIMIZER_STRICTNESS) is None
 
 
 def test_clear_optimizer_context_clears_slots_mapping_via_item_delete() -> None:
@@ -3447,7 +3497,6 @@ def test_optimizer_context_all_exports() -> None:
         "DST_OPTIMIZER_LOOKUP_PATHS",
         "DST_OPTIMIZER_PLAN",
         "DST_OPTIMIZER_PLANNED",
-        "DST_OPTIMIZER_STRICTNESS",
         "active_nested_strategy",
         "active_optimizer",
         "active_strictness",
@@ -3467,7 +3516,6 @@ def test_optimizer_context_all_exports() -> None:
         "relation_is_optimizer_scoped",
         "stash_for_optimizer",
         "stash_on_context",
-        "stashed_strictness",
         "planned_window",
     }
     assert set(ctx_mod.__all__) == expected
@@ -3502,18 +3550,6 @@ def test_stashed_key_sets_refuse_a_stash_that_is_not_a_set(key: str) -> None:
 
     with pytest.raises(TypeError, match="expected the type the source guarantees, got list"):
         _ = read(ctx)
-
-
-def test_stashed_strictness_reads_the_stashed_string_or_off_when_absent() -> None:
-    """The stashed strictness string answers; an absent stash reads as ``"off"``."""
-    assert stashed_strictness({DST_OPTIMIZER_STRICTNESS: "raise"}) == "raise"
-    assert stashed_strictness({}) == "off"
-
-
-def test_stashed_strictness_refuses_a_non_string_stash() -> None:
-    """A strictness stash that is not a string raises rather than reading as ``"off"``."""
-    with pytest.raises(TypeError, match="expected an instance of str, got int"):
-        stashed_strictness({DST_OPTIMIZER_STRICTNESS: 1})
 
 
 def test_publish_scoped_relations_handles_empty_and_generator_keys_when_active_and_inactive() -> (

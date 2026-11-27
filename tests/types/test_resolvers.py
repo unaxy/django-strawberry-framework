@@ -49,7 +49,6 @@ from django_strawberry_framework.exceptions import OptimizerError
 from django_strawberry_framework.optimizer._context import (
     DST_OPTIMIZER_FK_ID_ELISIONS,
     DST_OPTIMIZER_PLANNED,
-    DST_OPTIMIZER_STRICTNESS,
     begin_execution_frame,
     end_execution_frame,
     publish_scoped_relations,
@@ -77,7 +76,7 @@ from django_strawberry_framework.types.resolvers import (
 )
 from django_strawberry_framework.utils._narrowing import is_awaitable, is_iterable, read_attr
 from tests._catalog_data import categories_from_seed, items_from_seed
-from tests._idioms import saved_pk
+from tests._idioms import armed_strictness, saved_pk
 from tests._info import make_info, response_path, unread_info
 
 if TYPE_CHECKING:
@@ -377,13 +376,20 @@ def test_check_n1_ignores_bare_field_name_key() -> None:
     ItemType = _parent_type(Item, "ItemType")
 
     fake_info = SimpleNamespace(
-        context={"dst_optimizer_planned": {"category"}, "dst_optimizer_strictness": "raise"},
+        context={"dst_optimizer_planned": {"category"}},
         field_name="category",
         path=response_path("allItems", 0, "category"),
     )
 
     with pytest.raises(OptimizerError, match="Unplanned N\\+1"):
-        _check_n1(fake_info, SimpleNamespace(), "category", ItemType, kind="forward_single")
+        _check_n1(
+            fake_info,
+            SimpleNamespace(),
+            "category",
+            ItemType,
+            strictness="raise",
+            kind="forward_single",
+        )
 
 
 def test_check_n1_returns_when_relation_is_already_loaded() -> None:
@@ -391,7 +397,7 @@ def test_check_n1_returns_when_relation_is_already_loaded() -> None:
     ItemType = _parent_type(Item, "ItemType")
 
     fake_info = SimpleNamespace(
-        context={"dst_optimizer_planned": set(), "dst_optimizer_strictness": "raise"},
+        context={"dst_optimizer_planned": set()},
         path=response_path("allItems", 0, "category"),
     )
 
@@ -400,6 +406,7 @@ def test_check_n1_returns_when_relation_is_already_loaded() -> None:
         SimpleNamespace(_state=SimpleNamespace(fields_cache={"category": "cached"})),
         "category",
         ItemType,
+        strictness="raise",
         kind="forward_single",
     )
 
@@ -409,12 +416,19 @@ def test_check_n1_warns_for_unplanned_lazy_load(caplog: pytest.LogCaptureFixture
     ItemType = _parent_type(Item, "ItemType")
 
     fake_info = SimpleNamespace(
-        context={"dst_optimizer_planned": set(), "dst_optimizer_strictness": "warn"},
+        context={"dst_optimizer_planned": set()},
         path=response_path("allItems", 0, "category"),
     )
 
     caplog.set_level("WARNING", logger="django_strawberry_framework")
-    _check_n1(fake_info, SimpleNamespace(), "category", ItemType, kind="forward_single")
+    _check_n1(
+        fake_info,
+        SimpleNamespace(),
+        "category",
+        ItemType,
+        strictness="warn",
+        kind="forward_single",
+    )
 
     assert any("Potential N+1 on category" in r.message for r in caplog.records)
 
@@ -441,7 +455,7 @@ def test_check_n1_planned_hit_is_silent() -> None:
 
     key = resolver_key(ItemType, "category", ("allItems", "category"))
     fake_info = SimpleNamespace(
-        context={"dst_optimizer_planned": {key}, "dst_optimizer_strictness": "raise"},
+        context={"dst_optimizer_planned": {key}},
         path=response_path("allItems", 0, "category"),
     )
     _check_n1(
@@ -449,6 +463,7 @@ def test_check_n1_planned_hit_is_silent() -> None:
         SimpleNamespace(),
         "category",
         ItemType,
+        strictness="raise",
         kind="forward_single",
     )
 
@@ -475,7 +490,7 @@ def test_check_n1_raise_strictness_raises_on_lazy_load() -> None:
     ItemType = _parent_type(Item, "ItemType")
 
     fake_info = SimpleNamespace(
-        context={"dst_optimizer_planned": set(), "dst_optimizer_strictness": "raise"},
+        context={"dst_optimizer_planned": set()},
         path=response_path("allItems", 0, "category"),
     )
     with pytest.raises(OptimizerError, match="Unplanned N\\+1: category"):
@@ -484,6 +499,7 @@ def test_check_n1_raise_strictness_raises_on_lazy_load() -> None:
             SimpleNamespace(),
             "category",
             ItemType,
+            strictness="raise",
             kind="forward_single",
         )
 
@@ -501,7 +517,7 @@ def test_check_n1_many_side_kind_treats_consumer_set_attribute_as_lazy(
     CategoryType = _parent_type(Category, "CategoryType")
 
     fake_info = SimpleNamespace(
-        context={"dst_optimizer_planned": set(), "dst_optimizer_strictness": "raise"},
+        context={"dst_optimizer_planned": set()},
         path=response_path("allCategories", 0, "items"),
     )
     # ``items`` is set directly on the root - that would short-circuit the
@@ -509,7 +525,7 @@ def test_check_n1_many_side_kind_treats_consumer_set_attribute_as_lazy(
     # short-circuit the many-side check.
     root = SimpleNamespace(items=["not-a-real-prefetch"])
     with pytest.raises(OptimizerError, match="Unplanned N\\+1: items"):
-        _check_n1(fake_info, root, "items", CategoryType, kind=kind)
+        _check_n1(fake_info, root, "items", CategoryType, strictness="raise", kind=kind)
 
 
 def test_check_n1_many_kind_respects_prefetched_objects_cache() -> None:
@@ -517,12 +533,12 @@ def test_check_n1_many_kind_respects_prefetched_objects_cache() -> None:
     CategoryType = _parent_type(Category, "CategoryType")
 
     fake_info = SimpleNamespace(
-        context={"dst_optimizer_planned": set(), "dst_optimizer_strictness": "raise"},
+        context={"dst_optimizer_planned": set()},
         path=response_path("allCategories", 0, "items"),
     )
     root = SimpleNamespace(_prefetched_objects_cache={"items": []})
     # No raise - the relation is prefetched, so the strictness branch is skipped.
-    _check_n1(fake_info, root, "items", CategoryType, kind="many")
+    _check_n1(fake_info, root, "items", CategoryType, strictness="raise", kind="many")
 
 
 def test_check_n1_probes_prefetch_cache_under_cache_name() -> None:
@@ -539,7 +555,7 @@ def test_check_n1_probes_prefetch_cache_under_cache_name() -> None:
     PlainAuthorType = _parent_type(Category, "PlainAuthorType")
 
     fake_info = SimpleNamespace(
-        context={"dst_optimizer_planned": set(), "dst_optimizer_strictness": "raise"},
+        context={"dst_optimizer_planned": set()},
         path=response_path("authors", 0, "plainbook"),
     )
     root = SimpleNamespace(_prefetched_objects_cache={"plainbook_set": []})
@@ -549,6 +565,7 @@ def test_check_n1_probes_prefetch_cache_under_cache_name() -> None:
         root,
         "plainbook",
         PlainAuthorType,
+        strictness="raise",
         kind="reverse_many_to_one",
         cache_name="plainbook_set",
     )
@@ -560,6 +577,7 @@ def test_check_n1_probes_prefetch_cache_under_cache_name() -> None:
             root,
             "plainbook",
             PlainAuthorType,
+            strictness="raise",
             kind="reverse_many_to_one",
         )
 
@@ -1049,12 +1067,11 @@ def test_strictness_check_is_connection_agnostic_under_non_default_alias() -> No
     info = SimpleNamespace(
         context={
             DST_OPTIMIZER_PLANNED: {"some.unrelated.key@/"},
-            DST_OPTIMIZER_STRICTNESS: "raise",
         },
         path=None,
     )
 
-    with pytest.raises(OptimizerError, match="Unplanned N\\+1: shelf"):
+    with armed_strictness("raise"), pytest.raises(OptimizerError, match="Unplanned N\\+1: shelf"):
         _check_n1(info, root, "shelf", _ParentType, kind="forward_single")
 
 
@@ -1134,36 +1151,35 @@ def test_fk_id_elision_falls_back_when_consumer_only_defers_fk(
             self.accessed_relation = True
             return SimpleNamespace(pk=42)
 
-    def context(strictness: str) -> dict[str, set[str] | str]:
-        # The relation is in BOTH elisions and planned (the elision branch records
-        # it planned), exactly the production shape Decision 5 must not mistake.
-        return {
-            DST_OPTIMIZER_FK_ID_ELISIONS: {key},
-            DST_OPTIMIZER_PLANNED: {key},
-            DST_OPTIMIZER_STRICTNESS: strictness,
-        }
+    # The relation is in BOTH elisions and planned (the elision branch records
+    # it planned), exactly the production shape Decision 5 must not mistake.
+    context = {DST_OPTIMIZER_FK_ID_ELISIONS: {key}, DST_OPTIMIZER_PLANNED: {key}}
 
     # "raise": the fallback is loud - OptimizerError, not a silent planned-relation
     # lazy load, and never a read of the deferred FK column.
     info = make_info(
-        context=context("raise"),
+        context=context,
         field_name="category",
         path=response_path("allItems", 0, "category"),
         operation=OperationType(operation_arm),
     )
-    with pytest.raises(OptimizerError, match="Unplanned N\\+1: category"):
+    with (
+        armed_strictness("raise"),
+        pytest.raises(OptimizerError, match="Unplanned N\\+1: category"),
+    ):
         resolver(Root(), info)
 
     # "warn": logs and returns the related object via the normal resolve.
     root = Root()
     info = make_info(
-        context=context("warn"),
+        context=context,
         field_name="category",
         path=response_path("allItems", 0, "category"),
         operation=OperationType(operation_arm),
     )
     caplog.set_level("WARNING", logger="django_strawberry_framework")
-    result = resolver(root, info)
+    with armed_strictness("warn"):
+        result = resolver(root, info)
     assert any("Potential N+1 on category" in r.message for r in caplog.records)
     assert root.accessed_relation is True
     assert isinstance(result, SimpleNamespace)
@@ -1230,31 +1246,30 @@ def test_fk_id_elision_falls_back_on_real_deferred_only_instance(
     assert "category_id" in root.get_deferred_fields()
     assert "category_id" not in root.__dict__
 
-    def context(strictness: str) -> dict[str, set[str] | str]:
-        return {
-            DST_OPTIMIZER_FK_ID_ELISIONS: {key},
-            DST_OPTIMIZER_PLANNED: {key},
-            DST_OPTIMIZER_STRICTNESS: strictness,
-        }
+    context = {DST_OPTIMIZER_FK_ID_ELISIONS: {key}, DST_OPTIMIZER_PLANNED: {key}}
 
     # "raise": the deferred FK column is never read silently; the fallback is loud.
     info = make_info(
-        context=context("raise"),
+        context=context,
         field_name="category",
         path=response_path("allItems", 0, "category"),
     )
-    with pytest.raises(OptimizerError, match="Unplanned N\\+1: category"):
+    with (
+        armed_strictness("raise"),
+        pytest.raises(OptimizerError, match="Unplanned N\\+1: category"),
+    ):
         resolver(root, info)
 
     # "warn": logs the access and resolves the real related object normally.
     root = Item.objects.only("name").get(pk=pk)
     info = make_info(
-        context=context("warn"),
+        context=context,
         field_name="category",
         path=response_path("allItems", 0, "category"),
     )
     caplog.set_level("WARNING", logger="django_strawberry_framework")
-    result = resolver(root, info)
+    with armed_strictness("warn"):
+        result = resolver(root, info)
     assert any("Potential N+1 on category" in r.message for r in caplog.records)
     assert isinstance(result, Category)
 

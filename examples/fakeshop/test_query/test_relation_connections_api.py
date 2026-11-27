@@ -1626,9 +1626,8 @@ def test_strictness_silent_no_optimizer(caplog: pytest.LogCaptureFixture) -> Non
     """No optimizer installed -> strictness reads ``"off"`` -> ``_check_n1`` is a no-op.
 
     The root-shaped no-op: with no extension nothing arms the per-execution
-    strictness ``ContextVar`` and nothing stashes ``DST_OPTIMIZER_STRICTNESS``,
-    so ``types/resolvers.py::_check_n1`` reads the stash's ``"off"`` default
-    and the prelude returns before any probe - the per-parent pipeline
+    strictness ``ContextVar``, so ``types/resolvers.py::_check_n1`` reads it as
+    off and the prelude returns before any probe - the per-parent pipeline
     runs byte-identically to a tree with no optimizer installed, no flag.
     """
     _seed_library_books(["apple", "banana", "avocado"])

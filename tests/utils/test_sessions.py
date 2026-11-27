@@ -15,7 +15,6 @@ import types
 from typing import NoReturn
 
 import pytest
-from django.conf import settings as django_settings
 from django.contrib.sessions.backends.db import SessionStore as DBSessionStore
 from django.contrib.sessions.backends.signed_cookies import (
     SessionStore as SignedCookieSessionStore,
@@ -24,7 +23,6 @@ from django.test import override_settings
 from django.utils.functional import SimpleLazyObject
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.sessions import (
     _ACTOR_STATE_SCOPE_KEY,
     ConnectionActorState,
@@ -70,43 +68,20 @@ def test_session_store_class_resolves_custom_engine(monkeypatch: pytest.MonkeyPa
         assert session_store_class() is CustomSessionStore
 
 
-def test_session_store_class_reports_an_unreadable_setting_as_configuration_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ``settings.SESSION_ENGINE`` read that RAISES becomes ``ConfigurationError``.
-
-    A settings object whose ``SESSION_ENGINE`` read raises one of the settings
-    read errors the resolver names (here ``KeyError``) surfaces as the typed
-    error naming the setting, chained to the original.
-    """
-
-    class _RaisingSettings:
-        def __getattr__(self, name: str) -> object:
-            raise KeyError(name)
-
-    # ``conf.django_setting`` is the package's one Django-settings read.
-    monkeypatch.setattr("django_strawberry_framework.conf.django_settings", _RaisingSettings())
-    with pytest.raises(ConfigurationError, match="SESSION_ENGINE could not be read"):
-        session_store_class()
-
-    # The module attribute is restored by monkeypatch; prove the resolver is
-    # not left wedged on the stand-in.
-    monkeypatch.undo()
-    assert read_attr(django_settings, "SESSION_ENGINE")
-    assert session_store_class() is DBSessionStore
-
-
 @override_settings(SESSION_ENGINE=object())
 def test_session_store_class_rejects_a_non_string_engine() -> None:
-    """A non-string ``SESSION_ENGINE`` is rejected before any import is attempted."""
-    with pytest.raises(ConfigurationError, match="must be a string"):
+    """A non-string ``SESSION_ENGINE`` names no importable engine."""
+    with pytest.raises(ConfigurationError, match="Could not resolve SESSION_ENGINE <object"):
         session_store_class()
 
 
 @override_settings(SESSION_ENGINE="")
 def test_session_store_class_rejects_an_empty_engine() -> None:
-    """An empty ``SESSION_ENGINE`` is rejected rather than importing ``.SessionStore``."""
-    with pytest.raises(ConfigurationError, match="non-empty string"):
+    """An empty ``SESSION_ENGINE`` names no module."""
+    with pytest.raises(
+        ConfigurationError,
+        match=r"SESSION_ENGINE ''.s SessionStore \(ValueError\)",
+    ):
         session_store_class()
 
 
@@ -149,38 +124,26 @@ def test_session_store_class_plain_subclass_engine_resolves() -> None:
 
 
 @pytest.mark.parametrize(
-    ("engine", "rendered"),
+    "engine",
     [
-        pytest.param(
-            ClassReadRaises(RuntimeError),
-            "ClassReadRaises <ClassReadRaises>",
-            id="class-read-raises",
-        ),
-        pytest.param(
-            ClassReadRaises(KeyboardInterrupt),
-            "ClassReadRaises <ClassReadRaises>",
-            id="class-read-interrupts",
-        ),
-        pytest.param(ClaimsClass(str), "ClaimsClass <ClaimsClass>", id="claims-str"),
-        pytest.param(
-            SimpleLazyObject(lambda: "django.contrib.sessions.backends.db"),
-            "SimpleLazyObject <SimpleLazyObject: ",
-            id="lazy-str",
-        ),
+        pytest.param(ClassReadRaises(RuntimeError), id="class-read-raises"),
+        pytest.param(ClassReadRaises(KeyboardInterrupt), id="class-read-interrupts"),
+        pytest.param(ClaimsClass(str), id="claims-str"),
     ],
 )
-def test_session_store_class_rejects_an_engine_that_is_not_really_a_string(
-    engine: object,
-    rendered: str,
-) -> None:
-    """The engine is a string only if its real type is: its ``__class__`` is never consulted.
-
-    A ``__class__`` that raises or claims ``str`` would otherwise escape the typed rejection
-    (the base ``str`` slot below refuses an object that is not really a ``str``).
-    """
+def test_session_store_class_rejects_an_engine_that_is_not_really_a_string(engine: object) -> None:
+    """An engine whose ``__class__`` raises or claims ``str`` names no importable engine."""
     with override_settings(SESSION_ENGINE=engine), pytest.raises(ConfigurationError) as excinfo:
         session_store_class()
-    assert str(excinfo.value).startswith(f"SESSION_ENGINE must be a string; got {rendered}")
+    assert str(excinfo.value).startswith("Could not resolve SESSION_ENGINE <")
+
+
+@override_settings(
+    SESSION_ENGINE=SimpleLazyObject(lambda: "django.contrib.sessions.backends.db"),
+)
+def test_session_store_class_resolves_a_lazy_engine_as_django_does() -> None:
+    """A lazy engine name resolves like the string it carries, as Django's middleware does."""
+    assert session_store_class() is DBSessionStore
 
 
 @override_settings(SESSION_ENGINE=_PlainSubclassEngine("tests.utils._no_such_session_engine"))

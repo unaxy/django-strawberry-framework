@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING, NamedTuple
 from django_strawberry_framework.utils._narrowing import (
     is_set_or_frozenset,
     require,
-    require_instance,
 )
 from django_strawberry_framework.utils.context import (
     clear_context_key,
@@ -76,7 +75,6 @@ __all__ = (
     "DST_OPTIMIZER_LOOKUP_PATHS",
     "DST_OPTIMIZER_PLAN",
     "DST_OPTIMIZER_PLANNED",
-    "DST_OPTIMIZER_STRICTNESS",
     "active_nested_strategy",
     "active_optimizer",
     "active_strictness",
@@ -97,14 +95,12 @@ __all__ = (
     "relation_is_optimizer_scoped",
     "stash_for_optimizer",
     "stash_on_context",
-    "stashed_strictness",
 )
 
 DST_OPTIMIZER_PLAN = "dst_optimizer_plan"
 DST_OPTIMIZER_FK_ID_ELISIONS = "dst_optimizer_fk_id_elisions"
 DST_OPTIMIZER_PLANNED = "dst_optimizer_planned"
 DST_OPTIMIZER_LOOKUP_PATHS = "dst_optimizer_lookup_paths"
-DST_OPTIMIZER_STRICTNESS = "dst_optimizer_strictness"
 
 #: The key set an absent or non-set elision stash reads as.
 _NO_KEYS: frozenset[object] = frozenset()
@@ -381,7 +377,7 @@ def planned_resolver_keys(context: object) -> AbstractSet[object] | None:
 
     The extension stashes a ``frozenset`` (``_stash_union`` merges into a ``set`` or
     ``frozenset``); any other value under the key raises ``TypeError`` rather than
-    reading as absent, which would skip the N+1 guard a stashed strictness arms.
+    reading as absent, which would skip the N+1 guard strictness arms.
     """
     value = optimizer_value(context, DST_OPTIMIZER_PLANNED)
     return None if value is None else require(value, is_set_or_frozenset)
@@ -395,16 +391,6 @@ def fk_id_elision_keys(context: object) -> AbstractSet[object]:
     """
     value = optimizer_value(context, DST_OPTIMIZER_FK_ID_ELISIONS)
     return _NO_KEYS if value is None else require(value, is_set_or_frozenset)
-
-
-def stashed_strictness(context: object) -> str:
-    """Return the strictness string the optimizer stashed (``"off"`` when absent).
-
-    The extension stashes its validated ``strictness`` string; any other value under
-    the key raises ``TypeError`` rather than reading as ``"off"``, which would silence
-    the N+1 guard a hand-built context meant to arm.
-    """
-    return require_instance(optimizer_value(context, DST_OPTIMIZER_STRICTNESS, "off"), str)
 
 
 def stash_for_optimizer(context: object, key: str, value: object) -> None:
@@ -436,7 +422,6 @@ DST_OPTIMIZER_KEYS: tuple[str, ...] = (
     DST_OPTIMIZER_FK_ID_ELISIONS,
     DST_OPTIMIZER_PLANNED,
     DST_OPTIMIZER_LOOKUP_PATHS,
-    DST_OPTIMIZER_STRICTNESS,
 )
 
 

@@ -45,7 +45,6 @@ from django_strawberry_framework.connection import (
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.filters import FilterSet, filter_input_type
 from django_strawberry_framework.optimizer._context import (
-    DST_OPTIMIZER_STRICTNESS,
     begin_execution_frame,
     end_execution_frame,
     publish_planned_windows,
@@ -70,7 +69,7 @@ from django_strawberry_framework.utils.connections import (
 )
 from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
 from tests._definition import make_definition
-from tests._idioms import json_at, json_list
+from tests._idioms import armed_strictness, json_at, json_list
 from tests._info import make_info, raw_info_of, response_path
 from tests._relation_connection_schemas import (
     _genres_filterable_book_schema,
@@ -725,7 +724,7 @@ def test_fast_path_refuses_a_window_planned_under_other_bounds(strictness: str) 
     info = _page_info(
         connection_cls,
         "{ edges { node { title } } }",
-        context={DST_OPTIMIZER_STRICTNESS: strictness},
+        context={},
     )
     window = _WindowedConnectionRows(
         # Decoy rows (no title) standing for the first-three page.
@@ -755,10 +754,14 @@ def test_fast_path_refuses_a_window_planned_under_other_bounds(strictness: str) 
         )
 
     if strictness == "raise":
-        with pytest.raises(OptimizerError, match="planned window unservable"):
+        with (
+            armed_strictness("raise"),
+            pytest.raises(OptimizerError, match="planned window unservable"),
+        ):
             _consume()
         return
-    conn = _consume()
+    with armed_strictness(strictness):
+        conn = _consume()
     assert isinstance(conn, connection_cls)
     assert [read_attr(edge.node, "title") for edge in conn.edges] == ["a", "b"]
 
@@ -880,7 +883,6 @@ def test_strictness_silent_when_planned() -> None:
             "dst_optimizer_planned": {
                 resolver_key(GenreType, "books", ("objs", "booksConnection")),
             },
-            "dst_optimizer_strictness": "raise",
         },
         path=response_path("objs", 0, "booksConnection"),
     )
@@ -893,12 +895,13 @@ def test_strictness_silent_when_planned() -> None:
         GenreType,
         kind="connection_to_attr",
         reason="not window-planned; resolving per-parent",
+        strictness="raise",
     )
 
     # Sanity counter-proof: the SAME shape with the key absent DOES fire, so the
     # silence above is the planned-key match, not an inert no-op.
     info_unplanned = SimpleNamespace(
-        context={"dst_optimizer_planned": set(), "dst_optimizer_strictness": "raise"},
+        context={"dst_optimizer_planned": set()},
         path=response_path("objs", 0, "booksConnection"),
     )
     with pytest.raises(OptimizerError, match=r"Unplanned N\+1: books \("):
@@ -909,6 +912,7 @@ def test_strictness_silent_when_planned() -> None:
             GenreType,
             kind="connection_to_attr",
             reason="not window-planned; resolving per-parent",
+            strictness="raise",
         )
 
 
