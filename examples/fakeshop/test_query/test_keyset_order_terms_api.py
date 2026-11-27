@@ -19,7 +19,6 @@ controls ordering the same holders by a scalar column, annotated or not.
 import datetime
 import uuid
 from collections.abc import Mapping
-from functools import wraps
 
 import pytest
 import strawberry
@@ -27,11 +26,16 @@ from apps.library.models import Issue, MembershipCard, Patron, Periodical
 from apps.scalars.models import ScalarSpecimen
 from django.db import connection
 from django.db.models import Count, Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_at, json_list, json_object, json_str
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    graphql_payload,
+    json_at,
+    json_list,
+    json_object,
+    json_str,
+)
 from strategy_schemas import make_django_type
 
 from django_strawberry_framework import (
@@ -42,22 +46,13 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.orders import OrderSet, RelatedOrder
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests.optimizer._link_models import LnkPairChild, link_fixture_tables
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-keyset-order/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-keyset-order/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(
@@ -66,12 +61,8 @@ def _post(
     *,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(query, variables=variables, url="/graphql-keyset-order/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(query, variables=variables, url="/graphql-keyset-order/")
 
 
 def _names(page: JSONObject) -> list[str]:

@@ -35,8 +35,6 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
-from functools import wraps
-from typing import TYPE_CHECKING
 
 import pytest
 from apps.scalars import models
@@ -44,17 +42,11 @@ from asgiref.sync import sync_to_async
 from config import schema as config_schema
 from django.db import connection
 from django.test import override_settings
-from django.urls import path
 from django.utils import timezone
 from django.utils.duration import duration_string
-from graphql_client import JSONObject, post_graphql, response_json
+from graphql_client import JSONObject, SchemaMount, post_graphql, response_json
 
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView
-
-if TYPE_CHECKING:
-    from django.http import HttpRequest
-    from django.http.response import HttpResponseBase
 
 _UNBOUNDED_YEAR = "Enter a date whose whole year the current time zone can represent."
 _UNSTORABLE = "Enter a value the database can represent."
@@ -371,12 +363,8 @@ def test_span_null_is_written(flavor: str) -> None:
     assert list(models.DatedEntrySpecimen.objects.values_list("span", flat=True)) == [None]
 
 
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
-
-
-urlpatterns = [path("graphql-async/", _async_graphql_view)]
+_MOUNT = SchemaMount(__name__, async_route="graphql-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 @_SQLITE
@@ -392,7 +380,7 @@ async def test_async_write_answers_the_same_errors(flavor: str, shape: str) -> N
     else:
         data = {"span": "1000000000 00:00:00"}
         expected = _refusal(root, "span", _DAYS_OVERFLOW, "overflow")
-    with override_settings(ROOT_URLCONF=__name__), timezone.override("America/New_York"):
+    with _MOUNT.serving(config_schema.schema), timezone.override("America/New_York"):
         result = await AsyncTestClient().query(
             document,
             variables=_variables(data, None),

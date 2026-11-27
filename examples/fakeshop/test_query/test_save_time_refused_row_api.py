@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Generator, Mapping
-from functools import wraps
 from typing import TYPE_CHECKING, NoReturn, TypeVar
 
 import pytest
@@ -56,10 +55,14 @@ from asgiref.sync import sync_to_async
 from django import forms
 from django.db import IntegrityError, connection, transaction
 from django.db.models.signals import post_save, pre_save
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_at, json_list, response_json
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    graphql_payload,
+    json_at,
+    json_list,
+    response_json,
+)
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -72,7 +75,6 @@ from django_strawberry_framework import (
     finalize_django_types,
 )
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import ModelSerializerBase, saved_pk
 
 if TYPE_CHECKING:
@@ -82,7 +84,6 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 #: The consumer code's scenario for the request: how it treats the row's own save
 #: (``swallow``) and which write it runs afterwards (``escape``).
@@ -101,24 +102,8 @@ _ENVELOPE = [
 ]
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-refused-row/", _graphql_view),
-    path("graphql-refused-row-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(__name__, "graphql-refused-row/", async_route="graphql-refused-row-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _escape() -> None:
@@ -441,12 +426,8 @@ def _variables(flavor: str, *, item: object = None) -> JSONObject:
 def _post(flavor: str, variables: Mapping[str, object]) -> JSONObject:
     """POST the flavor's mutation over ``/graphql-refused-row/``; return the payload."""
     root, document = _DOCUMENTS[flavor]
-    _CURRENT["schema"] = _schema()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload(document, variables=variables, url="/graphql-refused-row/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(_schema()):
+        payload = graphql_payload(document, variables=variables, url="/graphql-refused-row/")
     assert "errors" not in payload, payload
     return {"answer": json_at(payload, "data", root)}
 
@@ -630,16 +611,12 @@ def test_a_modelform_failure_after_its_rows_swallowed_save_is_not_that_row(
     variables = _variables(flavor)
     _SCENARIO.update(swallow=swallow, escape=escape)
     root, document = _DOCUMENTS[flavor]
-    _CURRENT["schema"] = _schema()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload(
-                document,
-                variables=variables,
-                url="/graphql-refused-row/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(_schema()):
+        payload = graphql_payload(
+            document,
+            variables=variables,
+            url="/graphql-refused-row/",
+        )
     if expected is None:
         assert json_at(payload, "data") is None
         [error] = json_list(payload, "errors")
@@ -691,17 +668,13 @@ async def test_a_swallowed_refused_save_over_the_async_view_is_the_envelope(
     root, document = _DOCUMENTS[flavor]
     variables = await sync_to_async(_variables)(flavor)
     _SCENARIO.update(swallow="savepoint", escape="other_save")
-    _CURRENT["schema"] = await sync_to_async(_schema)()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient().query(
-                document,
-                variables=variables,
-                assert_no_errors=False,
-                url="/graphql-refused-row-async/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(await sync_to_async(_schema)()):
+        result = await AsyncTestClient().query(
+            document,
+            variables=variables,
+            assert_no_errors=False,
+            url="/graphql-refused-row-async/",
+        )
     assert result.response.status_code == 200
     payload = response_json(result.response)
     assert "errors" not in payload, payload
@@ -1047,12 +1020,11 @@ def _family_rows() -> tuple[list[tuple[int | None, str]], list[int], list[str]]:
 def _post_family(root: str, document: str, variables: Mapping[str, object]) -> object:
     """POST a family write over ``/graphql-refused-row/``; return its root field's answer."""
     _install_family_classes()
-    _CURRENT["schema"] = _family_schema()
+    schema = _family_schema()
     try:
-        with override_settings(ROOT_URLCONF=__name__):
+        with _MOUNT.serving(schema):
             payload = graphql_payload(document, variables=variables, url="/graphql-refused-row/")
     finally:
-        _CURRENT["schema"] = None
         _FAMILY_CLASSES.clear()
     assert "errors" not in payload, payload
     return json_at(payload, "data", root)

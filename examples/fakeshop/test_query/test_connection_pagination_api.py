@@ -40,8 +40,8 @@ connection field this module builds over the same shipped ``GenreType`` with an
 ``async def`` consumer resolver, the field shape that runs
 ``connection.py::_pipeline_async`` on every execution (a sync-shaped field takes
 it only under the asynchronous executor); it is served over a ``/graphql-async/``
-mount this module owns (``graphql_client.py`` is sync-only, so those rows drive
-``AsyncTestClient`` with ``django_db(transaction=True)``). The async rows mirror
+mount this module owns (``graphql_client.py``'s posts are sync-only, so those rows
+drive ``AsyncTestClient`` with ``django_db(transaction=True)``). The async rows mirror
 the sync matrix shape for shape - evaluated, materialized-list, none,
 projection, wrong-model, sliced, combined, routing-rewritten-in-place and
 malformed-deferred-filter - with one substitution the pipelines force: the
@@ -138,7 +138,6 @@ import logging
 import re
 import sys
 from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
-from functools import wraps
 from typing import NoReturn, TypeAlias
 
 import pytest
@@ -151,12 +150,11 @@ from apps.products.services import seed_data
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
 from django.db import connection, models
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import clear_url_caches, path
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     assert_graphql_success,
     graphql_payload,
     json_at,
@@ -177,7 +175,6 @@ from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 _ApplySyncOverride: TypeAlias = Callable[
     [
@@ -805,15 +802,14 @@ def test_connection_healthy_apply_sync_override_still_returns_ordered_edges(
     assert names == ["A", "B", "C"]
 
 
-#: The schema the async mount serves for the request in flight, resolved by the
+#: The async mount, serving its schema for the request in flight, read by the
 #: view at request time. A module-level one-shot cache cannot be used here: the
 #: acceptance harness reloads every contributing app schema around each test
 #: (``examples/fakeshop/test_query/conftest.py``,
 #: ``examples/fakeshop/schema_reload.py``), so a schema built during an earlier
 #: test holds type objects no longer registered. Each test therefore builds the
-#: schema after that reload, publishes it here for the duration of its request,
-#: and clears the slot in a ``finally``.
-_ASYNC_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+#: schema after that reload and serves it here for the duration of its request.
+_ASYNC_MOUNT = SchemaMount(__name__, async_route="graphql-async/")
 
 
 async def _async_genres_resolver(
@@ -848,40 +844,24 @@ def _async_genre_connection_schema() -> DjangoSchema:
     return DjangoSchema(query=Query, config=strawberry_config())
 
 
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_genre_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    """The test-local async-resolver schema on an async view."""
-    schema = _ASYNC_CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-async/", _async_genre_graphql_view),
-]
+urlpatterns = [*_ASYNC_MOUNT.urlpatterns]
 
 
 async def _post_async_genres(query: str) -> JSONObject:
     """POST ``query`` against the async-resolver genre connection over ``/graphql-async/``.
 
-    ``graphql_client.py`` is sync-only, so the async rows drive ``AsyncTestClient``
-    against a mount this module owns.
+    ``graphql_client.py``'s posts are sync-only, so the async rows drive
+    ``AsyncTestClient`` against a mount this module owns.
     The schema is built here, inside the test, so it is composed from the types
-    the autouse reload just registered, and published through ``_ASYNC_CURRENT``
+    the autouse reload just registered, and served through ``_ASYNC_MOUNT``
     for the view to read.
     """
-    _ASYNC_CURRENT["schema"] = _async_genre_connection_schema()
-    try:
-        with override_settings(ROOT_URLCONF=__name__, **_ERROR_POLICY_PASS_THROUGH):
-            clear_url_caches()
-            result = await AsyncTestClient().query(
-                query,
-                assert_no_errors=False,
-                url="/graphql-async/",
-            )
-    finally:
-        _ASYNC_CURRENT["schema"] = None
-        clear_url_caches()
+    with _ASYNC_MOUNT.serving(_async_genre_connection_schema(), **_ERROR_POLICY_PASS_THROUGH):
+        result = await AsyncTestClient().query(
+            query,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
     assert result.response.status_code == 200
     return response_json(result.response)
 
@@ -1545,9 +1525,13 @@ async def test_connection_async_healthy_filter_apply_async_override_still_filter
 #: negative slice is visibly wider than the ``max_page_size`` cap below.
 _CURSOR_ROW_COUNT = 40
 
-#: The schema the cursor mounts serve for the request in flight (the same
-#: per-test publication discipline as ``_ASYNC_CURRENT``).
-_CURSOR_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+#: The cursor mounts, serving their schema for the request in flight (the same
+#: per-test publication discipline as ``_ASYNC_MOUNT``).
+_CURSOR_MOUNT = SchemaMount(
+    __name__,
+    "graphql-cursor/",
+    async_route="graphql-cursor-async/",
+)
 
 
 def _cursor(payload: str) -> str:
@@ -1662,7 +1646,7 @@ async def _async_queryset_genres(
 def _cursor_schema() -> DjangoSchema:
     """One consumer-resolver connection per source shape, capped at three rows a page.
 
-    Built per request after the harness reload (see ``_ASYNC_CURRENT``). The
+    Built per request after the harness reload (see ``_ASYNC_MOUNT``). The
     ``max_page_size`` policy is the cap a wrapped negative slice would
     otherwise widen a page past. The failing sources (two generators, a project
     ``QuerySet`` whose ``query`` raises, a related manager whose deferred filter
@@ -1715,25 +1699,8 @@ def _cursor_schema() -> DjangoSchema:
     )
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _cursor_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURSOR_CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_cursor_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURSOR_CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
 # Appended here so the mounts sit beside the only rows that use them.
-urlpatterns += [
-    path("graphql-cursor/", _cursor_graphql_view),
-    path("graphql-cursor-async/", _async_cursor_graphql_view),
-]
+urlpatterns += _CURSOR_MOUNT.urlpatterns
 
 
 def _cursor_page_query(field: str) -> str:
@@ -1745,30 +1712,18 @@ def _cursor_page_query(field: str) -> str:
 
 
 def _post_local_sync(query: str, variables: JSONObject) -> JSONObject:
-    _CURSOR_CURRENT["schema"] = _cursor_schema()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            return graphql_payload(query, variables=variables, url="/graphql-cursor/")
-    finally:
-        _CURSOR_CURRENT["schema"] = None
-        clear_url_caches()
+    with _CURSOR_MOUNT.serving(_cursor_schema()):
+        return graphql_payload(query, variables=variables, url="/graphql-cursor/")
 
 
 async def _post_local_async(query: str, variables: JSONObject) -> JSONObject:
-    _CURSOR_CURRENT["schema"] = await sync_to_async(_cursor_schema)()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            result = await AsyncTestClient().query(
-                query,
-                variables=variables,
-                assert_no_errors=False,
-                url="/graphql-cursor-async/",
-            )
-    finally:
-        _CURSOR_CURRENT["schema"] = None
-        clear_url_caches()
+    with _CURSOR_MOUNT.serving(await sync_to_async(_cursor_schema)()):
+        result = await AsyncTestClient().query(
+            query,
+            variables=variables,
+            assert_no_errors=False,
+            url="/graphql-cursor-async/",
+        )
     assert result.response.status_code == 200
     return response_json(result.response)
 
@@ -2264,8 +2219,8 @@ def test_nested_per_parent_offset_cursor_near_sys_maxsize_serves_the_past_the_en
     assert len(queries.captured_queries) == 3, queries.captured_queries
 
 
-#: The schema the unbounded-cap mount serves for the request in flight.
-_UNBOUNDED_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+#: The unbounded-cap mount, serving its schema for the request in flight.
+_UNBOUNDED_MOUNT = SchemaMount(__name__, "graphql-cursor-unbounded/")
 
 
 def _unbounded_cap_schema() -> DjangoSchema:
@@ -2295,14 +2250,7 @@ def _unbounded_cap_schema() -> DjangoSchema:
     )
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _unbounded_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _UNBOUNDED_CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns += [path("graphql-cursor-unbounded/", _unbounded_graphql_view)]
+urlpatterns += _UNBOUNDED_MOUNT.urlpatterns
 
 
 @pytest.mark.django_db
@@ -2318,19 +2266,15 @@ def test_page_bound_of_sys_maxsize_serves_every_row(field: str, after: str | Non
     """
     for name in ("Alpha", "Bravo", "Charlie"):
         library_models.Genre.objects.create(name=name)
-    _UNBOUNDED_CURRENT["schema"] = _unbounded_cap_schema()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            with CaptureQueriesContext(connection) as queries:
-                payload = graphql_payload(
-                    _PAGE_INFO_QUERY.replace("cursor }", "cursor node { name } }") % field,
-                    variables={"after": None if after is None else _cursor(after)},
-                    url="/graphql-cursor-unbounded/",
-                )
-    finally:
-        _UNBOUNDED_CURRENT["schema"] = None
-        clear_url_caches()
+    with (
+        _UNBOUNDED_MOUNT.serving(_unbounded_cap_schema()),
+        CaptureQueriesContext(connection) as queries,
+    ):
+        payload = graphql_payload(
+            _PAGE_INFO_QUERY.replace("cursor }", "cursor node { name } }") % field,
+            variables={"after": None if after is None else _cursor(after)},
+            url="/graphql-cursor-unbounded/",
+        )
 
     start = 0 if after is None else 1
     cursors = [_cursor(str(index)) for index in range(start, 3)]
@@ -2802,14 +2746,8 @@ def _project_schema_under(converter: str) -> DjangoSchema:
 
 def _post_schema(schema: DjangoSchema, query: str) -> JSONObject:
     """POST ``query`` to ``schema`` over the module's ``/graphql-cursor/`` mount."""
-    _CURSOR_CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            return graphql_payload(query, url="/graphql-cursor/")
-    finally:
-        _CURSOR_CURRENT["schema"] = None
-        clear_url_caches()
+    with _CURSOR_MOUNT.serving(schema):
+        return graphql_payload(query, url="/graphql-cursor/")
 
 
 def _coded_errors(payload: JSONObject) -> list[tuple[object, object]]:

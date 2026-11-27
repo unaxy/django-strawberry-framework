@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
-from functools import wraps
 from typing import TYPE_CHECKING, TypeVar
 
 import pytest
@@ -13,12 +12,17 @@ from apps.library import models
 from django.db import connection
 from django.db import models as django_models
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase, QueryDict
-from django.test import override_settings
+from django.http import HttpRequest, QueryDict
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django_filters import CharFilter, Filter, ModelMultipleChoiceFilter
-from graphql_client import JSONObject, graphql_payload, json_list, json_object, json_str
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    graphql_payload,
+    json_list,
+    json_object,
+    json_str,
+)
 from strawberry import relay
 from strawberry.django.context import StrawberryDjangoContext
 from typing_extensions import override
@@ -33,24 +37,16 @@ from django_strawberry_framework.filters import FilterSet, RelatedFilter
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
 if TYPE_CHECKING:
     from django_strawberry_framework.utils.typing import ModelField
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-filter-querysets/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-filter-querysets/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(
@@ -59,12 +55,8 @@ def _post(
     *,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(query, variables=variables, url="/graphql-filter-querysets/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(query, variables=variables, url="/graphql-filter-querysets/")
 
 
 def _named_type(description: object) -> tuple[str, str]:

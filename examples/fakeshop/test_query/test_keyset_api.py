@@ -69,7 +69,6 @@ import datetime
 import enum
 import uuid
 from collections.abc import Callable, Mapping
-from functools import wraps
 
 import pytest
 import strawberry
@@ -84,13 +83,11 @@ from django.db import connection
 from django.db.models import F, Model, QuerySet, TextChoices
 from django.db.models.expressions import Combinable
 from django.db.models.functions import Lower, Random
-from django.http import HttpRequest
-from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import clear_url_caches, path
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     json_at,
     json_bool,
     json_list,
@@ -116,26 +113,9 @@ from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
-_CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _holder_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_holder_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-test/", _holder_view), path("graphql-async/", _async_holder_view)]
+_MOUNT = SchemaMount(__name__, "graphql-test/", async_route="graphql-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _issue_holder_schema(resolver: Callable[..., object]) -> strawberry.Schema:
@@ -153,14 +133,8 @@ def _post_holder(
     *,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            return _graphql_payload(query, variables=variables, url="/graphql-test/")
-    finally:
-        _CURRENT["schema"] = None
-        clear_url_caches()
+    with _MOUNT.serving(schema):
+        return _graphql_payload(query, variables=variables, url="/graphql-test/")
 
 
 async def _post_async_holder(
@@ -169,21 +143,15 @@ async def _post_async_holder(
     *,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            result = await AsyncTestClient().query(
-                query,
-                variables=variables,
-                assert_no_errors=False,
-                url="/graphql-async/",
-            )
-        assert result.response.status_code == 200, result.response.content
-        return response_json(result.response)
-    finally:
-        _CURRENT["schema"] = None
-        clear_url_caches()
+    with _MOUNT.serving(schema):
+        result = await AsyncTestClient().query(
+            query,
+            variables=variables,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+    assert result.response.status_code == 200, result.response.content
+    return response_json(result.response)
 
 
 def _seed_three_issues() -> None:
@@ -343,9 +311,7 @@ def test_root_keyset_rejects_tampered_and_offset_cursors(kind: str) -> None:
         "ciphertext": to_base64(prefix, reencrypted),
         "offset": to_base64("arrayconnection", 2),
     }[kind]
-    response = _post_graphql(ROOT_PAGE_QUERY, variables={"first": 1, "after": bad_cursor})
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = _graphql_payload(ROOT_PAGE_QUERY, variables={"first": 1, "after": bad_cursor})
     assert "errors" in payload, payload
     assert "invalid cursor" in json_str(payload, "errors", 0, "message")
     assert json_at(payload, "data") is None, payload

@@ -11,7 +11,6 @@ from __future__ import annotations
 import datetime
 from collections.abc import Generator, Sequence
 from decimal import Decimal
-from functools import wraps
 from typing import TYPE_CHECKING
 
 import pytest
@@ -21,11 +20,8 @@ from django.core.validators import MinValueValidator
 from django.db import connection as db_connection
 from django.db import models as db_models
 from django.db.models import Model, QuerySet, Transform
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from django.utils.functional import cached_property
-from graphql_client import JSONObject, graphql_payload, json_list
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_list
 from strawberry import relay
 from strawberry.scalars import JSON
 from typing_extensions import override
@@ -53,7 +49,6 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.relations import is_model_class
-from django_strawberry_framework.views import DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
@@ -61,17 +56,10 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.typing import ConcreteField
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-identity-columns/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-identity-columns/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 class _IdentityRow(db_models.Model):
@@ -632,16 +620,12 @@ def _schema(
 
 
 def _post(schema: DjangoSchema, where: JSONObject) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                "query($where: JSON!) { rows(where: $where) { name } allRows { name } }",
-                variables={"where": where},
-                url="/graphql-identity-columns/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            "query($where: JSON!) { rows(where: $where) { name } allRows { name } }",
+            variables={"where": where},
+            url="/graphql-identity-columns/",
+        )
 
 
 def _names(source: type[Model]) -> list[str]:
@@ -1044,17 +1028,13 @@ def test_relay_through_target_to_field_uses_the_decoded_primary_key(
         config=strawberry_config(),
         extensions=[lambda: optimizer],
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload(
-                f"query($ids: [String!]!) {{ rows(filter: {{ {wire}: {{ {lookup}: $ids }} }}) "
-                "{ edges { node { name } } } }",
-                variables={"ids": [global_id_for(target_type, 1)]},
-                url="/graphql-identity-columns/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload(
+            f"query($ids: [String!]!) {{ rows(filter: {{ {wire}: {{ {lookup}: $ids }} }}) "
+            "{ edges { node { name } } } }",
+            variables={"ids": [global_id_for(target_type, 1)]},
+            url="/graphql-identity-columns/",
+        )
     assert payload == {"data": {"rows": {"edges": [{"node": {"name": name}}]}}}, payload
 
 

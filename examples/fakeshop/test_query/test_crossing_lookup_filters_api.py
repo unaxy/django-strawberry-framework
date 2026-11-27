@@ -11,7 +11,6 @@ anonymous viewers and show both to staff.
 """
 
 from collections.abc import Iterator
-from functools import wraps
 
 import pytest
 import strawberry
@@ -19,11 +18,17 @@ from apps.library import models
 from apps.products.services import create_users
 from django.contrib.auth import get_user_model
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase, QueryDict
-from django.test import Client, override_settings
-from django.urls import path
+from django.http import QueryDict
+from django.test import Client
 from django_filters import BooleanFilter, CharFilter
-from graphql_client import JSONObject, graphql_payload, json_list, json_object, json_str
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    graphql_payload,
+    json_list,
+    json_object,
+    json_str,
+)
 from strawberry import relay
 from typing_extensions import override
 
@@ -36,23 +41,15 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, ListFilter, RelatedFilter
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 #: The ``check_<name>_permission`` gates the crossed hop's target set fired, in order.
 _GATES: list[str] = []
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-crossing-lookups/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-crossing-lookups/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _is_staff(info: strawberry.Info[object, object]) -> bool:
@@ -258,17 +255,13 @@ def _post(
     variables: JSONObject,
     client: Client,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                query,
-                client=client,
-                variables=variables,
-                url="/graphql-crossing-lookups/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            query,
+            client=client,
+            variables=variables,
+            url="/graphql-crossing-lookups/",
+        )
 
 
 def _filter_type(schema: DjangoSchema, root: str) -> str:

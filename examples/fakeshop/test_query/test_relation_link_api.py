@@ -21,17 +21,13 @@ relation's ``isnull`` filter tests the stored carriers instead of joining a pare
 """
 
 from collections.abc import Callable, Iterator
-from functools import wraps
 
 import pytest
 import strawberry
 from django.db import connection
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject, assert_graphql_success
+from graphql_client import JSONObject, SchemaMount, assert_graphql_success
 from strategy_schemas import make_django_type
 from strawberry import relay
 from strawberry.scalars import JSON
@@ -51,7 +47,6 @@ from django_strawberry_framework.connection import _connection_type_cache
 from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._narrowing import is_dict, is_list, is_str, require
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import is_object_dict, is_object_list
 from tests.optimizer._link_models import (
     LnkColumnChild,
@@ -65,27 +60,15 @@ from tests.optimizer._link_models import (
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-link/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-link/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(schema: DjangoSchema, query: str) -> JSONObject:
     """Send the operation through the package view using the current holder schema."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return assert_graphql_success(query, url="/graphql-link/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return assert_graphql_success(query, url="/graphql-link/")
 
 
 def _link_statements(captured: CaptureQueriesContext) -> list[str]:

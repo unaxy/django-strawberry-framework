@@ -13,19 +13,15 @@ schema's Strawberry definitions and configured NameConverter.
 """
 
 from collections.abc import Mapping, Sequence
-from functools import wraps
 from typing import TypeVar
 
 import pytest
 import strawberry
 from apps.library import models as library_models
 from django.db import connection, models
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from graphql import GraphQLInputObjectType, get_named_type
-from graphql_client import JSONObject, graphql_payload, json_at, json_list, json_str
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_at, json_list, json_str
 from strategy_schemas import make_django_type
 from strawberry.types.base import StrawberryObjectDefinition
 from typing_extensions import override
@@ -45,36 +41,24 @@ from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
 )
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 from tests.optimizer import _link_models
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _ModelT = TypeVar("_ModelT", bound=models.Model)
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-generated-relations/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-generated-relations/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(schema: DjangoSchema, document: str, *, variables: Mapping[str, object]) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                document,
-                variables=variables,
-                url="/graphql-generated-relations/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            document,
+            variables=variables,
+            url="/graphql-generated-relations/",
+        )
 
 
 def _schema(

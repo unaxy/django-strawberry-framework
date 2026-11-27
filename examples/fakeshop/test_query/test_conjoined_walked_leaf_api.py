@@ -22,20 +22,23 @@ type serves the set, with the number of statements it runs.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from functools import wraps
 
 import pytest
 import strawberry
 from apps.library import models
 from django.db import connection
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django_filters import Filter, ModelMultipleChoiceFilter, MultipleChoiceFilter
 from graphql import GraphQLInputObjectType, get_named_type
-from graphql_client import JSONObject, graphql_payload, json_at, json_list, json_object
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    graphql_payload,
+    json_at,
+    json_list,
+    json_object,
+)
 from strategy_schemas import make_django_type
 from strawberry.scalars import JSON
 from strawberry.types.base import StrawberryObjectDefinition
@@ -61,20 +64,12 @@ from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
 )
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-conjoined-walked/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-conjoined-walked/")
+urlpatterns = _MOUNT.urlpatterns
 
 #: The label column each model's rows answer by.
 _LABELS: dict[type[Model], str] = {
@@ -452,19 +447,15 @@ def _post(
         if typed
         else f"query($where: JSON!) {{ rows(where: $where) {{ {selection} }} }}"
     )
-    _CURRENT["schema"] = schema
-    try:
-        with (
-            override_settings(ROOT_URLCONF=__name__),
-            CaptureQueriesContext(connection) as queries,
-        ):
-            payload = graphql_payload(
-                query,
-                variables={"where": where},
-                url="/graphql-conjoined-walked/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with (
+        _MOUNT.serving(schema),
+        CaptureQueriesContext(connection) as queries,
+    ):
+        payload = graphql_payload(
+            query,
+            variables={"where": where},
+            url="/graphql-conjoined-walked/",
+        )
     rows = (
         [
             json_at(json_object(edge), "node")

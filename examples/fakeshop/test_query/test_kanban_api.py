@@ -26,7 +26,6 @@ directly (not via the importer, so assertions stay independent of how the real
 """
 
 from datetime import timedelta
-from functools import wraps
 from typing import NoReturn
 
 import pytest
@@ -37,15 +36,15 @@ from apps.kanban.filters import MilestoneFilter
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
 from django.db import connection
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django.utils import timezone
 from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
+    graphql_payload,
     json_at,
     json_list,
     json_object,
@@ -60,7 +59,6 @@ from strawberry import relay
 from typing_extensions import TypedDict
 
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 #: Settings that open the spec-048 error policy's pass-through gate for ONE live
 #: request. ``settings.DEBUG`` is the gate, and on this tier it is the only
@@ -341,12 +339,9 @@ def test_flat_composite_milestone_filter_fires_target_permission_gate(
     # ``raising=False``: the gate is an opt-in hook the fixture filter does not
     # declare, so the undo has to be a delete rather than a restore.
     monkeypatch.setattr(MilestoneFilter, "check_key_permission", deny_key, raising=False)
-    response = post_graphql(
+    payload = graphql_payload(
         'query { allCards(filter: { milestoneKey: { exact: "alpha" } }) { title } }',
     )
-
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload["data"] is None
     assert "milestone key denied" in json_str(payload, "errors", 0, "message")
 
@@ -610,11 +605,7 @@ def test_deeply_nested_self_referential_dependency_filter_is_capped() -> None:
     """
     _seed_board()
     query = "query { allCards(filter: { " + _nested_dependency_filter(10) + " }) { title } }"
-    response = post_graphql(query)
-    # A typed cap error is a normal GraphQL error (HTTP 200 + ``errors``), never a
-    # 500 stack overflow.
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = graphql_payload(query)
     # A top-level resolver error nulls ``data`` and reports under ``errors``.
     assert payload["data"] is None
     messages = [json_str(error, "message") for error in json_list(payload, "errors")]
@@ -1344,13 +1335,8 @@ def test_nested_decisions_connection_window_orders_by_decided_at_then_pk() -> No
     assert pk_at > decided_at_at, sql
 
 
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
-
-    return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
-
-
-urlpatterns = [path("graphql-async/", _async_shipped_graphql_view)]
+_MOUNT = SchemaMount(__name__, async_route="graphql-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 _CARD_DECISIONS_AFTER = """
 query ($id: ID!, $after: DateTime!) {
@@ -1394,7 +1380,7 @@ async def test_async_decisions_connection_refuses_an_unbindable_temporal_filter(
     16:00, which SQLite projects onto UTC and filters on.
     """
     card_id = await sync_to_async(_card_with_a_decision)()
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         client = AsyncTestClient()
         control = await client.query(
             _CARD_DECISIONS_AFTER,
@@ -1475,7 +1461,7 @@ async def test_async_all_cards_answers_as_the_sync_view(
     """
     await sync_to_async(_seed_board)()
     recorded = record_compiled_sql()
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         result = await AsyncTestClient().query(
             document,
             assert_no_errors=False,

@@ -135,8 +135,6 @@ import uuid
 from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from decimal import Decimal
-from functools import wraps
-from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import django
@@ -147,18 +145,19 @@ from config import schema as config_schema
 from django.db import DataError, connection, transaction
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django.utils import timezone
-from graphql_client import JSONObject, json_at, post_graphql, response_json
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    graphql_payload,
+    json_at,
+    post_graphql,
+    response_json,
+)
 
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import is_dict, is_list_or_tuple
 from django_strawberry_framework.utils.typing import object_result
-from django_strawberry_framework.views import AsyncDjangoGraphQLView
-
-if TYPE_CHECKING:
-    from django.http import HttpRequest
-    from django.http.response import HttpResponseBase
 
 _UNSTORABLE = "Enter a value the database can represent."
 _UNREPRESENTABLE_IN_ZONE = "Enter a value the current time zone can represent."
@@ -648,12 +647,8 @@ def test_decimal_sqlite_cannot_read_back_is_the_field_error(
     assert rows == [(label, stored)]
 
 
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
-
-
-urlpatterns = [path("graphql-async/", _async_shipped_graphql_view)]
+_MOUNT = SchemaMount(__name__, async_route="graphql-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 @pytest.mark.django_db(transaction=True)
@@ -676,7 +671,7 @@ async def test_async_write_holds_the_same_temporal_rule(flavor: str, name: str) 
     """
     cell = _CELLS[name]
     root, document = _document(flavor, "create")
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         result = await AsyncTestClient().query(
             document,
             variables=_variables(flavor, "create", cell, None),
@@ -1014,7 +1009,7 @@ async def test_async_form_write_holds_the_zone_and_hook_refusals(
     """
     selection = "{ result { label } errors { field messages codes path } }"
     document = f"mutation Write($data: {input_type}!) {{ {root}(data: $data) {selection} }}"
-    with override_settings(ROOT_URLCONF=__name__, TIME_ZONE="America/New_York"):
+    with _MOUNT.serving(config_schema.schema, TIME_ZONE="America/New_York"):
         result = await AsyncTestClient().query(
             document,
             variables={"data": {**_CREATE_DATA, **data}},
@@ -1137,9 +1132,7 @@ def test_posted_text_over_a_split_datetime_widget_is_a_masked_decompress_error(
 def _create_model_value(data: Mapping[str, object]) -> JSONObject:
     """Create through the shipped model mutation and return its entire HTTP envelope."""
     _root, document = _document("model", "create")
-    response = post_graphql(document, variables={"data": data})
-    assert response.status_code == 200
-    return response_json(response)
+    return graphql_payload(document, variables={"data": data})
 
 
 _MODEL_CREATE_SUCCESS: JSONObject = {
@@ -1448,7 +1441,7 @@ async def test_async_checkbox_over_a_nullable_boolean_stores_null_for_null(
     """The async pipeline stores ``NULL`` for the checkbox ``flag``'s ``null`` the same way."""
     root, document = _flag_document(operation)
     variables = await sync_to_async(_flag_variables)(operation, data, stored=stored)
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         result = await AsyncTestClient().query(
             document,
             variables=variables,
@@ -1674,7 +1667,7 @@ async def test_async_char_field_over_a_nullable_float_column_stores_null_for_nul
     """The async pipeline stores ``NULL`` for the ``CharField`` ``score``'s ``null`` the same way."""
     root, document = _flag_document(operation, "label score")
     variables = await sync_to_async(_score_variables)(operation, data, stored=stored)
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         result = await AsyncTestClient().query(
             document,
             variables=variables,
@@ -1835,7 +1828,7 @@ async def test_async_json_text_field_writes_the_same_way(
 ) -> None:
     """The async pipeline parses the JSON text sent and keeps an omitted stored value the same way."""
     root, document, variables = await sync_to_async(_json_text_write)("update", data, {"k": "v"})
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         result = await AsyncTestClient().query(
             document,
             variables=variables,
@@ -1983,7 +1976,7 @@ async def test_async_update_omitting_a_column_keeps_its_stored_value(
     """The async pipeline keeps an omitted column's stored value the same way."""
     root, document = _flag_document("update")
     variables = await sync_to_async(_kept_columns_variables)(stored)
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         result = await AsyncTestClient().query(
             document,
             variables=variables,
@@ -2091,7 +2084,7 @@ async def test_async_update_through_disabled_fields_keeps_their_stored_values(
 ) -> None:
     """The async pipeline keeps a disabled field's stored value the same way, omitted or sent."""
     variables, external_id = await sync_to_async(_locked_variables)(sent)
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         result = await AsyncTestClient().query(
             _LOCKED_DOCUMENT,
             variables=variables,

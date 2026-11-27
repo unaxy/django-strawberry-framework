@@ -10,7 +10,6 @@ logical arms and flat leaves walk it, at every nesting level.
 import asyncio
 import datetime
 from collections.abc import Awaitable, Mapping, Sequence
-from functools import wraps
 from typing import TypeVar
 
 import pytest
@@ -19,14 +18,13 @@ from apps.library import models
 from asgiref.sync import sync_to_async
 from django import forms
 from django.db.models import F, Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
+from django.http import HttpRequest
 from django_filters import BooleanFilter, CharFilter, DateFilter, Filter
 from django_filters.filterset import BaseFilterSet
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -46,31 +44,17 @@ from django_strawberry_framework import (
 from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import read_attr, require_instance
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 _M = TypeVar("_M", bound=Model)
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-relation-defaults/", _graphql_view),
-    path("graphql-relation-defaults-async/", _async_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-relation-defaults/",
+    async_route="graphql-relation-defaults-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 async def _async_post(document: str, variables: JSONObject) -> JSONObject:
@@ -95,18 +79,14 @@ def _post(
         f"query($where: JSON!) {{ rows(where: $where) {{ name: {label} }} "
         f"allRows {{ name: {label} }} }}"
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if transport == "async":
-                return asyncio.run(_async_post(document, {"where": where}))
-            return graphql_payload(
-                document,
-                variables={"where": where},
-                url="/graphql-relation-defaults/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        if transport == "async":
+            return asyncio.run(_async_post(document, {"where": where}))
+        return graphql_payload(
+            document,
+            variables={"where": where},
+            url="/graphql-relation-defaults/",
+        )
 
 
 def _holder(

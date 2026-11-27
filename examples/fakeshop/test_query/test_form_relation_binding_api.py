@@ -1,7 +1,6 @@
 """Live HTTP form tests for relation-key reconstruction, replacement and decode refusals."""
 
 from collections.abc import Mapping
-from functools import wraps
 
 import pytest
 import strawberry
@@ -11,11 +10,15 @@ from apps.products.services import seed_data
 from django import forms
 from django.db import connection
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_at, json_list, post_lock_rereads
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    graphql_payload,
+    json_at,
+    json_list,
+    post_lock_rereads,
+)
 from strawberry import relay
 from typing_extensions import override
 
@@ -31,21 +34,13 @@ from django_strawberry_framework import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import dict_of, read_attr
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._catalog_data import categories_from_seed
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-form-relations/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-form-relations/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 @strawberry.type
@@ -63,12 +58,8 @@ def _schema(mutation: type[object]) -> DjangoSchema:
 
 def _post(schema: DjangoSchema, document: str, variables: Mapping[str, object]) -> JSONObject:
     """Read the native HTTP response and restore this test's schema mount on every exit."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(document, variables=variables, url="/graphql-form-relations/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(document, variables=variables, url="/graphql-form-relations/")
 
 
 def _relation_error(field: str) -> JSONObject:

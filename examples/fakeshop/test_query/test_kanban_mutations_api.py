@@ -24,8 +24,8 @@ from django.contrib.auth.models import User
 from django.http import HttpRequest, HttpResponseBase
 from django.test import Client
 from django.urls import include, path
-from graphql_client import JSONObject, json_at, json_list, json_object, json_str, response_json
-from graphql_client import post_graphql as _post_graphql
+from graphql_client import JSONObject, json_at, json_list, json_object, json_str
+from graphql_client import graphql_payload as _graphql_payload
 
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.testing.relay import global_id_for
@@ -77,9 +77,7 @@ def _card_gid(card: models.Card) -> str:
 
 def _run(query: str, variables: dict[str, object], *, client: Client) -> JSONObject:
     """POST a mutation and return the parsed payload (top-level and envelope both readable)."""
-    response = _post_graphql(query, client=client, variables=variables)
-    assert response.status_code == 200
-    return response_json(response)
+    return _graphql_payload(query, client=client, variables=variables)
 
 
 _SET_STATUS = (

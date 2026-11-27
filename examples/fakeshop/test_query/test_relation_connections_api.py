@@ -11,7 +11,6 @@ identities remain in tests/test_relay_connection.py.
 import re
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
-from functools import wraps
 
 import pytest
 import strawberry
@@ -21,11 +20,9 @@ from django.db import connection as db_connection
 from django.db import models as djmodels
 from django.db.models import ForeignObjectRel
 from django.db.models.expressions import Combinable
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import RecordCompiledSql, middleware_without_debug_toolbar
+from graphql_client import RecordCompiledSql, SchemaMount, middleware_without_debug_toolbar
 from strategy_schemas import make_django_type
 from strategy_schemas import make_django_type as _make_type
 from strawberry import relay
@@ -52,7 +49,6 @@ from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import declare_django_type, json_at, json_list
 from tests._relation_connection_schemas import (
     _genres_distinct_book_schema,
@@ -65,27 +61,14 @@ from tests._relation_connection_schemas import (
 )
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-relation-connections/", _graphql_view),
-    path("graphql-relation-connections-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-relation-connections/",
+    async_route="graphql-relation-connections-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 @pytest.fixture(autouse=True)
@@ -102,36 +85,28 @@ def _exec(
     expect_errors: bool = False,
 ) -> GraphQLResponse:
     """Post the consumer operation against the function-scoped graph."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = TestClient().query(
-                query,
-                assert_no_errors=False,
-                url="/graphql-relation-connections/",
-            )
-        assert result.response.status_code == 200
-        if not expect_errors:
-            assert result.errors is None, result.errors
-        return result
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        result = TestClient().query(
+            query,
+            assert_no_errors=False,
+            url="/graphql-relation-connections/",
+        )
+    assert result.response.status_code == 200
+    if not expect_errors:
+        assert result.errors is None, result.errors
+    return result
 
 
 async def _exec_async(schema: strawberry.Schema, query: str) -> GraphQLResponse:
     """Post the same graph through the async view and client."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient().query(
-                query,
-                assert_no_errors=False,
-                url="/graphql-relation-connections-async/",
-            )
-        assert result.response.status_code == 200
-        return result
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        result = await AsyncTestClient().query(
+            query,
+            assert_no_errors=False,
+            url="/graphql-relation-connections-async/",
+        )
+    assert result.response.status_code == 200
+    return result
 
 
 @contextmanager

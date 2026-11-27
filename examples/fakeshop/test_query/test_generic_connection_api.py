@@ -6,7 +6,6 @@ content-type, paging and query-cost claims on the HTTP tier.
 """
 
 from collections.abc import Mapping, Sequence
-from functools import wraps
 
 import pytest
 import strawberry
@@ -15,14 +14,12 @@ from asgiref.sync import sync_to_async
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection as db_connection
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
-    graphql_payload,
+    SchemaMount,
+    assert_graphql_success,
     json_at,
     json_list,
     json_object,
@@ -39,56 +36,28 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-generic/", _graphql_view),
-    path("graphql-generic-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(__name__, "graphql-generic/", async_route="graphql-generic-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(schema: DjangoSchema, query: str) -> JSONObject:
     """Serve the function-scoped graph through Django's HTTP request stack."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload(query, url="/graphql-generic/")
-        assert "errors" not in payload, payload
-        return json_object(payload, "data")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return assert_graphql_success(query, url="/graphql-generic/")
 
 
 async def _post_async(schema: DjangoSchema, query: str) -> JSONObject:
     """Serve the same graph through the package's async HTTP view."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient().query(query, url="/graphql-generic-async/")
-        assert result.response.status_code == 200
-        payload = response_json(result.response)
-        assert "errors" not in payload, payload
-        return json_object(payload, "data")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        result = await AsyncTestClient().query(query, url="/graphql-generic-async/")
+    assert result.response.status_code == 200
+    payload = response_json(result.response)
+    assert "errors" not in payload, payload
+    return json_object(payload, "data")
 
 
 def _build_schema(*, strategy: str | None = None, total_count: bool = False) -> DjangoSchema:

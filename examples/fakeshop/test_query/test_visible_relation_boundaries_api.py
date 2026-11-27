@@ -11,19 +11,15 @@ the type the set is bound to.
 import asyncio
 import datetime
 from collections.abc import Awaitable, Mapping, Sequence
-from functools import wraps
 from typing import NamedTuple
 
 import pytest
 import strawberry
 from apps.library import models
 from django.db import models as django_models
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from django_filters import BooleanFilter, CharFilter, ModelChoiceFilter, NumberFilter
 from graphql import GraphQLInputObjectType, get_named_type
-from graphql_client import JSONObject, graphql_payload, response_json
+from graphql_client import JSONObject, SchemaMount, graphql_payload, response_json
 from strategy_schemas import make_django_type
 from strawberry.scalars import JSON
 from strawberry.types.base import StrawberryObjectDefinition
@@ -44,31 +40,17 @@ from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
 )
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-visible-boundaries/", _graphql_view),
-    path("graphql-visible-boundaries-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-visible-boundaries/",
+    async_route="graphql-visible-boundaries-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 async def _async_post(document: str, variables: Mapping[str, object]) -> JSONObject:
@@ -89,19 +71,15 @@ def _post(
     *,
     transport: str = "sync",
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            variables = {"where": where}
-            if transport == "async":
-                return asyncio.run(_async_post(document, variables))
-            return graphql_payload(
-                document,
-                variables=variables,
-                url="/graphql-visible-boundaries/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        variables = {"where": where}
+        if transport == "async":
+            return asyncio.run(_async_post(document, variables))
+        return graphql_payload(
+            document,
+            variables=variables,
+            url="/graphql-visible-boundaries/",
+        )
 
 
 def _type(

@@ -7,18 +7,13 @@ their metadata before the request. A model-less related-only set wired as a type
 ``Meta.orderset_class`` serves ``orderBy`` on a ``DjangoListField`` the same way.
 """
 
-from functools import wraps
-
 import pytest
 import strawberry
 from apps.library import models
 from django.db import connection
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload
+from graphql_client import JSONObject, SchemaMount, graphql_payload
 
 from django_strawberry_framework import (
     DjangoListField,
@@ -28,20 +23,12 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.orders import Ordering, OrderSet, RelatedOrder
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-order-arguments/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-order-arguments/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _schema(metadata: str) -> DjangoSchema:
@@ -101,24 +88,20 @@ def _schema(metadata: str) -> DjangoSchema:
 
 
 def _post(schema: DjangoSchema) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                """
-                {
-                  rows(descending: false) {
-                    name
-                  }
-                  allRows {
-                    name
-                  }
-                }
-                """,
-                url="/graphql-order-arguments/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            """
+            {
+              rows(descending: false) {
+                name
+              }
+              allRows {
+                name
+              }
+            }
+            """,
+            url="/graphql-order-arguments/",
+        )
 
 
 @pytest.mark.django_db
@@ -204,17 +187,13 @@ def test_a_wired_related_only_order_without_meta_model_serves_order_by(
     beta = models.Branch.objects.create(name="Beta", city="Y")
     models.Shelf.objects.create(code="a", branch=beta)
     models.Shelf.objects.create(code="b", branch=beta)
-    _CURRENT["schema"] = _wired_schema()
-    try:
-        with (
-            override_settings(ROOT_URLCONF=__name__),
-            CaptureQueriesContext(connection) as captured,
-        ):
-            payload = graphql_payload(
-                f"{{ branches(orderBy: [{{shelves: {{code: {direction}}}}}]) {{ name }} }}",
-                url="/graphql-order-arguments/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with (
+        _MOUNT.serving(_wired_schema()),
+        CaptureQueriesContext(connection) as captured,
+    ):
+        payload = graphql_payload(
+            f"{{ branches(orderBy: [{{shelves: {{code: {direction}}}}}]) {{ name }} }}",
+            url="/graphql-order-arguments/",
+        )
     assert payload == {"data": {"branches": [{"name": name} for name in names]}}
     assert len(captured.captured_queries) == 1, captured.captured_queries

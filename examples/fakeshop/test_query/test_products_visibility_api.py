@@ -28,7 +28,6 @@ verdict.
 
 import json
 from collections.abc import Callable
-from functools import wraps
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import pytest
@@ -42,14 +41,13 @@ from config import schema as config_schema
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.models import QuerySet
-from django.http import HttpRequest
-from django.http.response import HttpResponseBase
-from django.test import AsyncClient, Client, override_settings
+from django.test import AsyncClient, Client
 from django.test.utils import CaptureQueriesContext
-from django.urls import clear_url_caches, path
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     assert_graphql_success,
+    graphql_payload,
     json_at,
     json_list,
     json_object,
@@ -76,7 +74,6 @@ from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedASGIResponse
@@ -86,24 +83,9 @@ _ItemGetQueryset: TypeAlias = Callable[
     QuerySet[Item],
 ]
 
-_CURRENT: dict[str, object | None] = {"schema": None}
 
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql/", _graphql_view), path("graphql-async/", _async_graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql/", async_route="graphql-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 @pytest.mark.django_db
@@ -125,21 +107,15 @@ def test_unoptimized_relation_hides_private_child_over_http() -> None:
             graphql_type=list[products_schema.CategoryType],
         )
 
-    _CURRENT["schema"] = strawberry.Schema(query=Query)
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            response = post_graphql(
-                "{ categories { items { name } } }",
-                url="/graphql/",
-            )
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert payload.get("errors") is None, payload
-        assert payload["data"] == {"categories": [{"items": []}]}
-    finally:
-        _CURRENT["schema"] = None
-        clear_url_caches()
+    with _MOUNT.serving(strawberry.Schema(query=Query)):
+        response = post_graphql(
+            "{ categories { items { name } } }",
+            url="/graphql/",
+        )
+    assert response.status_code == 200
+    payload = response_json(response)
+    assert payload.get("errors") is None, payload
+    assert payload["data"] == {"categories": [{"items": []}]}
 
 
 def _build_async_visibility_schema() -> strawberry.Schema:
@@ -166,19 +142,13 @@ def _build_async_visibility_schema() -> strawberry.Schema:
 
 async def _post_async_visibility_query() -> "_MonkeyPatchedASGIResponse":
     schema = await sync_to_async(_build_async_visibility_schema)()
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            res = await AsyncTestClient().query(
-                "{ categories { items { name } } }",
-                assert_no_errors=False,
-                url="/graphql-async/",
-            )
-            return res.response
-    finally:
-        _CURRENT["schema"] = None
-        clear_url_caches()
+    with _MOUNT.serving(schema):
+        res = await AsyncTestClient().query(
+            "{ categories { items { name } } }",
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+        return res.response
 
 
 @pytest.mark.django_db(transaction=True)
@@ -279,16 +249,10 @@ def _post_visibility_query(
     ``client`` carries a logged-in session when the row's subject is which viewer
     the target hook answers for; omitting it posts anonymously.
     """
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            response = post_graphql(query, client=client, url="/graphql/")
-        assert response.status_code == 200
-        return response_json(response)
-    finally:
-        _CURRENT["schema"] = None
-        clear_url_caches()
+    with _MOUNT.serving(schema):
+        response = post_graphql(query, client=client, url="/graphql/")
+    assert response.status_code == 200
+    return response_json(response)
 
 
 @pytest.mark.django_db
@@ -410,19 +374,13 @@ async def test_async_forward_fk_target_visibility_hides_a_private_target_over_ht
     """
     await sync_to_async(services.seed_data)(1)
     schema = await sync_to_async(_build_async_forward_fk_schema)()
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            res = await AsyncTestClient().query(
-                "{ items { name category { name } } }",
-                assert_no_errors=False,
-                url="/graphql-async/",
-            )
-            response = res.response
-    finally:
-        _CURRENT["schema"] = None
-        clear_url_caches()
+    with _MOUNT.serving(schema):
+        res = await AsyncTestClient().query(
+            "{ items { name category { name } } }",
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+        response = res.response
     assert response.status_code == 200
     payload = response_json(response)
     assert payload["data"] is None
@@ -1083,19 +1041,13 @@ async def test_async_reverse_one_to_one_custom_visibility_over_http() -> None:
         )
 
     schema = strawberry.Schema(query=Query)
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            res = await AsyncTestClient().query(
-                "{ patrons { name card { barcode } } }",
-                assert_no_errors=False,
-                url="/graphql-async/",
-            )
-            response = res.response
-    finally:
-        _CURRENT["schema"] = None
-        clear_url_caches()
+    with _MOUNT.serving(schema):
+        res = await AsyncTestClient().query(
+            "{ patrons { name card { barcode } } }",
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+        response = res.response
     assert response.status_code == 200
     payload = response_json(response)
     assert payload.get("errors") is None, payload
@@ -1523,9 +1475,7 @@ def _sync_shipped_payload(document: str, username: str) -> JSONObject:
     """The actual shipped sync response, checked against a transport-independent oracle."""
     client = Client()
     client.force_login(get_user_model().objects.get(username=username))
-    response = post_graphql(document, client=client)
-    assert response.status_code == 200
-    return response_json(response)
+    return graphql_payload(document, client=client)
 
 
 def _expected_shipped_payload(shape: str) -> JSONObject:
@@ -1566,16 +1516,12 @@ async def _async_payload(
     client: AsyncClient | None = None,
 ) -> JSONObject:
     """POST ``document`` against ``schema`` on the async package view at ``/graphql-async/``."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            res = await AsyncTestClient(client=client).query(
-                document,
-                assert_no_errors=False,
-                url="/graphql-async/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        res = await AsyncTestClient(client=client).query(
+            document,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
     assert res.response.status_code == 200
     return response_json(res.response)
 

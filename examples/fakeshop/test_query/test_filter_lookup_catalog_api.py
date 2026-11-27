@@ -7,7 +7,6 @@ interface rather than pretending their column-typed generated inputs accept thos
 
 import datetime
 import uuid
-from functools import wraps
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,11 +14,8 @@ import strawberry
 from apps.scalars import models as scalar_models
 from django.db import models
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from django_filters import CharFilter
-from graphql_client import assert_graphql_data
+from graphql_client import SchemaMount, assert_graphql_data
 
 from django_strawberry_framework import (
     DjangoSchema,
@@ -28,23 +24,15 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet
-from django_strawberry_framework.views import DjangoGraphQLView
 
 if TYPE_CHECKING:
     from graphql_client import JSONValue
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-filter-lookup-catalog/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-filter-lookup-catalog/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _schema() -> DjangoSchema:
@@ -101,12 +89,8 @@ def _schema() -> DjangoSchema:
 
 
 def _assert_data(schema: DjangoSchema, query: str, expected: dict[str, "JSONValue"]) -> None:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            assert_graphql_data(query, expected, url="/graphql-filter-lookup-catalog/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        assert_graphql_data(query, expected, url="/graphql-filter-lookup-catalog/")
 
 
 @pytest.mark.django_db

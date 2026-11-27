@@ -19,7 +19,6 @@ a scalar-only nested connection window.
 """
 
 from collections.abc import Callable
-from functools import wraps
 
 import pytest
 import strawberry
@@ -30,12 +29,17 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.models import QuerySet
-from django.http import HttpRequest
-from django.http.response import HttpResponseBase
-from django.test import Client, override_settings
+from django.test import Client
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject, json_at, json_list, post_graphql, response_json, saved_pk
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    json_at,
+    json_list,
+    post_graphql,
+    response_json,
+    saved_pk,
+)
 from strategy_schemas import make_django_type
 
 from django_strawberry_framework import (
@@ -48,26 +52,9 @@ from django_strawberry_framework import (
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
-_CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql/", _graphql_view), path("graphql-async/", _async_graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql/", async_route="graphql-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 #: Depth one: the root JOINs the item's category, which the plan prefetches.
 _DEPTH_ONE_QUERY = "{ items { name category { name } } }"
@@ -131,14 +118,10 @@ def _joined_schema(item_pk: int, entry_pk: int) -> strawberry.Schema:
 
 
 def _post(schema: strawberry.Schema, query: str, *, client: Client | None = None) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            response = post_graphql(query, client=client, url="/graphql/")
-        assert response.status_code == 200
-        return response_json(response)
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        response = post_graphql(query, client=client, url="/graphql/")
+    assert response.status_code == 200
+    return response_json(response)
 
 
 def _staff_client() -> Client:
@@ -404,17 +387,13 @@ def _async_holder_schema() -> tuple[strawberry.Schema, str]:
 async def test_async_hook_join_does_not_serve_the_planned_targets_hidden_row(query: str) -> None:
     """The same refusal on an async request, at both depths."""
     schema, hidden_name = await sync_to_async(_async_holder_schema)()
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            res = await AsyncTestClient().query(
-                query,
-                assert_no_errors=False,
-                url="/graphql-async/",
-            )
-            response = res.response
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        res = await AsyncTestClient().query(
+            query,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+        response = res.response
     assert response.status_code == 200
     _assert_refused(response_json(response), _HOLDER_REFUSAL, hidden_name)
 
@@ -548,15 +527,11 @@ async def test_async_hook_join_the_selection_never_reads_survives_the_projection
 ) -> None:
     """The same unread hook JOIN, at the root and in the planned child, on an async request."""
     schema, item, entry = await sync_to_async(_unread_hook_join_rows)()
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            res = await AsyncTestClient().query(
-                query,
-                assert_no_errors=False,
-                url="/graphql-async/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        res = await AsyncTestClient().query(
+            query,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
     assert res.response.status_code == 200
     assert res.response.json() == {"data": expected(item, entry)}

@@ -2,7 +2,6 @@
 
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
-from functools import wraps
 
 import pytest
 import strawberry
@@ -13,11 +12,8 @@ from django.core.exceptions import ValidationError
 from django.db import connection
 from django.db.models import Model, QuerySet
 from django.db.models.signals import m2m_changed, pre_save
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_at, json_list
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_at, json_list
 from strawberry import relay
 from strawberry.schema.config import StrawberryConfig
 from strawberry.schema.name_converter import NameConverter
@@ -36,21 +32,13 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.input_values import UNSET
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._catalog_data import categories_from_seed
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-model-flows/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-model-flows/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 @strawberry.type
@@ -82,12 +70,8 @@ def _post(
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
     """Decode the entire HTTP envelope and restore this mount even when the request raises."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(document, variables=variables, url="/graphql-model-flows/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(document, variables=variables, url="/graphql-model-flows/")
 
 
 def _error(field: str) -> JSONObject:

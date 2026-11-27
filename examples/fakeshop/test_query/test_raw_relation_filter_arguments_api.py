@@ -9,17 +9,13 @@ available.
 """
 
 from collections.abc import Sequence
-from functools import wraps
 
 import pytest
 import strawberry
 from apps.library import models
 from django.db import models as django_models
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from django_filters import BooleanFilter, CharFilter, ModelChoiceFilter, NumberFilter
-from graphql_client import JSONObject, RecordCompiledSql, graphql_payload
+from graphql_client import JSONObject, RecordCompiledSql, SchemaMount, graphql_payload
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -30,34 +26,22 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-raw-relation-arguments/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-raw-relation-arguments/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(schema: DjangoSchema, document: str, variables: JSONObject) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                document,
-                variables=variables,
-                url="/graphql-raw-relation-arguments/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            document,
+            variables=variables,
+            url="/graphql-raw-relation-arguments/",
+        )
 
 
 def _schema(query: type[object], types: Sequence[type[DjangoType]]) -> DjangoSchema:

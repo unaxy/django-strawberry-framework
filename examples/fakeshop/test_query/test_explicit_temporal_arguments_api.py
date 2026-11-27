@@ -13,7 +13,6 @@ from __future__ import annotations
 import datetime
 import uuid
 from collections.abc import Mapping, Sequence
-from functools import wraps
 from typing import NamedTuple
 
 import django_filters
@@ -23,13 +22,12 @@ from apps.scalars import models as scalar_models
 from django.db import connection
 from django.db import models as django_models
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
-from django.urls import path
 from django.utils import timezone
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -52,25 +50,17 @@ from django_strawberry_framework.scalars import BigInt
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import is_queryset, require
 from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _UNBINDABLE = [{"message": "Enter a value the database can represent.", "code": "invalid"}]
 _NAIVE_DATE_WARNING = pytest.mark.filterwarnings(
     "ignore:DateTimeField .* received a naive datetime:RuntimeWarning",
 )
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-calendar-search/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-calendar-search/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _temporal_filter_class() -> type[FilterSet]:
@@ -449,16 +439,12 @@ def _post(schema: DjangoSchema, root: str, arguments: Mapping[str, object]) -> J
         f"query({', '.join(definitions)}) {{ rows: {root_name}({', '.join(supplied)}) "
         "{ id label } }"
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                document,
-                variables=variables,
-                url="/graphql-calendar-search/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            document,
+            variables=variables,
+            url="/graphql-calendar-search/",
+        )
 
 
 def _expected(

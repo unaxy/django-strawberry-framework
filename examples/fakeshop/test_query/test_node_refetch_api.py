@@ -41,7 +41,6 @@ import warnings
 import zoneinfo
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from decimal import Decimal
-from functools import wraps
 from types import UnionType
 from typing import TYPE_CHECKING
 
@@ -55,13 +54,12 @@ from asgiref.sync import async_to_sync, sync_to_async
 from django.db import connection, models
 from django.db.models import Model, QuerySet
 from django.db.models.functions import Length
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django.utils.functional import SimpleLazyObject
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -88,7 +86,6 @@ from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import is_exact_list, read_attr
 from django_strawberry_framework.utils.typing import object_result
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import FETCH_MODES, pickle_roundtrip, requires_fetch_modes, saved_pk
 
 if TYPE_CHECKING:
@@ -109,27 +106,9 @@ else:
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 
-_CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
 
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-refetch/", _graphql_view),
-    path("graphql-refetch-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(__name__, "graphql-refetch/", async_route="graphql-refetch-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(
@@ -138,12 +117,8 @@ def _post(
     *,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(query, variables=variables, url="/graphql-refetch/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(query, variables=variables, url="/graphql-refetch/")
 
 
 async def _post_async(
@@ -152,19 +127,15 @@ async def _post_async(
     *,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient().query(
-                query,
-                variables=variables,
-                assert_no_errors=False,
-                url="/graphql-refetch-async/",
-            )
-        assert result.response.status_code == 200
-        return response_json(result.response)
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        result = await AsyncTestClient().query(
+            query,
+            variables=variables,
+            assert_no_errors=False,
+            url="/graphql-refetch-async/",
+        )
+    assert result.response.status_code == 200
+    return response_json(result.response)
 
 
 def _category_type(name: str, **meta_extra: object) -> type[DjangoType]:

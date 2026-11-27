@@ -27,7 +27,6 @@ Relay parent, whose shadowing closure emits the published name like every other
 
 import sys
 from collections.abc import Callable, Iterator, Mapping
-from functools import wraps
 
 import pytest
 import strawberry
@@ -36,20 +35,17 @@ from apps.products import models
 from apps.products.services import create_users, seed_data
 from django.contrib.auth.models import Permission, User
 from django.db import connection
-from django.http import HttpRequest
-from django.http.response import HttpResponseBase
 from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from graphql_client import (
     JSONObject,
+    SchemaMount,
+    graphql_payload,
     json_at,
     json_list,
     json_object,
     json_str,
-    post_graphql,
     read_attr,
-    response_json,
 )
 from strawberry import relay
 from strawberry.schema.name_converter import NameConverter
@@ -70,19 +66,9 @@ from django_strawberry_framework import (
 from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.views import DjangoGraphQLView
 
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 class _ApiPrefix(NameConverter):
@@ -101,7 +87,7 @@ def _gid(type_name: str, pk: object) -> str:
 
 def _published_id(type_name: str, pk: object) -> str:
     """Mint against the real registered type and the executing schema's NameConverter."""
-    schema = _CURRENT["schema"]
+    schema = _MOUNT.schema
     assert schema is not None
     origin = registry.definition_for_graphql_name(type_name).origin
     assert origin is not None
@@ -130,21 +116,13 @@ def renaming_schema(project_schema_override: Callable[[], None]) -> Iterator[Dja
             config=strawberry_config(name_converter=_ApiPrefix()),
             extensions=[lambda: optimizer],
         )
-        _CURRENT["schema"] = schema
-        try:
-            with override_settings(ROOT_URLCONF=__name__):
-                yield schema
-        finally:
-            _CURRENT["schema"] = None
+        with _MOUNT.serving(schema):
+            yield schema
 
 
 def _mount(schema: DjangoSchema) -> Iterator[DjangoSchema]:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            yield schema
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        yield schema
 
 
 def _payload(
@@ -153,9 +131,7 @@ def _payload(
     *,
     client: Client | None = None,
 ) -> JSONObject:
-    response = post_graphql(query, variables=variables, client=client, url="/graphql/")
-    assert response.status_code == 200
-    return response_json(response)
+    return graphql_payload(query, variables=variables, client=client, url="/graphql/")
 
 
 def _data(

@@ -94,7 +94,6 @@ One shape per planner rule, each read off the wire and off the SQL the request e
 import enum
 import re
 from collections.abc import Callable
-from functools import wraps
 
 import pytest
 import strawberry
@@ -121,13 +120,11 @@ from django.db.models import (
 from django.db.models.expressions import CombinedExpression, RawSQL
 from django.db.models.functions import Abs, Lower, Random
 from django.db.models.lookups import Exact
-from django.http import HttpRequest
-from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext, register_lookup
-from django.urls import clear_url_caches, path
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     assert_graphql_success,
     graphql_payload,
     is_json_list,
@@ -155,7 +152,6 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import decode_global_id, global_id_for
-from django_strawberry_framework.views import DjangoGraphQLView
 
 
 def _sql_from_table(captured: CaptureQueriesContext, table: str) -> list[str]:
@@ -1293,17 +1289,8 @@ def test_string_literal_in_a_book_order_condition_keeps_genre_books_connection_w
 #: ``djdt`` routes under the ambient ``DEBUG=False``.
 _ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
-_MOUNTED: dict[str, strawberry.Schema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _mounted_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _MOUNTED["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-test/", _mounted_view)]
+_MOUNT = SchemaMount(__name__, "graphql-test/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(query: str, *, schema: strawberry.Schema | None = None) -> JSONObject:
@@ -1316,14 +1303,8 @@ def _post(query: str, *, schema: strawberry.Schema | None = None) -> JSONObject:
     if schema is None:
         with override_settings(**_ERROR_POLICY_PASS_THROUGH):
             return graphql_payload(query)
-    _MOUNTED["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__, **_ERROR_POLICY_PASS_THROUGH):
-            clear_url_caches()
-            return graphql_payload(query, url="/graphql-test/")
-    finally:
-        _MOUNTED["schema"] = None
-        clear_url_caches()
+    with _MOUNT.serving(schema, **_ERROR_POLICY_PASS_THROUGH):
+        return graphql_payload(query, url="/graphql-test/")
 
 
 def _unoptimized_library_schema() -> DjangoSchema:

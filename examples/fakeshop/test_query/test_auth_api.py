@@ -917,12 +917,10 @@ def test_non_string_login_username_fails_validation_before_the_resolver() -> Non
     create_users(1)
     client = Client()
 
-    response = _post_graphql(
+    payload = graphql_payload(
         'mutation{ login(username: 123, password: "x"){ node{ username } errors{ field } } }',
         client=client,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload
     assert payload.get("data") is None
     assert "sessionid" not in client.cookies

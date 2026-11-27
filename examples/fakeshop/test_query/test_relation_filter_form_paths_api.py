@@ -7,20 +7,18 @@ while authored model-choice empty values retain the roots their target types hid
 
 import asyncio
 from collections.abc import Awaitable, Mapping, Sequence
-from functools import wraps
 
 import pytest
 import strawberry
 from apps.library import models
 from asgiref.sync import sync_to_async
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
+from django.http import HttpRequest
 from django_filters import CharFilter, ModelChoiceFilter, ModelMultipleChoiceFilter
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_object,
     response_json,
@@ -43,31 +41,17 @@ from django_strawberry_framework.utils._narrowing import (
     require,
     require_instance,
 )
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-relation-form-paths/", _graphql_view),
-    path("graphql-relation-form-paths-async/", _async_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-relation-form-paths/",
+    async_route="graphql-relation-form-paths-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _scope(model: type[Model], **hidden: object) -> type[DjangoType]:
@@ -186,18 +170,14 @@ def _post(
         f"query($where: JSON!) {{ rows(where: $where) {{ key: id label: {label} }} "
         f"allRows {{ key: id label: {label} }} }}"
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if transport == "async":
-                return asyncio.run(_async_post(document, where))
-            return graphql_payload(
-                document,
-                variables={"where": where},
-                url="/graphql-relation-form-paths/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        if transport == "async":
+            return asyncio.run(_async_post(document, where))
+        return graphql_payload(
+            document,
+            variables={"where": where},
+            url="/graphql-relation-form-paths/",
+        )
 
 
 def _labels(rows: Sequence[Model], label: str) -> list[JSONObject]:

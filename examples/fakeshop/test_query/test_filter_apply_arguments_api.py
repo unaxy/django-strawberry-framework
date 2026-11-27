@@ -34,7 +34,7 @@ import datetime
 import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping
-from functools import partial, wraps
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, ClassVar, NamedTuple, NoReturn
 
 import pytest
@@ -54,10 +54,9 @@ from django.forms import DurationField as FormDurationField
 from django.forms import Field as FormField
 from django.forms import Form, TextInput, Widget
 from django.forms.utils import ErrorDict
-from django.http import HttpRequest, HttpResponseBase, QueryDict
-from django.test import AsyncClient, Client, override_settings
+from django.http import HttpRequest, QueryDict
+from django.test import AsyncClient, Client
 from django.test.utils import isolate_apps, register_lookup
-from django.urls import path
 from django_filters import (
     BaseInFilter,
     BaseRangeFilter,
@@ -75,6 +74,7 @@ from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_object,
@@ -102,7 +102,6 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.typing import object_result
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._cleaned_filter_sets import cleaned_specimen
 from tests._idioms import saved_pk
 
@@ -110,27 +109,14 @@ if TYPE_CHECKING:
     from django_strawberry_framework import DjangoType
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-apply-arguments/", _graphql_view),
-    path("graphql-apply-arguments-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-apply-arguments/",
+    async_route="graphql-apply-arguments-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 async def _async_post(
@@ -168,21 +154,17 @@ def _post(
     variables: JSONObject = {"where": where}
     if optional is not UNSET:
         variables["optional"] = optional
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if transport == "async":
-                assert client is None or isinstance(client, AsyncClient)
-                return asyncio.run(_async_post(document, variables, client))
-            assert client is None or isinstance(client, Client)
-            return graphql_payload(
-                document,
-                variables=variables,
-                url="/graphql-apply-arguments/",
-                client=client,
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        if transport == "async":
+            assert client is None or isinstance(client, AsyncClient)
+            return asyncio.run(_async_post(document, variables, client))
+        assert client is None or isinstance(client, Client)
+        return graphql_payload(
+            document,
+            variables=variables,
+            url="/graphql-apply-arguments/",
+            client=client,
+        )
 
 
 def _schema(
@@ -1290,12 +1272,8 @@ def test_raw_expression_alias_bind_errors_preserve_good_siblings(
         config=strawberry_config(),
         error_policy={"enabled": False},
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
     errors: JSONObject = {}
     if invalid_field is not None:
         errors[invalid_field] = [
@@ -1592,12 +1570,8 @@ def test_raw_scoped_integer_expression_reuses_the_source_for_errors_and_qs(
         config=strawberry_config(),
         error_policy={"enabled": False},
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
     errors: JSONObject = {}
     if invalid_field is not None:
         errors[invalid_field] = [
@@ -3309,16 +3283,12 @@ def test_raw_scoped_annotation_form_asks_before_bare_qs(
         config=strawberry_config(),
         error_policy={"enabled": False},
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload(
-                "query($query: String!) { answer(query: $query) }",
-                variables={"query": query},
-                url="/graphql-apply-arguments/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload(
+            "query($query: String!) { answer(query: $query) }",
+            variables={"query": query},
+            url="/graphql-apply-arguments/",
+        )
     if connection.features.has_native_duration_field:
         errors = {}
         valid = query != "__unbound__"
@@ -3424,12 +3394,8 @@ def test_raw_invalid_form_skips_only_uncached_bind_source_and_keeps_partial_qs(
         config=strawberry_config(),
         error_policy={"enabled": False},
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
     errors: JSONObject = {"bad_number": [{"message": "Enter a number.", "code": "invalid"}]}
     if cached_owner and not connection.features.has_native_duration_field:
         errors["lag_among"] = [
@@ -3937,12 +3903,8 @@ def test_raw_cached_declared_sibling_enriches_own_initial_before_clean(
         config=strawberry_config(),
         error_policy={"enabled": False},
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
     huge = member.startswith("999999999")
     bind_error = huge and not connection.features.has_native_duration_field
     expected_errors: JSONObject = (
@@ -5188,12 +5150,8 @@ def test_raw_clean_created_complete_annotation_uses_one_form_and_source(
         config=strawberry_config(),
         error_policy={"enabled": False},
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
     label = "other" if scenario == "inactive" else "of-child"
     errors: JSONObject = {}
     if scenario == "huge" and not connection.features.has_native_duration_field:
@@ -5305,12 +5263,8 @@ def test_raw_unchanged_form_post_super_value_is_bound_on_the_same_instance(
         config=strawberry_config(),
         error_policy={"enabled": False},
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
     expected_events = ["post.super", *(["hook"] if added else [])]
     assert payload == {
         "data": {
@@ -5379,12 +5333,8 @@ def test_raw_logical_domain_error_suppresses_new_bind_owner_and_keeps_safe_sibli
         config=strawberry_config(),
         error_policy={"enabled": False},
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
     assert payload == {
         "data": {
             "answer": {
@@ -5460,12 +5410,8 @@ def test_raw_logical_child_error_wins_complete_owner_in_both_arm_orders(
         config=strawberry_config(),
         error_policy={"enabled": False},
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
     index = 0 if invalid_first else 1
     assert payload == {
         "data": {
@@ -7365,12 +7311,8 @@ def test_async_annotation_readiness_uses_constructor_selected_shard(family: str)
             timeout=5,
         )
 
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = asyncio.run(bounded_request())
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = asyncio.run(bounded_request())
     assert payload == {"data": {"rows": [{"code": "remote"}]}}, payload
     assert calls == ["shard_b"]
 

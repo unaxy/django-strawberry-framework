@@ -29,7 +29,6 @@ import datetime
 import time
 import uuid
 from decimal import Decimal
-from functools import wraps
 from typing import NamedTuple
 
 import pytest
@@ -37,11 +36,9 @@ import strawberry
 from apps.library import models as library
 from apps.scalars import models as scalars
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase, QueryDict
-from django.test import override_settings
-from django.urls import path
+from django.http import QueryDict
 from django.utils import timezone
-from graphql_client import JSONObject, graphql_payload, json_list, json_str
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_list, json_str
 from strawberry import relay
 
 from django_strawberry_framework import (
@@ -53,20 +50,12 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, RangeFilter
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-range-declared-lookup/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-range-declared-lookup/")
+urlpatterns = _MOUNT.urlpatterns
 
 #: Five rows, ``a`` .. ``e``, each column ordered as the labels are; two bounds keep ``b`` .. ``d``.
 _LABELS = [
@@ -228,16 +217,12 @@ def _profile_schema(cell: _Cell) -> DjangoSchema:
 
 
 def _post(schema: DjangoSchema, query: str, variables: JSONObject) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                query,
-                variables=variables,
-                url="/graphql-range-declared-lookup/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            query,
+            variables=variables,
+            url="/graphql-range-declared-lookup/",
+        )
 
 
 def _span_key(schema: DjangoSchema) -> str:

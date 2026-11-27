@@ -17,7 +17,6 @@ types and their serialized values.
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from decimal import Decimal
-from functools import wraps
 from types import ModuleType
 from typing import TYPE_CHECKING, Annotated
 
@@ -26,13 +25,11 @@ import strawberry
 from apps.library import models as library_models
 from apps.scalars import models as scalar_models
 from django.db import connection, models
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from graphql import GraphQLEnumType, GraphQLInputObjectType, get_named_type
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -64,23 +61,15 @@ from django_strawberry_framework.utils.typing import (
     graphql_type_of,
     object_result,
 )
-from django_strawberry_framework.views import DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-converter/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-converter/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(
@@ -89,12 +78,8 @@ def _post(
     *,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(query, variables=variables, url="/graphql-converter/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(query, variables=variables, url="/graphql-converter/")
 
 
 _EMPTY_LABEL_CHOICES: list[tuple[str | None, str]] = [

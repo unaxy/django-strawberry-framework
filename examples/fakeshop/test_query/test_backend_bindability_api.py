@@ -14,7 +14,6 @@ import datetime
 import uuid
 from collections.abc import Sequence
 from decimal import Decimal
-from functools import wraps
 from importlib import import_module
 from typing import Annotated, NamedTuple
 
@@ -23,15 +22,14 @@ import strawberry
 from apps.scalars import models
 from django.db import connection
 from django.db import models as django_models
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
-from django.urls import path
 from django.utils import timezone
 from django_filters import NumberFilter
 from graphql import GraphQLInputObjectType, get_named_type
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -53,21 +51,13 @@ from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
 )
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _UNBINDABLE = [{"message": "Enter a value the database can represent.", "code": "invalid"}]
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-bindability/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-bindability/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _shipped_schema() -> DjangoSchema:
@@ -115,16 +105,12 @@ def _post(schema: DjangoSchema, root: str, where: JSONObject) -> JSONObject:
     if root == "allScalarSpecimens":
         with override_settings(ROOT_URLCONF="config.urls"):
             return graphql_payload(document, variables={"where": where})
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                document,
-                variables={"where": where},
-                url="/graphql-bindability/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            document,
+            variables={"where": where},
+            url="/graphql-bindability/",
+        )
 
 
 def _expected(root: str, rows: Sequence[models.ScalarSpecimen]) -> JSONObject:

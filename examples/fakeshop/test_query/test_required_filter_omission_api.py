@@ -14,7 +14,6 @@ the copy.
 import asyncio
 import logging
 from collections.abc import Mapping
-from functools import wraps
 
 import pytest
 import strawberry
@@ -22,13 +21,11 @@ from apps.library import models as library_models
 from django import forms
 from django.db import connection
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django_filters import BooleanFilter, CharFilter
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     graphql_payload,
     json_list,
     json_object,
@@ -49,30 +46,16 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-required-omission/", _graphql_view),
-    path("graphql-required-omission-async/", _async_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-required-omission/",
+    async_route="graphql-required-omission-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 async def _async_post(document: str, variables: Mapping[str, object]) -> JSONObject:
@@ -93,18 +76,14 @@ def _post(
     *,
     transport: str = "sync",
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if transport == "async":
-                return asyncio.run(_async_post(document, variables or {}))
-            return graphql_payload(
-                document,
-                variables=variables,
-                url="/graphql-required-omission/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        if transport == "async":
+            return asyncio.run(_async_post(document, variables or {}))
+        return graphql_payload(
+            document,
+            variables=variables,
+            url="/graphql-required-omission/",
+        )
 
 
 def _periodical_set(*, required: bool) -> type[FilterSet]:

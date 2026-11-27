@@ -1,16 +1,11 @@
 """Live HTTP introspection tests for consumer relation shapes and target-owned connection fields."""
 
-from functools import wraps
-
 import pytest
 import strawberry
 from apps.library.models import Book, Genre
 from apps.products.models import Category, Item, Property
 from apps.products.services import seed_data
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_list, json_str
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_list, json_str
 from strawberry import relay
 
 from django_strawberry_framework import (
@@ -22,20 +17,12 @@ from django_strawberry_framework import (
 from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-relation-introspection/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-relation-introspection/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _schema(root_type: type[DjangoType]) -> DjangoSchema:
@@ -56,14 +43,10 @@ def _schema(root_type: type[DjangoType]) -> DjangoSchema:
 
 def _post(schema: DjangoSchema, document: str) -> JSONObject:
     """Inspect the native view's complete successful HTTP envelope and restore the mount."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload(document, url="/graphql-relation-introspection/")
-        assert set(payload) == {"data"}, payload
-        return payload
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        payload = graphql_payload(document, url="/graphql-relation-introspection/")
+    assert set(payload) == {"data"}, payload
+    return payload
 
 
 def _fields(payload: JSONObject, alias: str) -> dict[str, list[str]]:

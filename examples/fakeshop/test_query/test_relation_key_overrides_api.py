@@ -27,7 +27,6 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
-from functools import wraps
 from typing import TYPE_CHECKING, TypeVar
 
 import pytest
@@ -37,16 +36,15 @@ from asgiref.sync import sync_to_async
 from django.db import connection
 from django.db import models as db_models
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
+from django.http import HttpRequest
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy
 from django_filters import CharFilter, Filter, ModelChoiceFilter, ModelMultipleChoiceFilter
 from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -69,35 +67,21 @@ from django_strawberry_framework.filters import FilterSet, GlobalIDFilter, Relat
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import list_of, read_attr, require_instance
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 _M = TypeVar("_M", bound=Model)
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _CALLS: list[tuple[str, str, str]] = []
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-key-overrides/", _graphql_view),
-    path("graphql-key-overrides-async/", _async_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-key-overrides/",
+    async_route="graphql-key-overrides-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _record(field_name: object, value: object, qs: QuerySet[_M]) -> None:
@@ -559,14 +543,10 @@ def _post(
     transport: str = "sync",
 ) -> JSONObject:
     document = f"query($where: JSON!) {{ rows(where: $where) {{ name: {label} }} }}"
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if transport == "async":
-                return asyncio.run(_async_post(document, variables))
-            return graphql_payload(document, variables=variables, url="/graphql-key-overrides/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        if transport == "async":
+            return asyncio.run(_async_post(document, variables))
+        return graphql_payload(document, variables=variables, url="/graphql-key-overrides/")
 
 
 def _received(case: _Case) -> list[tuple[str, str, str]]:
@@ -1837,15 +1817,11 @@ def test_a_key_override_default_pages_counts_and_orders_its_visible_parents(walk
             "{ totalCount edges { cursor node { name } } pageInfo { hasNextPage } } }"
         )
         _CALLS.clear()
-        _CURRENT["schema"] = schema
-        try:
-            with (
-                override_settings(ROOT_URLCONF=__name__),
-                CaptureQueriesContext(connection) as queries,
-            ):
-                payload = graphql_payload(document, url="/graphql-key-overrides/")
-        finally:
-            _CURRENT["schema"] = None
+        with (
+            _MOUNT.serving(schema),
+            CaptureQueriesContext(connection) as queries,
+        ):
+            payload = graphql_payload(document, url="/graphql-key-overrides/")
         page = json_object(json_at(payload, "data", "rows"))
         assert json_at(page, "totalCount") == len(expected), payload
         edge = json_object(json_at(page, "edges", 0))

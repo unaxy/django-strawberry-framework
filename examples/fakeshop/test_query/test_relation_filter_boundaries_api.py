@@ -12,7 +12,6 @@ nonnullable Shelf admission boundary.
 """
 
 from collections.abc import Sequence
-from functools import wraps
 
 import pytest
 import strawberry
@@ -21,11 +20,9 @@ from apps.products.services import create_users
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AbstractUser
 from django.db import models as django_models
-from django.http import HttpRequest, HttpResponseBase
-from django.test import Client, override_settings
-from django.urls import path
+from django.test import Client
 from django_filters import BooleanFilter, CharFilter
-from graphql_client import JSONObject, RecordCompiledSql, graphql_payload
+from graphql_client import JSONObject, RecordCompiledSql, SchemaMount, graphql_payload
 from strawberry.scalars import JSON
 from typing_extensions import override
 
@@ -37,20 +34,12 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-mti-queryset-boundaries/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-mti-queryset-boundaries/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _schema(query: type[object], targets: Sequence[type[DjangoType]]) -> DjangoSchema:
@@ -84,16 +73,12 @@ def _post(
         "query($where: JSON!) { "
         f"rows(where: $where) {{ {selection} }} allRows {{ {selection} }} {extra} }}"
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                document,
-                variables={"where": where},
-                url="/graphql-mti-queryset-boundaries/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            document,
+            variables={"where": where},
+            url="/graphql-mti-queryset-boundaries/",
+        )
 
 
 def _root_sql(sqls: Sequence[str], model: type[django_models.Model]) -> list[str]:
@@ -532,17 +517,13 @@ def _crossing_schema(*, declares_branch: bool) -> DjangoSchema:
 
 
 def _post_codes(schema: DjangoSchema, where: JSONObject, client: Client) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                "query($where: JSON!) { rows(where: $where) }",
-                client=client,
-                variables={"where": where},
-                url="/graphql-mti-queryset-boundaries/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            "query($where: JSON!) { rows(where: $where) }",
+            client=client,
+            variables={"where": where},
+            url="/graphql-mti-queryset-boundaries/",
+        )
 
 
 @pytest.mark.django_db

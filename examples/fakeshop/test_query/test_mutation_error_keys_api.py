@@ -29,7 +29,7 @@ kanban, products and library mutation surfaces have their own live suites.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from functools import partial, wraps
+from functools import partial
 from typing import TYPE_CHECKING, Literal, NoReturn
 
 import pytest
@@ -40,10 +40,7 @@ from django import forms
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Model, UniqueConstraint
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
-from graphql_client import assert_graphql_success
+from graphql_client import SchemaMount, assert_graphql_success
 from rest_framework import serializers
 from strawberry import relay
 from typing_extensions import override
@@ -62,7 +59,6 @@ from django_strawberry_framework.auth import register_mutation
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils.errors import NON_FIELD_ERROR_KEY
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import ModelSerializerBase, is_object_dict, is_object_list, saved_pk
 
 if TYPE_CHECKING:
@@ -76,17 +72,9 @@ _Runner = Callable[[str, _Raised, pytest.MonkeyPatch], list[tuple[str, list[str]
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-keyed-write/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-keyed-write/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 @pytest.fixture(autouse=True)
@@ -187,12 +175,8 @@ def _execute(
         f"mutation {{ write({id_argument}data: {{ {data_literal()} }}) "
         "{ errors { field path } } }"
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            data = assert_graphql_success(query, url="/graphql-keyed-write/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        data = assert_graphql_success(query, url="/graphql-keyed-write/")
     write = data["write"]
     assert is_object_dict(write)
     errors = write["errors"]

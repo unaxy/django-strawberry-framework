@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from functools import wraps
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,11 +15,8 @@ import strawberry
 from apps.library.models import Branch
 from django.db import connections
 from django.db.models import Model, Q
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_at
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_at
 from rest_framework import serializers
 from rest_framework.validators import UniqueTogetherValidator
 from typing_extensions import override
@@ -34,14 +30,12 @@ from django_strawberry_framework import (
     finalize_django_types,
 )
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import ModelSerializerBase, saved_pk
 
 if TYPE_CHECKING:
     from django_strawberry_framework.rest_framework.serializer_converter import DRFSerializer
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
 class _BranchWriteRouter:
@@ -51,14 +45,8 @@ class _BranchWriteRouter:
         return "shard_b" if model is Branch else None
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-serializer-conditional-sharded/", _view)]
+_MOUNT = SchemaMount(__name__, "graphql-serializer-conditional-sharded/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 @strawberry.type
@@ -131,27 +119,23 @@ def _post(
     *,
     row_id: int | None = None,
 ) -> tuple[JSONObject, dict[str, list[str]]]:
-    _CURRENT["schema"] = schema
-    try:
-        identifier = f'id: "{row_id}", ' if row_id is not None else ""
-        with (
-            override_settings(ROOT_URLCONF=__name__, DATABASE_ROUTERS=[_BranchWriteRouter()]),
-            CaptureQueriesContext(connections["default"]) as on_default,
-            CaptureQueriesContext(connections["shard_b"]) as on_shard,
-        ):
-            payload = graphql_payload(
-                "mutation { write("
-                f"{identifier}data: {{ {data} }}"
-                ") { result { name city } errors { field messages codes } } }",
-                url="/graphql-serializer-conditional-sharded/",
-            )
-        statements = {
-            "default": [item["sql"] for item in on_default.captured_queries],
-            "shard_b": [item["sql"] for item in on_shard.captured_queries],
-        }
-        return payload, statements
-    finally:
-        _CURRENT["schema"] = None
+    identifier = f'id: "{row_id}", ' if row_id is not None else ""
+    with (
+        _MOUNT.serving(schema, DATABASE_ROUTERS=[_BranchWriteRouter()]),
+        CaptureQueriesContext(connections["default"]) as on_default,
+        CaptureQueriesContext(connections["shard_b"]) as on_shard,
+    ):
+        payload = graphql_payload(
+            "mutation { write("
+            f"{identifier}data: {{ {data} }}"
+            ") { result { name city } errors { field messages codes } } }",
+            url="/graphql-serializer-conditional-sharded/",
+        )
+    statements = {
+        "default": [item["sql"] for item in on_default.captured_queries],
+        "shard_b": [item["sql"] for item in on_shard.captured_queries],
+    }
+    return payload, statements
 
 
 def _assert_only_shard_branch_sql(statements: dict[str, list[str]]) -> None:

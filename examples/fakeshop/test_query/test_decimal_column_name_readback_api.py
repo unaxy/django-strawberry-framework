@@ -11,7 +11,6 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Generator
 from decimal import Decimal, InvalidOperation
-from functools import wraps
 
 import django
 import pytest
@@ -19,11 +18,8 @@ import strawberry
 from django import forms
 from django.db import connection, models
 from django.db.models.expressions import Combinable
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from drf_serializers import ModelSerializerBase
-from graphql_client import JSONObject, graphql_payload
+from graphql_client import JSONObject, SchemaMount, graphql_payload
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -35,7 +31,6 @@ from django_strawberry_framework import (
     SerializerMutation,
     finalize_django_types,
 )
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = [
@@ -45,7 +40,6 @@ pytestmark = [
     ),
     pytest.mark.usefixtures("private_registry"),
 ]
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _BOUNDARY = "99999999999999.99"
 _FIT = "12.50"
 _MESSAGE = "Enter a value the database can represent."
@@ -80,14 +74,8 @@ class _NamedDecimalSerializer(ModelSerializerBase[_NamedDecimal]):
         fields = ("label", "amount")
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-decimal-column-name/", _view)]
+_MOUNT = SchemaMount(__name__, "graphql-decimal-column-name/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 @strawberry.type
@@ -171,15 +159,11 @@ def _post(schema: DjangoSchema, amount: str, *, row_id: int | None) -> JSONObjec
         f'mutation {{ write({identifier}data: {{ label: "written", amount: "{amount}" }}) '
         "{ result { label amount } errors { field messages codes path } } }"
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                document,
-                url="/graphql-decimal-column-name/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            document,
+            url="/graphql-decimal-column-name/",
+        )
 
 
 @pytest.mark.django_db(transaction=True)

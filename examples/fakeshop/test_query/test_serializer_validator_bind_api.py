@@ -7,7 +7,6 @@ import inspect
 from collections.abc import Generator, Iterator, Mapping
 from contextlib import contextmanager
 from decimal import Decimal
-from functools import wraps
 from importlib import import_module
 from typing import TYPE_CHECKING
 
@@ -17,11 +16,9 @@ from django.db import connection, models
 from django.db.models import F, Q, Value
 from django.db.models.expressions import Combinable
 from django.db.models.lookups import BuiltinLookup
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext, isolate_apps
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_at
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_at
 from rest_framework import serializers
 from rest_framework.validators import (
     UniqueForDateValidator,
@@ -43,7 +40,6 @@ from django_strawberry_framework import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._narrowing import is_dict, read_attr, require
 from django_strawberry_framework.utils.typing import object_result
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import ModelSerializerBase, saved_pk
 
 if TYPE_CHECKING:
@@ -51,7 +47,6 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.typing import ConcreteField
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _HUGE = "999999999 00:00:00"
 _FIT = "1 00:00:00"
 
@@ -110,14 +105,8 @@ class _Other(models.Model):
         return "Other"
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-serializer-validator-binds/", _view)]
+_MOUNT = SchemaMount(__name__, "graphql-serializer-validator-binds/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 @strawberry.type
@@ -173,19 +162,15 @@ def _post(
     row_id: int | None = None,
     include_path: bool = False,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        identifier = f'id: "{row_id}", ' if row_id is not None else ""
-        error_fields = "field messages codes path" if include_path else "field messages codes"
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                "mutation { write("
-                f"{identifier}data: {{ {data} }}"
-                f") {{ result {{ label amount rank }} errors {{ {error_fields} }} }} }}",
-                url="/graphql-serializer-validator-binds/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    identifier = f'id: "{row_id}", ' if row_id is not None else ""
+    error_fields = "field messages codes path" if include_path else "field messages codes"
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            "mutation { write("
+            f"{identifier}data: {{ {data} }}"
+            f") {{ result {{ label amount rank }} errors {{ {error_fields} }} }} }}",
+            url="/graphql-serializer-validator-binds/",
+        )
 
 
 @pytest.fixture

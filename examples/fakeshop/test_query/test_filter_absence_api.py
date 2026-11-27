@@ -7,7 +7,6 @@ connection pipeline; its Issue type deliberately exposes both embargoed and open
 """
 
 from collections.abc import Mapping
-from functools import wraps
 from typing import TypeVar
 
 import pytest
@@ -16,13 +15,11 @@ from apps.library import models as library_models
 from django import forms
 from django.db import connection
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django_filters import BooleanFilter, CharFilter, ChoiceFilter, Filter, ModelChoiceFilter
 from django_filters.filterset import BaseFilterSet
-from graphql_client import JSONObject, graphql_payload, json_list, json_object
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_list, json_object
 from strawberry import relay
 from strawberry.scalars import JSON
 from strawberry.types import Info
@@ -37,34 +34,22 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _ModelT = TypeVar("_ModelT", bound=Model)
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-filter-absence/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-filter-absence/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(schema: DjangoSchema, query: str, variables: Mapping[str, object]) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                query,
-                variables=variables,
-                url="/graphql-filter-absence/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            query,
+            variables=variables,
+            url="/graphql-filter-absence/",
+        )
 
 
 class _OpenIssuesCharFilter(CharFilter):

@@ -77,7 +77,6 @@ import asyncio
 import datetime
 import re
 from collections.abc import Callable, Generator
-from functools import wraps
 from typing import TypeVar
 
 import pytest
@@ -90,15 +89,14 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import connection
 from django.db.models import Model, QuerySet
 from django.db.models.signals import pre_save
-from django.http import HttpRequest, HttpResponseBase
-from django.test import Client, override_settings
+from django.test import Client
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django_filters import CharFilter
 from graphql_client import (
     DeleteAfterAuthorization,
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     assert_graphql_success,
     graphql_payload,
     json_at,
@@ -132,7 +130,6 @@ from django_strawberry_framework.connection import _connection_type_for
 from django_strawberry_framework.filters import FilterSet, GlobalIDFilter, RelatedFilter
 from django_strawberry_framework.orders import OrderSet, RelatedOrder
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import ModelSerializerBase, saved_pk
 
 
@@ -535,42 +532,16 @@ def test_signage_on_a_city_less_branch_is_hidden_by_the_proxy_type_hook() -> Non
     assert not models.VisibleBranch.objects.filter(pk=outpost.pk).exists()
 
 
-_BRANCH_READS: dict[str, DjangoSchema | None] = {"schema": None}
 _MODES = ["sync", "async"]
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _branch_reads_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _BRANCH_READS["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _branch_reads_async_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _BRANCH_READS["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
+_BRANCH_MOUNT = SchemaMount(
+    __name__,
+    "graphql-branch-reads/",
+    async_route="graphql-branch-reads-async/",
+)
 #: The private schema ``_post_family`` serves, set for one request.
-_FAMILY_WRITES: dict[str, DjangoSchema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _family_writes_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _FAMILY_WRITES["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-# Served only under ``override_settings(ROOT_URLCONF=__name__)`` by ``_branch_reads`` and
-# ``_post_family``.
-urlpatterns = [
-    path("graphql-branch-reads/", _branch_reads_view),
-    path("graphql-branch-reads-async/", _branch_reads_async_view),
-    path("graphql-venue-family/", _family_writes_view),
-]
+_FAMILY_MOUNT = SchemaMount(__name__, "graphql-venue-family/")
+# Served only while ``_branch_reads`` or ``_post_family`` serves its mount.
+urlpatterns = [*_BRANCH_MOUNT.urlpatterns, *_FAMILY_MOUNT.urlpatterns]
 
 
 async def _branch_reads_async(document: str) -> JSONObject:
@@ -584,14 +555,10 @@ async def _branch_reads_async(document: str) -> JSONObject:
 
 def _branch_reads(schema: DjangoSchema, document: str, mode: str) -> JSONObject:
     """Post ``document`` to ``schema``'s sync or async mount and return the whole payload."""
-    _BRANCH_READS["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if mode == "async":
-                return asyncio.run(_branch_reads_async(document))
-            return graphql_payload(document, url="/graphql-branch-reads/")
-    finally:
-        _BRANCH_READS["schema"] = None
+    with _BRANCH_MOUNT.serving(schema):
+        if mode == "async":
+            return asyncio.run(_branch_reads_async(document))
+        return graphql_payload(document, url="/graphql-branch-reads/")
 
 
 def _seed_branch_signage() -> int:
@@ -2136,14 +2103,13 @@ def test_lending_desk_update_out_of_range_id_is_not_found_over_http(mutation: st
     desk = models.LendingDesk.objects.create(name="Desk", window_count=2)
     before = _stored_desk(desk.pk)
 
-    payload = graphql_payload(
+    data = assert_graphql_success(
         f"mutation($id: ID!, $d: {_DESK_UPDATE_INPUTS[mutation]}!) {{ "
         f"{mutation}(id: $id, data: $d) {{ result {{ name }} errors {{ field messages }} }} }}",
         variables={"id": str(2**70), "d": {"name": "Renamed Desk"}},
     )
 
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", mutation) == {
+    assert json_at(data, mutation) == {
         "result": None,
         "errors": [{"field": "id", "messages": ["No matching row found."]}],
     }
@@ -2234,13 +2200,12 @@ def test_kiosk_fault_inputs_type_the_kiosk_key_from_the_column_its_chain_stores(
 
 def _post_kiosk_fault(mutation: str, kiosk_id: int | None) -> object:
     """Create a fault naming ``kiosk_id`` through ``mutation``; return its payload."""
-    payload = graphql_payload(
+    data = assert_graphql_success(
         f"mutation($d: {_KIOSK_FAULT_CREATES[mutation]}!) {{ {mutation}(data: $d) {{ "
         "result { note kiosk { kioskCode } } errors { field messages codes path } } }",
         variables={"d": {"kioskId": kiosk_id, "note": "Jammed"}},
     )
-    assert "errors" not in payload, payload
-    return json_at(payload, "data", mutation)
+    return json_at(data, mutation)
 
 
 @pytest.mark.django_db
@@ -2515,15 +2480,14 @@ def _post_family(backing: str, located: int | None) -> tuple[JSONObject, list[st
         )
         variables = {"id": located, "d": {"name": "Sent"}}
     _install_family_classes()
-    _FAMILY_WRITES["schema"] = _family_schema()
+    schema = _family_schema()
     try:
         with (
-            override_settings(ROOT_URLCONF=__name__),
+            _FAMILY_MOUNT.serving(schema),
             CaptureQueriesContext(connection) as captured,
         ):
             payload = graphql_payload(document, variables=variables, url="/graphql-venue-family/")
     finally:
-        _FAMILY_WRITES["schema"] = None
         _FAMILY_CLASSES.clear()
     return payload, [query["sql"] for query in captured.captured_queries], document.index(root) + 1
 

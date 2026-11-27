@@ -50,6 +50,7 @@ from graphql_client import (
     response_json,
 )
 from graphql_client import assert_graphql_success as _assert_graphql_success
+from graphql_client import graphql_payload as _graphql_payload
 from graphql_client import post_graphql as _post_graphql
 from strawberry import relay
 
@@ -414,9 +415,7 @@ def all_fields_shelf_schema(private_registry: None) -> Iterator[DjangoSchema]:
 
 
 def _holder_payload(query: str, variables: dict[str, object] | None = None) -> JSONObject:
-    response = _post_graphql(query, variables=variables, url="/graphql-test/")
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = _graphql_payload(query, variables=variables, url="/graphql-test/")
     assert "errors" not in payload, payload
     return payload
 

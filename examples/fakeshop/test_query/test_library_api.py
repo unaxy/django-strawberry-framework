@@ -17,7 +17,6 @@ import string
 import sys
 from collections import OrderedDict
 from collections.abc import Callable, Generator, Mapping, Sequence
-from functools import wraps
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
 import django
@@ -43,10 +42,8 @@ from django.db.models import F, Model, Prefetch, QuerySet, TextField, Value, Win
 from django.db.models.functions import RowNumber, Upper
 from django.db.models.signals import post_init, pre_save
 from django.http import HttpRequest
-from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django.utils.functional import SimpleLazyObject
 from django_filters import (
     AllValuesMultipleFilter,
@@ -62,6 +59,7 @@ from graphql_client import (
     JSONObject,
     JSONValue,
     RecordCompiledSql,
+    SchemaMount,
     batched_pk_lookup,
     is_json_list,
     is_json_object,
@@ -125,7 +123,6 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.db.backends.utils import _ExecuteParameters, _ExecuteQuery
@@ -302,7 +299,7 @@ def _field_type(type_info: JSONObject, field_name: str) -> JSONObject:
 
 
 def _input_field_names(type_name: str) -> set[str]:
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f"""
         query {{
           __type(name: "{type_name}") {{
@@ -311,10 +308,7 @@ def _input_field_names(type_name: str) -> set[str]:
         }}
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    type_info = json_object(payload, "data", "__type")
+    type_info = json_object(data, "__type")
     assert type_info is not None
     return {json_str(field, "name") for field in json_list(type_info, "inputFields")}
 
@@ -329,7 +323,7 @@ def _input_field_type(type_name: str, field_name: str) -> JSONObject:
     not change a ``CharField``'s type) and that two hooks differing only in ``allow_null`` emit
     ``String!`` vs ``String``.
     """
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f"""
         query {{
           __type(name: "{type_name}") {{
@@ -338,10 +332,7 @@ def _input_field_type(type_name: str, field_name: str) -> JSONObject:
         }}
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    type_info = json_object(payload, "data", "__type")
+    type_info = json_object(data, "__type")
     assert type_info is not None
     return next(
         json_object(f, "type")
@@ -358,7 +349,7 @@ def _mutation_data_input_type_name(field_name: str) -> str:
     through it the descriptor-derived input names of two same-serializer hook mutations
     without hard-coding the (deliberately opaque) digest-bearing names.
     """
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           __type(name: "Mutation") {
@@ -367,10 +358,7 @@ def _mutation_data_input_type_name(field_name: str) -> str:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    fields = json_list(payload, "data", "__type", "fields")
+    fields = json_list(data, "__type", "fields")
     field = next(f for f in fields if json_at(f, "name") == field_name)
     data_arg = next(arg for arg in json_list(field, "args") if json_at(arg, "name") == "data")
     arg_type = json_object(data_arg, "type")
@@ -504,7 +492,7 @@ def test_library_patron_bigint_lifetime_fines_over_http() -> None:
     large_value = 9007199254752336
     models.Patron.objects.create(name="Mae", lifetime_fines_cents=large_value)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryPatrons {
@@ -514,10 +502,7 @@ def test_library_patron_bigint_lifetime_fines_over_http() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    rows = json_list(body, "data", "allLibraryPatrons")
+    rows = json_list(data, "allLibraryPatrons")
     mae = next(row for row in rows if json_at(row, "name") == "Mae")
     assert json_at(mae, "lifetimeFinesCents") == str(large_value)
 
@@ -2196,15 +2181,12 @@ def test_library_branches_via_djangolistfield_consumer_manager_resolver_over_htt
     _seed_branch_with_two_shelves("ManagerResolver West")
     _seed_branch_with_two_shelves("ManagerResolver East")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "{ allLibraryBranchesViaListFieldManagerResolver { id name } }",
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
     names = {
         json_at(branch, "name")
-        for branch in json_list(payload, "data", "allLibraryBranchesViaListFieldManagerResolver")
+        for branch in json_list(data, "allLibraryBranchesViaListFieldManagerResolver")
     }
     assert names == {"ManagerResolver West", "ManagerResolver East"}
 
@@ -2223,12 +2205,10 @@ def test_library_branches_via_djangolistfield_nullable_outer_renders_and_resolve
     """
     # Introspection over the real composed schema: outer LIST is nullable (no NON_NULL
     # wrapper); the inner item stays NON_NULL.
-    introspection = _post_graphql(
+    ibody = _graphql_payload(
         '{ __type(name: "Query") { fields { name type '
         "{ kind ofType { kind ofType { kind name } } } } } }",
     )
-    assert introspection.status_code == 200
-    ibody = response_json(introspection)
     assert "errors" not in ibody, ibody
     fields = {
         json_at(f, "name"): json_at(f, "type")
@@ -2244,9 +2224,7 @@ def test_library_branches_via_djangolistfield_nullable_outer_renders_and_resolve
 
     # End-to-end resolve: the nullable-outer field still returns a real list over the wire.
     _seed_branch_with_two_shelves("Nullable West")
-    response = _post_graphql("query { allLibraryBranchesViaListFieldNullable { id name } }")
-    assert response.status_code == 200
-    body = response_json(response)
+    body = _graphql_payload("query { allLibraryBranchesViaListFieldNullable { id name } }")
     assert "errors" not in body, body
     names = {
         json_at(b, "name")
@@ -2271,7 +2249,7 @@ def test_library_relay_node_global_id_round_trips() -> None:
     """
     genre = models.Genre.objects.create(name="Speculative")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryGenres {
@@ -2281,10 +2259,7 @@ def test_library_relay_node_global_id_round_trips() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    genres = json_list(payload, "data", "allLibraryGenres")
+    genres = json_list(data, "allLibraryGenres")
     assert len(genres) == 1
     type_name, node_id = _decode_global_id(json_str(genres, 0, "id"))
     # Under the model-label default the GlobalID carries the Django model
@@ -2768,11 +2743,9 @@ def test_library_undeclared_relation_key_answers_as_if_hidden_rows_were_absent_o
 @pytest.mark.django_db
 def test_library_relation_key_rejects_an_uncoercible_primary_key_at_the_wire_over_http() -> None:
     """A value the target pk scalar cannot hold is a GraphQL input error, never a query."""
-    response = _post_graphql(
+    payload = _graphql_payload(
         '{ allLibraryShelves(filter: { altBranches: { exact: ["not-a-pk"] } }) { code } }',
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("data") is None
     (error,) = json_list(payload, "errors")
     assert "Int" in json_str(error, "message")
@@ -3439,9 +3412,7 @@ def test_library_flat_expanded_method_filter_runs_in_its_own_filterset_over_http
         variables={"value": "p1@x"},
     )
     _assert_graphql_data(query, {"allLibraryLoans": []}, variables={"value": "nobody@x"})
-    response = _post_graphql(query, variables={"value": "no-at-sign"})
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = _graphql_payload(query, variables={"value": "no-at-sign"})
     assert payload.get("data") is None, payload
     (error,) = json_list(payload, "errors")
     assert json_at(error, "message") == "Invalid filter input"
@@ -3863,13 +3834,10 @@ def test_relay_relation_isnull_absent_from_shipped_book_filter() -> None:
     ``genres`` is a RelatedFilter (nested ``GenreFilter``), not Meta.fields
     ``isnull`` / ``exact``. The grouped bag type is therefore unpublished.
     """
-    response = _post_graphql(
+    data = _assert_graphql_success(
         '{ __type(name: "BookFilterGenresFilterInputType") { name } }',
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "__type") is None
+    assert json_at(data, "__type") is None
 
 
 @pytest.mark.usefixtures("private_registry")
@@ -4136,7 +4104,7 @@ def test_library_genres_filter_by_relay_own_pk_global_id_in_rejects_wrong_type()
     """
     genre = models.Genre.objects.create(name="SciFi")
     wrong = str(relay.GlobalID(type_name=models.Book._meta.label_lower, node_id=str(genre.pk)))
-    response = _post_graphql(
+    payload = _graphql_payload(
         f"""
         query {{
           allLibraryGenres(filter: {{ id: {{ in: ["{wrong}"] }} }}) {{
@@ -4145,8 +4113,6 @@ def test_library_genres_filter_by_relay_own_pk_global_id_in_rejects_wrong_type()
         }}
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
     assert "GlobalID type mismatch" in json_str(payload, "errors", 0, "message")
@@ -4169,7 +4135,7 @@ def test_library_genres_filter_malformed_own_pk_global_id_raises_globalid_invali
     malformed-payload sibling.
     """
     models.Genre.objects.create(name="SciFi")
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           allLibraryGenres(filter: { id: { exact: "not-a-valid-base64!!!" } }) {
@@ -4178,8 +4144,6 @@ def test_library_genres_filter_malformed_own_pk_global_id_raises_globalid_invali
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
     error = json_object(payload, "errors", 0)
@@ -4203,7 +4167,7 @@ def test_library_genres_filter_typed_global_id_with_invalid_pk_raises_globalid_i
             node_id="not-an-int",
         ),
     )
-    response = _post_graphql(
+    payload = _graphql_payload(
         f"""
         query {{
           allLibraryGenres(filter: {{ id: {{ exact: "{invalid_pk_gid}" }} }}) {{
@@ -4212,8 +4176,6 @@ def test_library_genres_filter_typed_global_id_with_invalid_pk_raises_globalid_i
         }}
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
     error = json_object(payload, "errors", 0)
@@ -4231,7 +4193,7 @@ def test_library_genres_filter_malformed_own_pk_global_id_in_names_index() -> No
     ``"GlobalID type mismatch ... at index N"`` message).
     """
     models.Genre.objects.create(name="SciFi")
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           allLibraryGenres(filter: { id: { in: ["Zm9v"] } }) {
@@ -4240,8 +4202,6 @@ def test_library_genres_filter_malformed_own_pk_global_id_in_names_index() -> No
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
     error = json_object(payload, "errors", 0)
@@ -4264,7 +4224,7 @@ def test_library_genres_filter_empty_id_scalar_global_id_raises_globalid_invalid
     """
     models.Genre.objects.create(name="SciFi")
     empty_gid = str(relay.GlobalID(type_name=models.Genre._meta.label_lower, node_id=""))
-    response = _post_graphql(
+    payload = _graphql_payload(
         f"""
         query {{
           allLibraryGenres(filter: {{ id: {{ exact: "{empty_gid}" }} }}) {{
@@ -4273,8 +4233,6 @@ def test_library_genres_filter_empty_id_scalar_global_id_raises_globalid_invalid
         }}
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     error = json_object(payload, "errors", 0)
     assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
@@ -4299,7 +4257,7 @@ def test_library_genres_filter_empty_id_in_list_raises_globalid_invalid_at_index
     """
     models.Genre.objects.create(name="SciFi")
     empty_gid = str(relay.GlobalID(type_name=models.Genre._meta.label_lower, node_id=""))
-    response = _post_graphql(
+    payload = _graphql_payload(
         f"""
         query {{
           allLibraryGenres(filter: {{ id: {{ in: ["{empty_gid}"] }} }}) {{
@@ -4308,8 +4266,6 @@ def test_library_genres_filter_empty_id_in_list_raises_globalid_invalid_at_index
         }}
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     error = json_object(payload, "errors", 0)
     assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
@@ -4336,7 +4292,7 @@ def test_library_genres_filter_mixed_empty_id_in_list_rejects_whole_input_at_ind
         relay.GlobalID(type_name=models.Genre._meta.label_lower, node_id=str(sci_fi.pk)),
     )
     empty_gid = str(relay.GlobalID(type_name=models.Genre._meta.label_lower, node_id=""))
-    response = _post_graphql(
+    payload = _graphql_payload(
         f"""
         query {{
           allLibraryGenres(filter: {{ id: {{ in: ["{valid_gid}", "{empty_gid}"] }} }}) {{
@@ -4345,8 +4301,6 @@ def test_library_genres_filter_mixed_empty_id_in_list_rejects_whole_input_at_ind
         }}
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     error = json_object(payload, "errors", 0)
     assert json_at(error, "extensions", "code") == "GLOBALID_INVALID", payload
@@ -4765,16 +4719,12 @@ async def test_async_publisher_relay_id_renamed_by_a_name_converter_reads_the_lo
     }
     await sync_to_async(_seed_house_codes)()
     publisher_sql = record_compiled_sql('"library_publisher"')
-    _CURRENT["schema"] = renamed
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient().query(
-                _ASYNC_PUBLISHER_ID_DOCUMENTS[position].replace(" id ", " identity "),
-                assert_no_errors=False,
-                url="/graphql-async-test/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(renamed):
+        result = await AsyncTestClient().query(
+            _ASYNC_PUBLISHER_ID_DOCUMENTS[position].replace(" id ", " identity "),
+            assert_no_errors=False,
+            url="/graphql-async-test/",
+        )
 
     assert result.response.status_code == 200
     assert response_json(result.response) == {"data": expected_by_position[position]}
@@ -5083,7 +5033,7 @@ def test_library_branches_filter_by_reverse_fk_lookup() -> None:
         branch=branch_without,
     )
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBranches(filter: { shelves: { code: { iContains: "A" } } }) {
@@ -5092,10 +5042,7 @@ def test_library_branches_filter_by_reverse_fk_lookup() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    names = [json_at(b, "name") for b in json_list(payload, "data", "allLibraryBranches")]
+    names = [json_at(b, "name") for b in json_list(data, "allLibraryBranches")]
     assert names == ["With Match"]
 
 
@@ -5197,7 +5144,7 @@ def test_library_branches_filter_respects_related_queryset_boundary_on_parent() 
     models.Shelf.objects.create(code="A-2", topic="seasonal", branch=branch_a)
     models.Shelf.objects.create(code="A-3", topic="seasonal", branch=branch_b)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBranches(filter: { shelves: { code: { iContains: "A" } } }) {
@@ -5207,10 +5154,7 @@ def test_library_branches_filter_respects_related_queryset_boundary_on_parent() 
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    rows = json_list(payload, "data", "allLibraryBranches")
+    rows = json_list(data, "allLibraryBranches")
     # (a) ``branch_B`` is EXCLUDED - no shelf with ``topic="permanent collection"``.
     assert [json_at(row, "name") for row in rows] == ["Branch A"]
     # (b) and (c) ``branch_A`` is INCLUDED and its consumer-authored ``shelves``
@@ -5313,7 +5257,7 @@ def test_nested_related_filter_honors_target_get_queryset() -> None:
     # Anonymous: ``ShelfType.get_queryset`` strips ``topic="secret"``, so
     # asking for the hidden shelf yields no books (no shelf the request
     # can see carries that id); asking for the visible shelf returns its book.
-    hidden_query_response = _post_graphql(
+    hidden_payload = _graphql_payload(
         f"""
         query {{
           allLibraryBooks(filter: {{ shelf: {{ id: {{ exact: {hidden_shelf.pk} }} }} }}) {{
@@ -5322,12 +5266,10 @@ def test_nested_related_filter_honors_target_get_queryset() -> None:
         }}
         """,
     )
-    assert hidden_query_response.status_code == 200
-    hidden_payload = response_json(hidden_query_response)
     assert "errors" not in hidden_payload, hidden_payload
     assert json_at(hidden_payload, "data", "allLibraryBooks") == []
 
-    visible_query_response = _post_graphql(
+    visible_payload = _graphql_payload(
         f"""
         query {{
           allLibraryBooks(filter: {{ shelf: {{ id: {{ exact: {visible_shelf.pk} }} }} }}) {{
@@ -5336,8 +5278,6 @@ def test_nested_related_filter_honors_target_get_queryset() -> None:
         }}
         """,
     )
-    assert visible_query_response.status_code == 200
-    visible_payload = response_json(visible_query_response)
     assert "errors" not in visible_payload, visible_payload
     assert [
         json_at(row, "title") for row in json_list(visible_payload, "data", "allLibraryBooks")
@@ -5486,11 +5426,10 @@ def test_a_flat_filter_through_a_related_filter_cycle_reaches_past_its_first_lap
     assert {"loansBookTitle", "loansBookShelfTopic"} <= _input_field_names("PatronFilterInputType")
     assert "shelvesBooksTitle" in _input_field_names("BranchFilterInputType")
 
-    response = _post_graphql(f"query {{ allLibraryPatrons(filter: {filter_input}) {{ name }} }}")
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert [json_at(row, "name") for row in json_list(payload, "data", "allLibraryPatrons")] == [
+    data = _assert_graphql_success(
+        f"query {{ allLibraryPatrons(filter: {filter_input}) {{ name }} }}",
+    )
+    assert [json_at(row, "name") for row in json_list(data, "allLibraryPatrons")] == [
         "Ada",
     ]
 
@@ -6374,7 +6313,7 @@ def test_apply_raises_graphqlerror_on_invalid_filter_input() -> None:
     """Form-validation rejection surfaces ``FILTER_INVALID``."""
     models.Patron.objects.create(name="Ada", email="ada@example.com")
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           allLibraryPatrons(filter: { emailMustHaveAtSign: { exact: "bogus" } }) {
@@ -6383,8 +6322,6 @@ def test_apply_raises_graphqlerror_on_invalid_filter_input() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
     error = json_object(payload, "errors", 0)
@@ -6564,10 +6501,7 @@ def test_filter_text_no_database_can_bind_answers_filter_invalid(shape: str) -> 
     _seed_north_shelf()
     query, variables, form_key = _UNSTORABLE_FILTER_ROWS[shape]
 
-    response = _post_graphql(query, variables=variables)
-
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = _graphql_payload(query, variables=variables)
     assert payload["data"] is None, payload
     (error,) = json_list(payload, "errors")
     assert json_at(error, "message") == "Invalid filter input"
@@ -6614,10 +6548,7 @@ def test_an_arm_branch_error_answers_before_an_arm_form_error(
     _seed_north_shelf()
     query = f"query($v: String) {{ allLibraryBooks(filter: {filter_text}) {{ title }} }}"
 
-    response = _post_graphql(query, variables={"v": f"a{_LONE_SURROGATE}"})
-
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = _graphql_payload(query, variables={"v": f"a{_LONE_SURROGATE}"})
     assert payload["data"] is None, payload
     (error,) = json_list(payload, "errors")
     assert json_object(error, "extensions") == {
@@ -6725,13 +6656,10 @@ def test_nested_form_non_field_error_is_keyed_under_its_path(
     """
     north_pk = _seed_north_branch()
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         f"query($pk: Int) {{ allLibraryBooks(filter: {book_filter}) {{ title }} }}",
         variables={"pk": north_pk},
     )
-
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload["data"] is None, payload
     (error,) = json_list(payload, "errors")
     assert json_at(error, "message") == "Invalid filter input"
@@ -7002,7 +6930,7 @@ def test_filter_text_refusal_reads_a_lazy_value_as_its_text(
 @pytest.mark.django_db
 def test_apply_passes_graphql_enum_coercion_before_form_validation() -> None:
     """Enum coercion fires before form validation."""
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           allLibraryBooks(filter: { circulationStatus: { exact: NOT_A_REAL_ENUM_VALUE } }) {
@@ -7011,8 +6939,6 @@ def test_apply_passes_graphql_enum_coercion_before_form_validation() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
     error = json_object(payload, "errors", 0)
@@ -7035,7 +6961,7 @@ def test_root_get_queryset_runs_before_filter_apply() -> None:
     # Anonymous: ``BranchType.get_queryset`` strips the restricted row so the
     # ``iContains: "andromeda"`` clause runs against the visibility-scoped
     # queryset and matches only the surviving row.
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBranches(filter: { name: { iContains: "andromeda" } }) {
@@ -7044,10 +6970,7 @@ def test_root_get_queryset_runs_before_filter_apply() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert [json_at(row, "name") for row in json_list(payload, "data", "allLibraryBranches")] == [
+    assert [json_at(row, "name") for row in json_list(data, "allLibraryBranches")] == [
         "Andromeda Main",
     ]
 
@@ -7082,7 +7005,7 @@ def test_relay_global_id_filter_rejects_wrong_type_name() -> None:
     right_id = global_id_for(library_schema.GenreType, sci_fi.pk)
     wrong_id = global_id_for(library_schema.BookType, sci_fi.pk)
 
-    wrong_response = _post_graphql(
+    wrong_payload = _graphql_payload(
         f"""
         query {{
           allLibraryBooks(filter: {{ genres: {{ id: {{ exact: "{wrong_id}" }} }} }}) {{
@@ -7091,8 +7014,6 @@ def test_relay_global_id_filter_rejects_wrong_type_name() -> None:
         }}
         """,
     )
-    assert wrong_response.status_code == 200
-    wrong_payload = response_json(wrong_response)
     assert "errors" in wrong_payload, wrong_payload
     assert wrong_payload["data"] is None, wrong_payload
     message = json_str(wrong_payload, "errors", 0, "message")
@@ -7103,7 +7024,7 @@ def test_relay_global_id_filter_rejects_wrong_type_name() -> None:
     assert models.Genre._meta.label_lower in message
     assert models.Book._meta.label_lower in message
 
-    right_response = _post_graphql(
+    data = _assert_graphql_success(
         f"""
         query {{
           allLibraryBooks(filter: {{ genres: {{ id: {{ exact: "{right_id}" }} }} }}) {{
@@ -7112,12 +7033,7 @@ def test_relay_global_id_filter_rejects_wrong_type_name() -> None:
         }}
         """,
     )
-    assert right_response.status_code == 200
-    right_payload = response_json(right_response)
-    assert "errors" not in right_payload, right_payload
-    assert [
-        json_at(row, "title") for row in json_list(right_payload, "data", "allLibraryBooks")
-    ] == ["Hyperion"]
+    assert [json_at(row, "title") for row in json_list(data, "allLibraryBooks")] == ["Hyperion"]
 
 
 @pytest.mark.django_db
@@ -7159,7 +7075,7 @@ def test_relay_global_id_filter_multihop_leaf_validates_against_the_terminal_mod
         relay.GlobalID(type_name=models.Genre._meta.label_lower, node_id=str(sci_fi.pk)),
     )
 
-    accepted = _post_graphql(
+    data = _assert_graphql_success(
         f"""
         query {{
           allLibraryBooks(filter: {{ genresBooksId: {{ exact: "{book_id}" }} }}) {{
@@ -7168,16 +7084,14 @@ def test_relay_global_id_filter_multihop_leaf_validates_against_the_terminal_mod
         }}
         """,
     )
-    assert accepted.status_code == 200
-    accepted_payload = response_json(accepted)
-    assert "errors" not in accepted_payload, accepted_payload
     # Every book sharing a genre with Hyperion, each reported once; the
     # Westerns title is excluded.
-    assert sorted(
-        json_str(row, "title") for row in json_list(accepted_payload, "data", "allLibraryBooks")
-    ) == ["Endymion", "Hyperion"]
+    assert sorted(json_str(row, "title") for row in json_list(data, "allLibraryBooks")) == [
+        "Endymion",
+        "Hyperion",
+    ]
 
-    rejected = _post_graphql(
+    rejected_payload = _graphql_payload(
         f"""
         query {{
           allLibraryBooks(filter: {{ genresBooksId: {{ exact: "{genre_id}" }} }}) {{
@@ -7186,8 +7100,6 @@ def test_relay_global_id_filter_multihop_leaf_validates_against_the_terminal_mod
         }}
         """,
     )
-    assert rejected.status_code == 200
-    rejected_payload = response_json(rejected)
     assert "errors" in rejected_payload, rejected_payload
     assert rejected_payload["data"] is None, rejected_payload
     message = json_str(rejected_payload, "errors", 0, "message")
@@ -8187,7 +8099,7 @@ def test_library_books_order_by_subtitle_null_positioning(
     """Spec-028 test plan - NULLS positioning through real ``/graphql/``."""
     _seed_books_with_nullable_subtitles()
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f"""
         query {{
           allLibraryBooks(orderBy: [{{ subtitle: {direction} }}]) {{
@@ -8197,10 +8109,7 @@ def test_library_books_order_by_subtitle_null_positioning(
         }}
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    rows = json_list(payload, "data", "allLibraryBooks")
+    rows = json_list(data, "allLibraryBooks")
     assert [json_at(row, "subtitle") for row in rows] == expected_subtitles
 
 
@@ -9262,7 +9171,7 @@ def test_root_get_queryset_runs_before_order_apply() -> None:
     models.Branch.objects.create(name="Alpha", city="Boston")
     models.Branch.objects.create(name="Zeta", city="restricted")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBranches(orderBy: [{ city: DESC }]) {
@@ -9272,10 +9181,7 @@ def test_root_get_queryset_runs_before_order_apply() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    rows = json_list(payload, "data", "allLibraryBranches")
+    rows = json_list(data, "allLibraryBranches")
     # The hidden ``Zeta`` (``city="restricted"``) does NOT appear at
     # the head of the DESC list; the visibility scope ran BEFORE the
     # order clause.
@@ -9311,7 +9217,7 @@ def test_order_check_permission_denies_for_active_field() -> None:
     """
     models.Branch.objects.create(name="Alpha", city="Boston")
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           allLibraryBranches(orderBy: [{ name: ASC }]) {
@@ -9320,8 +9226,6 @@ def test_order_check_permission_denies_for_active_field() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
     assert json_at(payload, "errors", 0, "extensions", "code") == "ORDER_PERMISSION_DENIED"
@@ -9339,7 +9243,7 @@ def test_order_check_permission_quiet_for_inactive_field() -> None:
     models.Branch.objects.create(name="Alpha", city="Boston")
     models.Branch.objects.create(name="Beta", city="Cambridge")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBranches(orderBy: [{ city: ASC }]) {
@@ -9348,10 +9252,7 @@ def test_order_check_permission_quiet_for_inactive_field() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    cities = [json_at(row, "city") for row in json_list(payload, "data", "allLibraryBranches")]
+    cities = [json_at(row, "city") for row in json_list(data, "allLibraryBranches")]
     assert cities == ["Boston", "Cambridge"]
 
 
@@ -9376,9 +9277,7 @@ def test_filter_return_form_gate_denies_on_false() -> None:
     """
     models.Publisher.objects.create(name="Gated House", house_code="GATED")
 
-    response = _post_graphql(_PUBLISHERS_BY_HOUSE_CODE)
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = _graphql_payload(_PUBLISHERS_BY_HOUSE_CODE)
     assert payload["data"] is None, payload
     assert (
         json_str(payload, "errors", 0, "message")
@@ -9417,7 +9316,7 @@ def test_order_check_permission_denies_active_related_branch() -> None:
     branch = models.Branch.objects.create(name="Alpha", city="Boston")
     models.Shelf.objects.create(code="A-1", topic="general", branch=branch)
 
-    denial_response = _post_graphql(
+    denial_payload = _graphql_payload(
         """
         query {
           allLibraryBranches(orderBy: [{ shelves: { code: ASC } }]) {
@@ -9426,13 +9325,11 @@ def test_order_check_permission_denies_active_related_branch() -> None:
         }
         """,
     )
-    assert denial_response.status_code == 200
-    denial_payload = response_json(denial_response)
     assert "errors" in denial_payload, denial_payload
     assert denial_payload["data"] is None, denial_payload
     assert json_at(denial_payload, "errors", 0, "extensions", "code") == "ORDER_PERMISSION_DENIED"
 
-    quiet_response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBranches(orderBy: [{ city: ASC }]) {
@@ -9441,12 +9338,7 @@ def test_order_check_permission_denies_active_related_branch() -> None:
         }
         """,
     )
-    assert quiet_response.status_code == 200
-    quiet_payload = response_json(quiet_response)
-    assert "errors" not in quiet_payload, quiet_payload
-    assert [
-        json_at(row, "city") for row in json_list(quiet_payload, "data", "allLibraryBranches")
-    ] == [
+    assert [json_at(row, "city") for row in json_list(data, "allLibraryBranches")] == [
         "Boston",
     ]
 
@@ -9467,7 +9359,7 @@ def test_library_books_order_by_multi_field_priority() -> None:
     models.Book.objects.create(title="Foo", shelf=shelf_b)
     models.Book.objects.create(title="Bar", shelf=shelf_b)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBooks(
@@ -9479,10 +9371,7 @@ def test_library_books_order_by_multi_field_priority() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    rows = json_list(payload, "data", "allLibraryBooks")
+    rows = json_list(data, "allLibraryBooks")
     assert [(json_at(row, "shelf", "code"), json_at(row, "title")) for row in rows] == [
         ("A", "Foo"),
         ("A", "Bar"),
@@ -9603,7 +9492,7 @@ def test_library_branches_order_empty_list_and_null_direction_no_op() -> None:
     models.Branch.objects.create(name="Alpha", city="Boston")
     models.Branch.objects.create(name="Charlie", city="Boston")
 
-    empty_response = _post_graphql(
+    empty_payload = _graphql_payload(
         """
         query {
           allLibraryBranches(orderBy: []) {
@@ -9612,15 +9501,13 @@ def test_library_branches_order_empty_list_and_null_direction_no_op() -> None:
         }
         """,
     )
-    assert empty_response.status_code == 200
-    empty_payload = response_json(empty_response)
     assert "errors" not in empty_payload, empty_payload
     empty_names = [
         json_at(row, "name") for row in json_list(empty_payload, "data", "allLibraryBranches")
     ]
     assert empty_names == ["Bravo", "Alpha", "Charlie"]
 
-    null_response = _post_graphql(
+    null_payload = _graphql_payload(
         """
         query {
           allLibraryBranches(orderBy: [{ name: null }]) {
@@ -9629,8 +9516,6 @@ def test_library_branches_order_empty_list_and_null_direction_no_op() -> None:
         }
         """,
     )
-    assert null_response.status_code == 200
-    null_payload = response_json(null_response)
     assert "errors" not in null_payload, null_payload
     null_names = [
         json_at(row, "name") for row in json_list(null_payload, "data", "allLibraryBranches")
@@ -9656,7 +9541,7 @@ def test_nullability_override_flips_sdl_nullability() -> None:
     """The override flips the acceptance type's SDL nullability, columns unchanged."""
     _seed_library_graph()
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           __type(name: "NullabilityOverrideBookType") {
@@ -9672,10 +9557,7 @@ def test_nullability_override_flips_sdl_nullability() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    type_info = json_object(payload, "data", "__type")
+    type_info = json_object(data, "__type")
     assert type_info is not None
 
     # title: NOT NULL column natively String! -> flipped to String by nullable_overrides.
@@ -9710,7 +9592,7 @@ def test_nullability_override_acceptance_api_is_queryable() -> None:
         shelf=shelf,
     )
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryNullabilityOverrideBooks {
@@ -9720,10 +9602,7 @@ def test_nullability_override_acceptance_api_is_queryable() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    rows = json_at(payload, "data", "allLibraryNullabilityOverrideBooks")
+    rows = json_at(data, "allLibraryNullabilityOverrideBooks")
     # Only the non-null-subtitle row survives the resolver's exclude().
     assert rows == [{"title": "Parable of the Sower", "subtitle": "Earthseed"}]
 
@@ -9757,15 +9636,13 @@ def test_secondary_book_global_id_refetches_as_primary_book_type_over_http(
     with override_settings(FAKESHOP_TEST_RELAY_SECONDARY_NODE=True):
         project_schema_override()
 
-        listed = _post_graphql(
+        listed_payload = _graphql_payload(
             """
             query {
               allLibraryNullabilityOverrideBooks { id title }
             }
             """,
         )
-        assert listed.status_code == 200
-        listed_payload = response_json(listed)
         assert "errors" not in listed_payload, listed_payload
         rows = json_list(listed_payload, "data", "allLibraryNullabilityOverrideBooks")
         assert len(rows) == 1
@@ -9795,7 +9672,7 @@ def test_secondary_book_global_id_refetches_as_primary_book_type_over_http(
         assert "secondaryTitle" not in node
 
     project_schema_override()
-    default_sdl = _post_graphql(
+    default_payload = _graphql_payload(
         """
         query {
           __type(name: "NullabilityOverrideBookType") {
@@ -9804,8 +9681,6 @@ def test_secondary_book_global_id_refetches_as_primary_book_type_over_http(
         }
         """,
     )
-    assert default_sdl.status_code == 200
-    default_payload = response_json(default_sdl)
     assert "errors" not in default_payload, default_payload
     interfaces = json_at(default_payload, "data", "__type", "interfaces")
     entries = json_list(interfaces) if interfaces else []
@@ -9833,7 +9708,7 @@ def test_consumer_cast_book_resolves_to_the_secondary_type_under_node_over_http(
 
     with override_settings(FAKESHOP_TEST_RELAY_SECONDARY_NODE=True):
         project_schema_override()
-        response = _post_graphql(
+        data = _assert_graphql_success(
             """
             query {
               libraryCastSecondaryBookNodes {
@@ -9844,10 +9719,7 @@ def test_consumer_cast_book_resolves_to_the_secondary_type_under_node_over_http(
             }
             """,
         )
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        assert json_at(payload, "data", "libraryCastSecondaryBookNodes") == [
+        assert json_at(data, "libraryCastSecondaryBookNodes") == [
             {
                 "__typename": "NullabilityOverrideBookType",
                 "secondaryTitle": "Kindred",
@@ -9880,7 +9752,7 @@ def test_public_patron_exclude_deny_list_shapes_type_and_resolves() -> None:
     #    ``PublicPatronType`` class name is NOT a GraphQL type), carries the
     #    Meta.description, drops the two excluded columns, and the allow-list primary
     #    PatronType still carries lifetimeFinesCents.
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           public: __type(name: "PublicPatron") { description fields { name } }
@@ -9889,8 +9761,6 @@ def test_public_patron_exclude_deny_list_shapes_type_and_resolves() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     # Meta.name renamed the GraphQL type; the class-name type no longer resolves.
     assert json_at(payload, "data", "public") is not None
@@ -9917,7 +9787,7 @@ def test_public_patron_exclude_deny_list_shapes_type_and_resolves() -> None:
     assert "lifetimeFinesCents" in primary_fields
 
     # 2. Acceptance: the kept columns resolve over the dedicated root field.
-    data_response = _post_graphql(
+    data_payload = _graphql_payload(
         """
         query {
           allLibraryPublicPatrons {
@@ -9926,8 +9796,6 @@ def test_public_patron_exclude_deny_list_shapes_type_and_resolves() -> None:
         }
         """,
     )
-    assert data_response.status_code == 200
-    data_payload = response_json(data_response)
     assert "errors" not in data_payload, data_payload
     assert json_at(data_payload, "data", "allLibraryPublicPatrons") == [{"name": "Ada"}]
 
@@ -9987,7 +9855,7 @@ def test_genre_connection_full_round_trip() -> None:
     # Post-filter (``icontains "a"``) set in name-ASC order:
     # Alpha, Banana, Delta, Gamma (Echo excluded).
 
-    page_one = _post_graphql(
+    payload_one = _graphql_payload(
         """
         query {
           allLibraryGenresConnection(
@@ -10002,8 +9870,6 @@ def test_genre_connection_full_round_trip() -> None:
         }
         """,
     )
-    assert page_one.status_code == 200
-    payload_one = response_json(page_one)
     assert "errors" not in payload_one, payload_one
     conn_one = json_object(payload_one, "data", "allLibraryGenresConnection")
 
@@ -10023,7 +9889,7 @@ def test_genre_connection_full_round_trip() -> None:
     # size (2) and NOT the grand total (5).
     assert conn_one["totalCount"] == 4
 
-    page_two = _post_graphql(
+    payload_two = _graphql_payload(
         f"""
         query {{
           allLibraryGenresConnection(
@@ -10039,8 +9905,6 @@ def test_genre_connection_full_round_trip() -> None:
         }}
         """,
     )
-    assert page_two.status_code == 200
-    payload_two = response_json(page_two)
     assert "errors" not in payload_two, payload_two
     conn_two = json_object(payload_two, "data", "allLibraryGenresConnection")
 
@@ -10310,7 +10174,7 @@ def test_genre_connection_flat_leaf_total_count_is_row_preserving() -> None:
     other_book = models.Book.objects.create(title="Neuro Atlas", shelf=shelf)
     other_book.genres.add(other_genre)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryGenresConnection(filter: { booksTitle: { iContains: "cardio" } }) {
@@ -10320,10 +10184,7 @@ def test_genre_connection_flat_leaf_total_count_is_row_preserving() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    conn = json_object(payload, "data", "allLibraryGenresConnection")
+    conn = json_object(data, "allLibraryGenresConnection")
 
     # Row-preserving: one genre, reported exactly once.
     assert conn["totalCount"] == 1
@@ -10371,7 +10232,7 @@ def test_genre_connection_expanded_origin_pagination_is_row_preserving() -> None
     """
     _seed_two_matching_genres_over_two_books_each()
 
-    page_one = _post_graphql(
+    payload_one = _graphql_payload(
         """
         query {
           allLibraryGenresConnection(
@@ -10386,8 +10247,6 @@ def test_genre_connection_expanded_origin_pagination_is_row_preserving() -> None
         }
         """,
     )
-    assert page_one.status_code == 200
-    payload_one = response_json(page_one)
     assert "errors" not in payload_one, payload_one
     conn_one = json_object(payload_one, "data", "allLibraryGenresConnection")
 
@@ -10401,7 +10260,7 @@ def test_genre_connection_expanded_origin_pagination_is_row_preserving() -> None
     # Row-preserving pre-slice count: two genres, NOT four fanned-out rows.
     assert conn_one["totalCount"] == 2
 
-    page_two = _post_graphql(
+    payload_two = _graphql_payload(
         f"""
         query {{
           allLibraryGenresConnection(
@@ -10417,8 +10276,6 @@ def test_genre_connection_expanded_origin_pagination_is_row_preserving() -> None
         }}
         """,
     )
-    assert page_two.status_code == 200
-    payload_two = response_json(page_two)
     assert "errors" not in payload_two, payload_two
     conn_two = json_object(payload_two, "data", "allLibraryGenresConnection")
 
@@ -10443,7 +10300,7 @@ def test_genre_connection_nested_spelling_matches_flat_spelling() -> None:
     _seed_two_matching_genres_over_two_books_each()
 
     def _fetch(filter_body: str) -> tuple[list[str], int]:
-        response = _post_graphql(
+        data = _assert_graphql_success(
             """
             query {
               allLibraryGenresConnection(
@@ -10457,10 +10314,7 @@ def test_genre_connection_nested_spelling_matches_flat_spelling() -> None:
             """
             % filter_body,
         )
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        conn = json_object(payload, "data", "allLibraryGenresConnection")
+        conn = json_object(data, "allLibraryGenresConnection")
         total_count = conn["totalCount"]
         assert isinstance(total_count, int), conn
         return [json_str(edge, "node", "name") for edge in json_list(conn, "edges")], total_count
@@ -10711,7 +10565,7 @@ def test_library_loans_connection_mixed_or_paginates_row_preserved_roots_over_ht
             _assert_row_preserving_root(sql, "library_loan", "library_book", "library_patron")
             assert _BOOK_HIDDEN_ROW_PREDICATE in sql
 
-        page_two = _post_graphql(
+        payload_two = _graphql_payload(
             """
             query {
               allLibraryLoansConnection(
@@ -10728,8 +10582,6 @@ def test_library_loans_connection_mixed_or_paginates_row_preserved_roots_over_ht
             """
             % (filter_body, end_cursor),
         )
-        assert page_two.status_code == 200
-        payload_two = response_json(page_two)
         assert "errors" not in payload_two, payload_two
         conn_two = json_object(payload_two, "data", "allLibraryLoansConnection")
 
@@ -10739,9 +10591,7 @@ def test_library_loans_connection_mixed_or_paginates_row_preserved_roots_over_ht
 
     # Flag off: rebuild the default schema and prove the connection field is GONE.
     project_schema_override()
-    introspection = _post_graphql('{ __type(name: "Query") { fields { name } } }')
-    assert introspection.status_code == 200
-    introspection_payload = response_json(introspection)
+    introspection_payload = _graphql_payload('{ __type(name: "Query") { fields { name } } }')
     assert "errors" not in introspection_payload, introspection_payload
     query_fields = {
         json_at(field, "name")
@@ -10760,7 +10610,7 @@ def test_genre_connection_flat_leaf_no_match_is_empty() -> None:
     """
     _seed_two_matching_genres_over_two_books_each()
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryGenresConnection(filter: { booksTitle: { iContains: "nonesuch" } }) {
@@ -10770,10 +10620,7 @@ def test_genre_connection_flat_leaf_no_match_is_empty() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    conn = json_object(payload, "data", "allLibraryGenresConnection")
+    conn = json_object(data, "allLibraryGenresConnection")
     assert conn["edges"] == []
     assert conn["totalCount"] == 0
 
@@ -10788,7 +10635,7 @@ def test_genre_connection_first_and_last_rejected() -> None:
     """
     _seed_genres("Alpha", "Beta", "Gamma")
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           allLibraryGenresConnection(first: 1, last: 1) {
@@ -10797,8 +10644,6 @@ def test_genre_connection_first_and_last_rejected() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
     messages = " ".join(json_str(error, "message") for error in json_list(payload, "errors"))
@@ -10817,7 +10662,7 @@ def test_genre_connection_first_zero_empty_edges() -> None:
     """
     _seed_genres("Alpha", "Beta", "Gamma")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryGenresConnection(first: 0) {
@@ -10828,10 +10673,7 @@ def test_genre_connection_first_zero_empty_edges() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    conn = json_object(payload, "data", "allLibraryGenresConnection")
+    conn = json_object(data, "allLibraryGenresConnection")
     assert conn["edges"] == []
     # ListConnection's real first:0-over-rows shape: more rows exist beyond the
     # zero window, so hasNextPage is True; endCursor is null (no edges).
@@ -11170,7 +11012,7 @@ def test_genre_connection_two_aliases_independent_total_counts() -> None:
     _seed_genres("Alpha", "Banana", "Cobra", "Zephyr")
     # "a": Alpha, Banana, Cobra -> 3; "z": Zephyr -> 1.
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           matchA: allLibraryGenresConnection(filter: { name: { iContains: "a" } }) {
@@ -11184,8 +11026,6 @@ def test_genre_connection_two_aliases_independent_total_counts() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     data = json_object(payload, "data")
     assert json_at(data, "matchA", "totalCount") == 3
@@ -11217,7 +11057,7 @@ def test_genre_connection_order_by_to_many_no_node_multiplication() -> None:
     book_c.genres.add(fiction)
     book_b.genres.add(history)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryGenresConnection(orderBy: [{ books: { title: ASC } }]) {
@@ -11227,10 +11067,7 @@ def test_genre_connection_order_by_to_many_no_node_multiplication() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    conn = json_object(payload, "data", "allLibraryGenresConnection")
+    conn = json_object(data, "allLibraryGenresConnection")
     names = [json_at(edge, "node", "name") for edge in json_list(conn, "edges")]
     # Each genre appears exactly once, ordered by its MIN book title
     # (Fiction "Aaa" < History "Bbb") -- no duplicate Fiction despite two books.
@@ -11246,13 +11083,10 @@ def _genres_connection(args: str, selection: str) -> JSONObject:
     Asserts the no-error envelope (HTTP 200, no ``errors`` entry) so every
     caller pins at least the query-succeeds property.
     """
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f"query {{ allLibraryGenresConnection({args}) {{ {selection} }} }}",
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    return json_object(payload, "data", "allLibraryGenresConnection")
+    return json_object(data, "allLibraryGenresConnection")
 
 
 @pytest.mark.django_db
@@ -11517,9 +11351,7 @@ def _post_node(global_id: str, selection: str = "__typename") -> JSONObject:
     presence or absence of ``errors`` per the Decision-5 failure families.
     Pins only the never-a-500 transport contract itself.
     """
-    response = _post_graphql(f'query {{ node(id: "{global_id}") {{ {selection} }} }}')
-    assert response.status_code == 200
-    return response_json(response)
+    return _graphql_payload(f'query {{ node(id: "{global_id}") {{ {selection} }} }}')
 
 
 def _nodes_query(ids: tuple[str, ...]) -> str:
@@ -11536,35 +11368,11 @@ def _nodes_query(ids: tuple[str, ...]) -> str:
         """
 
 
-_CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _holder_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
-
-    return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_holder_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    """The holder schema on the async view, whose sync library hooks read ``request.user``."""
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-test/", _holder_graphql_view),
-    path("graphql-async/", _async_shipped_graphql_view),
-    path("graphql-async-test/", _async_holder_graphql_view),
-]
+#: The holder schema on the sync and async views (whose sync library hooks read
+#: ``request.user``), and the shipped schema on the async view.
+_MOUNT = SchemaMount(__name__, "graphql-test/", async_route="graphql-async-test/")
+_SHIPPED = SchemaMount(__name__, async_route="graphql-async/")
+urlpatterns = [*_MOUNT.urlpatterns, *_SHIPPED.urlpatterns]
 
 
 async def _async_genres_resolver(
@@ -11601,25 +11409,21 @@ async def _post_async_genres(query: str, *, user: User | None = None) -> JSONObj
 
     The request runs as ``user`` when given.
     """
-    _CURRENT["schema"] = _async_genre_connection_holder_schema()
     client = AsyncTestClient()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if user is None:
+    with _MOUNT.serving(_async_genre_connection_holder_schema()):
+        if user is None:
+            result = await client.query(
+                query,
+                assert_no_errors=False,
+                url="/graphql-async-test/",
+            )
+        else:
+            async with client.login(user):
                 result = await client.query(
                     query,
                     assert_no_errors=False,
                     url="/graphql-async-test/",
                 )
-            else:
-                async with client.login(user):
-                    result = await client.query(
-                        query,
-                        assert_no_errors=False,
-                        url="/graphql-async-test/",
-                    )
-    finally:
-        _CURRENT["schema"] = None
     assert result.response.status_code == 200
     return response_json(result.response)
 
@@ -11643,17 +11447,13 @@ async def _post_async_periodicals(query: str) -> JSONObject:
             resolver=_async_periodicals_resolver,
         )
 
-    _CURRENT["schema"] = DjangoSchema(query=Query, config=strawberry_config())
     client = AsyncTestClient()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await client.query(
-                query,
-                assert_no_errors=False,
-                url="/graphql-async-test/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(DjangoSchema(query=Query, config=strawberry_config())):
+        result = await client.query(
+            query,
+            assert_no_errors=False,
+            url="/graphql-async-test/",
+        )
     assert result.response.status_code == 200
     return response_json(result.response)
 
@@ -11665,12 +11465,8 @@ def _post_holder(
     variables: Mapping[str, object] | None = None,
 ) -> "_MonkeyPatchedWSGIResponse":
     """POST ``query`` against a holder schema mounted at ``/graphql-test/``."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return _post_graphql(query, variables=variables, url="/graphql-test/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return _post_graphql(query, variables=variables, url="/graphql-test/")
 
 
 def _relay_relation_isnull_holder_schema() -> strawberry.Schema:
@@ -12904,7 +12700,7 @@ async def _post_async_shipped(
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
     """POST ``query`` against the shipped schema over ``/graphql-async/``."""
-    with override_settings(ROOT_URLCONF=__name__):
+    with _SHIPPED.serving(config_schema.schema):
         result = await AsyncTestClient().query(
             query,
             variables=variables,
@@ -12971,11 +12767,8 @@ def test_node_refetch_genre() -> None:
     """
     models.Genre.objects.create(name="Speculative")
 
-    listed = _post_graphql("query { allLibraryGenres { id name } }")
-    assert listed.status_code == 200
-    listed_payload = response_json(listed)
-    assert "errors" not in listed_payload, listed_payload
-    emitted = json_object(listed_payload, "data", "allLibraryGenres", 0)
+    data = _assert_graphql_success("query { allLibraryGenres { id name } }")
+    emitted = json_object(data, "allLibraryGenres", 0)
 
     refetched = _post_node(json_str(emitted, "id"), "... on GenreType { id name }")
     assert "errors" not in refetched, refetched
@@ -12988,11 +12781,8 @@ def test_typed_node_field_live() -> None:
     genre = models.Genre.objects.create(name="Speculative")
     gid = global_id_for(library_schema.GenreType, genre.pk)
 
-    response = _post_graphql(f'query {{ genre(id: "{gid}") {{ id name }} }}')
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "genre") == {"id": gid, "name": "Speculative"}
+    data = _assert_graphql_success(f'query {{ genre(id: "{gid}") {{ id name }} }}')
+    assert json_at(data, "genre") == {"id": gid, "name": "Speculative"}
 
 
 @pytest.mark.django_db
@@ -13008,9 +12798,7 @@ def test_typed_node_field_mismatch_live() -> None:
     book = models.Book.objects.create(title="Kindred", shelf=_seed_shelf())
     book_gid = global_id_for(library_schema.BookType, book.pk)
 
-    response = _post_graphql(f'query {{ genre(id: "{book_gid}") {{ name }} }}')
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = _graphql_payload(f'query {{ genre(id: "{book_gid}") {{ name }} }}')
     assert "errors" in payload, payload
     messages = " ".join(json_str(error, "message") for error in json_list(payload, "errors"))
     assert "Wrong node type: expected a GenreType id, received a BookType id." in messages
@@ -13107,19 +12895,16 @@ def test_node_refetch_reads_a_resolve_nodes_only_override_live() -> None:
     draft_gid = global_id_for(library_schema.ReadingListType, draft.pk)
     selection = "... on ReadingListType { title }"
 
-    response = _post_graphql(
+    _assert_graphql_data(
         f'query {{ published: node(id: "{published_gid}") {{ {selection} }}'
         f' draft: node(id: "{draft_gid}") {{ {selection} }}'
         f' batch: nodes(ids: ["{published_gid}", "{draft_gid}"]) {{ {selection} }} }}',
+        {
+            "published": {"title": "Classics"},
+            "draft": None,
+            "batch": [{"title": "Classics"}, None],
+        },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert payload["data"] == {
-        "published": {"title": "Classics"},
-        "draft": None,
-        "batch": [{"title": "Classics"}, None],
-    }
 
 
 @pytest.mark.django_db
@@ -13180,11 +12965,8 @@ def test_nodes_batch_mixed_types_order_and_null() -> None:
     )
     document = _nodes_query(ids)
 
-    response = _post_graphql(document)
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "nodes") == [
+    data = _assert_graphql_success(document)
+    assert json_at(data, "nodes") == [
         {"__typename": "GenreType", "name": "Speculative"},
         None,
         None,
@@ -13216,13 +12998,10 @@ def test_nodes_duplicates_and_empty_live() -> None:
     genre = models.Genre.objects.create(name="Speculative")
     gid = global_id_for(library_schema.GenreType, genre.pk)
 
-    duplicated = _post_graphql(
+    data = _assert_graphql_success(
         f'query {{ nodes(ids: ["{gid}", "{gid}"]) {{ ... on GenreType {{ name }} }} }}',
     )
-    assert duplicated.status_code == 200
-    duplicated_payload = response_json(duplicated)
-    assert "errors" not in duplicated_payload, duplicated_payload
-    assert json_at(duplicated_payload, "data", "nodes") == [{"name": "Speculative"}] * 2
+    assert json_at(data, "nodes") == [{"name": "Speculative"}] * 2
 
     with CaptureQueriesContext(connection) as captured:
         empty = _post_graphql("query { nodes(ids: []) { __typename } }")
@@ -13244,12 +13023,10 @@ def test_nodes_malformed_id_mid_batch_live() -> None:
     """
     genre = models.Genre.objects.create(name="Speculative")
     gid = global_id_for(library_schema.GenreType, genre.pk)
-    response = _post_graphql(
+    payload = _graphql_payload(
         "query ($ids: [ID!]!) { nodes(ids: $ids) { __typename } }",
         variables={"ids": [gid, "this-is-not-base64"]},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     error = json_object(payload, "errors", 0)
     assert json_at(error, "extensions", "code") == "GLOBALID_INVALID"
@@ -13463,7 +13240,7 @@ def test_genre_books_connection_behavior() -> None:
     hidden.genres.add(genre)
 
     def _books_page(args: str) -> JSONObject:
-        response = _post_graphql(
+        data = _assert_graphql_success(
             f"""
             query {{
               allLibraryGenres {{
@@ -13475,10 +13252,7 @@ def test_genre_books_connection_behavior() -> None:
             }}
             """,
         )
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        return json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
+        return json_object(data, "allLibraryGenres", 0, "booksConnection")
 
     page_one = _books_page("orderBy: [{ title: ASC }], first: 2")
     titles_one = [json_at(edge, "node", "title") for edge in json_list(page_one, "edges")]
@@ -13510,7 +13284,7 @@ def test_nested_books_connection_first_overrun_clamps() -> None:
         book = models.Book.objects.create(title=title, shelf=shelf)
         book.genres.add(genre)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryGenres(filter: { name: { exact: "OverrunGenre" } }) {
@@ -13522,10 +13296,7 @@ def test_nested_books_connection_first_overrun_clamps() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    conn = json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
+    conn = json_object(data, "allLibraryGenres", 0, "booksConnection")
     assert [json_at(edge, "node", "title") for edge in json_list(conn, "edges")] == [
         "Alpha",
         "Beta",
@@ -13555,7 +13326,7 @@ def test_nested_books_connection_stale_after_is_not_an_error() -> None:
         book = models.Book.objects.create(title=title, shelf=shelf)
         book.genres.add(genre)
 
-    page_one_resp = _post_graphql(
+    page_one = _graphql_payload(
         """
         query {
           allLibraryGenres(filter: { name: { exact: "StaleAfterGenre" } }) {
@@ -13566,8 +13337,6 @@ def test_nested_books_connection_stale_after_is_not_an_error() -> None:
         }
         """,
     )
-    assert page_one_resp.status_code == 200
-    page_one = response_json(page_one_resp)
     assert "errors" not in page_one, page_one
     end_cursor = json_at(
         page_one,
@@ -13582,7 +13351,7 @@ def test_nested_books_connection_stale_after_is_not_an_error() -> None:
     # Delete the row the cursor position points at (second in title order).
     models.Book.objects.get(genres=genre, title="Beta").delete()
 
-    page_two_resp = _post_graphql(
+    page_two = _graphql_payload(
         f"""
         query {{
           allLibraryGenres(filter: {{ name: {{ exact: "StaleAfterGenre" }} }}) {{
@@ -13593,8 +13362,6 @@ def test_nested_books_connection_stale_after_is_not_an_error() -> None:
         }}
         """,
     )
-    assert page_two_resp.status_code == 200
-    page_two = response_json(page_two_resp)
     assert "errors" not in page_two, page_two
     edges = json_list(page_two, "data", "allLibraryGenres", 0, "booksConnection", "edges")
     assert len(edges) >= 1, page_two
@@ -13613,7 +13380,7 @@ def test_nested_books_connection_first_and_last_rejected() -> None:
     book = models.Book.objects.create(title="Alpha", shelf=shelf)
     book.genres.add(genre)
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           allLibraryGenres(filter: { name: { exact: "FirstLastGenre" } }) {
@@ -13624,8 +13391,6 @@ def test_nested_books_connection_first_and_last_rejected() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
     messages = " ".join(json_str(error, "message") for error in json_list(payload, "errors"))
@@ -13699,11 +13464,8 @@ def test_genre_books_connection_has_next_page_served_count_free_via_probe() -> N
           }
         }
         """
-    fallback_response = _post_graphql(fallback_query)
-    assert fallback_response.status_code == 200
-    fallback_payload = response_json(fallback_response)
-    assert "errors" not in fallback_payload, fallback_payload
-    fallback_conn = json_object(fallback_payload, "data", "allLibraryGenres", 0, "booksConnection")
+    data = _assert_graphql_success(fallback_query)
+    fallback_conn = json_object(data, "allLibraryGenres", 0, "booksConnection")
     assert fallback_conn["edges"] == conn["edges"]
     assert json_at(fallback_conn, "pageInfo", "hasNextPage") == json_at(
         conn,
@@ -13819,13 +13581,10 @@ def test_genre_books_connection_probe_childless_and_populated_parents() -> None:
           }
         }
         """
-    no_edges_response = _post_graphql(no_edges_query)
-    assert no_edges_response.status_code == 200
-    no_edges_payload = response_json(no_edges_response)
-    assert "errors" not in no_edges_payload, no_edges_payload
+    data = _assert_graphql_success(no_edges_query)
     flags = {
         json_at(row, "name"): json_at(row, "booksConnection", "pageInfo", "hasNextPage")
-        for row in json_list(no_edges_payload, "data", "allLibraryGenres")
+        for row in json_list(data, "allLibraryGenres")
     }
     assert flags == {"Populated": True, "Empty": False}
 
@@ -13860,11 +13619,8 @@ def test_genre_books_connection_alias_merge_probe_plus_edges_drops_the_sentinel(
           }
         }
         """
-    response = _post_graphql(merged_query)
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    node = json_object(payload, "data", "allLibraryGenres", 0)
+    data = _assert_graphql_success(merged_query)
+    node = json_object(data, "allLibraryGenres", 0)
     # ``b`` (edges-only) must NOT leak the overfetched sentinel: exactly its page.
     assert [json_at(edge, "node", "title") for edge in json_list(node, "b", "edges")] == [
         "Aurora",
@@ -13922,13 +13678,10 @@ def test_genres_connection_alias_merge_total_count_sibling_keeps_has_next() -> N
           }
         }
         """
-    response = _post_graphql(query)
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
+    data = _assert_graphql_success(query)
     target = next(
         bk
-        for bk in json_list(payload, "data", "allLibraryBooks")
+        for bk in json_list(data, "allLibraryBooks")
         if json_at(bk, "a") is not None and json_at(bk, "b", "totalCount") == 3
     )
     # 3 genres, page of 2 -> a next page exists, read from the retained count.
@@ -14975,9 +14728,7 @@ def test_divergent_aliases_nested_same_key_conflict_serves_each_subtree_args() -
         }}
         """
 
-    response = _post_graphql(_nested_query(""))
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = _graphql_payload(_nested_query(""))
     assert "errors" not in payload, payload
     assert payload == {
         "data": {
@@ -15015,7 +14766,7 @@ def test_identical_aliases_nested_same_key_conflict_serves_each_subtree_args() -
     level per-parent while the outer keeps its shared window.
     """
     _seed_two_genres_three_shared_books()
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           allLibraryGenres(orderBy: [{ name: ASC }]) {
@@ -15033,8 +14784,6 @@ def test_identical_aliases_nested_same_key_conflict_serves_each_subtree_args() -
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     expected = {
         "a": {"edges": _shared_book_edges(["Aurora", "Binti"], ["G-Alpha"])},
@@ -15054,7 +14803,7 @@ def test_plain_list_aliases_nested_same_key_conflict_serves_each_subtree_args() 
     page size is honored.
     """
     _seed_two_genres_three_shared_books()
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           allLibraryGenres(orderBy: [{ name: ASC }]) {
@@ -15064,8 +14813,6 @@ def test_plain_list_aliases_nested_same_key_conflict_serves_each_subtree_args() 
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     expected = {
         "a": _shared_book_nodes(["Aurora", "Binti", "Circe"], ["G-Alpha"]),
@@ -15109,7 +14856,7 @@ def test_genre_books_connection_after_last_page_info_matches_per_parent() -> Non
         book.genres.add(genre)
 
     def _books_page(args: str) -> JSONObject:
-        response = _post_graphql(
+        data = _assert_graphql_success(
             f"""
             query {{
               allLibraryGenres {{
@@ -15121,10 +14868,7 @@ def test_genre_books_connection_after_last_page_info_matches_per_parent() -> Non
             }}
             """,
         )
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        return json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
+        return json_object(data, "allLibraryGenres", 0, "booksConnection")
 
     # Page forward to the third book ("Circe") to obtain a real ``after`` cursor;
     # the after-set is then {Dune, Elantris} - exactly two rows, ``<= last: 3``.
@@ -15176,7 +14920,7 @@ def test_book_genres_connection_sidecars_and_total_count() -> None:
     ):
         book.genres.add(models.Genre.objects.create(name=name))
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBooks {
@@ -15192,10 +14936,7 @@ def test_book_genres_connection_sidecars_and_total_count() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    conn = json_object(payload, "data", "allLibraryBooks", 0, "genresConnection")
+    conn = json_object(data, "allLibraryBooks", 0, "genresConnection")
     # ``iContains "a"`` matches Gamma / Alpha / Banana (Echo excluded); the
     # orderBy arranges, the first: 2 window slices.
     assert [json_at(edge, "node", "name") for edge in json_list(conn, "edges")] == [
@@ -15214,14 +14955,10 @@ def test_book_loans_relation_stays_list_only() -> None:
     Relay-shaped; ``genresConnection`` in the same field set is the
     positive control.
     """
-    introspected = _post_graphql('query { __type(name: "BookType") { fields { name } } }')
-    assert introspected.status_code == 200
-    introspected_payload = response_json(introspected)
-    assert "errors" not in introspected_payload, introspected_payload
-    field_names = {
-        json_at(field, "name")
-        for field in json_list(introspected_payload, "data", "__type", "fields")
-    }
+    data = _assert_graphql_success(
+        'query { __type(name: "BookType") { fields { name } } }',
+    )
+    field_names = {json_at(field, "name") for field in json_list(data, "__type", "fields")}
     assert "loans" in field_names
     assert "loansConnection" not in field_names
     assert "genresConnection" in field_names
@@ -15314,14 +15051,8 @@ def test_nodes_batch_holes_for_cascade_hidden_rows(monkeypatch: pytest.MonkeyPat
         ),
     )
 
-    response = _post_graphql(document)
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "nodes") == [
-        None,
-        {"__typename": "BookType", "title": "Kindred"},
-    ]
+    data = _assert_graphql_success(document)
+    assert json_at(data, "nodes") == [None, {"__typename": "BookType", "title": "Kindred"}]
 
     staff_response = _post_graphql_as_staff(document)
     assert staff_response.status_code == 200
@@ -15519,11 +15250,8 @@ def test_nested_books_connection_has_next_page_without_edges() -> None:
     assert "_dst_total_count" not in window_sql
     assert "COUNT(" not in window_sql.upper()
 
-    exact = _post_graphql(exact_query)
-    assert exact.status_code == 200
-    exact_payload = response_json(exact)
-    assert "errors" not in exact_payload, exact_payload
-    for edge in json_list(exact_payload, "data", "allLibraryGenresConnection", "edges"):
+    data = _assert_graphql_success(exact_query)
+    for edge in json_list(data, "allLibraryGenresConnection", "edges"):
         assert json_at(edge, "node", "booksConnection", "pageInfo", "hasNextPage") is False
 
 
@@ -15896,11 +15624,8 @@ def test_nested_connection_pagination_from_graphql_variable_live() -> None:
       }
     }
     """
-    response = _post_graphql(query, variables={"n": 2})
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    conn = json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
+    data = _assert_graphql_success(query, variables={"n": 2})
+    conn = json_object(data, "allLibraryGenres", 0, "booksConnection")
     assert [json_at(e, "node", "title") for e in json_list(conn, "edges")] == ["a", "b"]
     assert json_at(conn, "pageInfo", "hasNextPage") is True
 
@@ -16586,16 +16311,12 @@ async def test_snake_case_page_info_only_keyset_page_reports_has_next_page_async
     await models.Issue.objects.acreate(periodical=periodical, number=1, title="Spring")
     await models.Issue.objects.acreate(periodical=periodical, number=2, title="Summer")
     document, path = _SNAKE_CASE_PAGE_INFO_DOCUMENTS["root-keyset"]
-    _CURRENT["schema"] = _snake_case_schema()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient().query(
-                document,
-                assert_no_errors=False,
-                url="/graphql-async-test/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(_snake_case_schema()):
+        result = await AsyncTestClient().query(
+            document,
+            assert_no_errors=False,
+            url="/graphql-async-test/",
+        )
     payload = response_json(result.response)
 
     assert "errors" not in payload, payload
@@ -16619,7 +16340,7 @@ def test_nested_connection_first_zero_empty_page_live() -> None:
     """
     shelf = _seed_shelf()
     _seed_genre_with_books("Empty", shelf, ("a", "b", "c"))
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryGenres {
@@ -16631,10 +16352,7 @@ def test_nested_connection_first_zero_empty_page_live() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    conn = json_object(payload, "data", "allLibraryGenres", 0, "booksConnection")
+    conn = json_object(data, "allLibraryGenres", 0, "booksConnection")
     assert conn["edges"] == []
     assert json_at(conn, "pageInfo", "hasNextPage") is True
     assert json_at(conn, "pageInfo", "endCursor") is None
@@ -16753,7 +16471,7 @@ def test_nested_or_related_branch_constrains_parent_live() -> None:
     _seed_branch_with_shelf_codes("alpha", ("match",))
     _seed_branch_with_shelf_codes("beta", ("other",))
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBranches(
@@ -16764,10 +16482,7 @@ def test_nested_or_related_branch_constrains_parent_live() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "allLibraryBranches") == [{"name": "alpha"}]
+    assert json_at(data, "allLibraryBranches") == [{"name": "alpha"}]
 
 
 @pytest.mark.django_db
@@ -16783,7 +16498,7 @@ def test_many_side_related_filter_returns_each_parent_once_live() -> None:
     _seed_branch_with_shelf_codes("alpha", ("match-1", "match-2", "other"))
     _seed_branch_with_shelf_codes("beta", ("unrelated",))
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBranches(
@@ -16794,12 +16509,9 @@ def test_many_side_related_filter_returns_each_parent_once_live() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
     # ``alpha`` appears exactly once despite two matching shelves; ``beta`` is
     # absent. A fan-out join would have returned ``[alpha, alpha]``.
-    assert json_at(payload, "data", "allLibraryBranches") == [{"name": "alpha"}]
+    assert json_at(data, "allLibraryBranches") == [{"name": "alpha"}]
 
 
 @pytest.mark.django_db
@@ -16814,7 +16526,7 @@ def test_related_filter_identical_direct_and_inside_logic_tree_live() -> None:
     _seed_branch_with_shelf_codes("alpha", ("match-1", "match-2"))
     _seed_branch_with_shelf_codes("beta", ("other",))
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           direct: allLibraryBranches(
@@ -16826,8 +16538,6 @@ def test_related_filter_identical_direct_and_inside_logic_tree_live() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     data = json_object(payload, "data")
     assert data["direct"] == data["wrapped"] == [{"name": "alpha"}]
@@ -16845,7 +16555,7 @@ def test_related_filter_identical_direct_and_inside_logic_tree_live() -> None:
 
 def _introspect_type(type_name: str) -> JSONObject:
     """Return the ``__type`` payload (interfaces + fields with nested type tree)."""
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f"""
         query {{
           __type(name: "{type_name}") {{
@@ -16858,10 +16568,7 @@ def _introspect_type(type_name: str) -> JSONObject:
         }}
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    type_info = json_object(payload, "data", "__type")
+    type_info = json_object(data, "__type")
     assert type_info is not None, f"{type_name} is not in the schema"
     return type_info
 
@@ -16958,11 +16665,9 @@ def test_periodical_type_issues_are_connection_only_live() -> None:
 @pytest.mark.django_db
 def test_periodical_issues_list_is_not_selectable_live() -> None:
     """Explicit ``"connection"`` removes the list: selecting ``issues`` is a validation error."""
-    response = _post_graphql(
+    payload = _graphql_payload(
         "{ allLibraryPeriodicalsConnection(first: 1) { edges { node { issues { title } } } } }",
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("data") is None, payload
     messages = [
         json_object(error).get("message", "") for error in json_list(payload.get("errors", []))
@@ -16994,13 +16699,9 @@ def test_branches_via_list_field_default_resolver_applies_get_queryset_live() ->
     models.Branch.objects.create(name="Visible", city="Boston")
     models.Branch.objects.create(name="Hidden", city="restricted")
 
-    response = _post_graphql("{ allLibraryBranchesViaListField { name } }")
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
+    data = _assert_graphql_success("{ allLibraryBranchesViaListField { name } }")
     names = [
-        json_at(branch, "name")
-        for branch in json_list(payload, "data", "allLibraryBranchesViaListField")
+        json_at(branch, "name") for branch in json_list(data, "allLibraryBranchesViaListField")
     ]
     assert "Visible" in names
     assert "Hidden" not in names
@@ -17030,7 +16731,7 @@ def test_scalar_or_branch_unions_matching_rows_live() -> None:
     models.Branch.objects.create(name="other-name", city="y-row")
     models.Branch.objects.create(name="no-match", city="elsewhere")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBranches(
@@ -17041,12 +16742,9 @@ def test_scalar_or_branch_unions_matching_rows_live() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
     # OR does not guarantee ordering; assert the matching set. ``no-match`` is
     # excluded; neither row is duplicated.
-    names = {json_at(row, "name") for row in json_list(payload, "data", "allLibraryBranches")}
+    names = {json_at(row, "name") for row in json_list(data, "allLibraryBranches")}
     assert names == {"x-row", "other-name"}
 
 
@@ -17068,7 +16766,7 @@ def test_scalar_and_branch_intersects_matching_rows_live() -> None:
     models.Branch.objects.create(name="city-only", city="downtown")
     models.Branch.objects.create(name="neither", city="elsewhere")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allLibraryBranches(
@@ -17080,12 +16778,9 @@ def test_scalar_and_branch_intersects_matching_rows_live() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
     # AND returns only the both-arm row; ``city-only`` (city arm only) is
     # excluded - a union would have returned it too.
-    assert json_at(payload, "data", "allLibraryBranches") == [{"name": "both", "city": "downtown"}]
+    assert json_at(data, "allLibraryBranches") == [{"name": "both", "city": "downtown"}]
 
 
 @pytest.mark.django_db
@@ -17103,7 +16798,7 @@ def test_malformed_nested_branch_form_raises_filter_invalid_live() -> None:
     """
     models.Patron.objects.create(name="Ada", email="ada@example.com")
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         """
         query {
           allLibraryPatrons(
@@ -17114,8 +16809,6 @@ def test_malformed_nested_branch_form_raises_filter_invalid_live() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" in payload, payload
     assert payload["data"] is None, payload
     error = json_object(payload, "errors", 0)
@@ -17275,14 +16968,11 @@ def test_create_shelf_via_form_hidden_branch_fk_is_relation_field_error() -> Non
     GlobalID relation gives - earned live (single FK, form path).
     """
     restricted = models.Branch.objects.create(name="FormRestrictedFK", city="restricted")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_SHELF_VIA_FORM,
         variables={"d": {"code": "RF-1", "branchId": restricted.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaForm")
+    result = json_object(data, "createShelfViaForm")
     assert result["result"] is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["branchId"]
     assert not models.Shelf.objects.filter(code="RF-1").exists()
@@ -17293,14 +16983,11 @@ def test_create_shelf_via_form_hidden_branch_in_alt_branches_is_field_error() ->
     """A raw-pk M2M element whose Branch is hidden -> field error, no write (multi, form path)."""
     visible = models.Branch.objects.create(name="FormVisibleM2M", city="open")
     restricted = models.Branch.objects.create(name="FormRestrictedM2M", city="restricted")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_SHELF_VIA_FORM,
         variables={"d": {"code": "RM-1", "branchId": visible.pk, "altBranches": [restricted.pk]}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaForm")
+    result = json_object(data, "createShelfViaForm")
     assert result["result"] is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["altBranches"]
     assert not models.Shelf.objects.filter(code="RM-1").exists()
@@ -17318,14 +17005,11 @@ def test_create_shelf_via_form_visible_branch_resolves_by_to_field_name_and_writ
     the bound ``ModelChoiceField(to_field_name="name")`` validates by that key.
     """
     visible = models.Branch.objects.create(name="FormVisibleOK", city="open")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_SHELF_VIA_FORM,
         variables={"d": {"code": "OK-1", "branchId": visible.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaForm")
+    result = json_object(data, "createShelfViaForm")
     assert result["errors"] == []
     assert json_at(result, "result", "code") == "OK-1"
     shelf = models.Shelf.objects.get(code="OK-1")
@@ -17390,17 +17074,11 @@ def test_create_shelf_via_form_tier_member_or_omission_writes(
 ) -> None:
     """A tier member writes its value; an omitted tier keeps the column default."""
     branch = models.Branch.objects.create(name="TierWriteBranch", city="open")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_SHELF_VIA_FORM_TIER,
         variables={"d": {"code": "TIER-OK", "branchId": branch.pk, **tier_input}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "createShelfViaForm") == {
-        "result": {"code": "TIER-OK"},
-        "errors": [],
-    }
+    assert json_at(data, "createShelfViaForm") == {"result": {"code": "TIER-OK"}, "errors": []}
     assert models.Shelf.objects.get(code="TIER-OK").tier == stored
 
 
@@ -17415,14 +17093,11 @@ def test_create_shelf_model_mutation_hidden_branch_is_field_error() -> None:
     so a hidden Branch is a field-keyed error with no write.
     """
     restricted = models.Branch.objects.create(name="ModelRestrictedFK", city="restricted")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_SHELF_MODEL,
         variables={"d": {"code": "MM-1", "branchId": restricted.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelf")
+    result = json_object(data, "createShelf")
     assert result["result"] is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["branchId"]
     assert not models.Shelf.objects.filter(code="MM-1").exists()
@@ -17441,14 +17116,11 @@ def test_create_shelf_model_mutation_hidden_alt_branch_m2m_is_field_error() -> N
     """
     visible = models.Branch.objects.create(name="ModelVisibleM2M", city="open")
     restricted = models.Branch.objects.create(name="ModelRestrictedM2M", city="restricted")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_SHELF_MODEL,
         variables={"d": {"code": "MM-2", "branchId": visible.pk, "altBranches": [restricted.pk]}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelf")
+    result = json_object(data, "createShelf")
     assert result["result"] is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["altBranches"]
     assert not models.Shelf.objects.filter(code="MM-2").exists()
@@ -17467,16 +17139,13 @@ def test_create_shelf_model_mutation_nonexistent_alt_branch_is_field_error() -> 
     before = models.Shelf.objects.count()
     missing_pk = 99999
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_SHELF_MODEL,
         variables={
             "d": {"code": "MM-3", "branchId": visible.pk, "altBranches": [missing_pk]},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelf")
+    result = json_object(data, "createShelf")
     assert result["result"] is None
     missing_errors = json_list(result, "errors")
     assert [json_at(e, "field") for e in missing_errors] == ["altBranches"]
@@ -17517,16 +17186,13 @@ def test_create_shelf_model_mutation_visible_alt_branches_attach() -> None:
     alt1 = models.Branch.objects.create(name="ModelAltOneM2M", city="open")
     alt2 = models.Branch.objects.create(name="ModelAltTwoM2M", city="open")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_SHELF_MODEL,
         variables={
             "d": {"code": "MM-4", "branchId": home.pk, "altBranches": [alt1.pk, alt2.pk]},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelf")
+    result = json_object(data, "createShelf")
     assert result["errors"] == []
     assert json_at(result, "result", "code") == "MM-4"
     shelf = models.Shelf.objects.get(code="MM-4")
@@ -17556,17 +17222,14 @@ def test_update_book_via_form_partial_update_preserves_m2m_over_http() -> None:
     book = models.Book.objects.create(title="BeforeFormTitle", shelf=shelf)
     book.genres.set([genre_one, genre_two])
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _UPDATE_BOOK_VIA_FORM,
         variables={
             "id": global_id_for(library_schema.BookType, book.pk),
             "d": {"title": "AfterFormTitle"},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "updateBookViaForm")
+    result = json_object(data, "updateBookViaForm")
     assert result["errors"] == []
     assert json_at(result, "node", "title") == "AfterFormTitle"
     book.refresh_from_db()
@@ -17588,14 +17251,11 @@ def test_update_book_via_form_explicit_null_genres_is_form_required_error() -> N
     book = models.Book.objects.create(title="NullBeforeTitle", shelf=shelf)
     book.genres.set([genre])
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _UPDATE_BOOK_VIA_FORM,
         variables={"id": global_id_for(library_schema.BookType, book.pk), "d": {"genres": None}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "updateBookViaForm")
+    result = json_object(data, "updateBookViaForm")
     assert result["node"] is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["genres"]
     book.refresh_from_db()
@@ -17631,7 +17291,7 @@ def test_update_book_malformed_genre_element_is_relation_field_error_over_http(
     book = models.Book.objects.create(title="MalformedBefore", shelf=shelf)
     book.genres.set([kept])
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f"mutation($id: ID!, $d: {input_name}!){{ {field}(id:$id, data:$d){{ "
         "node{ title } errors{ field messages } } }",
         variables={
@@ -17645,10 +17305,7 @@ def test_update_book_malformed_genre_element_is_relation_field_error_over_http(
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", field) == {
+    assert json_at(data, field) == {
         "node": None,
         "errors": [{"field": "genres", "messages": ["Invalid id for relation 'genres'."]}],
     }
@@ -17684,14 +17341,11 @@ def test_update_book_at_repair_desk_publishes_only_the_form_choices_over_http() 
     )
     book_id = global_id_for(library_schema.BookType, book.pk)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _UPDATE_BOOK_AT_REPAIR_DESK,
         variables={"id": book_id, "d": {"circulationStatus": "repair"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateBookAtRepairDeskViaForm")
+    result = json_at(data, "updateBookAtRepairDeskViaForm")
     assert result == {"node": {"circulationStatus": "repair"}, "errors": []}
     book.refresh_from_db()
     assert book.circulation_status == "repair"
@@ -17806,17 +17460,14 @@ def test_update_book_via_form_partial_update_preserves_optional_nullable_scalar_
     )
     book.genres.set([genre])
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _UPDATE_BOOK_VIA_FORM,
         variables={
             "id": global_id_for(library_schema.BookType, book.pk),
             "d": {"title": "SubAfterTitle"},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "updateBookViaForm")
+    result = json_object(data, "updateBookViaForm")
     assert result["errors"] == []
     book.refresh_from_db()
     assert book.title == "SubAfterTitle"
@@ -17831,15 +17482,12 @@ def test_update_book_via_form_partial_update_preserves_optional_nullable_scalar_
 
 def _input_fields_by_name(type_name: str) -> dict[str, JSONObject]:
     """Introspect a generated input type and index its inputFields by GraphQL name."""
-    response = _post_graphql(
+    data = _assert_graphql_success(
         'query { __type(name: "'
         + type_name
         + '") { inputFields { name type { kind name ofType { kind name } } } } }',
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    introspected = json_object(payload, "data", "__type")
+    introspected = json_object(data, "__type")
     assert introspected is not None, f"{type_name} not in schema"
     return {
         json_str(field, "name"): json_object(field, "type")
@@ -17922,23 +17570,20 @@ def test_create_publisher_errors_key_to_the_input_fields_sent() -> None:
     """
     models.Publisher.objects.create(name="Keyed House", house_code="KEYED")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_PUBLISHER_PAIR,
         variables={
             "dup": {"publisherName": "Keyed House", "houseCode": "KEYED"},
             "bad": {"publisherName": "\ud800", "houseCode": "FRESH"},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    duplicate = json_object(payload, "data", "dup")
+    duplicate = json_object(data, "dup")
     assert duplicate["node"] is None
     assert sorted(json_list(duplicate, "errors"), key=lambda error: json_str(error, "field")) == [
         {"field": "houseCode", "path": ["houseCode"], "codes": ["unique"]},
         {"field": "publisherName", "path": ["publisherName"], "codes": ["unique"]},
     ]
-    undecodable = json_object(payload, "data", "bad")
+    undecodable = json_object(data, "bad")
     assert undecodable["node"] is None
     assert [
         (json_at(error, "field"), json_at(error, "path"))
@@ -17965,7 +17610,7 @@ def test_create_book_via_custom_input_happy_path() -> None:
     """
     shelf = _seed_shelf()
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_BOOK_VIA_CUSTOM_INPUT,
         variables={
             "d": {
@@ -17975,10 +17620,7 @@ def test_create_book_via_custom_input_happy_path() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBookViaCustomInput")
+    result = json_object(data, "createBookViaCustomInput")
     assert result["errors"] == []
     assert result["node"] == {
         "title": "CustomBook",
@@ -18000,7 +17642,7 @@ def test_create_book_via_custom_input_attaches_provided_genres() -> None:
     g2 = models.Genre.objects.create(name="CreateFantasy")
     models.Genre.objects.create(name="CreateUnused")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_BOOK_VIA_CUSTOM_INPUT,
         variables={
             "d": {
@@ -18014,10 +17656,7 @@ def test_create_book_via_custom_input_attaches_provided_genres() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBookViaCustomInput")
+    result = json_object(data, "createBookViaCustomInput")
     assert result["errors"] == []
     book = models.Book.objects.get(title="GenreCreateBook", shelf=shelf)
     assert set(book.genres.values_list("name", flat=True)) == {"CreateSciFi", "CreateFantasy"}
@@ -18032,7 +17671,7 @@ def test_create_book_via_custom_input_saves_circulation_status_choice_value() ->
     """
     shelf = _seed_shelf()
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: BookInput!){ createBookViaCustomInput(data:$d){ "
         "node{ title circulationStatus } errors{ field messages } } }",
         variables={
@@ -18044,10 +17683,7 @@ def test_create_book_via_custom_input_saves_circulation_status_choice_value() ->
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBookViaCustomInput")
+    result = json_object(data, "createBookViaCustomInput")
     assert result["errors"] == []
     assert json_at(result, "node", "circulationStatus") == "available"
     created = models.Book.objects.get(title="ChoiceCreateBook", shelf=shelf)
@@ -18070,7 +17706,7 @@ def test_update_book_via_custom_input_saves_circulation_status_choice_value() ->
         circulation_status=models.Book.CirculationStatus.AVAILABLE,
     )
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($id: ID!, $d: BookPartialInput!){ updateBookViaCustomInput(id:$id, data:$d){ "
         "node{ title circulationStatus } errors{ field messages } } }",
         variables={
@@ -18078,10 +17714,7 @@ def test_update_book_via_custom_input_saves_circulation_status_choice_value() ->
             "d": {"title": "ChoiceUpdateBook", "circulationStatus": "checked_out"},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "updateBookViaCustomInput")
+    result = json_object(data, "updateBookViaCustomInput")
     assert result["errors"] == []
     assert json_at(result, "node", "circulationStatus") == "checked_out"
     book.refresh_from_db()
@@ -18165,13 +17798,11 @@ def test_update_book_via_custom_input_genres_omit_vs_empty_list(
     book.genres.set([genre])
     data = {"title": f"{title}After", **data_extra}
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         "mutation($id: ID!, $d: BookPartialInput!){ updateBookViaCustomInput(id:$id, data:$d){ "
         "node{ title } errors{ field messages } } }",
         variables={"id": global_id_for(library_schema.BookType, book.pk), "d": data},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     result = json_object(payload, "data", "updateBookViaCustomInput")
     assert result["errors"] == []
@@ -18187,7 +17818,7 @@ def test_create_book_via_custom_input_explicit_null_genres_is_field_error() -> N
     """
     shelf = _seed_shelf()
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_BOOK_VIA_CUSTOM_INPUT,
         variables={
             "d": {
@@ -18198,10 +17829,7 @@ def test_create_book_via_custom_input_explicit_null_genres_is_field_error() -> N
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBookViaCustomInput")
+    result = json_object(data, "createBookViaCustomInput")
     assert result["node"] is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["genres"]
     assert not models.Book.objects.filter(title="NullGenresBook").exists()
@@ -18213,7 +17841,7 @@ def test_create_book_via_custom_input_wrong_type_genre_id_is_field_error() -> No
     shelf = _seed_shelf()
     decoy = models.Book.objects.create(title="WrongTypeDecoy", shelf=shelf)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_BOOK_VIA_CUSTOM_INPUT,
         variables={
             "d": {
@@ -18224,10 +17852,7 @@ def test_create_book_via_custom_input_wrong_type_genre_id_is_field_error() -> No
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBookViaCustomInput")
+    result = json_object(data, "createBookViaCustomInput")
     assert result["node"] is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["genres"]
     assert not models.Book.objects.filter(title="WrongTypeGenresBook").exists()
@@ -18238,7 +17863,7 @@ def test_create_book_via_custom_input_uncoercible_genre_pk_is_field_error() -> N
     """A well-formed Genre GlobalID with ``node_id="abc"`` is in-band on ``genres``."""
     shelf = _seed_shelf()
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _CREATE_BOOK_VIA_CUSTOM_INPUT,
         variables={
             "d": {
@@ -18249,10 +17874,7 @@ def test_create_book_via_custom_input_uncoercible_genre_pk_is_field_error() -> N
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBookViaCustomInput")
+    result = json_object(data, "createBookViaCustomInput")
     assert result["node"] is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["genres"]
     assert not models.Book.objects.filter(title="UncoercibleGenresBook").exists()
@@ -18268,12 +17890,10 @@ def test_create_book_via_custom_input_omitting_overridden_required_field_errors(
     """
     shelf = _seed_shelf()
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _CREATE_BOOK_VIA_CUSTOM_INPUT,
         variables={"d": {"title": "NoSubtitleBook", "shelfId": shelf.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload  # top-level coercion error
     assert "subtitle" in str(payload["errors"])
     assert not models.Book.objects.filter(title="NoSubtitleBook").exists()
@@ -18291,7 +17911,7 @@ def test_update_book_via_custom_partial_input_happy_path() -> None:
     shelf = _seed_shelf()
     book = models.Book.objects.create(title="OldBookTitle", subtitle="keep", shelf=shelf)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($id: ID!, $d: BookPartialInput!){ updateBookViaCustomInput(id:$id, data:$d){ "
         "node{ title } errors{ field messages } } }",
         variables={
@@ -18299,10 +17919,7 @@ def test_update_book_via_custom_partial_input_happy_path() -> None:
             "d": {"title": "NewBookTitle"},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "updateBookViaCustomInput")
+    result = json_object(data, "updateBookViaCustomInput")
     assert result["errors"] == []
     assert json_at(result, "node", "title") == "NewBookTitle"
     book.refresh_from_db()
@@ -18327,7 +17944,7 @@ def test_update_book_replaces_m2m_and_returns_row_after_visibility_exit_over_htt
     book = models.Book.objects.create(title="VisibleBeforeUpdate", shelf=shelf)
     book.genres.set([old_one, old_two])
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($id: ID!, $d: BookPartialInput!){ updateBookViaCustomInput(id:$id, data:$d){ "
         "node{ title } errors{ field messages } } }",
         variables={
@@ -18339,10 +17956,7 @@ def test_update_book_replaces_m2m_and_returns_row_after_visibility_exit_over_htt
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "updateBookViaCustomInput")
+    result = json_object(data, "updateBookViaCustomInput")
     assert result["errors"] == []
     assert json_at(result, "node", "title") == "HiddenAfterUpdate"
     book.refresh_from_db()
@@ -18364,7 +17978,7 @@ def test_named_interface_is_implemented_by_library_types_over_http() -> None:
     ``possibleTypes``, and each lists ``Named`` (``GenreType`` lists BOTH ``Node`` and
     ``Named``) as an implemented interface.
     """
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           iface: __type(name: "Named") { kind fields { name } possibleTypes { name } }
@@ -18373,21 +17987,16 @@ def test_named_interface_is_implemented_by_library_types_over_http() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    iface = json_object(payload, "data", "iface")
+    iface = json_object(data, "iface")
     assert iface is not None, "Named interface missing from the SDL"
     assert iface["kind"] == "INTERFACE"
     assert {"name"} <= {json_at(f, "name") for f in json_list(iface, "fields")}
     possible = {json_at(pt, "name") for pt in json_list(iface, "possibleTypes")}
     assert {"BranchType", "GenreType", "PatronType"} <= possible
     assert {"Node", "Named"} <= {
-        json_at(i, "name") for i in json_list(payload, "data", "genre", "interfaces")
+        json_at(i, "name") for i in json_list(data, "genre", "interfaces")
     }
-    assert "Named" in {
-        json_at(i, "name") for i in json_list(payload, "data", "branch", "interfaces")
-    }
+    assert "Named" in {json_at(i, "name") for i in json_list(data, "branch", "interfaces")}
 
 
 @pytest.mark.django_db
@@ -18402,13 +18011,10 @@ def test_named_library_records_returns_polymorphic_interface_list_over_http() ->
     models.Genre.objects.create(name="IfaceGenre")
     models.Patron.objects.create(name="IfacePatron", email="iface@example.com")
 
-    response = _post_graphql("query { namedLibraryRecords { __typename name } }")
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
+    data = _assert_graphql_success("query { namedLibraryRecords { __typename name } }")
     pairs = {
         (json_at(r, "__typename"), json_at(r, "name"))
-        for r in json_list(payload, "data", "namedLibraryRecords")
+        for r in json_list(data, "namedLibraryRecords")
     }
     assert ("BranchType", "IfaceBranch") in pairs
     assert ("GenreType", "IfaceGenre") in pairs
@@ -18428,13 +18034,10 @@ def test_named_library_records_hides_restricted_branch_from_anonymous_over_http(
     models.Branch.objects.create(name="NamedVisible", city="Boston")
     models.Branch.objects.create(name="NamedRestricted", city="restricted")
 
-    response = _post_graphql("query { namedLibraryRecords { __typename name } }")
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
+    data = _assert_graphql_success("query { namedLibraryRecords { __typename name } }")
     branch_names = {
         json_at(r, "name")
-        for r in json_list(payload, "data", "namedLibraryRecords")
+        for r in json_list(data, "namedLibraryRecords")
         if json_at(r, "__typename") == "BranchType"
     }
     assert "NamedVisible" in branch_names
@@ -18467,15 +18070,12 @@ def test_create_branch_with_shelf_perform_mutate_runs_custom_write() -> None:
     ``Branch`` plus a starter ``Shelf`` under it from the validated form data. The payload
     is the pinned ``{ ok, errors }``; both rows land in the DB.
     """
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: BranchWithShelfFormInput!){ createBranchWithShelf(data:$d){ "
         "ok errors{ field messages } } }",
         variables={"d": {"branchName": "HookBranch", "shelfCode": "H-1"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBranchWithShelf")
+    result = json_object(data, "createBranchWithShelf")
     assert result["ok"] is True
     assert result["errors"] == []
     # perform_mutate ran the custom multi-row write inside the mutation transaction.
@@ -18493,15 +18093,12 @@ def test_create_branch_with_shelf_validation_errors_key_to_wire_names() -> None:
     name the client sent - the same contract the relation errors and the serializer
     flattener keep - so both overlong values surface as ``branchName`` / ``shelfCode``.
     """
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: BranchWithShelfFormInput!){ createBranchWithShelf(data:$d){ "
         "ok errors{ field messages } } }",
         variables={"d": {"branchName": "B" * 201, "shelfCode": "S" * 201}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBranchWithShelf")
+    result = json_object(data, "createBranchWithShelf")
     assert result["ok"] is False
     assert {json_str(entry, "field") for entry in json_list(result, "errors")} == {
         "branchName",
@@ -18521,17 +18118,14 @@ def test_create_branch_pair_rolls_back_first_write_when_second_conflicts() -> No
     """
     models.Branch.objects.create(name="RollbackConflict")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: BranchPairFormInput!){ createBranchPair(data:$d){ "
         "ok errors{ field messages } } }",
         variables={
             "d": {"firstName": "RollbackFirst", "secondName": "RollbackConflict"},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBranchPair")
+    result = json_object(data, "createBranchPair")
     assert result["ok"] is False
     assert json_at(result, "errors", 0, "field") == "__all__"
     assert not models.Branch.objects.filter(name="RollbackFirst").exists()
@@ -18554,15 +18148,12 @@ def test_create_shelf_via_serializer_happy_path() -> None:
     resolves and the row writes. This is the parent the subclass mutation extends.
     """
     branch = models.Branch.objects.create(name="SerBranch", city="Boston")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: ShelfSerializerInput!) { createShelfViaSerializer(data: $d) { "
         "result { code } errors { field messages } } }",
         variables={"d": {"code": "SerShelf", "branchId": branch.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaSerializer")
+    result = json_object(data, "createShelfViaSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": "SerShelf"}
     assert models.Shelf.objects.filter(code="SerShelf", branch=branch).exists()
@@ -18657,15 +18248,12 @@ def test_create_shelf_rejecting_serializer_save_time_all_sentinel() -> None:
     and no row is written (the write rolled back).
     """
     branch = models.Branch.objects.create(name="RejectBranch", city="Boston")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: RejectingShelfSerializerInput!) { createShelfRejectingViaSerializer(data: $d) { "
         "result { code } errors { field messages } } }",
         variables={"d": {"code": "RejShelf", "branchId": branch.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfRejectingViaSerializer")
+    result = json_object(data, "createShelfRejectingViaSerializer")
     assert result["result"] is None
     assert result["errors"] == [
         {"field": "__all__", "messages": ["Shelf rejected by a whole-object business rule."]},
@@ -18714,13 +18302,11 @@ def test_serializer_hook_same_serializer_different_targets_distinct_inputs_and_d
 
     # The Patron half decodes targetId against Patron: the Patron pk resolves, the runtime
     # serializer re-validates + pops it, and the Shelf writes through code + branch.
-    patron_response = _post_graphql(
+    patron_payload = _graphql_payload(
         "mutation { createShelfViaHookTargetingPatron(data: { "
         f'code: "CollisionViaPatron", branchId: {branch.pk}, targetId: {target_pk} '
         "}) { result { code } errors { field messages } } }",
     )
-    assert patron_response.status_code == 200
-    patron_payload = response_json(patron_response)
     assert "errors" not in patron_payload, patron_payload
     patron_result = json_object(patron_payload, "data", "createShelfViaHookTargetingPatron")
     assert patron_result["errors"] == []
@@ -18729,13 +18315,11 @@ def test_serializer_hook_same_serializer_different_targets_distinct_inputs_and_d
 
     # The Loan half decodes the SAME targetId against Loan, where that pk does not exist:
     # a targetId-keyed relation error, result null, no row (the wrong-model assertion).
-    loan_response = _post_graphql(
+    loan_payload = _graphql_payload(
         "mutation { createShelfViaHookTargetingLoan(data: { "
         f'code: "CollisionViaLoanWrongTarget", branchId: {branch.pk}, targetId: {target_pk} '
         "}) { result { code } errors { field messages } } }",
     )
-    assert loan_response.status_code == 200
-    loan_payload = response_json(loan_response)
     assert "errors" not in loan_payload, loan_payload
     loan_result = json_object(loan_payload, "data", "createShelfViaHookTargetingLoan")
     assert loan_result["result"] is None
@@ -18757,15 +18341,12 @@ def test_create_shelf_via_hook_narrowed_serializer_recovers_unsupported_default_
     writes the row.
     """
     branch = models.Branch.objects.create(name="NarrowBranch", city="Boston")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation { createShelfViaHookNarrowedSerializer(data: { "
         f'code: "NarrowShelf", branchId: {branch.pk} '
         "}) { result { code } errors { field messages } } }",
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaHookNarrowedSerializer")
+    result = json_object(data, "createShelfViaHookNarrowedSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": "NarrowShelf"}
     assert models.Shelf.objects.filter(code="NarrowShelf", branch=branch).exists()
@@ -18790,15 +18371,12 @@ def test_create_shelf_via_serializer_hidden_branch_is_relation_field_error() -> 
     canonical (default full shape) input name, so it is referenced by a typed variable.
     """
     restricted = models.Branch.objects.create(name="SerRestrictedFK", city="restricted")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: ShelfSerializerInput!) { createShelfViaSerializer(data: $d) { "
         "result { code } errors { field messages } } }",
         variables={"d": {"code": "HiddenSerShelf", "branchId": restricted.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaSerializer")
+    result = json_object(data, "createShelfViaSerializer")
     assert result["result"] is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["branchId"]
     assert not models.Shelf.objects.filter(code="HiddenSerShelf").exists()
@@ -18819,15 +18397,12 @@ def test_create_shelf_via_schema_hook_serializer_hidden_branch_is_relation_field
     a ``branchId``-keyed ``FieldError``, and no ``Shelf`` row.
     """
     restricted = models.Branch.objects.create(name="HookRestrictedFK", city="restricted")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation { createShelfViaSchemaHookSerializer(data: { "
         f'code: "HiddenHookShelf", branchId: {restricted.pk} '
         "}) { result { code } errors { field messages } } }",
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaSchemaHookSerializer")
+    result = json_object(data, "createShelfViaSchemaHookSerializer")
     assert result["result"] is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["branchId"]
     assert not models.Shelf.objects.filter(code="HiddenHookShelf").exists()
@@ -18853,15 +18428,12 @@ def test_create_shelf_via_blank_code_serializer_accepts_empty_string_over_http()
     assert code_type["kind"] == "NON_NULL"
     assert json_at(code_type, "ofType", "name") == "String"
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: BlankCodeShelfSerializerInput!) { createShelfViaBlankCodeSerializer(data: $d) { "
         "result { code } errors { field messages } } }",
         variables={"d": {"code": "", "branchId": branch.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaBlankCodeSerializer")
+    result = json_object(data, "createShelfViaBlankCodeSerializer")
     # The serializer accepted the blank (a plain required CharField would have rejected it).
     assert result["errors"] == []
     assert result["result"] == {"code": ""}
@@ -18896,26 +18468,22 @@ def test_serializer_optional_fields_over_http_uses_distinct_input_and_in_band_re
     assert optional_branch["kind"] == "NON_NULL"
     assert json_at(optional_branch, "ofType", "name") == "Int"
 
-    omitted_response = _post_graphql(
+    omitted_payload = _graphql_payload(
         f"mutation($d: {optional_input}!) {{ createShelfViaOptionalCodeSerializer(data: $d) {{ "
         "result { code } errors { field messages } } }",
         variables={"d": {"branchId": branch.pk}},
     )
-    assert omitted_response.status_code == 200
-    omitted_payload = response_json(omitted_response)
     assert "errors" not in omitted_payload, omitted_payload
     omitted_result = json_object(omitted_payload, "data", "createShelfViaOptionalCodeSerializer")
     assert omitted_result["result"] is None
     assert [json_at(error, "field") for error in json_list(omitted_result, "errors")] == ["code"]
     assert not models.Shelf.objects.filter(branch=branch, code="").exists()
 
-    success_response = _post_graphql(
+    success_payload = _graphql_payload(
         f"mutation($d: {optional_input}!) {{ createShelfViaOptionalCodeSerializer(data: $d) {{ "
         "result { code } errors { field messages } } }",
         variables={"d": {"code": "OptionalCodeShelf", "branchId": branch.pk}},
     )
-    assert success_response.status_code == 200
-    success_payload = response_json(success_response)
     assert "errors" not in success_payload, success_payload
     success_result = json_object(success_payload, "data", "createShelfViaOptionalCodeSerializer")
     assert success_result["errors"] == []
@@ -18965,13 +18533,11 @@ def test_serializer_hooks_differing_only_in_allow_null_bind_distinct_nullability
 
     # The non-null half requires note (String!); it is decoded + validated then dropped by the
     # runtime NoteShelfSerializer.create, and the Shelf writes.
-    non_null_response = _post_graphql(
+    non_null_payload = _graphql_payload(
         "mutation { createShelfViaHookNonNullNote(data: { "
         f'code: "NonNullNoteShelf", branchId: {branch.pk}, note: "provided" '
         "}) { result { code } errors { field messages } } }",
     )
-    assert non_null_response.status_code == 200
-    non_null_payload = response_json(non_null_response)
     assert "errors" not in non_null_payload, non_null_payload
     non_null_result = json_object(non_null_payload, "data", "createShelfViaHookNonNullNote")
     assert non_null_result["errors"] == []
@@ -18980,13 +18546,11 @@ def test_serializer_hooks_differing_only_in_allow_null_bind_distinct_nullability
 
     # The nullable half sends an EXPLICIT null (its allow_null=True note accepts it); the note
     # is decoded then dropped and the Shelf still writes.
-    nullable_response = _post_graphql(
+    nullable_payload = _graphql_payload(
         "mutation { createShelfViaHookNullableNote(data: { "
         f'code: "NullableNoteShelf", branchId: {branch.pk}, note: null '
         "}) { result { code } errors { field messages } } }",
     )
-    assert nullable_response.status_code == 200
-    nullable_payload = response_json(nullable_response)
     assert "errors" not in nullable_payload, nullable_payload
     nullable_result = json_object(nullable_payload, "data", "createShelfViaHookNullableNote")
     assert nullable_result["errors"] == []
@@ -18995,13 +18559,11 @@ def test_serializer_hooks_differing_only_in_allow_null_bind_distinct_nullability
 
     # The nullable half is also GraphQL-omittable; omission reaches DRF as a missing key, so
     # the required-field error stays in-band rather than becoming a top-level GraphQL error.
-    omitted_response = _post_graphql(
+    omitted_payload = _graphql_payload(
         "mutation { createShelfViaHookNullableNote(data: { "
         f'code: "OmittedNullableNoteShelf", branchId: {branch.pk} '
         "}) { result { code } errors { field messages } } }",
     )
-    assert omitted_response.status_code == 200
-    omitted_payload = response_json(omitted_response)
     assert "errors" not in omitted_payload, omitted_payload
     omitted_result = json_object(omitted_payload, "data", "createShelfViaHookNullableNote")
     assert omitted_result["result"] is None
@@ -19062,7 +18624,7 @@ def test_create_shelf_via_metadata_serializer_expanded_input_type_system_over_ht
     }
 
     # Post through all three (the enum via a variable string, the JSON via an object).
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
         "result { code topic } errors { field messages } } }",
         variables={
@@ -19075,10 +18637,7 @@ def test_create_shelf_via_metadata_serializer_expanded_input_type_system_over_ht
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
+    result = json_object(data, "createShelfViaMetadataSerializer")
     assert result["errors"] == []
     # The enum value round-tripped into ``topic``; the JSON + custom field were dropped.
     assert result["result"] == {"code": "MetaShelf", "topic": "priority:high"}
@@ -19145,17 +18704,14 @@ def test_create_shelf_list_of_choices_enum_blank_member_writes_empty_string_over
     )
     assert "BLANK" in {json_at(v, "name") for v in enum_values}
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
         "result { code topic } errors { field messages codes path } } }",
         variables={
             "d": {"code": f"ListChoice-{field_name}", "branchId": branch.pk, field_name: sent},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
+    result = json_object(data, "createShelfViaMetadataSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": f"ListChoice-{field_name}", "topic": topic}
 
@@ -19173,17 +18729,14 @@ def test_create_shelf_list_of_choices_enum_blank_member_writes_empty_string_over
 
 def _input_field_description(type_name: str, field_name: str) -> str | None:
     """Return an input object field's GraphQL description via introspection."""
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f"""
         query {{
           __type(name: "{type_name}") {{ inputFields {{ name description }} }}
         }}
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    fields = json_list(payload, "data", "__type", "inputFields")
+    fields = json_list(data, "__type", "inputFields")
     description = next(
         json_at(f, "description") for f in fields if json_at(f, "name") == field_name
     )
@@ -19235,16 +18788,12 @@ def test_serializer_unencodable_text_in_a_list_or_json_leaf_is_field_error_over_
     """
     branch = models.Branch.objects.create(name="SurrogateBranch", city="Boston")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
         "result { code } errors { field messages codes path } } }",
         variables={"d": {"code": "SurrogateShelf", "branchId": branch.pk, **unencodable_input}},
     )
-
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
+    result = json_object(data, "createShelfViaMetadataSerializer")
     assert result["result"] is None
     assert result["errors"] == [
         {
@@ -19663,16 +19212,12 @@ def test_serializer_nul_in_a_list_or_json_leaf_is_field_error_over_http(
     """
     branch = models.Branch.objects.create(name="NulBranch", city="Boston")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
         "result { code } errors { field messages codes path } } }",
         variables={"d": {"code": "NulShelf", "branchId": branch.pk, **nul_input}},
     )
-
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_object(payload, "data", "createShelfViaMetadataSerializer") == {
+    assert json_object(data, "createShelfViaMetadataSerializer") == {
         "result": None,
         "errors": [{"field": error_field, **_NUL_ERROR, "path": error_field.split(".")}],
     }
@@ -19978,15 +19523,12 @@ def test_serializer_error_envelope_carries_codes_and_path_over_http() -> None:
     branch = models.Branch.objects.create(name="CodesBranch", city="Boston")
 
     # A DRF field error: label is a CharField(max_length=40); posting 50 chars fails is_valid.
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
         "result { code } errors { field messages codes path } } }",
         variables={"d": {"code": "CodesShelf", "branchId": branch.pk, "label": "x" * 50}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
+    result = json_object(data, "createShelfViaMetadataSerializer")
     assert result["result"] is None
     (err,) = json_list(result, "errors")
     assert json_at(err, "field") == "label"
@@ -20025,15 +19567,12 @@ def test_serializer_injected_field_contract_over_http() -> None:
     input_name = _mutation_data_input_type_name("createShelfWithInjectedTopic")
     assert _input_field_names(input_name) == {"code", "branchId"}
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: " + input_name + "!) { createShelfWithInjectedTopic(data: $d) { "
         "result { code topic } errors { field messages } } }",
         variables={"d": {"code": "InjectShelf", "branchId": branch.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfWithInjectedTopic")
+    result = json_object(data, "createShelfWithInjectedTopic")
     assert result["errors"] == []
     # The override supplied the narrowed-away required ``topic``; the write succeeded with it.
     assert result["result"] == {"code": "InjectShelf", "topic": "stamped-by-injection"}
@@ -20062,7 +19601,7 @@ def test_serializer_update_injected_field_contract_over_http() -> None:
     input_name = _mutation_data_input_type_name("updateBookWithInjectedStatus")
     assert _input_field_names(input_name) == {"title"}
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($id: ID!, $d: " + input_name + "!) { "
         "updateBookWithInjectedStatus(id: $id, data: $d) { "
         "node { title subtitle } errors { field messages } } }",
@@ -20071,10 +19610,7 @@ def test_serializer_update_injected_field_contract_over_http() -> None:
             "d": {"title": "AfterInject"},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "updateBookWithInjectedStatus")
+    result = json_object(data, "updateBookWithInjectedStatus")
     assert result["errors"] == []
     # The override supplied the narrowed-away required ``status``; the write succeeded with it
     # (the serializer's update() stamped the resolved enum value into ``subtitle``).
@@ -20099,17 +19635,14 @@ def test_serializer_m2m_relation_visibility_over_http() -> None:
     hidden = models.Branch.objects.create(name="M2MHidden", city="restricted")
 
     # Visible alt branches: the M2M writes.
-    ok = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: AltBranchesShelfSerializerInput!) { createShelfViaAltBranchesSerializer(data: $d) { "
         "result { code } errors { field messages } } }",
         variables={
             "d": {"code": "M2MShelf", "branchId": branch.pk, "altBranches": [alt1.pk, alt2.pk]},
         },
     )
-    assert ok.status_code == 200
-    ok_payload = response_json(ok)
-    assert "errors" not in ok_payload, ok_payload
-    ok_result = json_object(ok_payload, "data", "createShelfViaAltBranchesSerializer")
+    ok_result = json_object(data, "createShelfViaAltBranchesSerializer")
     assert ok_result["errors"] == []
     shelf = models.Shelf.objects.get(code="M2MShelf", branch=branch)
     assert set(shelf.alt_branches.values_list("pk", flat=True)) == {alt1.pk, alt2.pk}
@@ -20379,15 +19912,12 @@ def test_serializer_save_kwargs_hook_injects_server_side_data_over_http() -> Non
     runs inside the framework's value-preserving save closure.
     """
     branch = models.Branch.objects.create(name="SaveKwargsBranch", city="Boston")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: SaveKwargsShelfSerializerInput!) { createShelfWithSaveKwargs(data: $d) { "
         "result { code topic } errors { field messages } } }",
         variables={"d": {"code": "SaveKwargsShelf", "branchId": branch.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfWithSaveKwargs")
+    result = json_object(data, "createShelfWithSaveKwargs")
     assert result["errors"] == []
     assert result["result"] == {"code": "SaveKwargsShelf", "topic": "stamped-at-save"}
     assert models.Shelf.objects.filter(
@@ -20475,7 +20005,7 @@ def test_serializer_update_with_select_for_update_over_http() -> None:
     shelf = _seed_shelf()
     book = models.Book.objects.create(title="BeforeLock", shelf=shelf)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($id: ID!, $d: BookSerializerPartialInput!) { "
         "updateBookViaSerializerWithLock(id: $id, data: $d) { "
         "node { title } errors { field messages } } }",
@@ -20484,10 +20014,7 @@ def test_serializer_update_with_select_for_update_over_http() -> None:
             "d": {"title": "AfterLock"},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "updateBookViaSerializerWithLock")
+    result = json_object(data, "updateBookViaSerializerWithLock")
     assert result["errors"] == []
     assert json_at(result, "node", "title") == "AfterLock"
     book.refresh_from_db()
@@ -20508,7 +20035,7 @@ def test_serializer_update_provided_genres_list_replaces_complete_set_over_http(
     book = models.Book.objects.create(title="GenreSwap", shelf=shelf)
     book.genres.set([old_genre])
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($id: ID!, $d: BookGenresSerializerPartialInput!) { "
         "updateBookGenresViaSerializer(id: $id, data: $d) { "
         "node { title } errors { field messages } } }",
@@ -20517,10 +20044,7 @@ def test_serializer_update_provided_genres_list_replaces_complete_set_over_http(
             "d": {"genres": [global_id_for(library_schema.GenreType, new_genre.pk)]},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "updateBookGenresViaSerializer", "errors") == []
+    assert json_at(data, "updateBookGenresViaSerializer", "errors") == []
     assert list(book.genres.values_list("name", flat=True)) == ["ReplaceNew"]
 
 
@@ -20537,7 +20061,7 @@ def test_serializer_update_omitted_genres_leaves_relation_unchanged_over_http() 
     book = models.Book.objects.create(title="KeepGenres", shelf=shelf)
     book.genres.set([kept])
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($id: ID!, $d: BookGenresSerializerPartialInput!) { "
         "updateBookGenresViaSerializer(id: $id, data: $d) { "
         "node { title } errors { field messages } } }",
@@ -20546,12 +20070,7 @@ def test_serializer_update_omitted_genres_leaves_relation_unchanged_over_http() 
             "d": {"title": "TitleOnly"},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert (
-        json_at(payload, "data", "updateBookGenresViaSerializer", "node", "title") == "TitleOnly"
-    )
+    assert json_at(data, "updateBookGenresViaSerializer", "node", "title") == "TitleOnly"
     # The omitted M2M is unchanged.
     assert list(book.genres.values_list("name", flat=True)) == ["KeptGenre"]
 
@@ -20747,13 +20266,11 @@ def test_serializer_to_field_relation_create_stores_the_target_key_over_http(
     elif value == "null":
         data[shape.input_key] = None
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         f"mutation($d: {shape.input_type}!) {{ "
         f"{shape.mutation}(data: $d) {{ {_PROFILE_SELECTION} }} }}",
         variables={"d": data},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     result = json_object(payload, "data", shape.mutation)
     assert result["errors"] == []
@@ -20802,16 +20319,13 @@ def test_serializer_generic_foreign_key_hold_update_over_http(value: str) -> Non
     book_type = ContentType.objects.get_for_model(models.Book).id
     hold = None if value == "null" else global_id_for(library_schema.BookType, book.pk)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($id: ID!, $d: CirculationDeskHoldSerializerPartialInput!) { "
         "updateCirculationDeskHoldViaSerializer(id: $id, data: $d) { "
         "result { name } errors { field messages } } }",
         variables={"id": str(desk.pk), "d": {"contentObjectId": hold}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "updateCirculationDeskHoldViaSerializer")
+    result = json_object(data, "updateCirculationDeskHoldViaSerializer")
     if value == "hidden":
         assert result["result"] is None
         assert json_at(result, "errors", 0, "field") == "contentObjectId"
@@ -20847,13 +20361,11 @@ def test_serializer_to_field_relation_update_stores_the_target_key_over_http(
     elif value == "null":
         data["favoriteGenreId"] = None
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         "mutation($id: ID!, $d: PatronProfileSerializerPartialInput!) { "
         f"updatePatronProfileViaSerializer(id: $id, data: $d) {{ {_PROFILE_SELECTION} }} }}",
         variables={"id": global_id_for(library_schema.PatronProfileType, patron.pk), "d": data},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     result = json_object(payload, "data", "updatePatronProfileViaSerializer")
     assert result["errors"] == []
@@ -20896,13 +20408,11 @@ def test_narrowed_serializer_update_over_relay_target_writes_the_genre_over_http
     elif value == "null":
         data["favoriteGenreId"] = None
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         f"mutation($id: ID!, $d: {input_type}!) {{ "
         f"updatePatronProfileGenreViaSerializer(id: $id, data: $d) {{ {_PROFILE_SELECTION} }} }}",
         variables={"id": global_id_for(library_schema.PatronProfileType, patron.pk), "d": data},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     result = json_object(payload, "data", "updatePatronProfileGenreViaSerializer")
     assert result["errors"] == []
@@ -20957,12 +20467,10 @@ def test_model_to_field_relation_update_stores_the_target_key_over_http(
     elif value == "null":
         data["favoriteGenreId"] = None
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _MODEL_PROFILE_UPDATE,
         variables={"id": global_id_for(library_schema.PatronProfileType, patron.pk), "d": data},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     result = json_object(payload, "data", "updatePatronProfile")
     assert result["errors"] == []
@@ -20996,17 +20504,14 @@ def test_profile_update_out_of_range_id_is_not_found_over_http(operation: str, f
     """
     patron = models.Patron.objects.create(name="OutOfRangeProfilePatron")
     models.PatronProfile.objects.create(patron=patron, address_2="kept")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         operation,
         variables={
             "id": global_id_for(library_schema.PatronProfileType, 2**70),
             "d": {"address2": "changed"},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", field)
+    result = json_object(data, field)
     assert result["node"] is None
     assert result["errors"] == [
         {"field": "id", "messages": ["No matching row found."]},
@@ -21051,12 +20556,10 @@ def test_form_to_field_relation_update_keeps_an_omitted_genre_over_http(value: s
         data["favoriteGenreId"] = None
     expected = {"omitted_unset": None, "genre": new.name, "null": None}.get(value, old.name)
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _FORM_PROFILE_UPDATE,
         variables={"id": global_id_for(library_schema.PatronProfileType, patron.pk), "d": data},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     result = json_object(payload, "data", "updatePatronProfileViaForm")
     assert result["errors"] == []
@@ -21952,9 +21455,7 @@ def test_form_shelf_update_keeps_or_replaces_the_branch_over_http(value: str) ->
         data["branchId"] = new.pk
     expected = old if value == "omitted" else new
 
-    response = _post_graphql(_UPDATE_SHELF_VIA_FORM, variables={"id": shelf.pk, "d": data})
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = _graphql_payload(_UPDATE_SHELF_VIA_FORM, variables={"id": shelf.pk, "d": data})
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "updateShelfViaForm") == {
         "result": {"code": "EN-4", "branch": {"name": expected.name}},
@@ -21969,15 +21470,12 @@ def test_form_shelf_update_keeps_or_replaces_the_branch_over_http(value: str) ->
 def test_form_shelf_create_refuses_a_branch_named_empty_over_http() -> None:
     """A form create naming a branch whose name is ``""`` is the ``invalid_choice`` error."""
     empty = models.Branch.objects.create(name="", city="open")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: ShelfRelationsFormInput!){ createShelfViaForm(data:$d){ "
         "result{ code } errors{ field messages } } }",
         variables={"d": {"code": "EN-5", "branchId": empty.pk}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "createShelfViaForm") == {
+    assert json_at(data, "createShelfViaForm") == {
         "result": None,
         "errors": [{"field": "branchId", "messages": [_INVALID_CHOICE]}],
     }
@@ -22091,17 +21589,14 @@ def test_model_to_field_relation_update_rejects_a_missing_genre_over_http() -> N
     patron = models.Patron.objects.create(name="ToFieldMissingPatron")
     models.PatronProfile.objects.create(patron=patron, favorite_genre=old)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _MODEL_PROFILE_UPDATE,
         variables={
             "id": global_id_for(library_schema.PatronProfileType, patron.pk),
             "d": {"favoriteGenreId": gone_id},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "updatePatronProfile") == {
+    assert json_at(data, "updatePatronProfile") == {
         "node": None,
         "errors": [
             {
@@ -22131,7 +21626,7 @@ def test_create_branch_with_nested_shelves_over_http() -> None:
     assert "shelves" in _input_field_names(top_input)
     assert _input_field_names("NestedShelfSerializerInput") == {"code", "topic", "altBranches"}
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: " + top_input + "!) { createBranchWithNestedShelves(data: $d) { "
         "result { name shelves { code topic } } errors { field messages } } }",
         variables={
@@ -22145,10 +21640,7 @@ def test_create_branch_with_nested_shelves_over_http() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBranchWithNestedShelves")
+    result = json_object(data, "createBranchWithNestedShelves")
     assert result["errors"] == []
     # ``BranchType.shelves`` orders by ``-code``, so N2 then N1.
     assert result["result"] == {
@@ -22215,7 +21707,7 @@ def test_nested_shelf_hidden_alt_branch_is_structured_path_error_over_http() -> 
     hidden = models.Branch.objects.create(name="NestHiddenAlt", city="restricted")
     top_input = _mutation_data_input_type_name("createBranchWithNestedShelves")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: " + top_input + "!) { createBranchWithNestedShelves(data: $d) { "
         "result { name } errors { field messages codes path } } }",
         variables={
@@ -22225,10 +21717,7 @@ def test_nested_shelf_hidden_alt_branch_is_structured_path_error_over_http() -> 
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBranchWithNestedShelves")
+    result = json_object(data, "createBranchWithNestedShelves")
     assert result["result"] is None
     (err,) = json_list(result, "errors")
     assert json_at(err, "field") == "shelves.0.altBranches"
@@ -22250,17 +21739,14 @@ def test_nested_shelf_validation_error_flattens_to_structured_path_over_http() -
     """
     top_input = _mutation_data_input_type_name("createBranchWithNestedShelves")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: " + top_input + "!) { createBranchWithNestedShelves(data: $d) { "
         "result { name } errors { field messages path } } }",
         variables={
             "d": {"name": "NestedBadCode", "shelves": [{"code": "OK1"}, {"code": "BANNED"}]},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBranchWithNestedShelves")
+    result = json_object(data, "createBranchWithNestedShelves")
     assert result["result"] is None
     (err,) = json_list(result, "errors")
     assert json_at(err, "field") == "shelves.1.code"
@@ -22600,17 +22086,14 @@ def test_nested_shelf_save_time_error_keys_to_the_item_path_over_http(
     """
     top_input = _mutation_data_input_type_name("createBranchWithNestedShelves")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: " + top_input + "!) { createBranchWithNestedShelves(data: $d) { "
         "result { name } errors { field messages path } } }",
         variables={
             "d": {"name": "NestedDupCode", "shelves": [{"code": code} for code in codes]},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createBranchWithNestedShelves")
+    result = json_object(data, "createBranchWithNestedShelves")
     assert result["result"] is None
     assert result["errors"] == [
         {
@@ -22640,14 +22123,11 @@ def _render_gql_type(type_dict: JSONObject) -> str:
 
 def _input_fields_sdl(type_name: str) -> list[tuple[str, str, str | None]]:
     """Return an input object's ``[(field, rendered_type, description)]`` via introspection."""
-    response = _post_graphql(
+    data = _assert_graphql_success(
         'query { __type(name: "' + type_name + '") { inputFields { name description '
         "type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } }",
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    fields = json_list(payload, "data", "__type", "inputFields")
+    fields = json_list(data, "__type", "inputFields")
     return [
         (
             json_str(f, "name"),
@@ -22660,14 +22140,11 @@ def _input_fields_sdl(type_name: str) -> list[tuple[str, str, str | None]]:
 
 def _type_fields_sdl(type_name: str) -> list[tuple[str, str, str | None]]:
     """Return an object type's ``[(field, rendered_type, description)]`` via introspection."""
-    response = _post_graphql(
+    data = _assert_graphql_success(
         'query { __type(name: "' + type_name + '") { fields { name description '
         "type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } }",
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    fields = json_list(payload, "data", "__type", "fields")
+    fields = json_list(data, "__type", "fields")
     return [
         (
             json_str(f, "name"),
@@ -23336,19 +22813,18 @@ async def test_library_root_hook_projection_loads_the_selection_on_async(method:
     await models.Genre.objects.acreate(name="Mystery")
     registry.clear()
     try:
-        _CURRENT["schema"] = _hooked_holder_schema(
+        schema = _hooked_holder_schema(
             genres=lambda queryset: (
                 queryset.only("id") if method == "only" else queryset.defer("name")
             ),
         )
-        with override_settings(ROOT_URLCONF=__name__):
+        with _MOUNT.serving(schema):
             result = await AsyncTestClient().query(
                 "{ genres { name } }",
                 assert_no_errors=False,
                 url="/graphql-async-test/",
             )
     finally:
-        _CURRENT["schema"] = None
         registry.clear()
 
     payload = response_json(result.response)
@@ -23956,15 +23432,14 @@ async def test_library_consumer_prefetch_deferring_a_selected_column_fails_on_as
     caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
     registry.clear()
     try:
-        _CURRENT["schema"] = _books_prefetching_loans_without_their_note()
-        with override_settings(ROOT_URLCONF=__name__):
+        schema = _books_prefetching_loans_without_their_note()
+        with _MOUNT.serving(schema):
             result = await AsyncTestClient().query(
                 f"{{ shelves {{ code books {{ title loans {{ {loan_selection} }} }} }} }}",
                 assert_no_errors=False,
                 url="/graphql-async-test/",
             )
     finally:
-        _CURRENT["schema"] = None
         registry.clear()
 
     payload = response_json(result.response)
@@ -24725,15 +24200,14 @@ async def _post_owned_async(
     monkeypatch.setattr(CursorWrapper, "execute", _recording_execute)
     registry.clear()
     try:
-        _CURRENT["schema"] = build()
-        with override_settings(ROOT_URLCONF=__name__):
+        schema = build()
+        with _MOUNT.serving(schema):
             result = await AsyncTestClient().query(
                 document,
                 assert_no_errors=False,
                 url="/graphql-async-test/",
             )
     finally:
-        _CURRENT["schema"] = None
         registry.clear()
         monkeypatch.undo()
     return _comparable(response_json(result.response)), recorded
@@ -25175,9 +24649,9 @@ async def test_library_mutation_refetch_loads_the_child_hook_projection_on_async
     await sync_to_async(_seed_subtitled_books)()
     registry.clear()
     try:
-        _CURRENT["schema"] = _books_only_title()
+        schema = _books_only_title()
         variables = await sync_to_async(_update_holder_shelf_variables)()
-        with override_settings(ROOT_URLCONF=__name__):
+        with _MOUNT.serving(schema):
             result = await AsyncTestClient().query(
                 _UPDATE_HOLDER_SHELF,
                 variables=variables,
@@ -25185,7 +24659,6 @@ async def test_library_mutation_refetch_loads_the_child_hook_projection_on_async
                 url="/graphql-async-test/",
             )
     finally:
-        _CURRENT["schema"] = None
         registry.clear()
 
     payload = response_json(result.response)
@@ -25483,15 +24956,14 @@ async def test_library_skip_non_pk_link_resolves_on_async() -> None:
     await sync_to_async(_seed_favoring_profiles)()
     registry.clear()
     try:
-        _CURRENT["schema"] = _unplanned_relation_holder_schema()
-        with override_settings(ROOT_URLCONF=__name__):
+        schema = _unplanned_relation_holder_schema()
+        with _MOUNT.serving(schema):
             result = await AsyncTestClient().query(
                 "{ genres { id favoringProfiles { postalCode } } }",
                 assert_no_errors=False,
                 url="/graphql-async-test/",
             )
     finally:
-        _CURRENT["schema"] = None
         registry.clear()
 
     payload = response_json(result.response)
@@ -25746,10 +25218,7 @@ def test_library_prefetch_child_over_unrelated_table_is_refused_over_http() -> N
     _seed_branch_notes()
 
     query = "query { allLibraryBranchNotesOverUnrelatedChild { body branch { name } } }"
-    response = _post_graphql(query)
-
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = _graphql_payload(query)
     assert payload["data"] is None, payload
     assert [json_at(error, "path") for error in json_list(payload, "errors")] == [
         ["allLibraryBranchNotesOverUnrelatedChild"],
@@ -27080,13 +26549,11 @@ def test_shelf_condition_blank_writes_empty_string_through_every_write_flavor_ov
     assert condition_type["name"] == "ShelfTypeConditionEnum", input_name
 
     code = f"{field}-{member}"
-    response = _post_graphql(
+    payload = _graphql_payload(
         f"mutation($d: {input_name}!) {{ {field}(data: $d) {{ "
         "result { code condition } errors { field messages } } }",
         variables={"d": {"code": code, "branchId": branch.pk, "condition": member}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     result = json_object(payload, "data", field)
     assert result["errors"] == [], payload
@@ -27110,15 +26577,12 @@ def test_serializer_only_choice_allow_blank_writes_blank_over_http() -> None:
         "normal",
         "high",
     ]
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
         "result { code topic } errors { field messages } } }",
         variables={"d": {"code": "PriorityBlank", "branchId": branch.pk, "priority": "BLANK"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
+    result = json_object(data, "createShelfViaMetadataSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": "PriorityBlank", "topic": "priority:"}
 
@@ -27135,15 +26599,12 @@ def test_serializer_list_field_nullable_child_round_trips_null_element_over_http
     tags_type = _input_field_type("ShelfMetadataSerializerInput", "tags")
     assert tags_type["kind"] == "LIST"
     assert tags_type["ofType"] == {"kind": "SCALAR", "name": "String"}
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($d: ShelfMetadataSerializerInput!) { createShelfViaMetadataSerializer(data: $d) { "
         "result { code topic } errors { field messages } } }",
         variables={"d": {"code": "TagsShelf", "branchId": branch.pk, "tags": ["a", None]}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "createShelfViaMetadataSerializer")
+    result = json_object(data, "createShelfViaMetadataSerializer")
     assert result["errors"] == []
     assert result["result"] == {"code": "TagsShelf", "topic": 'tags:["a", null]'}
 
@@ -27170,15 +26631,12 @@ def test_update_shelf_condition_writes_blank_over_http() -> None:
     """An update mutation's ``condition: BLANK`` clears an assessed shelf back to ``""``."""
     branch = models.Branch.objects.create(name="UpdateConditionBranch", city="Boston")
     shelf = models.Shelf.objects.create(code="U-worn", branch=branch, condition="worn")
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "mutation($id: ID!, $d: ShelfConditionPartialInput!) { updateShelfCondition(id: $id, data: $d) { "
         "result { code condition } errors { field messages } } }",
         variables={"id": str(shelf.pk), "d": {"condition": "BLANK"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_object(payload, "data", "updateShelfCondition")
+    result = json_object(data, "updateShelfCondition")
     assert result["errors"] == []
     assert result["result"] == {"code": "U-worn", "condition": "BLANK"}
     shelf.refresh_from_db()

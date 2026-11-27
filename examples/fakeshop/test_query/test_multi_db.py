@@ -63,7 +63,6 @@ Critical contract pins (do not violate without an explicit spec revision):
 
 import os
 from collections.abc import Callable, Iterator, Mapping
-from functools import wraps
 from typing import TypeGuard
 
 import pytest
@@ -96,12 +95,12 @@ import strawberry
 from apps.library import models
 from django.db import connections
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
 from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import clear_url_caches, path
+from django.urls import clear_url_caches
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -135,7 +134,6 @@ from django_strawberry_framework.testing import TestClient
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import instance_state
 from django_strawberry_framework.utils._queryset_private import set_queryset_hints
-from django_strawberry_framework.views import DjangoGraphQLView
 
 _UPDATE_BOOK_TITLE_VALIDATOR_MUTATION = """
 mutation($id: ID!, $d: AliasValidatedBookSerializerPartialInput!) {
@@ -151,22 +149,13 @@ mutation($id: ID!, $d: AliasValidatedBookSerializerPartialInput!) {
 # ---------------------------------------------------------------------------
 #
 # The temp URLConf binds at module load, but the schema is built per-test
-# (after the autouse reload clears the registry). The holder lets the URLConf's
-# view read whichever schema the current test's fixture stored.
+# (after the autouse reload clears the registry). The ``SchemaMount`` route reads
+# ``_MOUNT.schema`` per request, so it serves whichever schema the current test's
+# fixture stored.
 
 
-_current: dict[str, object | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    """Closure-bound view that reads ``_current['schema']`` per request."""
-    schema = _current["schema"]
-    assert schema is not None, "_build_test_schema fixture must run before any /graphql/ request"
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _capture_payload(
@@ -254,12 +243,12 @@ def list_routing_override(
             resolver=_shard_b_branches,
         )
 
-    _current["schema"] = DjangoSchema(
+    _MOUNT.schema = DjangoSchema(
         query=_RoutingQuery,
         config=strawberry_config(),
     )
     yield routing
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.django_db(databases=["default", "shard_b"])
@@ -326,12 +315,12 @@ def connection_routing_override(
             resolver=_shard_b_genres,
         )
 
-    _current["schema"] = DjangoSchema(
+    _MOUNT.schema = DjangoSchema(
         query=_ConnectionRoutingQuery,
         config=strawberry_config(),
     )
     yield routing
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.django_db(databases=["default", "shard_b"])
@@ -403,12 +392,12 @@ def hints_routing_override(
             resolver=_hints_resolver,
         )
 
-    _current["schema"] = DjangoSchema(
+    _MOUNT.schema = DjangoSchema(
         query=_RoutingHintsQuery,
         config=strawberry_config(),
     )
     yield routing
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.django_db(databases=["default", "shard_b"])
@@ -480,9 +469,9 @@ def _build_list_field_in_place_routing_mutation_schema(
             resolver=_shard_b_tenant_resolver,
         )
 
-    _current["schema"] = DjangoSchema(query=_InPlaceRoutingQuery, config=strawberry_config())
+    _MOUNT.schema = DjangoSchema(query=_InPlaceRoutingQuery, config=strawberry_config())
     yield
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 def _branch_sql(captured: list[dict[str, str]]) -> list[str]:
@@ -596,9 +585,9 @@ def identity_token_swap(
             resolver=_tenant_resolver,
         )
 
-    _current["schema"] = DjangoSchema(query=_TenantQuery, config=strawberry_config())
+    _MOUNT.schema = DjangoSchema(query=_TenantQuery, config=strawberry_config())
     yield swap
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.django_db(databases=["default", "shard_b"])
@@ -732,9 +721,9 @@ def mutable_hint_token(
             resolver=_tenant_resolver,
         )
 
-    _current["schema"] = DjangoSchema(query=_MutableHintQuery, config=strawberry_config())
+    _MOUNT.schema = DjangoSchema(query=_MutableHintQuery, config=strawberry_config())
     yield token
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.django_db(databases=["default", "shard_b"])
@@ -821,13 +810,13 @@ def _build_test_schema(_reload_project_schema_for_acceptance_tests: None) -> Ite
         )
 
     optimizer = DjangoOptimizerExtension()
-    _current["schema"] = DjangoSchema(
+    _MOUNT.schema = DjangoSchema(
         query=_MultiDbTestQuery,
         config=strawberry_config(),
         extensions=[lambda: optimizer],
     )
     yield
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.fixture
@@ -865,13 +854,13 @@ def _build_debug_test_schema(_reload_project_schema_for_acceptance_tests: None) 
         )
 
     optimizer = DjangoOptimizerExtension()
-    _current["schema"] = DjangoSchema(
+    _MOUNT.schema = DjangoSchema(
         query=_MultiDbDebugTestQuery,
         config=strawberry_config(),
         extensions=[lambda: optimizer, lambda: DjangoDebugExtension(allow_unsafe_production=True)],
     )
     yield
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.fixture
@@ -908,13 +897,13 @@ def _build_loan_filter_test_schema(
         )
 
     optimizer = DjangoOptimizerExtension()
-    _current["schema"] = DjangoSchema(
+    _MOUNT.schema = DjangoSchema(
         query=_LoanFilterShardQuery,
         config=strawberry_config(),
         extensions=[lambda: optimizer],
     )
     yield
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 # ---------------------------------------------------------------------------
@@ -1177,7 +1166,7 @@ def _build_branch_tag_filter_test_schema() -> Iterator[None]:
         )
 
     optimizer = DjangoOptimizerExtension()
-    _current["schema"] = strawberry.Schema(
+    _MOUNT.schema = strawberry.Schema(
         query=_BranchTagShardQuery,
         config=strawberry_config(),
         extensions=[lambda: optimizer],
@@ -1185,7 +1174,7 @@ def _build_branch_tag_filter_test_schema() -> Iterator[None]:
     ContentType.objects.clear_cache()
     yield
     ContentType.objects.clear_cache()
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.usefixtures("private_registry", "_build_branch_tag_filter_test_schema")
@@ -1282,9 +1271,9 @@ def _build_pinned_shelves_filter_test_schema() -> Iterator[None]:
             graphql_type=list[branch_type],
         )
 
-    _current["schema"] = DjangoSchema(query=_PinnedShelvesQuery, config=strawberry_config())
+    _MOUNT.schema = DjangoSchema(query=_PinnedShelvesQuery, config=strawberry_config())
     yield
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.usefixtures("private_registry", "_build_pinned_shelves_filter_test_schema")
@@ -1434,9 +1423,9 @@ def _build_routed_shelves_filter_test_schema() -> Iterator[None]:
             graphql_type=list[branch_type],
         )
 
-    _current["schema"] = DjangoSchema(query=_RoutedShelvesQuery, config=strawberry_config())
+    _MOUNT.schema = DjangoSchema(query=_RoutedShelvesQuery, config=strawberry_config())
     yield
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.usefixtures("private_registry", "_build_routed_shelves_filter_test_schema")
@@ -1546,9 +1535,9 @@ class _ProductsWriteToShardBRouter:
 @pytest.fixture
 def _project_schema(_reload_project_schema_for_acceptance_tests: None) -> Iterator[None]:
     """Serve the freshly-reloaded PROJECT schema (the real write surface)."""
-    _current["schema"] = config_schema.schema
+    _MOUNT.schema = config_schema.schema
     yield
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 def _pin_seeded_same_pk_item_pair(pk_base: int) -> None:
@@ -1716,7 +1705,7 @@ def test_custom_nodeid_mutation_resolves_real_pk_on_write_alias() -> None:
         update_category = DjangoMutationField(UpdateCategory)
 
     finalize_django_types()
-    _current["schema"] = DjangoSchema(
+    _MOUNT.schema = DjangoSchema(
         query=Query,
         mutation=Mutation,
         config=strawberry_config(),
@@ -1752,7 +1741,7 @@ def test_custom_nodeid_mutation_resolves_real_pk_on_write_alias() -> None:
             finally:
                 clear_url_caches()
     finally:
-        _current["schema"] = None
+        _MOUNT.schema = None
 
     assert response.data == {
         "updateCategory": {
@@ -2177,7 +2166,7 @@ def _post_prefetch_alias_query(
     schema: strawberry.Schema,
 ) -> tuple[JSONObject, dict[str, list[str]]]:
     """POST ``_PREFETCH_ALIAS_QUERY`` against ``schema``; return (payload, per-alias SQL)."""
-    _current["schema"] = schema
+    _MOUNT.schema = schema
     try:
         with override_settings(ROOT_URLCONF=__name__):
             clear_url_caches()
@@ -2191,7 +2180,7 @@ def _post_prefetch_alias_query(
                     url="/graphql/",
                 )
     finally:
-        _current["schema"] = None
+        _MOUNT.schema = None
         clear_url_caches()
     book_sql = {
         alias: [

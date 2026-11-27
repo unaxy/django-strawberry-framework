@@ -39,7 +39,6 @@ import json
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from functools import wraps
 from typing import ClassVar, NamedTuple, TypeVar
 
 import pytest
@@ -63,10 +62,7 @@ from django.db.models import (
     Value,
 )
 from django.db.models.functions import Cast, Concat
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django_filters import (
     BooleanFilter,
     CharFilter,
@@ -81,6 +77,7 @@ from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -121,34 +118,20 @@ from django_strawberry_framework.utils._narrowing import (
     require,
     require_instance,
 )
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _M = TypeVar("_M", bound=Model)
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _URL = "/graphql-globalid-strategies/"
 _ASYNC_URL = "/graphql-globalid-strategies-async/"
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-globalid-strategies/", _view),
-    path("graphql-globalid-strategies-async/", _async_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-globalid-strategies/",
+    async_route="graphql-globalid-strategies-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _branches() -> None:
@@ -213,12 +196,8 @@ def _post(
     query: str,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(query, variables=variables, url=_URL)
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(query, variables=variables, url=_URL)
 
 
 def _emitted_id(schema: DjangoSchema) -> str:
@@ -3054,16 +3033,12 @@ async def _async_post(
     variables: Mapping[str, object],
 ) -> JSONObject:
     """Post ``query`` to the async view serving ``schema`` and return the parsed payload."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient(path=_ASYNC_URL).query(
-                query,
-                variables,
-                assert_no_errors=False,
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        result = await AsyncTestClient(path=_ASYNC_URL).query(
+            query,
+            variables,
+            assert_no_errors=False,
+        )
     assert result.response.status_code == 200
     return response_json(result.response)
 

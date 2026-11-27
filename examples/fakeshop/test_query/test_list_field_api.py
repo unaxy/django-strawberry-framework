@@ -39,6 +39,7 @@ from django.urls import clear_url_caches, path
 from django.utils.functional import cached_property
 from graphql_client import (
     JSONObject,
+    assert_graphql_success,
     graphql_payload,
     is_json_object,
     json_at,
@@ -401,12 +402,8 @@ def test_shipped_branches_anonymous_visibility_before_offset() -> None:
       }
     }
     """
-    payload = graphql_payload(query)
-    assert "errors" not in payload, payload
-    names = [
-        json_at(row, "name")
-        for row in json_list(payload, "data", "allLibraryBranchesViaListField")
-    ]
+    data = assert_graphql_success(query)
+    names = [json_at(row, "name") for row in json_list(data, "allLibraryBranchesViaListField")]
     assert names == ["Bravo", "Charlie"]
 
 
@@ -425,12 +422,8 @@ def test_shipped_branches_order_by_alone() -> None:
       }
     }
     """
-    payload = graphql_payload(query, client=client)
-    assert "errors" not in payload, payload
-    names = [
-        json_at(row, "name")
-        for row in json_list(payload, "data", "allLibraryBranchesViaListField")
-    ]
+    data = assert_graphql_success(query, client=client)
+    names = [json_at(row, "name") for row in json_list(data, "allLibraryBranchesViaListField")]
     assert names == ["Alpha", "Bravo", "Charlie"]
 
 
@@ -3330,10 +3323,9 @@ def test_shipped_branches_an_integral_float_limit_variable_coerces_and_runs() ->
     """
     library_models.Branch.objects.create(name="Alpha", city="Boston")
 
-    payload = graphql_payload(_LIMIT_VARIABLE_QUERY, variables={"lim": 1.0})
+    data = assert_graphql_success(_LIMIT_VARIABLE_QUERY, variables={"lim": 1.0})
 
-    assert "errors" not in payload, payload
-    assert len(json_list(payload, "data", "allLibraryBranchesViaListField")) == 1
+    assert len(json_list(data, "allLibraryBranchesViaListField")) == 1
 
 
 @pytest.mark.django_db
@@ -4929,10 +4921,9 @@ def test_shipped_branches_independent_aliases() -> None:
       }
     }
     """
-    payload = graphql_payload(query, client=client)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "p1") == [{"name": "Alpha"}]
-    assert json_at(payload, "data", "p2") == [{"name": "Bravo"}]
+    data = assert_graphql_success(query, client=client)
+    assert json_at(data, "p1") == [{"name": "Alpha"}]
+    assert json_at(data, "p2") == [{"name": "Bravo"}]
 
 
 _NEGATIVE_OFFSET = "expected a non-negative integer, got -1."
@@ -5036,9 +5027,8 @@ def test_holder_orderset_override_returning_queryset_subclass(
       }
     }
     """
-    payload = graphql_payload(query, client=client)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "allLibraryBranchesViaListField") == [{"name": "Bravo"}]
+    data = assert_graphql_success(query, client=client)
+    assert json_at(data, "allLibraryBranchesViaListField") == [{"name": "Bravo"}]
 
 
 # ---------------------------------------------------------------------------

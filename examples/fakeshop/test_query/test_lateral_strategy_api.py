@@ -1,7 +1,6 @@
 """Live PostgreSQL HTTP tests for lateral strategy parity, paging, visibility and custom joins."""
 
 import re
-from functools import wraps
 from typing import NamedTuple
 
 import pytest
@@ -14,11 +13,9 @@ from django.db import connection as db_connection
 from django.db import models
 from django.db.models import F, Model, QuerySet
 from django.db.models.expressions import Combinable
-from django.http import HttpRequest, HttpResponseBase
-from django.test import Client, override_settings
+from django.test import Client
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject
+from graphql_client import JSONObject, SchemaMount
 from strategy_schemas import build_strategy_schema, make_django_type
 from strawberry.relay.utils import to_base64
 from strawberry.test.client import Response
@@ -37,7 +34,6 @@ from django_strawberry_framework.testing import TestClient
 from django_strawberry_framework.utils._narrowing import (
     read_attr,
 )
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import (
     is_object_dict,
     is_object_list,
@@ -48,7 +44,6 @@ from tests._idioms import (
 from tests._lateral_data import _seed_periodicals
 
 pytestmark = [pytest.mark.pg, pytest.mark.django_db, pytest.mark.usefixtures("private_registry")]
-_CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
 
 
 def _build_strategy_schema(
@@ -59,30 +54,20 @@ def _build_strategy_schema(
     return build_strategy_schema(query_cls, strategy, schema_class=DjangoSchema)
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-lateral/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-lateral/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(schema: strawberry.Schema, query: str, *, client: Client | None = None) -> Response:
     """Execute the operation through the real package view and request middleware."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = TestClient(client=client).query(
-                query,
-                assert_no_errors=False,
-                url="/graphql-lateral/",
-            )
-        assert result.response.status_code == 200
-        return result
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        result = TestClient(client=client).query(
+            query,
+            assert_no_errors=False,
+            url="/graphql-lateral/",
+        )
+    assert result.response.status_code == 200
+    return result
 
 
 def _application_selects(captured: CaptureQueriesContext) -> list[dict[str, str]]:

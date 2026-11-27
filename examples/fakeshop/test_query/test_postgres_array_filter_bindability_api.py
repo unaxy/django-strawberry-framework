@@ -14,7 +14,6 @@ real columns.
 import datetime
 import decimal
 from collections.abc import Iterator
-from functools import wraps
 from typing import TYPE_CHECKING, Annotated, NamedTuple
 
 import django_filters
@@ -23,13 +22,18 @@ import strawberry
 from django import forms
 from django.db import connection, models
 from django.db.models import F, QuerySet
-from django.http import HttpRequest, HttpResponseBase, QueryDict
-from django.test import override_settings
+from django.http import QueryDict
 from django.test.utils import isolate_apps
-from django.urls import path
 from django_filters import DateTimeFilter, NumberFilter, TimeFilter
 from django_filters.filterset import BaseFilterSet
-from graphql_client import JSONObject, RecordCompiledSql, graphql_payload, json_list, json_object
+from graphql_client import (
+    JSONObject,
+    RecordCompiledSql,
+    SchemaMount,
+    graphql_payload,
+    json_list,
+    json_object,
+)
 from strawberry.scalars import JSON
 from strawberry.types import Info
 from typing_extensions import override
@@ -42,13 +46,11 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.filters import ArrayFilter, FilterInput, FilterSet, ListFilter
 from django_strawberry_framework.utils._narrowing import read_attr
-from django_strawberry_framework.views import DjangoGraphQLView
 
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
 
 pytestmark = [pytest.mark.pg, pytest.mark.usefixtures("private_registry")]
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _UNBINDABLE = [{"message": "Enter a value the database can represent.", "code": "invalid"}]
 #: Django's own error for an ``in`` member over an array column that is no list.
 _INVALID_LIST = {
@@ -59,14 +61,8 @@ _INVALID_LIST = {
 _NOT_A_NUMBER = {"message": "Enter a number.", "code": "invalid"}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-array-search/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-array-search/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 class _ArrayConsumer(NamedTuple):
@@ -302,12 +298,8 @@ def array_consumer() -> Iterator[_ArrayConsumer]:
 
 
 def _post(consumer: _ArrayConsumer, document: str, variables: JSONObject) -> JSONObject:
-    _CURRENT["schema"] = consumer.schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(document, variables=variables, url="/graphql-array-search/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(consumer.schema):
+        return graphql_payload(document, variables=variables, url="/graphql-array-search/")
 
 
 def _assert_answer(payload: JSONObject, names: list[str] | None, form_key: str) -> None:

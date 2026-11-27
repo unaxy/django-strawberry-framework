@@ -12,7 +12,6 @@ import asyncio
 import datetime
 import uuid
 from collections.abc import Mapping, Sequence
-from functools import wraps
 
 import pytest
 import strawberry
@@ -20,11 +19,14 @@ from apps.library import models as library_models
 from apps.scalars import models as scalar_models
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from graphql import GraphQLInputObjectType, get_named_type
-from graphql_client import JSONObject, RecordCompiledSql, graphql_payload, response_json
+from graphql_client import (
+    JSONObject,
+    RecordCompiledSql,
+    SchemaMount,
+    graphql_payload,
+    response_json,
+)
 from strategy_schemas import make_django_type
 from strawberry.types.base import StrawberryObjectDefinition
 
@@ -44,31 +46,17 @@ from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
 )
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-generated-reverse/", _graphql_view),
-    path("graphql-generated-reverse-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-generated-reverse/",
+    async_route="graphql-generated-reverse-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 async def _async_post(document: str, variables: Mapping[str, object]) -> JSONObject:
@@ -89,18 +77,14 @@ def _post(
     *,
     transport: str = "sync",
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if transport == "async":
-                return asyncio.run(_async_post(document, variables))
-            return graphql_payload(
-                document,
-                variables=variables,
-                url="/graphql-generated-reverse/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        if transport == "async":
+            return asyncio.run(_async_post(document, variables))
+        return graphql_payload(
+            document,
+            variables=variables,
+            url="/graphql-generated-reverse/",
+        )
 
 
 def _holder(

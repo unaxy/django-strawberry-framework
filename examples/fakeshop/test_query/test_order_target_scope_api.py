@@ -9,8 +9,6 @@ scopes the hop: a related row its type hides from the anonymous actor orders its
 as a missing one, and staff sees it.
 """
 
-from functools import wraps
-
 import pytest
 import strawberry
 from apps.library import models
@@ -18,10 +16,8 @@ from apps.products.services import create_users
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AbstractUser
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import Client, override_settings
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_list, json_str
+from django.test import Client
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_list, json_str
 from strawberry.types import Info
 from typing_extensions import override
 
@@ -32,20 +28,12 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.orders import Ordering, OrderSet, RelatedOrder
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-order-target-scope/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-order-target-scope/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _user_is_staff(info: object) -> bool:
@@ -232,12 +220,8 @@ def _schema() -> DjangoSchema:
 
 
 def _post(schema: DjangoSchema, query: str, client: Client | None = None) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(query, client=client, url="/graphql-order-target-scope/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(query, client=client, url="/graphql-order-target-scope/")
 
 
 @pytest.mark.django_db

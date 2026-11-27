@@ -35,6 +35,9 @@ from graphql_client import (
     middleware_without_debug_toolbar,
     response_json,
 )
+from graphql_client import assert_graphql_data as _assert_graphql_data
+from graphql_client import assert_graphql_success as _assert_graphql_success
+from graphql_client import graphql_payload as _graphql_payload
 from graphql_client import post_graphql as _post_graphql
 
 from django_strawberry_framework.testing import AsyncTestClient
@@ -131,7 +134,7 @@ def _seed_tag(label: str, *, active: bool = True) -> models.ScalarSpecimenTag:
 
 
 def _query_one_specimen() -> JSONObject:
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allScalarSpecimens {
@@ -150,10 +153,7 @@ def _query_one_specimen() -> JSONObject:
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    rows = json_list(body, "data", "allScalarSpecimens")
+    rows = json_list(data, "allScalarSpecimens")
     assert len(rows) == 1, rows
     return json_object(rows[0])
 
@@ -215,7 +215,7 @@ def test_filter_specimens_by_bigint_in_accepts_64bit_values() -> None:
     """
     _seed_specimen(label="big", signed_big=_SIGNED_BIG)
     _seed_specimen(label="small", signed_big=1)
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f"""
         query {{
           allScalarSpecimens(filter: {{ signedBig: {{ in: [{_SIGNED_BIG}] }} }}) {{
@@ -224,10 +224,7 @@ def test_filter_specimens_by_bigint_in_accepts_64bit_values() -> None:
         }}
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    assert json_at(body, "data", "allScalarSpecimens") == [{"label": "big"}]
+    assert json_at(data, "allScalarSpecimens") == [{"label": "big"}]
 
 
 @pytest.mark.django_db
@@ -244,15 +241,10 @@ def test_filter_specimens_by_bigint_in_drops_past_64bit_members_no_overflow(
     _seed_specimen(label="keep", signed_big=7)
     _seed_specimen(label="other", signed_big=3)
     values = "[9223372036854775808, 7]" if include_valid else "[9223372036854775808]"
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "{ allScalarSpecimens(filter: { signedBig: { in: " + values + " } }) { label } }",
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    assert json_at(body, "data", "allScalarSpecimens") == (
-        [{"label": "keep"}] if include_valid else []
-    )
+    assert json_at(data, "allScalarSpecimens") == ([{"label": "keep"}] if include_valid else [])
 
 
 @pytest.mark.django_db
@@ -302,13 +294,11 @@ def test_filter_specimens_explicit_empty_in_is_the_empty_set_on_every_column(
         "null": ("{ " + leaf + ": { in: null } }", ["keep", "other"]),
     }
     filter_input, expected = cases[shape]
-    response = _post_graphql("{ allScalarSpecimens(filter: " + filter_input + ") { label } }")
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
+    data = _assert_graphql_success(
+        "{ allScalarSpecimens(filter: " + filter_input + ") { label } }",
+    )
     assert (
-        sorted(json_str(row, "label") for row in json_list(body, "data", "allScalarSpecimens"))
-        == expected
+        sorted(json_str(row, "label") for row in json_list(data, "allScalarSpecimens")) == expected
     )
 
 
@@ -326,15 +316,10 @@ def test_filter_specimens_by_unsigned_bigint_in_drops_below_zero_members(
     _seed_specimen(label="keep", unsigned_big=7)
     _seed_specimen(label="other", unsigned_big=3)
     values = "[-1, 7]" if include_valid else "[-1]"
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "{ allScalarSpecimens(filter: { unsignedBig: { in: " + values + " } }) { label } }",
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    assert json_at(body, "data", "allScalarSpecimens") == (
-        [{"label": "keep"}] if include_valid else []
-    )
+    assert json_at(data, "allScalarSpecimens") == ([{"label": "keep"}] if include_valid else [])
 
 
 @pytest.mark.django_db
@@ -355,15 +340,11 @@ def test_filter_specimens_by_bigint_range_out_of_range_bound_no_overflow(
     """Each range decision reaches Django's supported integer lookup without an overflowing bound."""
     _seed_specimen(label="keep", signed_big=7)
     _seed_specimen(label="other", signed_big=1_000_000)
-    response = _post_graphql(
+    data = _assert_graphql_success(
         "{ allScalarSpecimens(filter: { signedBig: { range: " + bounds + " } }) { label } }",
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
     assert (
-        sorted(json_str(row, "label") for row in json_list(body, "data", "allScalarSpecimens"))
-        == expected
+        sorted(json_str(row, "label") for row in json_list(data, "allScalarSpecimens")) == expected
     )
 
 
@@ -390,14 +371,11 @@ def _seed_declared_bigint_rows() -> None:
 
 
 def _filtered_labels(filter_input: dict[str, object], *, negate: bool) -> list[str]:
-    response = _post_graphql(
+    data = _assert_graphql_success(
         _SPECIMEN_FILTER_QUERY,
         variables={"f": {"not": filter_input} if negate else filter_input},
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    return sorted(json_str(row, "label") for row in json_list(body, "data", "allScalarSpecimens"))
+    return sorted(json_str(row, "label") for row in json_list(data, "allScalarSpecimens"))
 
 
 @pytest.mark.django_db
@@ -627,13 +605,10 @@ def test_filter_specimens_by_bigint_exact_rejects_non_integer_literal(
     """
     _seed_specimen(label="present", signed_big=7, unsigned_big=7)
 
-    response = _post_graphql(
+    body = _graphql_payload(
         f"query {{ allScalarSpecimens(filter: {{ {field}: {{ exact: {literal} }} }}) "
         "{ label } }",
     )
-
-    assert response.status_code == 200
-    body = response_json(response)
     assert body.get("errors"), body
     assert body["data"] is None, body
     assert reason in json_str(body, "errors", 0, "message"), body
@@ -657,15 +632,11 @@ def test_filter_specimens_by_bigint_exact_accepts_decimal_string_literal(field: 
     )
     _seed_specimen(label="other", signed_big=7, unsigned_big=7)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f'query {{ allScalarSpecimens(filter: {{ {field}: {{ exact: "{past_safe_integer}" }} }}) '
         "{ label } }",
     )
-
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    assert json_at(body, "data", "allScalarSpecimens") == [{"label": "keep"}]
+    assert json_at(data, "allScalarSpecimens") == [{"label": "keep"}]
 
 
 @pytest.mark.django_db
@@ -688,13 +659,10 @@ def test_filter_specimens_by_bigint_exact_rejects_malformed_decimal_string(
     """
     _seed_specimen(label="present", signed_big=7, unsigned_big=7)
 
-    response = _post_graphql(
+    body = _graphql_payload(
         f"query {{ allScalarSpecimens(filter: {{ {field}: {{ exact: {literal} }} }}) "
         "{ label } }",
     )
-
-    assert response.status_code == 200
-    body = response_json(response)
     assert body.get("errors"), body
     assert body["data"] is None, body
     assert _BIGINT_STRING_REJECTION_REASON in json_str(body, "errors", 0, "message"), body
@@ -727,17 +695,10 @@ def test_scalar_specimen_by_signed_big_accepts_canonical_literals(
     _seed_specimen(label="keep", signed_big=column)
     _seed_specimen(label="other", signed_big=7)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f"query {{ scalarSpecimenBySignedBig(signedBig: {argument}) {{ label signedBig }} }}",
     )
-
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    assert json_at(body, "data", "scalarSpecimenBySignedBig") == {
-        "label": "keep",
-        "signedBig": wire,
-    }
+    assert json_at(data, "scalarSpecimenBySignedBig") == {"label": "keep", "signedBig": wire}
 
 
 @pytest.mark.django_db
@@ -753,7 +714,7 @@ def test_scalar_specimen_self_referential_parent_children_over_http() -> None:
     middle = _seed_specimen(label="middle", parent=root)
     _seed_specimen(label="leaf", parent=middle)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allScalarSpecimens {
@@ -764,10 +725,7 @@ def test_scalar_specimen_self_referential_parent_children_over_http() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")}
+    rows = {json_at(row, "label"): row for row in json_list(data, "allScalarSpecimens")}
 
     assert json_at(rows, "root", "parent") is None
     assert [json_at(child, "label") for child in json_list(rows, "root", "children")] == ["middle"]
@@ -781,7 +739,7 @@ def test_scalar_specimen_self_referential_parent_children_over_http() -> None:
 
 def _introspect_field_types(type_name: str) -> dict[str, JSONObject]:
     """Fetch the field-type map for ``type_name`` via live ``/graphql/`` introspection."""
-    response = _post_graphql(
+    data = _assert_graphql_success(
         f"""
         query {{
           __type(name: "{type_name}") {{
@@ -793,12 +751,9 @@ def _introspect_field_types(type_name: str) -> dict[str, JSONObject]:
         }}
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
     return {
         json_str(field, "name"): json_object(field, "type")
-        for field in json_list(body, "data", "__type", "fields")
+        for field in json_list(data, "__type", "fields")
     }
 
 
@@ -869,37 +824,32 @@ def test_nullable_scalar_specimen_all_null_wire_format_over_http() -> None:
     non-null branch.
     """
     _seed_nullable_specimen(label="empty")
-    response = _post_graphql(
-        (
-            "\n        query {\n          allNullableScalarSpecimens {\n            "
-            "label\n            flag\n            score\n            price"
-            "\n            occurredOn\n            occurredAt\n            "
-            "occurredTime\n            payload\n            externalId\n            "
-            "signedBig\n            unsignedBig\n            partner { label }"
-            "\n          }\n        }\n        "
-        ),
+    _assert_graphql_data(
+        "\n        query {\n          allNullableScalarSpecimens {\n            "
+        "label\n            flag\n            score\n            price"
+        "\n            occurredOn\n            occurredAt\n            "
+        "occurredTime\n            payload\n            externalId\n            "
+        "signedBig\n            unsignedBig\n            partner { label }"
+        "\n          }\n        }\n        ",
+        {
+            "allNullableScalarSpecimens": [
+                {
+                    "label": "empty",
+                    "flag": None,
+                    "score": None,
+                    "price": None,
+                    "occurredOn": None,
+                    "occurredAt": None,
+                    "occurredTime": None,
+                    "payload": None,
+                    "externalId": None,
+                    "signedBig": None,
+                    "unsignedBig": None,
+                    "partner": None,
+                },
+            ],
+        },
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    assert body["data"] == {
-        "allNullableScalarSpecimens": [
-            {
-                "label": "empty",
-                "flag": None,
-                "score": None,
-                "price": None,
-                "occurredOn": None,
-                "occurredAt": None,
-                "occurredTime": None,
-                "payload": None,
-                "externalId": None,
-                "signedBig": None,
-                "unsignedBig": None,
-                "partner": None,
-            },
-        ],
-    }
 
 
 @pytest.mark.django_db
@@ -913,7 +863,7 @@ def test_nullable_scalar_specimen_partner_fk_linkage_over_http() -> None:
     target = _seed_specimen(label="target", signed_big=42, unsigned_big=42)
     _seed_nullable_specimen(label="linked", partner=target, signed_big=_SIGNED_BIG)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allNullableScalarSpecimens {
@@ -924,10 +874,7 @@ def test_nullable_scalar_specimen_partner_fk_linkage_over_http() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    rows = json_list(body, "data", "allNullableScalarSpecimens")
+    rows = json_list(data, "allNullableScalarSpecimens")
     assert len(rows) == 1
     assert rows[0] == {
         "label": "linked",
@@ -952,7 +899,7 @@ def test_scalar_specimen_nullable_partners_reverse_relation_over_http() -> None:
     _seed_nullable_specimen(label="spoke_b", partner=hub)
     _seed_nullable_specimen(label="detached")  # no partner
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allScalarSpecimens {
@@ -962,10 +909,7 @@ def test_scalar_specimen_nullable_partners_reverse_relation_over_http() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")}
+    rows = {json_at(row, "label"): row for row in json_list(data, "allScalarSpecimens")}
     spoke_labels = sorted(json_str(p, "label") for p in json_list(rows, "hub", "nullablePartners"))
     assert spoke_labels == ["spoke_a", "spoke_b"]
 
@@ -994,7 +938,7 @@ def test_scalars_set_null_ondelete_detaches_partner_in_http_query() -> None:
     nullable = _seed_nullable_specimen(label="linked", partner=target)
 
     # BEFORE - the link is live.
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allNullableScalarSpecimens {
@@ -1004,10 +948,7 @@ def test_scalars_set_null_ondelete_detaches_partner_in_http_query() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    assert json_at(body, "data", "allNullableScalarSpecimens") == [
+    assert json_at(data, "allNullableScalarSpecimens") == [
         {"label": "linked", "partner": {"label": "target"}},
     ]
 
@@ -1017,7 +958,7 @@ def test_scalars_set_null_ondelete_detaches_partner_in_http_query() -> None:
     target.delete()
 
     # AFTER - SET_NULL fired, the link is gone, but the source row survives.
-    response = _post_graphql(
+    body = _graphql_payload(
         """
         query {
           allNullableScalarSpecimens {
@@ -1027,8 +968,6 @@ def test_scalars_set_null_ondelete_detaches_partner_in_http_query() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
     assert "errors" not in body, body
     assert json_at(body, "data", "allNullableScalarSpecimens") == [
         {"label": "linked", "partner": None},
@@ -1058,7 +997,7 @@ def test_nullable_self_fk_dangling_parent_resolves_to_null_over_http() -> None:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM scalars_scalarspecimen WHERE id = %s", [parent.pk])
         try:
-            response = _post_graphql(
+            data = _assert_graphql_success(
                 """
                 query {
                   allScalarSpecimens {
@@ -1068,12 +1007,7 @@ def test_nullable_self_fk_dangling_parent_resolves_to_null_over_http() -> None:
                 }
                 """,
             )
-            assert response.status_code == 200
-            body = response_json(response)
-            assert "errors" not in body, body
-            rows = {
-                json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")
-            }
+            rows = {json_at(row, "label"): row for row in json_list(data, "allScalarSpecimens")}
             assert "dangling-fk-parent" not in rows
             assert json_at(rows, "dangling-fk-child", "parent") is None
             dangling = models.ScalarSpecimen.objects.get(pk=child.pk)
@@ -1095,7 +1029,7 @@ def test_scalar_specimen_bigint_input_decimal_string_argument_over_http() -> Non
     target = _seed_specimen(label="target", signed_big=_SIGNED_BIG)
     _seed_specimen(label="other", signed_big=42)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           scalarSpecimenBySignedBig(signedBig: "9223372036854775000") {
@@ -1105,10 +1039,7 @@ def test_scalar_specimen_bigint_input_decimal_string_argument_over_http() -> Non
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    assert json_at(body, "data", "scalarSpecimenBySignedBig") == {
+    assert json_at(data, "scalarSpecimenBySignedBig") == {
         "label": "target",
         "signedBig": "9223372036854775000",
     }
@@ -1129,7 +1060,7 @@ def test_scalar_specimen_bigint_input_int_literal_argument_over_http() -> None:
     _seed_specimen(label="target", signed_big=42)
     _seed_specimen(label="other", signed_big=_SIGNED_BIG)
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           scalarSpecimenBySignedBig(signedBig: 42) {
@@ -1139,17 +1070,11 @@ def test_scalar_specimen_bigint_input_int_literal_argument_over_http() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
     # The outbound wire format is still the decimal string - even for
     # small values that JSON could represent as a bare number. That's
     # the BigInt scalar's contract: consumers must always parse the
     # response as a string. Anything else would be a wire-format leak.
-    assert json_at(body, "data", "scalarSpecimenBySignedBig") == {
-        "label": "target",
-        "signedBig": "42",
-    }
+    assert json_at(data, "scalarSpecimenBySignedBig") == {"label": "target", "signedBig": "42"}
 
 
 @pytest.mark.django_db
@@ -1700,7 +1625,7 @@ def test_scalars_custom_get_queryset_filters_inactive_tag_to_null_in_http_query(
     _seed_specimen(label="with-inactive", tag=inactive)
     _seed_specimen(label="untagged")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allScalarSpecimens {
@@ -1710,10 +1635,7 @@ def test_scalars_custom_get_queryset_filters_inactive_tag_to_null_in_http_query(
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimens")}
+    rows = {json_at(row, "label"): row for row in json_list(data, "allScalarSpecimens")}
 
     assert json_at(rows, "with-active", "tag") == {"label": "active-tag", "active": True}
     # The inactive tag isn't in the Prefetch result, so the source-side
@@ -1740,7 +1662,7 @@ def test_scalars_tagged_specimens_reverse_fk_in_http_query() -> None:
     _seed_specimen(label="b1", tag=tag_b)
     _seed_specimen(label="orphan")
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allScalarSpecimenTags {
@@ -1750,10 +1672,7 @@ def test_scalars_tagged_specimens_reverse_fk_in_http_query() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    rows = {json_at(row, "label"): row for row in json_list(body, "data", "allScalarSpecimenTags")}
+    rows = {json_at(row, "label"): row for row in json_list(data, "allScalarSpecimenTags")}
     assert sorted(json_str(s, "label") for s in json_list(rows, "tag-a", "taggedSpecimens")) == [
         "a1",
         "a2",
@@ -1845,7 +1764,7 @@ def test_override_specimen_consumer_field_overrides_resolve_over_http() -> None:
         note="inferred",
     )
 
-    response = _post_graphql(
+    data = _assert_graphql_success(
         """
         query {
           allOverrideSpecimens {
@@ -1858,11 +1777,7 @@ def test_override_specimen_consumer_field_overrides_resolve_over_http() -> None:
         }
         """,
     )
-
-    assert response.status_code == 200
-    body = response_json(response)
-    assert "errors" not in body, body
-    rows = json_list(body, "data", "allOverrideSpecimens")
+    rows = json_list(data, "allOverrideSpecimens")
     assert len(rows) == 1, rows
     row = rows[0]
     # Assigned ``@strawberry.field`` resolver ran (upper-cased), not the raw column.

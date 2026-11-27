@@ -17,7 +17,6 @@ primary key, so a holder update over ``RpCompositeParent`` pins its generated in
 import contextlib
 import json
 from collections.abc import Mapping
-from functools import wraps
 
 import django
 import pytest
@@ -25,13 +24,11 @@ import strawberry
 from asgiref.sync import sync_to_async
 from django.db import connection
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_list,
     json_str,
@@ -50,7 +47,6 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._mti_relations import (
     create_mti_tag_tables,
     declare_mti_tag_models,
@@ -61,27 +57,14 @@ from tests._mti_relations import (
 from tests._relation_fixtures import RpCompositeChild, RpCompositeParent, relation_fixture_tables
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-mti-composite/", _graphql_view),
-    path("graphql-mti-composite-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-mti-composite/",
+    async_route="graphql-mti-composite-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(
@@ -89,12 +72,8 @@ def _post(
     document: str,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(document, variables=variables, url="/graphql-mti-composite/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(document, variables=variables, url="/graphql-mti-composite/")
 
 
 async def _post_async(
@@ -102,19 +81,15 @@ async def _post_async(
     document: str,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient().query(
-                document,
-                variables=variables,
-                assert_no_errors=False,
-                url="/graphql-mti-composite-async/",
-            )
-        assert result.response.status_code == 200
-        return response_json(result.response)
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        result = await AsyncTestClient().query(
+            document,
+            variables=variables,
+            assert_no_errors=False,
+            url="/graphql-mti-composite-async/",
+        )
+    assert result.response.status_code == 200
+    return response_json(result.response)
 
 
 def _selects_from(statements: list[str], table: str) -> list[str]:

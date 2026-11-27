@@ -17,7 +17,6 @@ runs one statement.
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from functools import wraps
 from typing import ClassVar, TypeVar
 
 import pytest
@@ -26,14 +25,13 @@ from apps.library import models
 from asgiref.sync import sync_to_async
 from django.db import connection
 from django.db.models import Model, Q, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
+from django.http import HttpRequest
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django_filters import CharFilter, Filter, ModelChoiceFilter
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -54,32 +52,18 @@ from django_strawberry_framework import (
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import read_attr, require_instance
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 _M = TypeVar("_M", bound=Model)
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _CALLS: list[tuple[str, str]] = []
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-unconstraining/", _graphql_view),
-    path("graphql-unconstraining-async/", _async_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-unconstraining/",
+    async_route="graphql-unconstraining-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 #: Each way an override hands back every row it was given, as a new queryset.
 _BODIES = (
@@ -395,19 +379,15 @@ def _names(
     )
     document = f"query($where: JSON!) {{ rows(where: $where) {{ name: {selected} }} }}"
     variables: JSONObject = {"where": where}
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if transport == "async":
-                payload = asyncio.run(_async_post(document, variables))
-            else:
-                payload = graphql_payload(
-                    document,
-                    variables=variables,
-                    url="/graphql-unconstraining/",
-                )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        if transport == "async":
+            payload = asyncio.run(_async_post(document, variables))
+        else:
+            payload = graphql_payload(
+                document,
+                variables=variables,
+                url="/graphql-unconstraining/",
+            )
     assert "errors" not in payload, payload
     return [str(json_at(row, "name")) for row in json_list(payload, "data", "rows")]
 

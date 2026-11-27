@@ -39,7 +39,7 @@ wired in ``apps.products.schema`` end to end:
   switching aliases refused.
 
 Form-mutation async colour uses a module-local ``/graphql-async/`` mount
-(``graphql_client.py`` is sync-only).
+(``graphql_client.py``'s posts are sync-only).
 
 Per AGENTS.md, the catalog is seeded via ``services.seed_data`` and the auth
 user via ``services.create_users`` -- never hand-rolled. Faker-generated names
@@ -53,7 +53,6 @@ import contextlib
 import json
 import string
 from collections.abc import Callable, Generator
-from functools import wraps
 from pathlib import Path
 from typing import NamedTuple
 
@@ -78,14 +77,12 @@ from django.db.backends.signals import connection_created
 from django.db.models import QuerySet
 from django.db.models.fields.files import FieldFile
 from django.db.models.signals import post_save, pre_save
-from django.http import HttpRequest
-from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client, override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from graphql_client import (
     DeleteAfterAuthorization,
     JSONObject,
+    SchemaMount,
     json_at,
     json_list,
     json_object,
@@ -100,6 +97,7 @@ from graphql_client import (
 )
 from graphql_client import assert_graphql_data as _assert_graphql_data
 from graphql_client import assert_graphql_success as _graphql_data
+from graphql_client import graphql_payload as _graphql_payload
 from graphql_client import post_graphql as _post_graphql
 from graphql_client import post_graphql_raw as _post_graphql_raw
 from strawberry import relay
@@ -109,7 +107,6 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils.permissions import _GATE_ASYNC_RECOURSE
-from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 #: Settings that open the spec-048 error policy's pass-through gate for ONE live
 #: request. ``settings.DEBUG`` is the gate, and on this tier it is the only
@@ -1109,15 +1106,12 @@ def test_create_category_surrogate_in_unique_name_is_field_error_no_crash() -> N
     client = _login_with_perm("view_category_1", "add_category")
     before = models.Category.objects.count()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_CATEGORY,
         client=client,
         variables={"d": {"name": f"surrogate-{_LONE_SURROGATE}", "description": _LONE_SURROGATE}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createCategory")
+    result = json_at(data, "createCategory")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["name"]
     assert models.Category.objects.count() == before
@@ -1134,15 +1128,12 @@ def test_create_category_surrogate_in_nonunique_description_is_field_error_no_cr
     """
     create_users(1)
     client = _login_with_perm("view_category_1", "add_category")
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_CATEGORY,
         client=client,
         variables={"d": {"name": "surrogate-description-only", "description": _LONE_SURROGATE}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createCategory")
+    result = json_at(data, "createCategory")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["description"]
     assert not models.Category.objects.filter(name="surrogate-description-only").exists()
@@ -1181,15 +1172,12 @@ def test_create_category_nul_in_text_is_field_error_nothing_written(
     client = _login_with_perm("view_category_1", "add_category")
     before = models.Category.objects.count()
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         "mutation($d: CategoryInput!) { createCategory(data: $d) { "
         "node { name } errors { field messages codes path } } }",
         client=client,
         variables={"d": data},
     )
-
-    assert response.status_code == 200
-    payload = response_json(response)
     assert "errors" not in payload, payload
     assert json_at(payload, "data", "createCategory") == {
         "node": None,
@@ -1230,17 +1218,13 @@ def test_update_item_nul_in_name_is_the_same_field_error_in_every_flavor(flavor:
     client = _login_with_perm("staff_1", "change_item")
     field, input_type = _ITEM_NAME_UPDATES[flavor]
 
-    response = _post_graphql(
+    data = _graphql_data(
         f"mutation($id: ID!, $d: {input_type}!) {{ {field}(id: $id, data: $d) {{ "
         "node { name } errors { field messages codes path } } }",
         client=client,
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "After\x00"}},
     )
-
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", field) == {
+    assert json_at(data, field) == {
         "node": None,
         "errors": [{"field": "name", **_NUL_ERROR, "path": ["name"]}],
     }
@@ -1262,15 +1246,12 @@ def test_create_category_explicit_null_on_nonnullable_description_is_field_error
     client = _login_with_perm("view_category_1", "add_category")
     before = models.Category.objects.count()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_CATEGORY,
         client=client,
         variables={"d": {"name": "zzz_live_null_desc", "description": None}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createCategory")
+    result = json_at(data, "createCategory")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["description"]
     assert models.Category.objects.count() == before
@@ -1300,7 +1281,7 @@ def test_create_item_unique_constraint_envelope_uses_all_sentinel() -> None:
     existing.refresh_from_db()
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM,
         client=client,
         variables={
@@ -1310,10 +1291,7 @@ def test_create_item_unique_constraint_envelope_uses_all_sentinel() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItem")
+    result = json_at(data, "createItem")
     assert json_at(result, "node") is None
     assert len(json_list(result, "errors")) == 1
     assert json_at(result, "errors", 0, "field") == "__all__"
@@ -1335,17 +1313,14 @@ def test_create_item_empty_name_is_field_error_no_write() -> None:
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM,
         client=client,
         variables={
             "d": {"name": "", "categoryId": _global_id("products.category", category.pk)},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItem")
+    result = json_at(data, "createItem")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["name"]
     assert models.Item.objects.count() == before
@@ -1428,15 +1403,12 @@ def test_update_item_partial_collision_on_unique_constraint_changing_only_name()
     ).update(description="", is_private=False, attachment="", name="B", category=category)
     client = _login_with_perm("staff_1", "change_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM,
         client=client,
         variables={"id": _global_id("products.item", item_a.pk), "d": {"name": "B"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItem")
+    result = json_at(data, "updateItem")
     assert json_at(result, "node") is None
     assert json_list(result, "errors") == [
         {
@@ -1463,7 +1435,7 @@ def test_create_item_anonymous_is_denied_top_level_error_no_write() -> None:
     category = models.Category.objects.earliest("pk")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _CREATE_ITEM,
         variables={
             "d": {
@@ -1472,8 +1444,6 @@ def test_create_item_anonymous_is_denied_top_level_error_no_write() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload
     # The denial RAISES on a non-null ``createItem(...): CreateItemPayload!`` field,
     # so GraphQL nulls the whole ``data`` - the authorization-failure surface, NOT a
@@ -1534,7 +1504,7 @@ def test_create_item_missing_model_perm_is_denied_no_write() -> None:
     client = _login("view_item_1")  # only products.view_item, no add_item
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _CREATE_ITEM,
         client=client,
         variables={
@@ -1544,8 +1514,6 @@ def test_create_item_missing_model_perm_is_denied_no_write() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload
     assert json_at(payload, "data") is None
     assert "Not authorized" in json_str(payload, "errors", 0, "message")
@@ -1581,13 +1549,11 @@ def test_update_item_missing_change_perm_is_denied_no_write() -> None:
     item.refresh_from_db()
     client = _login_with_perm("staff_1", "add_item")  # holds add, LACKS change
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _UPDATE_ITEM,
         client=client,
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "Renamed"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload
     assert json_at(payload, "data") is None
     assert "Not authorized" in json_str(payload, "errors", 0, "message")
@@ -1621,13 +1587,11 @@ def test_delete_item_missing_delete_perm_is_denied_no_write() -> None:
     item.refresh_from_db()
     client = _login_with_perm("staff_1", "add_item")  # holds add, LACKS delete
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _DELETE_ITEM,
         client=client,
         variables={"id": _global_id("products.item", item.pk)},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload
     assert json_at(payload, "data") is None
     assert "Not authorized" in json_str(payload, "errors", 0, "message")
@@ -1801,14 +1765,11 @@ def test_update_item_anonymous_on_hidden_private_row_is_not_found_before_any_aut
     )
     hidden.refresh_from_db()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM,
         variables={"id": _global_id("products.item", hidden.pk), "d": {"name": "Leaked"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItem")
+    result = json_at(data, "updateItem")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     hidden.refresh_from_db()
@@ -1832,15 +1793,12 @@ def test_create_item_wrong_type_global_id_on_category_id_is_field_error() -> Non
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM,
         client=client,
         variables={"d": {"name": "WrongTypeWidget", "categoryId": wrong_gid}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItem")
+    result = json_at(data, "createItem")
     assert json_at(result, "node") is None
     assert len(json_list(result, "errors")) == 1
     assert json_at(result, "errors", 0, "field") == "categoryId"
@@ -1863,15 +1821,12 @@ def test_create_item_unresolvable_type_category_id_is_field_error() -> None:
     # This wire fixture deliberately names no registered type, so no real type can mint it.
     bogus = str(relay.GlobalID(type_name="nope.nonexistent", node_id="1"))
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM,
         client=client,
         variables={"d": {"name": "UnresolvableRel", "categoryId": bogus}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItem")
+    result = json_at(data, "createItem")
     assert json_at(result, "node") is None
     assert json_at(result, "errors") == [
         {"field": "categoryId", "messages": ["Invalid id for relation 'categoryId'."]},
@@ -1909,15 +1864,12 @@ def test_update_item_wrong_type_global_id_on_id_is_field_error() -> None:
     # A well-formed Category GlobalID whose numeric pk collides with the Item's pk
     # is the dangerous case: a bare-pk coercion would silently hit this Item.
     wrong_gid = _global_id("products.category", item.pk)
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM,
         client=client,
         variables={"id": wrong_gid, "d": {"name": "Renamed"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItem")
+    result = json_at(data, "updateItem")
     assert json_at(result, "node") is None
     assert json_at(result, "errors") == [
         {"field": "id", "messages": ["Invalid id."], "codes": ["invalid"]},
@@ -1964,11 +1916,8 @@ def test_delete_item_wrong_type_global_id_on_id_is_field_error() -> None:
     client = _login_with_perm("staff_1", "delete_item")
 
     wrong_gid = _global_id("products.category", item.pk)
-    response = _post_graphql(_DELETE_ITEM, client=client, variables={"id": wrong_gid})
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "deleteItem")
+    data = _graphql_data(_DELETE_ITEM, client=client, variables={"id": wrong_gid})
+    result = json_at(data, "deleteItem")
     assert json_at(result, "node") is None
     assert len(json_list(result, "errors")) == 1
     assert json_at(result, "errors", 0, "field") == "id"
@@ -1995,7 +1944,7 @@ def test_create_item_relation_id_for_hidden_category_is_field_error() -> None:
     before = models.Item.objects.count()
 
     # Hidden private category: FieldError on categoryId, no write.
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM,
         client=client,
         variables={
@@ -2005,10 +1954,7 @@ def test_create_item_relation_id_for_hidden_category_is_field_error() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItem")
+    result = json_at(data, "createItem")
     assert json_at(result, "node") is None
     hidden_errors = json_list(result, "errors")
     assert [json_at(e, "field") for e in hidden_errors] == ["categoryId"]
@@ -2079,15 +2025,12 @@ def test_update_item_explicit_null_category_id_is_field_error() -> None:
     item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM,
         client=client,
         variables={"id": _global_id("products.item", item.pk), "d": {"categoryId": None}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItem")
+    result = json_at(data, "updateItem")
     assert json_at(result, "node") is None
     assert json_at(result, "errors") == [
         {"field": "categoryId", "messages": ["This field cannot be null."], "codes": ["null"]},
@@ -2110,15 +2053,12 @@ def test_update_item_explicit_null_scalar_name_is_field_error() -> None:
     orig_name = item.name
     client = _login_with_perm("staff_1", "change_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM,
         client=client,
         variables={"id": _global_id("products.item", item.pk), "d": {"name": None}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItem")
+    result = json_at(data, "updateItem")
     assert json_at(result, "node") is None
     assert json_at(result, "errors") == [
         {"field": "name", "messages": ["This field cannot be null."], "codes": ["null"]},
@@ -2152,15 +2092,12 @@ def test_update_item_malformed_id_is_field_error_no_coercion_crash(id_shape: str
     client = _login_with_perm("staff_1", "change_item")
 
     bad_id = "not-a-global-id" if id_shape == "malformed" else str(item.pk)
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM,
         client=client,
         variables={"id": bad_id, "d": {"name": "Renamed"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItem")
+    result = json_at(data, "updateItem")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     item.refresh_from_db()
@@ -2180,15 +2117,12 @@ def test_create_item_malformed_category_id_is_relation_field_error() -> None:
     seed_data(1)
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM,
         client=client,
         variables={"d": {"name": "Malformed", "categoryId": "not-a-valid-global-id"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    assert json_at(payload, "data", "createItem") == {
+    assert json_at(data, "createItem") == {
         "node": None,
         "errors": [
             {"field": "categoryId", "messages": ["Invalid id for relation 'categoryId'."]},
@@ -2226,15 +2160,12 @@ def test_update_item_wellformed_id_uncoercible_node_id_is_not_found_no_crash() -
     client = _login_with_perm("staff_1", "change_item")
 
     bad_id = str(_global_id("products.item", "abc"))
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM,
         client=client,
         variables={"id": bad_id, "d": {"name": "Renamed"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItem")
+    result = json_at(data, "updateItem")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     item.refresh_from_db()
@@ -2259,15 +2190,12 @@ def test_create_item_wellformed_relation_id_uncoercible_node_id_is_field_error_n
     before = models.Item.objects.count()
 
     bad_cat = str(_global_id("products.category", "abc"))
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM,
         client=client,
         variables={"d": {"name": "UncoercibleRel", "categoryId": bad_cat}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItem")
+    result = json_at(data, "createItem")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["categoryId"]
     assert models.Item.objects.count() == before
@@ -2304,15 +2232,12 @@ def test_create_item_relation_id_absurd_huge_pk_is_field_error_no_overflow() -> 
     before = models.Item.objects.count()
 
     huge_cat = str(_global_id("products.category", _ABSURD_INTEGER_NODE_ID))
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM,
         client=client,
         variables={"d": {"name": "HugePk", "categoryId": huge_cat}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItem")
+    result = json_at(data, "createItem")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["categoryId"]
     assert models.Item.objects.count() == before
@@ -2344,15 +2269,12 @@ def test_update_item_id_absurd_huge_pk_is_not_found_no_overflow() -> None:
     client = _login_with_perm("staff_1", "change_item")
 
     huge_id = str(_global_id("products.item", _ABSURD_INTEGER_NODE_ID))
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM,
         client=client,
         variables={"id": huge_id, "d": {"name": "Renamed"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItem")
+    result = json_at(data, "updateItem")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     item.refresh_from_db()
@@ -2459,14 +2381,11 @@ def test_emitted_globalid_is_model_anchored() -> None:
     seed_data(1)
     client = _staff_client()
     item = models.Item.objects.earliest("id")
-    response = _post_graphql(
+    data = _graphql_data(
         "query { allItems { edges { node { id name } } } }",
         client=client,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    nodes = [json_at(edge, "node") for edge in json_list(payload, "data", "allItems", "edges")]
+    nodes = [json_at(edge, "node") for edge in json_list(data, "allItems", "edges")]
     emitted = next(node for node in nodes if json_at(node, "name") == item.name)
     parsed = relay.GlobalID.from_id(json_str(emitted, "id"))
     assert parsed.type_name == models.Item._meta.label_lower
@@ -2490,16 +2409,11 @@ def test_globalid_filter_round_trip() -> None:
     seed_data(1)
     client = _staff_client()
     target = models.Item.objects.earliest("id")
-    emit_response = _post_graphql(
+    data = _graphql_data(
         "query { allItems { edges { node { id name } } } }",
         client=client,
     )
-    assert emit_response.status_code == 200
-    emit_payload = response_json(emit_response)
-    assert "errors" not in emit_payload, emit_payload
-    emitted_nodes = [
-        json_at(edge, "node") for edge in json_list(emit_payload, "data", "allItems", "edges")
-    ]
+    emitted_nodes = [json_at(edge, "node") for edge in json_list(data, "allItems", "edges")]
     emitted = next(node for node in emitted_nodes if json_at(node, "name") == target.name)
     emitted_id = json_str(emitted, "id")
 
@@ -2536,14 +2450,11 @@ def test_type_strategy_opt_out_reproduces_type_name(
         DJANGO_STRAWBERRY_FRAMEWORK={"RELAY_GLOBALID_STRATEGY": "type"},
     ):
         project_schema_override()
-        response = _post_graphql(
+        data = _graphql_data(
             "query { allItems { edges { node { id name } } } }",
             client=client,
         )
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        nodes = [json_at(edge, "node") for edge in json_list(payload, "data", "allItems", "edges")]
+        nodes = [json_at(edge, "node") for edge in json_list(data, "allItems", "edges")]
         emitted = next(node for node in nodes if json_at(node, "name") == item.name)
         parsed = relay.GlobalID.from_id(json_str(emitted, "id"))
         assert parsed.type_name == "ItemType"
@@ -4056,7 +3967,7 @@ def test_cascade_anonymous_sees_no_entries_under_private_categories() -> None:
     create_users(1)
     chain = seed_cascade_split()
 
-    response = _post_graphql(
+    data = _graphql_data(
         """
         query {
           allEntries {
@@ -4065,10 +3976,7 @@ def test_cascade_anonymous_sees_no_entries_under_private_categories() -> None:
         }
         """,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    nodes = [json_at(edge, "node") for edge in json_list(payload, "data", "allEntries", "edges")]
+    nodes = [json_at(edge, "node") for edge in json_list(data, "allEntries", "edges")]
     category_names = {json_at(node, "item", "category", "name") for node in nodes}
     values = {json_at(node, "value") for node in nodes}
     # The cascade hides the entry whose item's category is private...
@@ -4099,15 +4007,12 @@ def test_cascade_view_item_user_respects_category_visibility() -> None:
     chain = seed_cascade_split()
     client = _login("view_item_1")
 
-    response = _post_graphql(
+    data = _graphql_data(
         "query { allItems { edges { node { name category { name } } } } }",
         client=client,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     # No RelatedObjectDoesNotExist on the non-null `category` selection.
-    assert "errors" not in payload, payload
-    nodes = [json_at(edge, "node") for edge in json_list(payload, "data", "allItems", "edges")]
+    nodes = [json_at(edge, "node") for edge in json_list(data, "allItems", "edges")]
     item_names = {json_at(node, "name") for node in nodes}
     category_names = {json_at(node, "category", "name") for node in nodes}
     # The Item under the private category is dropped (not surfaced with a broken FK)...
@@ -4138,15 +4043,12 @@ def test_cascade_view_entry_user_nested_selection_drops_hidden_targets() -> None
     chain = seed_cascade_split()
     client = _login("view_entry_1")
 
-    response = _post_graphql(
+    data = _graphql_data(
         "query { allEntries { edges { node { value item { name category { name } } } } } }",
         client=client,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     # The nested non-null FK selection does not error.
-    assert "errors" not in payload, payload
-    nodes = [json_at(edge, "node") for edge in json_list(payload, "data", "allEntries", "edges")]
+    nodes = [json_at(edge, "node") for edge in json_list(data, "allEntries", "edges")]
     values = {json_at(node, "value") for node in nodes}
     category_names = {json_at(node, "item", "category", "name") for node in nodes}
     # Entry under the private category is dropped...
@@ -4228,18 +4130,15 @@ def test_cascade_staff_sees_everything(
     seed_cascade_split()
     client = _login("staff_1")
 
-    response = _post_graphql(
+    data = _graphql_data(
         f"query {{ {field} {{ edges {{ node {{ id }} }} }} }}",
         client=client,
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
 
     # There must BE rows the cascade would hide, or the equality below is
     # satisfied by a queryset the cascade never had anything to narrow.
     assert model.objects.filter(is_private=True).exists(), field
-    returned = [json_at(edge, "node", "id") for edge in json_list(payload, "data", field, "edges")]
+    returned = [json_at(edge, "node", "id") for edge in json_list(data, field, "edges")]
     expected = _cascade_page_gids(model)
     assert returned == expected, (field, len(returned), len(expected))
 
@@ -4274,16 +4173,11 @@ def test_cascade_staff_sees_private_rows_hidden_from_non_staff(
     assert hidden_gid in _cascade_page_gids(model), (field, hidden.pk)
 
     def node_ids(client: Client | None) -> list[str]:
-        response = _post_graphql(
+        data = _graphql_data(
             f"query {{ {field} {{ edges {{ node {{ id }} }} }} }}",
             client=client,
         )
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        return [
-            json_str(edge, "node", "id") for edge in json_list(payload, "data", field, "edges")
-        ]
+        return [json_str(edge, "node", "id") for edge in json_list(data, field, "edges")]
 
     staff_ids = node_ids(_login("staff_1"))
     anonymous_ids = node_ids(None)
@@ -4818,7 +4712,7 @@ def test_create_item_via_form_happy_path() -> None:
     category = models.Category.objects.earliest("pk")
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_FORM,
         client=client,
         variables={
@@ -4828,10 +4722,7 @@ def test_create_item_via_form_happy_path() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaForm")
+    result = json_at(data, "createItemViaForm")
     assert json_at(result, "errors") == []
     assert json_at(result, "node") == {"name": "FormWidget", "category": {"name": category.name}}
     created = models.Item.objects.get(name="FormWidget", category=category)
@@ -4852,7 +4743,7 @@ def test_create_item_via_form_category_id_writes_through_form_category_field() -
     category = models.Category.objects.earliest("pk")
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_FORM,
         client=client,
         variables={
@@ -4862,10 +4753,7 @@ def test_create_item_via_form_category_id_writes_through_form_category_field() -
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaForm")
+    result = json_at(data, "createItemViaForm")
     assert json_at(result, "errors") == []
     created = models.Item.objects.get(name="ReverseMapWidget")
     # The FK was written through the form's `category` field from the `categoryId` arg.
@@ -4890,7 +4778,7 @@ def test_create_item_via_form_surrogate_in_constraint_name_is_field_error_no_cra
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_FORM,
         client=client,
         variables={
@@ -4900,10 +4788,7 @@ def test_create_item_via_form_surrogate_in_constraint_name_is_field_error_no_cra
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaForm")
+    result = json_at(data, "createItemViaForm")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["name"]
     assert models.Item.objects.count() == before
@@ -4923,7 +4808,7 @@ def test_create_item_via_form_surrogate_in_description_is_field_error_no_crash()
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_FORM,
         client=client,
         variables={
@@ -4934,10 +4819,7 @@ def test_create_item_via_form_surrogate_in_description_is_field_error_no_crash()
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaForm")
+    result = json_at(data, "createItemViaForm")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["description"]
     assert models.Item.objects.count() == before
@@ -5021,15 +4903,12 @@ def test_update_item_via_form_partial_update_preserves_category_and_description(
     original_category_id = item.category_id
     client = _login_with_perm("staff_1", "change_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM_VIA_FORM,
         client=client,
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "PreserveAfter"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItemViaForm")
+    result = json_at(data, "updateItemViaForm")
     assert json_at(result, "errors") == []
     item.refresh_from_db()
     assert item.name == "PreserveAfter"
@@ -5129,15 +5008,12 @@ def test_update_item_via_form_revalidates_an_untouched_stale_name() -> None:
     client = _login_with_perm("staff_1", "change_item")
     gid = _global_id("products.item", item.pk)
 
-    blocked = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM_VIA_FORM,
         client=client,
         variables={"id": gid, "d": {"description": "Blocked"}},
     )
-    assert blocked.status_code == 200
-    payload = response_json(blocked)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItemViaForm")
+    result = json_at(data, "updateItemViaForm")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["name"]
     # `clean_name`'s own rejection, not a "this field is required" from an empty
@@ -5188,16 +5064,13 @@ def test_update_item_via_form_explicit_null_category_id_is_the_form_required_err
     item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         "mutation($id: ID!, $d: ItemModelFormPartialInput!) { updateItemViaForm(id: $id, "
         "data: $d) { node { name } errors { field path messages codes } } }",
         client=client,
         variables={"id": _global_id("products.item", item.pk), "d": {"categoryId": None}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItemViaForm")
+    result = json_at(data, "updateItemViaForm")
     assert json_at(result, "node") is None
     assert json_at(result, "errors") == [
         {
@@ -5270,15 +5143,12 @@ def test_update_item_via_form_partial_collision_fires_unique_constraint_on_name_
     ).update(description="", is_private=False, attachment="", name="FormB", category=category)
     client = _login_with_perm("staff_1", "change_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM_VIA_FORM,
         client=client,
         variables={"id": _global_id("products.item", item_a.pk), "d": {"name": "FormB"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItemViaForm")
+    result = json_at(data, "updateItemViaForm")
     assert json_at(result, "node") is None
     assert len(json_list(result, "errors")) == 1
     assert json_at(result, "errors", 0, "field") == "__all__"
@@ -5300,7 +5170,7 @@ def test_create_item_via_form_clean_field_error_is_field_keyed() -> None:
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_FORM,
         client=client,
         variables={
@@ -5310,10 +5180,7 @@ def test_create_item_via_form_clean_field_error_is_field_keyed() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaForm")
+    result = json_at(data, "createItemViaForm")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["name"]
     assert json_at(result, "errors", 0, "messages")
@@ -5336,13 +5203,11 @@ def test_create_item_via_form_omitted_required_name_is_a_coercion_error_no_write
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _CREATE_ITEM_VIA_FORM,
         client=client,
         variables={"d": {"categoryId": _global_id("products.category", category.pk)}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload
     assert "name" in json_str(payload, "errors", 0, "message")
     assert payload.get("data") is None
@@ -5373,7 +5238,7 @@ def test_create_item_via_form_unique_constraint_envelope_uses_all_sentinel() -> 
     existing.refresh_from_db()
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_FORM,
         client=client,
         variables={
@@ -5383,10 +5248,7 @@ def test_create_item_via_form_unique_constraint_envelope_uses_all_sentinel() -> 
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaForm")
+    result = json_at(data, "createItemViaForm")
     assert json_at(result, "node") is None
     assert len(json_list(result, "errors")) == 1
     assert json_at(result, "errors", 0, "field") == "__all__"
@@ -5408,7 +5270,7 @@ def test_create_item_via_form_anonymous_is_denied_top_level_error_no_write() -> 
     category = models.Category.objects.earliest("pk")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _CREATE_ITEM_VIA_FORM,
         variables={
             "d": {
@@ -5417,8 +5279,6 @@ def test_create_item_via_form_anonymous_is_denied_top_level_error_no_write() -> 
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload
     assert json_at(payload, "data") is None
     assert "Not authorized" in json_str(payload, "errors", 0, "message")
@@ -5441,7 +5301,7 @@ def test_create_item_via_form_missing_model_perm_is_denied_no_write() -> None:
     client = _login("view_item_1")  # only products.view_item, no add_item
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _CREATE_ITEM_VIA_FORM,
         client=client,
         variables={
@@ -5451,8 +5311,6 @@ def test_create_item_via_form_missing_model_perm_is_denied_no_write() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload
     assert json_at(payload, "data") is None
     assert "Not authorized" in json_str(payload, "errors", 0, "message")
@@ -5529,7 +5387,7 @@ def test_create_item_via_form_relation_id_for_hidden_category_is_field_error() -
     before = models.Item.objects.count()
 
     # Hidden private category: FieldError on categoryId, no write.
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_FORM,
         client=client,
         variables={
@@ -5539,10 +5397,7 @@ def test_create_item_via_form_relation_id_for_hidden_category_is_field_error() -
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaForm")
+    result = json_at(data, "createItemViaForm")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["categoryId"]
     assert models.Item.objects.count() == before
@@ -5586,7 +5441,7 @@ def test_create_item_via_form_authorize_before_decode_anonymous_gets_auth_denial
     chain = seed_cascade_split()
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _CREATE_ITEM_VIA_FORM,
         variables={
             "d": {
@@ -5595,8 +5450,6 @@ def test_create_item_via_form_authorize_before_decode_anonymous_gets_auth_denial
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload
     assert json_at(payload, "data") is None
     assert "Not authorized" in json_str(payload, "errors", 0, "message")
@@ -5738,7 +5591,7 @@ def test_update_item_with_file_via_form_omitting_the_file_preserves_it(tmp_path:
         assert stored_name is not None
         assert stored_name.endswith("keepme.txt")
 
-        response = _post_graphql(
+        data = _graphql_data(
             "mutation($id: ID!, $d: ItemFileModelFormPartialInput!) { "
             "updateItemWithFileViaForm(id: $id, data: $d) { "
             "node { name } errors { field messages } } }",
@@ -5748,10 +5601,7 @@ def test_update_item_with_file_via_form_omitting_the_file_preserves_it(tmp_path:
                 "d": {"name": "PreservedFormWidgetRenamed"},
             },
         )
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        result = json_at(payload, "data", "updateItemWithFileViaForm")
+        result = json_at(data, "updateItemWithFileViaForm")
         assert json_at(result, "errors") == []
         assert json_at(result, "node") == {"name": "PreservedFormWidgetRenamed"}
 
@@ -5794,17 +5644,14 @@ def test_update_item_with_file_via_form_explicit_null_clears_the_file(tmp_path: 
             SimpleUploadedFile("clearme.txt", b"bytes to clear", content_type="text/plain"),
             save=True,
         )
-        response = _post_graphql(
+        data = _graphql_data(
             "mutation($id: ID!, $d: ItemFileModelFormPartialInput!) { "
             "updateItemWithFileViaForm(id: $id, data: $d) { "
             "node { name } errors { field messages } } }",
             client=client,
             variables={"id": _global_id("products.item", item.pk), "d": {"attachment": None}},
         )
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        result = json_at(payload, "data", "updateItemWithFileViaForm")
+        result = json_at(data, "updateItemWithFileViaForm")
         assert json_at(result, "errors") == []
         assert json_at(result, "node") == {"name": item.name}
 
@@ -5842,15 +5689,12 @@ def test_create_default_category_item_via_form_injects_the_default_category() ->
     assert models.Category.objects.exclude(pk=default_category.pk).exists()
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_DEFAULT_CATEGORY_ITEM_VIA_FORM,
         client=client,
         variables={"d": {"name": "RaceFormFresh"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createDefaultCategoryItemViaForm")
+    result = json_at(data, "createDefaultCategoryItemViaForm")
     assert json_at(result, "errors") == []
     assert json_at(result, "node") == {"name": "RaceFormFresh"}
 
@@ -5888,15 +5732,12 @@ def test_create_default_category_item_via_form_write_time_integrity_error_uses_e
     existing.refresh_from_db()
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_DEFAULT_CATEGORY_ITEM_VIA_FORM,
         client=client,
         variables={"d": {"name": existing.name}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createDefaultCategoryItemViaForm")
+    result = json_at(data, "createDefaultCategoryItemViaForm")
     assert json_at(result, "node") is None
     assert len(json_list(result, "errors")) == 1
     # The whole save-time envelope, over the wire: the `"__all__"` sentinel sits in
@@ -5930,7 +5771,7 @@ def test_create_stamped_item_via_form_get_form_kwargs_injects_user() -> None:
     category = models.Category.objects.earliest("pk")
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_STAMPED_ITEM_VIA_FORM,
         client=client,
         variables={
@@ -5940,10 +5781,7 @@ def test_create_stamped_item_via_form_get_form_kwargs_injects_user() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createStampedItemViaForm")
+    result = json_at(data, "createStampedItemViaForm")
     assert json_at(result, "errors") == []
     assert json_at(result, "node") == {
         "name": "StampedWidget",
@@ -5964,14 +5802,11 @@ def test_submit_contact_plain_form_success_shape() -> None:
     """
     create_users(1)
 
-    response = _post_graphql(
+    data = _graphql_data(
         _SUBMIT_CONTACT,
         variables={"d": {"subject": "Hello there", "email": "user@example.com"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "submitContact")
+    result = json_at(data, "submitContact")
     assert json_at(result, "ok") is True
     assert json_at(result, "errors") == []
 
@@ -5986,14 +5821,11 @@ def test_submit_contact_plain_form_validation_failure_shape() -> None:
     """
     create_users(1)
 
-    response = _post_graphql(
+    data = _graphql_data(
         _SUBMIT_CONTACT,
         variables={"d": {"subject": "   ", "email": "user@example.com"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "submitContact")
+    result = json_at(data, "submitContact")
     assert json_at(result, "ok") is False
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["subject"]
     assert json_at(result, "errors", 0, "messages")
@@ -6008,12 +5840,10 @@ def test_submit_ping_plain_form_denied_by_default_top_level_error() -> None:
     posture: the live call is rejected with a top-level authorization ``GraphQLError``
     (data nulled), never reaching the form - the deny default earned over real HTTP.
     """
-    response = _post_graphql(
+    payload = _graphql_payload(
         "mutation($d: PingFormInput!){ submitPing(data: $d) { ok errors { field } } }",
         variables={"d": {"message": "hi"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload  # top-level authorization error
     assert json_at(payload, "data") is None
     assert "Not authorized" in json_str(payload, "errors", 0, "message")
@@ -6034,15 +5864,12 @@ def test_create_item_via_form_wrong_type_global_id_on_category_id_is_field_error
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_FORM,
         client=client,
         variables={"d": {"name": "WrongTypeFormWidget", "categoryId": wrong_gid}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaForm")
+    result = json_at(data, "createItemViaForm")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["categoryId"]
     assert models.Item.objects.count() == before
@@ -6075,28 +5902,20 @@ def test_update_item_via_form_malformed_id_is_field_error_no_coercion_crash(bad_
     client = _login_with_perm("staff_1", "change_item")
 
     lookup_id = str(item.pk) if bad_id == "raw-pk" else bad_id
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM_VIA_FORM,
         client=client,
         variables={"id": lookup_id, "d": {"name": "RenamedForm"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItemViaForm")
+    result = json_at(data, "updateItemViaForm")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["id"]
     item.refresh_from_db()
     assert item.name == "FormUntouched"
 
 
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
-
-    return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
-
-
-urlpatterns = [path("graphql-async/", _async_shipped_graphql_view)]
+_MOUNT = SchemaMount(__name__, async_route="graphql-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 async def _post_async_shipped(
@@ -6106,7 +5925,7 @@ async def _post_async_shipped(
     client: AsyncClient | None = None,
 ) -> JSONObject:
     """POST ``query`` against the shipped schema over ``/graphql-async/``."""
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         result = await AsyncTestClient(client=client).query(
             query,
             variables=variables,
@@ -6568,7 +6387,7 @@ def test_create_item_via_serializer_happy_path() -> None:
     category = models.Category.objects.earliest("pk")
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={
@@ -6578,10 +6397,7 @@ def test_create_item_via_serializer_happy_path() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaSerializer")
+    result = json_at(data, "createItemViaSerializer")
     assert json_at(result, "errors") == []
     assert json_at(result, "node") == {
         "name": "SerializerWidget",
@@ -6608,15 +6424,12 @@ def test_update_item_via_serializer_happy_path() -> None:
     item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "SerAfter"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItemViaSerializer")
+    result = json_at(data, "updateItemViaSerializer")
     assert json_at(result, "errors") == []
     assert json_at(result, "node") == {"name": "SerAfter"}
     item.refresh_from_db()
@@ -6636,7 +6449,7 @@ def test_create_item_via_serializer_category_id_reverse_map_writes() -> None:
     category = models.Category.objects.latest("pk")
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={
@@ -6646,10 +6459,7 @@ def test_create_item_via_serializer_category_id_reverse_map_writes() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaSerializer")
+    result = json_at(data, "createItemViaSerializer")
     assert json_at(result, "errors") == []
     created = models.Item.objects.get(name="SerReverseMapWidget")
     assert created.category_id == category.pk
@@ -6663,7 +6473,7 @@ def test_create_item_via_serializer_validate_field_error_is_field_keyed() -> Non
     category = models.Category.objects.earliest("pk")
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={
@@ -6673,10 +6483,7 @@ def test_create_item_via_serializer_validate_field_error_is_field_keyed() -> Non
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload  # in-band envelope, NOT a top-level error
-    result = json_at(payload, "data", "createItemViaSerializer")
+    result = json_at(data, "createItemViaSerializer")
     assert json_at(result, "node") is None
     assert json_at(result, "errors") == [
         {"field": "name", "messages": ["This serializer name is not allowed."]},
@@ -6693,7 +6500,7 @@ def test_create_item_via_serializer_unencodable_scalar_is_field_error_no_crash()
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={
@@ -6703,10 +6510,7 @@ def test_create_item_via_serializer_unencodable_scalar_is_field_error_no_crash()
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaSerializer")
+    result = json_at(data, "createItemViaSerializer")
     assert json_at(result, "node") is None
     assert [json_at(error, "field") for error in json_list(result, "errors")] == ["name"]
     assert models.Item.objects.count() == before
@@ -6727,7 +6531,7 @@ def test_create_item_via_serializer_object_validate_all_sentinel_and_request_con
     category = models.Category.objects.earliest("pk")
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={
@@ -6737,10 +6541,7 @@ def test_create_item_via_serializer_object_validate_all_sentinel_and_request_con
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaSerializer")
+    result = json_at(data, "createItemViaSerializer")
     assert json_at(result, "node") is None
     assert json_at(result, "errors") == [
         {"field": "__all__", "messages": ["Item name must not equal the requesting username."]},
@@ -6774,11 +6575,8 @@ def test_create_item_via_serializer_object_validate_honours_a_reconfigured_non_f
     ]
 
     def _errors() -> object:
-        response = _post_graphql(_CREATE_ITEM_VIA_SERIALIZER, client=client, variables=variables)
-        assert response.status_code == 200
-        payload = response_json(response)
-        assert "errors" not in payload, payload
-        result = json_at(payload, "data", "createItemViaSerializer")
+        data = _graphql_data(_CREATE_ITEM_VIA_SERIALIZER, client=client, variables=variables)
+        result = json_at(data, "createItemViaSerializer")
         assert json_at(result, "node") is None
         return json_at(result, "errors")
 
@@ -6807,17 +6605,14 @@ def test_create_item_via_serializer_unique_together_error_uses_all_sentinel() ->
     ).update(description="", is_private=False, attachment="", name="SerDup", category=category)
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={
             "d": {"name": "SerDup", "categoryId": _global_id("products.category", category.pk)},
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaSerializer")
+    result = json_at(data, "createItemViaSerializer")
     assert json_at(result, "node") is None
     fields = {json_at(err, "field") for err in json_list(result, "errors")}
     assert fields == {"__all__"}, json_at(result, "errors")
@@ -6840,15 +6635,12 @@ def test_update_item_via_serializer_partial_update_preserves_other_fields() -> N
     item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "SerPreserveAfter"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItemViaSerializer")
+    result = json_at(data, "updateItemViaSerializer")
     assert json_at(result, "errors") == []
     item.refresh_from_db()
     assert item.name == "SerPreserveAfter"
@@ -6888,15 +6680,12 @@ def test_update_item_via_serializer_partial_unique_together_fires_on_name_only_c
     item.refresh_from_db()
     client = _login_with_perm("staff_1", "change_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={"id": _global_id("products.item", item.pk), "d": {"name": "SerTakenName"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItemViaSerializer")
+    result = json_at(data, "updateItemViaSerializer")
     assert json_at(result, "node") is None
     # DRF backfills the unchanged `category` from `serializer.instance` under
     # `partial=True` and surfaces the unique-together violation under `"__all__"`.
@@ -6917,15 +6706,12 @@ def test_update_item_via_serializer_visibility_scoped_hidden_row_is_not_found() 
 
     # The hidden (private-category) row is not located through CategoryType /
     # ItemType.get_queryset -> not-found, indistinguishable from missing.
-    response = _post_graphql(
+    data = _graphql_data(
         _UPDATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={"id": private_gid, "d": {"name": "SerHiddenAttempt"}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "updateItemViaSerializer")
+    result = json_at(data, "updateItemViaSerializer")
     assert json_at(result, "node") is None
     assert json_at(result, "errors") == [{"field": "id", "messages": ["No matching row found."]}]
 
@@ -6946,7 +6732,7 @@ def test_create_item_via_serializer_anonymous_is_denied_top_level_error_no_write
     seed_data(1)
     category = models.Category.objects.earliest("pk")
 
-    response = _post_graphql(
+    payload = _graphql_payload(
         _CREATE_ITEM_VIA_SERIALIZER,
         variables={
             "d": {
@@ -6955,8 +6741,6 @@ def test_create_item_via_serializer_anonymous_is_denied_top_level_error_no_write
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert payload.get("errors"), payload
     # The denial RAISES on the non-null payload field, so GraphQL nulls the whole
     # `data` - the authorization-failure surface, not a present-payload FieldError.
@@ -7014,7 +6798,7 @@ def test_create_item_via_serializer_hidden_category_id_is_field_keyed_relation_e
     client = _login_with_perm("view_item_1", "add_item")
 
     # The private category is hidden to `view_item_1` through CategoryType.get_queryset.
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_SERIALIZER,
         client=client,
         variables={
@@ -7024,10 +6808,7 @@ def test_create_item_via_serializer_hidden_category_id_is_field_keyed_relation_e
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaSerializer")
+    result = json_at(data, "createItemViaSerializer")
     assert json_at(result, "node") is None
     assert json_at(result, "errors") == [
         {"field": "categoryId", "messages": ["Invalid id for relation 'categoryId'."]},
@@ -7065,7 +6846,7 @@ def test_create_item_via_serializer_authorize_before_decode_unpermitted_gets_aut
     # `view_item_1` is logged in but lacks `add_item` (no write authorization).
     denied_client = Client()
     denied_client.force_login(User.objects.get(username="view_item_1"))
-    response = _post_graphql(
+    payload = _graphql_payload(
         _CREATE_ITEM_VIA_SERIALIZER,
         client=denied_client,
         variables={
@@ -7075,8 +6856,6 @@ def test_create_item_via_serializer_authorize_before_decode_unpermitted_gets_aut
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     # The AUTH denial (top-level, nulling the whole `data`), NOT the in-band
     # relation FieldError - the security-ordering proof.
     assert payload.get("errors"), payload
@@ -7283,7 +7062,7 @@ def test_create_item_via_renamed_serializer_happy_path() -> None:
     category = models.Category.objects.earliest("pk")
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_RENAMED_SERIALIZER,
         client=client,
         variables={
@@ -7293,10 +7072,7 @@ def test_create_item_via_renamed_serializer_happy_path() -> None:
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaRenamedSerializer")
+    result = json_at(data, "createItemViaRenamedSerializer")
     assert json_at(result, "errors") == []
     assert json_at(result, "node") == {
         "name": "RenamedWidget",
@@ -7322,15 +7098,12 @@ def test_renamed_serializer_relation_error_keys_to_graphql_wire_name() -> None:
     client = _login_with_perm("view_item_1", "add_item")
     before = models.Item.objects.count()
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_RENAMED_SERIALIZER,
         client=client,
         variables={"d": {"displayName": "BadRelRenamed", "categoryPk": wrong_gid}},
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaRenamedSerializer")
+    result = json_at(data, "createItemViaRenamedSerializer")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["categoryPk"]
     assert models.Item.objects.count() == before
@@ -7350,7 +7123,7 @@ def test_renamed_serializer_scalar_validation_error_keys_to_graphql_wire_name() 
     category = models.Category.objects.earliest("pk")
     client = _login_with_perm("view_item_1", "add_item")
 
-    response = _post_graphql(
+    data = _graphql_data(
         _CREATE_ITEM_VIA_RENAMED_SERIALIZER,
         client=client,
         variables={
@@ -7360,10 +7133,7 @@ def test_renamed_serializer_scalar_validation_error_keys_to_graphql_wire_name() 
             },
         },
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    result = json_at(payload, "data", "createItemViaRenamedSerializer")
+    result = json_at(data, "createItemViaRenamedSerializer")
     assert json_at(result, "node") is None
     assert [json_at(e, "field") for e in json_list(result, "errors")] == ["displayName"]
     assert "not allowed" in json_str(result, "errors", 0, "messages", 0)
@@ -7380,13 +7150,10 @@ def test_category_type_items_are_both_and_properties_are_connection_only() -> No
     list - selecting ``properties { id }`` is a validation error because the
     field is absent from the SDL, not because it is merely unbounded.
     """
-    response = _post_graphql(
+    data = _graphql_data(
         '{ __type(name: "CategoryType") { fields { name } } }',
     )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert "errors" not in payload, payload
-    published = json_at(payload, "data", "__type")
+    published = json_at(data, "__type")
     assert published is not None
     names = {json_at(field, "name") for field in json_list(published, "fields")}
     assert "items" in names
@@ -7398,11 +7165,9 @@ def test_category_type_items_are_both_and_properties_are_connection_only() -> No
 @pytest.mark.django_db
 def test_category_properties_list_is_not_selectable_over_http() -> None:
     """The connection-only default leaves no ``properties`` field to select on the shipped endpoint."""
-    response = _post_graphql(
+    payload = _graphql_payload(
         "{ allCategories(first: 1) { edges { node { properties { id } } } } }",
     )
-    assert response.status_code == 200
-    payload = response_json(response)
     assert json_at(payload, "data") is None, payload
     assert any(
         "Cannot query field 'properties'" in json_str(error, "message")

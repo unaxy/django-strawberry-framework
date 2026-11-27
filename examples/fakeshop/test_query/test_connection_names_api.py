@@ -7,19 +7,16 @@ A node field whose arguments do not coerce leaves its error to the field that re
 """
 
 import asyncio
-from functools import wraps
 from typing import ClassVar
 
 import pytest
 import strawberry
 from apps.library import models
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     json_list,
     json_object,
     post_graphql,
@@ -39,7 +36,6 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 
 class _RelayNameConverter(NameConverter):
@@ -59,24 +55,8 @@ class _RelayNameConverter(NameConverter):
         return self._NAMES.get(published, published)
 
 
-_CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _sync_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-names/", _sync_view), path("graphql-names-async/", _async_view)]
+_MOUNT = SchemaMount(__name__, "graphql-names/", async_route="graphql-names-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _schema(*, keyset: bool, renamed: bool) -> DjangoSchema:
@@ -116,24 +96,20 @@ def _post(
     variables: JSONObject | None = None,
 ) -> JSONObject:
     """Drive a real native transport, reading the held schema only when the request arrives."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if color == "sync":
-                return response_json(
-                    post_graphql(document, variables=variables, url="/graphql-names/"),
-                )
-            response = asyncio.run(
-                AsyncTestClient("/graphql-names-async/").query(
-                    document,
-                    variables,
-                    assert_no_errors=False,
-                ),
+    with _MOUNT.serving(schema):
+        if color == "sync":
+            return response_json(
+                post_graphql(document, variables=variables, url="/graphql-names/"),
             )
-            assert response.response.status_code == 200
-            return response_json(response.response)
-    finally:
-        _CURRENT["schema"] = None
+        response = asyncio.run(
+            AsyncTestClient("/graphql-names-async/").query(
+                document,
+                variables,
+                assert_no_errors=False,
+            ),
+        )
+        assert response.response.status_code == 200
+        return response_json(response.response)
 
 
 @pytest.mark.usefixtures("private_registry")

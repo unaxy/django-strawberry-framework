@@ -6,7 +6,6 @@ The consumer hook also records the actual queryset alias it receives.
 """
 
 import os
-from functools import wraps
 
 import pytest
 
@@ -17,12 +16,9 @@ import strawberry
 from apps.library import models
 from django.db import connections
 from django.db import models as django_models
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django_filters import CharFilter
-from graphql_client import JSONObject, graphql_payload
+from graphql_client import JSONObject, SchemaMount, graphql_payload
 from strawberry.scalars import JSON
 from typing_extensions import override
 
@@ -34,20 +30,12 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-relation-worlds-sharded/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-relation-worlds-sharded/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _seed_alias(alias: str, *, matching_member: bool) -> None:
@@ -167,20 +155,16 @@ def test_walked_filter_scopes_and_correlates_on_its_root_database(
     else:
         where = {"without_title": "x"}
         expected = ["hidden-only", "empty"]
-    _CURRENT["schema"] = schema
-    try:
-        with (
-            override_settings(ROOT_URLCONF=__name__),
-            CaptureQueriesContext(connections["default"]) as default_queries,
-            CaptureQueriesContext(connections["shard_b"]) as shard_queries,
-        ):
-            payload = graphql_payload(
-                "query($where: JSON!) { rows(where: $where) { name } allRows { name } }",
-                variables={"where": where},
-                url="/graphql-relation-worlds-sharded/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with (
+        _MOUNT.serving(schema),
+        CaptureQueriesContext(connections["default"]) as default_queries,
+        CaptureQueriesContext(connections["shard_b"]) as shard_queries,
+    ):
+        payload = graphql_payload(
+            "query($where: JSON!) { rows(where: $where) { name } allRows { name } }",
+            variables={"where": where},
+            url="/graphql-relation-worlds-sharded/",
+        )
     assert payload == {
         "data": {
             "rows": [{"name": name} for name in expected],
@@ -208,19 +192,15 @@ def test_a_nested_branch_across_a_flat_false_declaration_reads_the_root_database
     _seed_alias("shard_b", matching_member=True)
     seen: list[str] = []
     schema = _schema(declared=True, seen=seen, flat=False)
-    _CURRENT["schema"] = schema
-    try:
-        with (
-            override_settings(ROOT_URLCONF=__name__),
-            CaptureQueriesContext(connections["default"]) as default_queries,
-        ):
-            payload = graphql_payload(
-                "query($where: JSON!) { rows(where: $where) { name } }",
-                variables={"where": {"visible_books": {"title": "x"}}},
-                url="/graphql-relation-worlds-sharded/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with (
+        _MOUNT.serving(schema),
+        CaptureQueriesContext(connections["default"]) as default_queries,
+    ):
+        payload = graphql_payload(
+            "query($where: JSON!) { rows(where: $where) { name } }",
+            variables={"where": {"visible_books": {"title": "x"}}},
+            url="/graphql-relation-worlds-sharded/",
+        )
     assert payload == {"data": {"rows": [{"name": "matching"}]}}, payload
     assert seen == ["shard_b"]
     assert not any('"library_' in query["sql"] for query in default_queries), list(default_queries)

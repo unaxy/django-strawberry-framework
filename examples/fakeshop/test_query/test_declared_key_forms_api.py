@@ -4,18 +4,22 @@ import uuid
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from decimal import Decimal
-from functools import wraps
 
 import pytest
 import strawberry
 from apps.library import models
 from django.db import connection
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from django_filters import CharFilter, Filter
-from graphql_client import JSONObject, JSONValue, graphql_payload, json_list, json_object, json_str
+from graphql_client import (
+    JSONObject,
+    JSONValue,
+    SchemaMount,
+    graphql_payload,
+    json_list,
+    json_object,
+    json_str,
+)
 from strategy_schemas import make_django_type
 from strawberry.scalars import JSON
 from strawberry.types import Info
@@ -30,7 +34,6 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter
 from django_strawberry_framework.utils._narrowing import read_attr
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._filter_key_models import (
     _DecimalKeyed,
     _DecimalKeyedHolder,
@@ -40,17 +43,10 @@ from tests._filter_key_models import (
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-declared-keys/", _view)]
+_MOUNT = SchemaMount(__name__, "graphql-declared-keys/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(
@@ -58,12 +54,8 @@ def _post(
     document: str,
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(document, variables=variables, url="/graphql-declared-keys/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(document, variables=variables, url="/graphql-declared-keys/")
 
 
 def _key(self: Model) -> str:

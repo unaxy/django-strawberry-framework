@@ -12,7 +12,6 @@ requests.
 
 import logging
 from collections.abc import Callable, Iterator
-from functools import wraps
 from typing import NewType, TypeAlias
 
 import pytest
@@ -23,13 +22,11 @@ from apps.products.models import Category
 from debug_toolbar.toolbar import debug_toolbar_urls
 from django.db import connection
 from django.db.models import QuerySet
-from django.http import HttpRequest
-from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     assert_graphql_success,
     json_list,
     json_str,
@@ -57,22 +54,11 @@ from django_strawberry_framework.optimizer.nested_planner import _emit_index_adv
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import TestClient
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.urls(__name__)
 
-_current: dict[str, object | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    """Serve the probe schema installed by the current test's holder fixture."""
-    schema = _current["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql/", _graphql_view), *debug_toolbar_urls()]
+_MOUNT = SchemaMount(__name__, "graphql/")
+urlpatterns = [*_MOUNT.urlpatterns, *debug_toolbar_urls()]
 
 
 @pytest.fixture
@@ -100,13 +86,13 @@ def install_auto_strategy_schema(
             },
         ),
     )
-    _current["schema"] = build_strategy_schema(
+    _MOUNT.schema = build_strategy_schema(
         query_type,
         "auto",
         schema_class=DjangoSchema,
     )
     yield
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.django_db
@@ -203,13 +189,13 @@ def install_unhashable_set_scalar_cache_schema(
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension()
-    _current["schema"] = DjangoSchema(
+    _MOUNT.schema = DjangoSchema(
         query=Query,
         config=strawberry_config(extra_scalar_map={SetValue: set_scalar}),
         extensions=[lambda: optimizer],
     )
     yield optimizer
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.django_db
@@ -336,14 +322,14 @@ def install_hinted_strategy_schema(
                 },
             ),
         )
-        _current["schema"] = build_strategy_schema(
+        _MOUNT.schema = build_strategy_schema(
             query_type,
             default_strategy,
             schema_class=DjangoSchema,
         )
 
     yield _install
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 class _RefusingNestedStrategy:
@@ -458,13 +444,13 @@ def install_distinct_child_schema(
             },
         ),
     )
-    _current["schema"] = build_strategy_schema(
+    _MOUNT.schema = build_strategy_schema(
         query_type,
         "windowed",
         schema_class=DjangoSchema,
     )
     yield
-    _current["schema"] = None
+    _MOUNT.schema = None
 
 
 @pytest.mark.django_db
@@ -553,11 +539,11 @@ class TestAdvisoryDeferredUntilWindowAccepted:
         )
 
     def _post(self, strategy: StrategySelection) -> JSONObject:
-        _current["schema"] = self._shelf_books_schema(strategy)
+        _MOUNT.schema = self._shelf_books_schema(strategy)
         try:
             return assert_graphql_success(self._QUERY)
         finally:
-            _current["schema"] = None
+            _MOUNT.schema = None
 
     @override_settings(DEBUG=True, MIDDLEWARE=middleware_without_debug_toolbar())
     def test_refusing_strategy_emits_no_advisory_but_windowed_does(

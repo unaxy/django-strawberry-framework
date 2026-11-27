@@ -12,20 +12,16 @@ classes over the same column are declared on fakeshop's ``ScalarSpecimenFilter``
 """
 
 from collections.abc import Sequence
-from functools import wraps
 
 import pytest
 import strawberry
 from apps.scalars import models
 from django import forms
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from django.utils import timezone
 from django_filters import BaseInFilter, Filter, NumberFilter, TypedMultipleChoiceFilter
 from graphql import GraphQLInputObjectType, get_named_type
-from graphql_client import JSONObject, graphql_payload, json_object
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_object
 from strawberry import relay
 from strawberry.types import Info
 from strawberry.types.base import StrawberryObjectDefinition
@@ -46,11 +42,9 @@ from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
 )
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
 class IntFilter(Filter):
@@ -94,14 +88,8 @@ class IsoDatesInFilter(BaseInFilter, IsoDateFilter):
     """A consumer CSV filter cleaning each member as the ISO text of a date."""
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-json-filter-typing/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-json-filter-typing/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _holder() -> tuple[DjangoSchema, type[DjangoType]]:
@@ -217,16 +205,12 @@ def _post(schema: DjangoSchema, where: JSONObject) -> JSONObject:
         f"query($where: {_input(schema).name}!) {{ rows(filter: $where) "
         "{ edges { node { id label } } } }"
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                document,
-                variables={"where": where},
-                url="/graphql-json-filter-typing/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            document,
+            variables={"where": where},
+            url="/graphql-json-filter-typing/",
+        )
 
 
 def _seed() -> dict[str, models.ScalarSpecimen]:

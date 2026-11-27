@@ -32,7 +32,6 @@ refused with a ``ConfigurationError`` naming the declaration and both aliases, f
 """
 
 from collections.abc import Mapping
-from functools import wraps
 from typing import TypeAlias
 
 import pytest
@@ -42,10 +41,8 @@ from asgiref.sync import sync_to_async
 from django import forms
 from django.db import connection
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase, QueryDict
-from django.test import override_settings
+from django.http import HttpRequest, QueryDict
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django_filters import (
     AllValuesMultipleFilter,
     CharFilter,
@@ -55,6 +52,7 @@ from django_filters import (
 from django_filters.utils import get_model_field
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     graphql_payload,
     json_list,
     json_str,
@@ -80,10 +78,8 @@ from django_strawberry_framework.utils._narrowing import (
     require,
     require_instance,
 )
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 #: The shelf codes ``_LabelledPicks`` offers.
 _CODES = (
@@ -94,24 +90,8 @@ _CODES = (
 )
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-flat-binding/", _graphql_view),
-    path("graphql-flat-binding-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(__name__, "graphql-flat-binding/", async_route="graphql-flat-binding-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _column_label(model: type[Model], field_name: str | None) -> str:
@@ -602,16 +582,12 @@ def _post(
     root: str,
     filter_input: Mapping[str, object],
 ) -> tuple[JSONObject, int]:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__), CaptureQueriesContext(connection) as sql:
-            payload = graphql_payload(
-                _document(root),
-                variables={"filter": filter_input},
-                url="/graphql-flat-binding/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema), CaptureQueriesContext(connection) as sql:
+        payload = graphql_payload(
+            _document(root),
+            variables={"filter": filter_input},
+            url="/graphql-flat-binding/",
+        )
     return payload, len(sql)
 
 
@@ -652,20 +628,16 @@ async def test_a_walked_flat_copy_answers_its_nested_twins_rows_async(case: str)
     root, flat, nested, expected, _statements = _CASES[case]
     await sync_to_async(_world)()
     schema = _schema()
-    _CURRENT["schema"] = schema
     payloads: list[JSONObject] = []
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            for filter_input in (flat, nested):
-                result = await AsyncTestClient().query(
-                    _document(root),
-                    variables={"filter": filter_input},
-                    assert_no_errors=False,
-                    url="/graphql-flat-binding-async/",
-                )
-                payloads.append(response_json(result.response))
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        for filter_input in (flat, nested):
+            result = await AsyncTestClient().query(
+                _document(root),
+                variables={"filter": filter_input},
+                assert_no_errors=False,
+                url="/graphql-flat-binding-async/",
+            )
+            payloads.append(response_json(result.response))
 
     assert payloads == [_labels(root, expected)] * 2, payloads
 
@@ -685,16 +657,12 @@ def test_a_raw_filterset_walks_a_flat_copy_on_its_target_model(case: str) -> Non
     """A resolver's own ``FilterSet(data, queryset, request=...).qs`` reads the same rows."""
     query, expected = _RAW_CASES[case]
     _world()
-    _CURRENT["schema"] = _schema()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload(
-                "query ($query: String!) { rawBooks(query: $query) }",
-                variables={"query": query},
-                url="/graphql-flat-binding/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(_schema()):
+        payload = graphql_payload(
+            "query ($query: String!) { rawBooks(query: $query) }",
+            variables={"query": query},
+            url="/graphql-flat-binding/",
+        )
 
     assert payload == {"data": {"rawBooks": expected}}, payload
 
@@ -997,16 +965,12 @@ def _scoped_post(
     filter_input: Mapping[str, object],
 ) -> tuple[JSONObject, int]:
     document = _scoped_document(variant, root)
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__), CaptureQueriesContext(connection) as sql:
-            payload = graphql_payload(
-                document,
-                variables={"filter": filter_input},
-                url="/graphql-flat-binding/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema), CaptureQueriesContext(connection) as sql:
+        payload = graphql_payload(
+            document,
+            variables={"filter": filter_input},
+            url="/graphql-flat-binding/",
+        )
     return payload, len(sql)
 
 
@@ -1062,20 +1026,16 @@ async def test_a_scoped_branch_admits_its_child_rows_the_queryset_holds_async(ca
         ({"and": [nested, nested]}, expected),
         ({"or": [nested, nested]}, expected),
     )
-    _CURRENT["schema"] = schema
     payloads: list[JSONObject] = []
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            for filter_input, _expected in spellings:
-                result = await AsyncTestClient().query(
-                    document,
-                    variables={"filter": filter_input},
-                    assert_no_errors=False,
-                    url="/graphql-flat-binding-async/",
-                )
-                payloads.append(response_json(result.response))
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        for filter_input, _expected in spellings:
+            result = await AsyncTestClient().query(
+                document,
+                variables={"filter": filter_input},
+                assert_no_errors=False,
+                url="/graphql-flat-binding-async/",
+            )
+            payloads.append(response_json(result.response))
 
     assert payloads == [_scoped_labels(root, labels) for _input, labels in spellings], payloads
 
@@ -1094,16 +1054,12 @@ def test_a_raw_filterset_walks_a_scoped_branch_to_the_rows_its_queryset_holds(ca
     """A resolver's own scoped book set's ``(data, queryset, request=...).qs`` reads these rows."""
     variant, query, expected = _SCOPED_RAW_CASES[case]
     _world()
-    _CURRENT["schema"] = _scoped_schema(variant)
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload(
-                "query ($query: String!) { rawBooks(query: $query) }",
-                variables={"query": query},
-                url="/graphql-flat-binding/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(_scoped_schema(variant)):
+        payload = graphql_payload(
+            "query ($query: String!) { rawBooks(query: $query) }",
+            variables={"query": query},
+            url="/graphql-flat-binding/",
+        )
 
     assert payload == {"data": {"rawBooks": expected}}, payload
 
@@ -1122,37 +1078,33 @@ def test_a_scoped_branch_pinned_to_an_alias_the_request_does_not_read_is_refused
     _world()
     schema = _scoped_schema("pinned")
     nested = {"shelf": {"codeContains": {"iContains": "-"}}}
-    _CURRENT["schema"] = schema
-    try:
-        with (
-            override_settings(
-                ROOT_URLCONF=__name__,
-                DEBUG=True,
-                MIDDLEWARE=middleware_without_debug_toolbar(),
-            ),
-            CaptureQueriesContext(connection) as sql,
-        ):
-            payloads = [
-                graphql_payload(
-                    _scoped_document("pinned", "books"),
-                    variables={"filter": filter_input},
-                    url="/graphql-flat-binding/",
-                )
-                for filter_input in (
-                    {"shelfCodeContains": {"iContains": "-"}},
-                    nested,
-                    {"not": nested},
-                )
-            ]
-            payloads.append(
-                graphql_payload(
-                    "query ($query: String!) { rawBooks(query: $query) }",
-                    variables={"query": "shelf__code_contains=-"},
-                    url="/graphql-flat-binding/",
-                ),
+    with (
+        _MOUNT.serving(
+            schema,
+            DEBUG=True,
+            MIDDLEWARE=middleware_without_debug_toolbar(),
+        ),
+        CaptureQueriesContext(connection) as sql,
+    ):
+        payloads = [
+            graphql_payload(
+                _scoped_document("pinned", "books"),
+                variables={"filter": filter_input},
+                url="/graphql-flat-binding/",
             )
-    finally:
-        _CURRENT["schema"] = None
+            for filter_input in (
+                {"shelfCodeContains": {"iContains": "-"}},
+                nested,
+                {"not": nested},
+            )
+        ]
+        payloads.append(
+            graphql_payload(
+                "query ($query: String!) { rawBooks(query: $query) }",
+                variables={"query": "shelf__code_contains=-"},
+                url="/graphql-flat-binding/",
+            ),
+        )
 
     assert [len(json_list(payload, "errors")) for payload in payloads] == [1] * 4, payloads
     assert [json_str(payload, "errors", 0, "message") for payload in payloads] == [
@@ -1170,28 +1122,20 @@ async def test_a_scoped_branch_pinned_to_an_alias_the_request_does_not_read_is_r
     await sync_to_async(_world)()
     schema = _scoped_schema("pinned")
     nested = {"shelf": {"codeContains": {"iContains": "-"}}}
-    _CURRENT["schema"] = schema
     payloads: list[JSONObject] = []
-    try:
-        with override_settings(
-            ROOT_URLCONF=__name__,
-            DEBUG=True,
-            MIDDLEWARE=middleware_without_debug_toolbar(),
-        ):
-            for filter_input in (
-                {"shelfCodeContains": {"iContains": "-"}},
-                nested,
-                {"not": nested},
-            ):
-                result = await AsyncTestClient().query(
-                    _scoped_document("pinned", "books"),
-                    variables={"filter": filter_input},
-                    assert_no_errors=False,
-                    url="/graphql-flat-binding-async/",
-                )
-                payloads.append(response_json(result.response))
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(
+        schema,
+        DEBUG=True,
+        MIDDLEWARE=middleware_without_debug_toolbar(),
+    ):
+        for filter_input in ({"shelfCodeContains": {"iContains": "-"}}, nested, {"not": nested}):
+            result = await AsyncTestClient().query(
+                _scoped_document("pinned", "books"),
+                variables={"filter": filter_input},
+                assert_no_errors=False,
+                url="/graphql-flat-binding-async/",
+            )
+            payloads.append(response_json(result.response))
 
     assert [len(json_list(payload, "errors")) for payload in payloads] == [1] * 3, payloads
     assert [json_str(payload, "errors", 0, "message") for payload in payloads] == [

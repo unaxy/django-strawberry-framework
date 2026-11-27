@@ -10,7 +10,6 @@ import asyncio
 import functools
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable
-from functools import wraps
 from typing import TYPE_CHECKING, Literal, TypeVar
 
 import pytest
@@ -19,11 +18,8 @@ from apps.products import services
 from apps.products.models import Category, Item
 from asgiref.sync import sync_to_async
 from django.db import connection, models
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject, json_str
+from graphql_client import JSONObject, SchemaMount, json_str
 from strawberry import relay
 from strawberry.relay.utils import from_base64, to_base64
 from typing_extensions import override
@@ -46,7 +42,6 @@ from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, Response, TestClient
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._connection_field_schemas import (
     _CONNECTION_MALFORMED_FILTER_ROWS,
@@ -82,39 +77,18 @@ if TYPE_CHECKING:
 _M = TypeVar("_M", bound=models.Model)
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-connection/", _graphql_view),
-    path("graphql-connection-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(__name__, "graphql-connection/", async_route="graphql-connection-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(schema: strawberry.Schema, query: str) -> "Response[_MonkeyPatchedWSGIResponse]":
     """Send one ordinary operation through the package's sync HTTP view."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = TestClient(path="/graphql-connection/").query(query, assert_no_errors=False)
-        assert result.response.status_code == 200
-        return result
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        result = TestClient(path="/graphql-connection/").query(query, assert_no_errors=False)
+    assert result.response.status_code == 200
+    return result
 
 
 async def _post_async(
@@ -122,17 +96,13 @@ async def _post_async(
     query: str,
 ) -> "Response[_MonkeyPatchedASGIResponse]":
     """Send one ordinary operation through the package's async HTTP view."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient(path="/graphql-connection-async/").query(
-                query,
-                assert_no_errors=False,
-            )
-        assert result.response.status_code == 200
-        return result
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        result = await AsyncTestClient(path="/graphql-connection-async/").query(
+            query,
+            assert_no_errors=False,
+        )
+    assert result.response.status_code == 200
+    return result
 
 
 def _sync_executor(schema: strawberry.Schema) -> Callable[[str], JSONObject]:

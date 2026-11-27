@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
-from functools import wraps
 
 import pytest
 import strawberry
@@ -36,11 +35,9 @@ from apps.library.models import (
 )
 from asgiref.sync import sync_to_async
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     assert_graphql_success,
     graphql_payload,
     json_at,
@@ -60,33 +57,14 @@ from django_strawberry_framework.filters import FilterSet, RelatedFilter
 from django_strawberry_framework.orders import Ordering, OrderSet, RelatedOrder
 from django_strawberry_framework.schema import DjangoSchema
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import is_object_dict, is_object_list, saved_pk
 
 # Every test declares fresh ``DjangoType`` classes over the library models.
 pytestmark = pytest.mark.usefixtures("private_registry")
 
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-reentry/", _graphql_view),
-    path("graphql-reentry-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(__name__, "graphql-reentry/", async_route="graphql-reentry-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 async def _async_data(query: str) -> JSONObject:
@@ -168,16 +146,12 @@ def _names(
     """
     label = "body" if field == "notes" else "name"
     query = f"{{ {field}({arguments}) {{ edges {{ node {{ {label} }} }} }} }}"
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            data = (
-                asyncio.run(_async_data(query))
-                if mode == "async"
-                else assert_graphql_success(query, url="/graphql-reentry/")
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        data = (
+            asyncio.run(_async_data(query))
+            if mode == "async"
+            else assert_graphql_success(query, url="/graphql-reentry/")
+        )
     connection = data[field]
     assert is_object_dict(connection)
     edges = connection["edges"]
@@ -636,14 +610,10 @@ async def _async_ordering_payload(document: str) -> JSONObject:
 
 def _ordering_payload(schema: DjangoSchema, label: str, mode: str) -> JSONObject:
     document = f"{{ rows(descending: true) {{ label: {label} }} allRows {{ label: {label} }} }}"
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if mode == "async":
-                return asyncio.run(_async_ordering_payload(document))
-            return graphql_payload(document, url="/graphql-reentry/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        if mode == "async":
+            return asyncio.run(_async_ordering_payload(document))
+        return graphql_payload(document, url="/graphql-reentry/")
 
 
 def _ordered_expected(names: Sequence[str], universe: Sequence[str]) -> JSONObject:

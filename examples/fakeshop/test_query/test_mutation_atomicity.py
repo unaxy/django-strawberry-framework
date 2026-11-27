@@ -24,8 +24,8 @@ top-level mutation fields keep independent transactions) is pinned alongside, as
 mutation root's ``__typename`` meta-field, which carries no mutation class and resolves
 as a plain field, and the refusal of a generated mutation that a plain
 ``strawberry.Schema`` serves.
-Async colour uses a module-local ``/graphql-async/`` mount (``graphql_client.py``
-is sync-only).
+Async colour uses a module-local ``/graphql-async/`` mount (``graphql_client.py``'s posts
+are sync-only).
 """
 
 from __future__ import annotations
@@ -48,13 +48,13 @@ from django.http import HttpRequest
 from django.http.response import HttpResponseBase
 from django.test import AsyncClient, Client, override_settings
 from django.urls import path
-from graphql_client import JSONObject, json_at, json_list, read_attr, response_json
+from graphql_client import JSONObject, SchemaMount, json_at, json_list, read_attr, response_json
 
 from django_strawberry_framework import strawberry_config
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
+from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
 if TYPE_CHECKING:
@@ -497,10 +497,7 @@ def test_mutation_root_typename_meta_field_resolves() -> None:
     assert response_json(res.response) == {"data": {"__typename": "Mutation"}}
 
 
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
-
-    return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
+_MOUNT = SchemaMount(__name__, async_route="graphql-async/")
 
 
 @wraps(DjangoGraphQLView.as_view())
@@ -514,10 +511,7 @@ def _plain_schema_graphql_view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=plain)(request)
 
 
-urlpatterns = [
-    path("graphql-async/", _async_shipped_graphql_view),
-    path("graphql-plain/", _plain_schema_graphql_view),
-]
+urlpatterns = [*_MOUNT.urlpatterns, path("graphql-plain/", _plain_schema_graphql_view)]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -565,7 +559,7 @@ async def _post_async(
     client: AsyncClient | None = None,
 ) -> _MonkeyPatchedASGIResponse:
     """POST ``query`` against the shipped schema over ``/graphql-async/``."""
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         result = await AsyncTestClient(client=client).query(
             query,
             variables=variables,

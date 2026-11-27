@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from functools import wraps
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
@@ -13,11 +12,8 @@ from apps.products.services import seed_data
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import connection
 from django.db.models import Model
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_list, json_str
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_list, json_str
 from rest_framework import serializers
 from strawberry import relay
 from typing_extensions import override
@@ -35,7 +31,6 @@ from django_strawberry_framework import (
 from django_strawberry_framework.rest_framework.accessors import base_fields, validated_data_of
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import dict_of
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._idioms import ModelSerializerBase, is_object_dict, is_object_list
 
@@ -53,17 +48,10 @@ if TYPE_CHECKING:
     )
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-serializer-runtime/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-serializer-runtime/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 @strawberry.type
@@ -124,16 +112,12 @@ def _post(
     variables: Mapping[str, object] | None = None,
 ) -> JSONObject:
     """Return the complete native HTTP envelope and restore the function's schema mount."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                document,
-                variables=variables,
-                url="/graphql-serializer-runtime/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            document,
+            variables=variables,
+            url="/graphql-serializer-runtime/",
+        )
 
 
 def _document(schema: DjangoSchema, *, update: bool = False) -> str:

@@ -17,7 +17,6 @@ import datetime
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import wraps
 
 import django_filters
 import pytest
@@ -26,12 +25,11 @@ from apps.library import models
 from django import forms
 from django.core.exceptions import ValidationError
 from django.db.models import Case, DateTimeField, QuerySet, Value, When
-from django.http import HttpRequest, HttpResponseBase, QueryDict
+from django.http import HttpRequest, QueryDict
 from django.test import override_settings
-from django.urls import path
 from django_filters.fields import DateTimeRangeField
 from django_filters.filterset import BaseFilterSet
-from graphql_client import JSONObject, RecordCompiledSql, graphql_payload, json_at
+from graphql_client import JSONObject, RecordCompiledSql, SchemaMount, graphql_payload, json_at
 from strawberry.scalars import JSON
 from strawberry.types import Info
 from strawberry.types.base import StrawberryList
@@ -53,22 +51,14 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.typing import object_result
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _NAMES = ("Alpha", "Beta", "Gamma")
 _CHOICES = [(name, name) for name in _NAMES]
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-filter-widgets/", _view)]
+_MOUNT = SchemaMount(__name__, "graphql-filter-widgets/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _branches() -> None:
@@ -145,16 +135,12 @@ def _schema(filters: type[FilterSet], *, ranged: bool = False) -> DjangoSchema:
 
 
 def _post(schema: DjangoSchema, where: object) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                "query($where: JSON!) { rows(where: $where) { name } }",
-                variables={"where": where},
-                url="/graphql-filter-widgets/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            "query($where: JSON!) { rows(where: $where) { name } }",
+            variables={"where": where},
+            url="/graphql-filter-widgets/",
+        )
 
 
 _RANGE_DOCUMENT = (
@@ -163,16 +149,12 @@ _RANGE_DOCUMENT = (
 
 
 def _range_post(schema: DjangoSchema, start: str | None, end: str | None) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                _RANGE_DOCUMENT,
-                variables={"start": start, "end": end},
-                url="/graphql-filter-widgets/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            _RANGE_DOCUMENT,
+            variables={"start": start, "end": end},
+            url="/graphql-filter-widgets/",
+        )
 
 
 def _expected(names: Sequence[str]) -> JSONObject:
@@ -860,19 +842,15 @@ def test_empty_permitted_form_delegates_unchanged_and_propagates_consumer_change
             ).is_valid()
 
     schema = DjangoSchema(query=Query, error_policy={"enabled": False})
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            unchanged = graphql_payload(
-                "{ valid(refusing: false) }",
-                url="/graphql-filter-widgets/",
-            )
-            assert unchanged == {"data": {"valid": True}}
-            assert calls == ["full_clean"]
-            calls.clear()
-            refused = graphql_payload("{ valid(refusing: true) }", url="/graphql-filter-widgets/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        unchanged = graphql_payload(
+            "{ valid(refusing: false) }",
+            url="/graphql-filter-widgets/",
+        )
+        assert unchanged == {"data": {"valid": True}}
+        assert calls == ["full_clean"]
+        calls.clear()
+        refused = graphql_payload("{ valid(refusing: true) }", url="/graphql-filter-widgets/")
     assert json_at(refused, "errors", 0, "message") == "consumer change detection"
     assert calls == []
 

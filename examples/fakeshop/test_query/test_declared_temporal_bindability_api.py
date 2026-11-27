@@ -9,7 +9,6 @@ native connection over HTTP.
 import datetime
 import uuid
 from collections.abc import Sequence
-from functools import wraps
 from typing import NamedTuple
 
 import pytest
@@ -18,9 +17,7 @@ from apps.scalars import models
 from django import forms
 from django.db import connection
 from django.db.models import F, QuerySet
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
-from django.urls import path
 from django.utils import timezone
 from django_filters import (
     BaseInFilter,
@@ -38,6 +35,7 @@ from graphql import GraphQLInputObjectType, get_named_type
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -63,11 +61,9 @@ from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
 )
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _UNBINDABLE = [{"message": "Enter a value the database can represent.", "code": "invalid"}]
 _NAIVE_DATE_WARNING = pytest.mark.filterwarnings(
     "ignore:DateTimeField .* received a naive datetime:RuntimeWarning",
@@ -101,14 +97,8 @@ class ParentBuiltNumberFilter(NumberFilter):
         return super().field
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-declared-temporal/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-declared-temporal/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _holder() -> tuple[DjangoSchema, type[DjangoType]]:
@@ -236,16 +226,12 @@ def _post(schema: DjangoSchema, where: JSONObject) -> JSONObject:
         f"query($where: {_input(schema).name}!) {{ rows(filter: $where) "
         "{ edges { node { id label } } } }"
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                document,
-                variables={"where": where},
-                url="/graphql-declared-temporal/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            document,
+            variables={"where": where},
+            url="/graphql-declared-temporal/",
+        )
 
 
 def _seed() -> dict[str, models.ScalarSpecimen]:

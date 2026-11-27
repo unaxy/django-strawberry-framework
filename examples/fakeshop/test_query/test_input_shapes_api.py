@@ -22,7 +22,6 @@ under ``auto_camel_case=False``, with narrowings over them, and two merged
 narrowed inputs Strawberry would re-case to one name.
 """
 
-from functools import wraps
 from typing import TYPE_CHECKING
 
 import pytest
@@ -30,11 +29,9 @@ import strawberry
 from apps.library import models as library_models
 from django import forms
 from django.db import connection, models
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     assert_graphql_success,
     json_at,
     json_list,
@@ -58,7 +55,6 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils._narrowing import dict_of
-from django_strawberry_framework.views import DjangoGraphQLView
 
 if TYPE_CHECKING:
     from typing import TypeAlias
@@ -67,17 +63,8 @@ if TYPE_CHECKING:
 
     _IntColumn: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
 
-_CURRENT_SCHEMA: dict[str, strawberry.Schema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _form_input_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT_SCHEMA["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-input/", _form_input_view)]
+_MOUNT = SchemaMount(__name__, "graphql-input/")
+urlpatterns = _MOUNT.urlpatterns
 
 _TYPE_REF = "kind name ofType { kind name ofType { kind name ofType { kind name } } }"
 
@@ -293,17 +280,13 @@ def test_a_validating_nullable_boolean_form_field_requires_a_boolean_over_http(
         submit_required = DjangoMutationField(SubmitRequired)
 
     finalize_django_types()
-    _CURRENT_SCHEMA["schema"] = DjangoSchema(query=InputQuery, mutation=InputMutation)
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            response = post_graphql(
-                f"mutation {{ submitRequired(data: {input_literal}) {{ ok errors {{ field }} }} }}",
-                url="/graphql-input/",
-            )
-        assert response.status_code == 200
-        payload = response_json(response)
-    finally:
-        _CURRENT_SCHEMA["schema"] = None
+    with _MOUNT.serving(DjangoSchema(query=InputQuery, mutation=InputMutation)):
+        response = post_graphql(
+            f"mutation {{ submitRequired(data: {input_literal}) {{ ok errors {{ field }} }} }}",
+            url="/graphql-input/",
+        )
+    assert response.status_code == 200
+    payload = response_json(response)
 
     if message is None:
         assert payload == {"data": {"submitRequired": {"ok": True, "errors": []}}}
@@ -316,12 +299,8 @@ def test_a_validating_nullable_boolean_form_field_requires_a_boolean_over_http(
 
 def _holder_payload(schema: strawberry.Schema, document: str) -> JSONObject:
     """Return the payload of ``document`` posted to the holder ``schema`` over HTTP."""
-    _CURRENT_SCHEMA["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            response = post_graphql(document, url="/graphql-input/")
-    finally:
-        _CURRENT_SCHEMA["schema"] = None
+    with _MOUNT.serving(schema):
+        response = post_graphql(document, url="/graphql-input/")
     assert response.status_code == 200
     return response_json(response)
 

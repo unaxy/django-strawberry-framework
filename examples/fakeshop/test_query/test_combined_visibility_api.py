@@ -29,7 +29,6 @@ under a nested connection, whose seal licenses a slice the rewrite cannot carry.
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import wraps
 
 import pytest
 import strawberry
@@ -38,13 +37,12 @@ from apps.library import schema as library_schema
 from django.db import connection
 from django.db.models import F, Model, OrderBy, Prefetch, Q, QuerySet, Value
 from django.db.models.functions import Lower
-from django.http import HttpRequest
-from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from graphql_client import (
     JSONObject,
+    SchemaMount,
+    graphql_payload,
     is_json_list,
     is_json_object,
     json_at,
@@ -73,24 +71,15 @@ from django_strawberry_framework import (
 from django_strawberry_framework.optimizer import DjangoOptimizerExtension
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.views import DjangoGraphQLView
 
 #: Opens the error policy's pass-through gate so a refusal's message reaches the
 #: wire; the toolbar middleware is dropped because ``config.urls`` computed its
 #: ``djdt`` routes under the ambient ``DEBUG=False``.
 _ERROR_POLICY_PASS_THROUGH = {"DEBUG": True, "MIDDLEWARE": middleware_without_debug_toolbar()}
 
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-test/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-test/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _library_schema(
@@ -123,12 +112,11 @@ def _post(
         with override_settings(**_ERROR_POLICY_PASS_THROUGH):
             response = post_graphql(query, variables=variables)
     else:
-        _CURRENT["schema"] = schema if schema is not None else _library_schema([])
-        try:
-            with override_settings(ROOT_URLCONF=__name__, **_ERROR_POLICY_PASS_THROUGH):
-                response = post_graphql(query, variables=variables, url="/graphql-test/")
-        finally:
-            _CURRENT["schema"] = None
+        with _MOUNT.serving(
+            schema if schema is not None else _library_schema([]),
+            **_ERROR_POLICY_PASS_THROUGH,
+        ):
+            response = post_graphql(query, variables=variables, url="/graphql-test/")
     assert response.status_code == 200
     return response_json(response)
 
@@ -1512,10 +1500,7 @@ def test_refused_combined_shape_is_masked_by_the_production_error_policy(
         lambda queryset, _info: _a(queryset).union(_b(queryset), all=True),
     )
 
-    response = post_graphql("{ allLibraryGenresViaListField { name } }")
-
-    assert response.status_code == 200
-    payload = response_json(response)
+    payload = graphql_payload("{ allLibraryGenresViaListField { name } }")
     assert payload["data"] is None, payload
     [error] = json_list(payload, "errors")
     assert json_at(error, "path") == ["allLibraryGenresViaListField"]

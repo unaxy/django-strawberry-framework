@@ -9,7 +9,6 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Generator, Iterable, Mapping, Sized
 from contextlib import contextmanager
-from functools import wraps
 
 import pytest
 import strawberry
@@ -19,10 +18,8 @@ from django import forms
 from django.db import connection
 from django.db.models import F, Model, QuerySet, TextField
 from django.forms import TextInput
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django.utils.choices import CallableChoiceIterator
 from django.utils.functional import SimpleLazyObject, lazy
 from django_filters import (
@@ -38,7 +35,7 @@ from django_filters import (
     TypedMultipleChoiceFilter,
 )
 from django_filters.fields import ChoiceField
-from graphql_client import JSONObject, graphql_payload
+from graphql_client import JSONObject, SchemaMount, graphql_payload
 from strawberry import relay
 from strawberry.schema.name_converter import HasGraphQLName, NameConverter
 from typing_extensions import override
@@ -55,30 +52,18 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet, RangeFilter, RelatedFilter
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._narrowing import dict_of
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import consumer_module, consumer_query
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-filter-declarations/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-filter-declarations/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(schema: DjangoSchema, document: str) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(document, url="/graphql-filter-declarations/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(document, url="/graphql-filter-declarations/")
 
 
 _DEFERRED_CONSUMER = """

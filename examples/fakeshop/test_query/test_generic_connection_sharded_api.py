@@ -8,7 +8,6 @@ fakeshop's intentionally unpublished generic fields.
 
 import os
 from collections.abc import Iterator
-from functools import wraps
 
 import pytest
 
@@ -22,10 +21,14 @@ import strawberry
 from apps.library.models import Branch, TaggedItem
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_at, json_list, json_object
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    assert_graphql_success,
+    json_at,
+    json_list,
+    json_object,
+)
 from strawberry import relay
 
 from django_strawberry_framework import (
@@ -36,32 +39,18 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-generic-sharded/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-generic-sharded/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(schema: DjangoSchema, query: str) -> JSONObject:
     """Read the non-default alias through a real GraphQL HTTP request."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            payload = graphql_payload(query, url="/graphql-generic-sharded/")
-        assert "errors" not in payload, payload
-        return json_object(payload, "data")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return assert_graphql_success(query, url="/graphql-generic-sharded/")
 
 
 @pytest.fixture(autouse=True)

@@ -14,7 +14,6 @@ schemas are served through a holder HTTP mount because fakeshop carries no such 
 """
 
 from collections.abc import Callable, Iterator, Mapping
-from functools import wraps
 from typing import TYPE_CHECKING
 
 import pytest
@@ -23,10 +22,7 @@ from asgiref.sync import sync_to_async
 from django.db import connection
 from django.db.backends.utils import CursorWrapper
 from django.db.models import Prefetch, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
-from graphql_client import assert_graphql_success, json_object, response_json
+from graphql_client import SchemaMount, assert_graphql_success, json_object, response_json
 from strategy_schemas import make_django_type
 
 from django_strawberry_framework import (
@@ -40,7 +36,6 @@ from django_strawberry_framework import (
 from django_strawberry_framework.connection import _connection_type_cache
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests.optimizer._spelling_models import (
     SpBadge,
     SpCard,
@@ -57,27 +52,9 @@ pytestmark = [
     pytest.mark.django_db(transaction=True),
 ]
 
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-spelling/", _graphql_view),
-    path("graphql-spelling-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(__name__, "graphql-spelling/", async_route="graphql-spelling-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 #: A ``get_queryset`` hook body, bound as a classmethod on the type it narrows.
 _Hook = Callable[..., object]
@@ -174,14 +151,10 @@ def _run_sync(
     card_hook: _Hook | None = None,
 ) -> tuple[object, int]:
     schema = _schema(optimizer=optimizer, parent_hook=parent_hook, card_hook=card_hook)
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__), monkeypatch.context() as patch:
-            recorded = _recorded_statements(patch)
-            data = assert_graphql_success(query, url="/graphql-spelling/")
-        return data, len(recorded)
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema), monkeypatch.context() as patch:
+        recorded = _recorded_statements(patch)
+        data = assert_graphql_success(query, url="/graphql-spelling/")
+    return data, len(recorded)
 
 
 async def _run_async(
@@ -197,15 +170,11 @@ async def _run_async(
         parent_hook=parent_hook,
         card_hook=card_hook,
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__), monkeypatch.context() as patch:
-            recorded = _recorded_statements(patch)
-            result = await AsyncTestClient(path="/graphql-spelling-async/").query(query)
-        assert result.response.status_code == 200
-        return json_object(response_json(result.response), "data"), len(recorded)
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema), monkeypatch.context() as patch:
+        recorded = _recorded_statements(patch)
+        result = await AsyncTestClient(path="/graphql-spelling-async/").query(query)
+    assert result.response.status_code == 200
+    return json_object(response_json(result.response), "data"), len(recorded)
 
 
 def _prefetch_card_without_b(

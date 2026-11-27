@@ -5,16 +5,12 @@ and reads its qs property. No target DjangoType is registered, so generated
 relation leaves keep their raw-key form behavior rather than Relay conversion.
 """
 
-from functools import wraps
-
 import pytest
 import strawberry
 from apps.library import models
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_object
+from django.http import HttpRequest
+from graphql_client import JSONObject, SchemaMount, graphql_payload, json_object
 from strawberry.scalars import JSON
 
 from django_strawberry_framework import (
@@ -26,21 +22,13 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.utils._narrowing import read_attr, require_instance
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-raw-relation-form/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-raw-relation-form/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _schema(filterset: type[FilterSet], model: type[Model], label: str) -> DjangoSchema:
@@ -85,16 +73,12 @@ def _schema(filterset: type[FilterSet], model: type[Model], label: str) -> Djang
 
 
 def _post(schema: DjangoSchema, where: JSONObject, label: str) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                f"query($where: JSON!) {{ rows(where: $where) {{ {label} }} allRows {{ {label} }} }}",
-                variables={"where": where},
-                url="/graphql-raw-relation-form/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            f"query($where: JSON!) {{ rows(where: $where) {{ {label} }} allRows {{ {label} }} }}",
+            variables={"where": where},
+            url="/graphql-raw-relation-form/",
+        )
 
 
 @pytest.mark.django_db

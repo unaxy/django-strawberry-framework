@@ -11,7 +11,6 @@ called with the HTTP request, on a nested branch and on a flat leaf walking it, 
 """
 
 from collections.abc import Awaitable, Callable
-from functools import wraps
 
 import pytest
 import strawberry
@@ -19,13 +18,19 @@ from apps.library import models
 from asgiref.sync import sync_to_async
 from django.db import connection
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import AsyncClient, Client, override_settings
+from django.http import HttpRequest
+from django.test import AsyncClient, Client
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from django_filters import CharFilter, Filter, ModelChoiceFilter
 from graphql import GraphQLError
-from graphql_client import JSONObject, graphql_payload, json_at, json_list, response_json
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    graphql_payload,
+    json_at,
+    json_list,
+    response_json,
+)
 from strawberry.scalars import JSON
 
 from django_strawberry_framework import (
@@ -39,11 +44,9 @@ from django_strawberry_framework.filters import FilterSet, RelatedFilter
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import require
 from django_strawberry_framework.utils.relations import is_model_class
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _ConsumerShelfProxy = type(
     "ConsumerShelfProxy",
     (models.Shelf,),
@@ -51,24 +54,12 @@ _ConsumerShelfProxy = type(
 )
 
 
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-filter-contracts/", _graphql_view),
-    path("graphql-filter-contracts-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-filter-contracts/",
+    async_route="graphql-filter-contracts-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _returns_a_list(_self: Filter, _queryset: object, _value: object) -> list[object]:
@@ -211,21 +202,17 @@ def _post(
     denied: bool = False,
     label: str = "title",
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                "query($where: JSON!) { rows(where: $where) { "
-                + label
-                + " } allRows { "
-                + label
-                + " } }",
-                variables={"where": where},
-                client=Client(headers={"X-Refuse-Books": "yes" if denied else "no"}),
-                url="/graphql-filter-contracts/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            "query($where: JSON!) { rows(where: $where) { "
+            + label
+            + " } allRows { "
+            + label
+            + " } }",
+            variables={"where": where},
+            client=Client(headers={"X-Refuse-Books": "yes" if denied else "no"}),
+            url="/graphql-filter-contracts/",
+        )
 
 
 def _refusal(payload: JSONObject, message: str) -> None:
@@ -501,17 +488,13 @@ async def test_a_callable_related_queryset_reads_the_orm_off_the_event_loop(
         open_pks = list(models.Shelf.objects.filter(topic="open").values_list("pk", flat=True))
         return models.Shelf.objects.filter(pk__in=open_pks)
 
-    _CURRENT["schema"] = _explicit_queryset_schema(open_shelves, use_async=True)
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient(client=AsyncClient()).query(
-                "query($where: JSON!) { rows(where: $where) { name } }",
-                variables={"where": where},
-                assert_no_errors=False,
-                url="/graphql-filter-contracts-async/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(_explicit_queryset_schema(open_shelves, use_async=True)):
+        result = await AsyncTestClient(client=AsyncClient()).query(
+            "query($where: JSON!) { rows(where: $where) { name } }",
+            variables={"where": where},
+            assert_no_errors=False,
+            url="/graphql-filter-contracts-async/",
+        )
     assert result.response.status_code == 200
     payload = response_json(result.response)
     assert payload == {"data": {"rows": [{"name": "alpha"}]}}, payload
