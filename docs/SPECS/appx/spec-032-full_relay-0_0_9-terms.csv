@@ -7,7 +7,7 @@ DjangoConnectionField,djangoconnectionfield,DONE-030 machinery the relation-as-C
 DjangoConnection,djangoconnection,Generic connection base whose concrete per-target subclasses the synthesized relation connections reuse
 DjangoListField,djangolistfield,Annotation-driven factory precedent the root node fields follow
 DjangoOptimizerExtension,djangooptimizerextension,Root-gated optimization untouched; connections own their seam per spec-030 Decision 11
-Meta.interfaces,metainterfaces,Slice 1 extends its validation with the six named-helper rejections
+Meta.interfaces,metainterfaces,Slice 1 pins its rejection of the six strawberry.relay non-interface helpers
 Meta.connection,metaconnection,Type-level totalCount opt-in the synthesized relation connections follow; shipped non-Node gate re-affirmed
 Meta.relation_shapes,metarelation_shapes,Relation-shape key this card ships; shipped (0.0.9)
 Meta.globalid_strategy,metaglobalid_strategy,Shipped DONE-031 strategy key; root fields decode whatever it emits

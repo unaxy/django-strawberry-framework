@@ -491,10 +491,8 @@ def test_meta_orderset_class_is_allowed_not_deferred() -> None:
 def _declare_category_type_with_interface(entry: object) -> None:
     """Declare a ``DjangoType`` subclass with ``entry`` in ``Meta.interfaces``.
 
-    Shared boilerplate for the six named-rejection tests and the
-    non-interface-class re-affirmation pin (spec-032 Decision 8); the
-    declaration itself raises ``ConfigurationError`` for every entry these
-    tests pass.
+    Shared boilerplate for the non-interface rejection tests; the declaration
+    itself raises ``ConfigurationError`` for every entry these tests pass.
     """
 
     class CategoryType(DjangoType):
@@ -506,74 +504,53 @@ def _declare_category_type_with_interface(entry: object) -> None:
     assert registry.get(Category) is CategoryType
 
 
-def test_interfaces_rejects_relay_globalid_named() -> None:
-    """``relay.GlobalID`` in ``Meta.interfaces`` is rejected by name (Decision 8)."""
+@pytest.mark.parametrize(
+    ("entry", "refusal"),
+    [
+        (relay.GlobalID, "entry GlobalID is not a Strawberry interface"),
+        (relay.NodeID, "must contain interface classes, got "),
+        (relay.Connection, "entry Connection is not a Strawberry interface"),
+        (relay.ListConnection, "entry ListConnection is not a Strawberry interface"),
+        (relay.Edge, "entry Edge is not a Strawberry interface"),
+        (relay.PageInfo, "entry PageInfo is not a Strawberry interface"),
+    ],
+    ids=[
+        "GlobalID",
+        "NodeID",
+        "Connection",
+        "ListConnection",
+        "Edge",
+        "PageInfo",
+    ],
+)
+def test_interfaces_rejects_relay_non_interface_helpers(entry: object, refusal: str) -> None:
+    """Each ``strawberry.relay`` non-interface helper is refused at type creation.
+
+    ``relay.NodeID`` is an ``Annotated`` alias, not a class; the rest are classes
+    whose Strawberry definition is not an interface.
+    """
     with pytest.raises(ConfigurationError) as excinfo:
-        _declare_category_type_with_interface(relay.GlobalID)
-    message = str(excinfo.value)
-    assert "relay.GlobalID" in message
-    assert "scalar-like id wrapper" in message
-    assert "`id: GlobalID!` automatically from `relay.Node`" in message
+        _declare_category_type_with_interface(entry)
+    assert f"Category.Meta.interfaces {refusal}" in str(excinfo.value)
 
 
-def test_interfaces_rejects_relay_nodeid_named() -> None:
-    """``relay.NodeID`` (an ``Annotated`` alias, not a class) is rejected by name."""
-    with pytest.raises(ConfigurationError) as excinfo:
-        _declare_category_type_with_interface(relay.NodeID)
-    message = str(excinfo.value)
-    assert "relay.NodeID" in message
-    assert "annotation helper for custom id fields (`id: relay.NodeID[int]`)" in message
-    assert "add `relay.Node` to `Meta.interfaces` instead" in message
+def test_interfaces_rejects_djangotype_inheriting_relay_node() -> None:
+    """A ``DjangoType`` inheriting ``relay.Node`` carries an interface definition and is still refused."""
 
+    class ItemNode(DjangoType, relay.Node):
+        class Meta:
+            model = Item
+            fields = ("id", "name")
 
-def test_interfaces_rejects_relay_connection_named() -> None:
-    """``relay.Connection`` rejection names ``Meta.connection`` / ``DjangoConnectionField``."""
-    with pytest.raises(ConfigurationError) as excinfo:
-        _declare_category_type_with_interface(relay.Connection)
-    message = str(excinfo.value)
-    assert "relay.Connection" in message
-    assert "generic output type" in message
-    assert "Meta.connection" in message
-    assert "DjangoConnectionField" in message
-
-
-def test_interfaces_rejects_relay_listconnection_named() -> None:
-    """``relay.ListConnection`` carries the same connection-surface remediation."""
-    with pytest.raises(ConfigurationError) as excinfo:
-        _declare_category_type_with_interface(relay.ListConnection)
-    message = str(excinfo.value)
-    assert "relay.ListConnection" in message
-    assert "generic output type" in message
-    assert "Meta.connection" in message
-    assert "DjangoConnectionField" in message
-
-
-def test_interfaces_rejects_relay_edge_named() -> None:
-    """``relay.Edge`` rejection says the connection machinery instantiates it."""
-    with pytest.raises(ConfigurationError) as excinfo:
-        _declare_category_type_with_interface(relay.Edge)
-    message = str(excinfo.value)
-    assert "relay.Edge" in message
-    assert "generic output type the connection machinery instantiates" in message
-    assert "not consumer-declarable" in message
-
-
-def test_interfaces_rejects_relay_pageinfo_named() -> None:
-    """``relay.PageInfo`` rejection says it is a generated pagination type."""
-    with pytest.raises(ConfigurationError) as excinfo:
-        _declare_category_type_with_interface(relay.PageInfo)
-    message = str(excinfo.value)
-    assert "relay.PageInfo" in message
-    assert "generated pagination type" in message
-    assert "add `relay.Node` to `Meta.interfaces` instead" in message
+    with pytest.raises(
+        ConfigurationError,
+        match="may not contain DjangoType or DjangoType subclasses",
+    ):
+        _declare_category_type_with_interface(ItemNode)
 
 
 def test_interfaces_rejects_non_interface_class_named() -> None:
-    """Re-affirmation pin: a plain ``@strawberry.type`` class takes the generic branch.
-
-    Pins spec-015 Decision 4's generic non-interface rejection and its
-    documented message naming the offending class (spec-032).
-    """
+    """A plain ``@strawberry.type`` class is refused, the message naming the class (spec-015 Decision 4)."""
 
     @strawberry.type
     class PlainType:

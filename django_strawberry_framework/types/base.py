@@ -153,8 +153,7 @@ RELATION_SHAPE_VALUES: frozenset[str] = frozenset({"list", "connection", "both"}
 DEFAULT_RELATION_SHAPE = "connection"
 
 # The Relay-Node-gate lead-in: every ``Meta``-key gate composes this one
-# literal by name, as does ``global_id_for`` in ``testing/relay.py`` - the
-# ``_INTERFACES_SHAPE_ERROR_LEAD_IN`` precedent. Every gate appends
+# literal by name, as does ``global_id_for`` in ``testing/relay.py``. Every gate appends
 # ``_RELAY_NODE_GATE_INHERIT_TAIL`` but the relation_shapes gate, which
 # appends the spec-pinned "or remove the key." (spec-032 Decision 7).
 _RELAY_NODE_GATE_LEAD = "requires a Relay-Node-shaped type; add `relay.Node` to `Meta.interfaces`"
@@ -1158,69 +1157,6 @@ def _refuse_unknown_fields(
     )
 
 
-_INTERFACES_SHAPE_ERROR_LEAD_IN = (
-    "Meta.interfaces must be a tuple/list of Strawberry interface classes "
-    "or a single interface class"
-)
-
-
-def _interfaces_shape_error(model: type[models.Model], got_suffix: str) -> str:
-    """Format the top-level ``Meta.interfaces`` shape-rejection message.
-
-    Both raise sites (string-typed raw, other non-sequence raw) share the
-    long lead-in defined in ``_INTERFACES_SHAPE_ERROR_LEAD_IN``; this
-    helper localizes the wording so the two sites cannot drift.
-    """
-    return f"{model.__name__}.{_INTERFACES_SHAPE_ERROR_LEAD_IN}, got {got_suffix}."
-
-
-# Decision-8 remediation tail shared by all six named rejections: every
-# message ends by naming what the consumer probably meant (``relay.Node``);
-# the ``Connection`` / ``ListConnection`` rows additionally name
-# ``Meta.connection`` / ``DjangoConnectionField`` in their descriptions.
-_RELAY_NON_INTERFACE_REMEDIATION = (
-    "If the goal is a Relay-Node-shaped type, add `relay.Node` to `Meta.interfaces` instead."
-)
-
-# ``relay.Connection`` and ``relay.ListConnection`` share one description
-# (spec-032 Decision 8 pins "same remediation as ``Connection``").
-_RELAY_CONNECTION_HELPER_DESCRIPTION = (
-    "a generic output type; declare `Meta.connection` / use "
-    "`DjangoConnectionField` for connection shapes"
-)
-
-# The six ``strawberry.relay`` NON-interface helpers rejected by name when
-# found in ``Meta.interfaces`` (spec-032 Decision 8). Rows are
-# ``(helper_object, display_label, what-it-is description)``; matching is by
-# identity (``entry is helper``) because ``relay.NodeID`` is a
-# ``typing.Annotated`` alias - not a class, not reliably hashable/equatable -
-# and ``Meta.interfaces`` entries can be arbitrary (even unhashable) consumer
-# objects. Single raise site in ``_validate_interfaces``.
-_RELAY_NON_INTERFACE_HELPERS: tuple[tuple[object, str, str], ...] = (
-    (
-        relay.GlobalID,
-        "relay.GlobalID",
-        (
-            "a scalar-like id wrapper, not an interface; Relay-Node-shaped types "
-            "get `id: GlobalID!` automatically from `relay.Node`"
-        ),
-    ),
-    (
-        relay.NodeID,
-        "relay.NodeID",
-        "an annotation helper for custom id fields (`id: relay.NodeID[int]`), not an interface",
-    ),
-    (relay.Connection, "relay.Connection", _RELAY_CONNECTION_HELPER_DESCRIPTION),
-    (relay.ListConnection, "relay.ListConnection", _RELAY_CONNECTION_HELPER_DESCRIPTION),
-    (
-        relay.Edge,
-        "relay.Edge",
-        "a generic output type the connection machinery instantiates; not consumer-declarable",
-    ),
-    (relay.PageInfo, "relay.PageInfo", "a generated pagination type; not an interface"),
-)
-
-
 def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[object], ...]:
     """Validate and normalize ``Meta.interfaces`` per Decision 4.
 
@@ -1235,13 +1171,9 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
       Strawberry interface class (e.g. ``interfaces = relay.Node``).
     - Rejects strings, sets, generators, dicts, ints, and other
       non-sequence values.
-    - Each entry must satisfy
-      ``get_object_definition(entry)`` answering an interface definition.
-    - Rejects string entries (no lazy/forward-reference lookup).
-    - Rejects the six ``strawberry.relay`` non-interface helpers
-      (``GlobalID``, ``NodeID``, ``Connection``, ``ListConnection``,
-      ``Edge``, ``PageInfo``) by name, before the generic non-interface
-      rejection (spec-032 Decision 8).
+    - Each entry must be a class ``get_object_definition`` answers with an
+      interface definition, so string entries and the ``strawberry.relay``
+      non-interface helpers are rejected.
     - Rejects ``DjangoType`` self-reference and other ``DjangoType``
       subclasses.
     - Rejects duplicates.
@@ -1254,8 +1186,6 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
     raw = read_attr(meta, "interfaces", None)
     if raw is None:
         return ()
-    if isinstance(raw, str):
-        raise ConfigurationError(_interfaces_shape_error(model, "a string"))
     if is_class(raw):
         # Consumer-declared entries stay unproven until the loop below checks each one.
         entries: tuple[object, ...] = (raw,)
@@ -1263,7 +1193,10 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
         # The real-class check above proved a ``tuple`` or ``list``.
         entries = tuple(list_of(raw))
     else:
-        raise ConfigurationError(_interfaces_shape_error(model, type(raw).__name__))
+        raise ConfigurationError(
+            f"{model.__name__}.Meta.interfaces must be a tuple/list of Strawberry interface "
+            f"classes or a single interface class, got {type(raw).__name__}.",
+        )
     if entries == ():
         return ()
     model_name = model.__name__
@@ -1271,26 +1204,12 @@ def _validate_interfaces(meta: object, model: type[models.Model]) -> tuple[type[
     duplicates: list[str] = []
     interfaces: list[type[object]] = []
     for entry in entries:
-        if isinstance(entry, str):
-            raise ConfigurationError(
-                f"{model_name}.Meta.interfaces must contain interface classes, "
-                f"not strings (got {entry!r}). Lazy/forward-reference interface lookup is "
-                "deferred (no current spec home).",
-            )
-        # Named-helper rejection (spec-032 Decision 8). Runs BEFORE the
-        # non-class branch below because ``relay.NodeID`` is an ``Annotated``
-        # alias, not a class - placed later it would die in the generic
-        # non-class rejection without ever being named.
-        for helper, label, description in _RELAY_NON_INTERFACE_HELPERS:
-            if entry is helper:
-                raise ConfigurationError(
-                    f"{model_name}.Meta.interfaces entry {label} is "
-                    f"{description}. {_RELAY_NON_INTERFACE_REMEDIATION}",
-                )
         if not is_class(entry):
             raise ConfigurationError(
                 f"{model_name}.Meta.interfaces must contain interface classes, got {entry!r}.",
             )
+        # A DjangoType inheriting ``relay.Node`` inherits its interface definition,
+        # so the definition check below alone would accept it.
         if issubclass(entry, DjangoType):
             raise ConfigurationError(
                 f"{model_name}.Meta.interfaces may not contain DjangoType or "

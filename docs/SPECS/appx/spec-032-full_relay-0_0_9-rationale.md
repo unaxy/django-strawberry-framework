@@ -117,13 +117,13 @@ Spec: [Decision 8 — The six schema-validation diagnostics][spec-032-d8].
 
 ### Justification
 
-- The named-helper messages convert the most common Relay-configuration mistake (reaching for the helper class that *sounds* right) from a generic rejection into a remediation: each message says what the helper is and names the correct surface.
+- The generic interface check already refuses each helper at type creation, naming the entry; a per-helper message table would restate that refusal.
 - The enumeration ambiguity is real — the card's DoD count ("six") could also be read as the four validation bullets plus two — so this spec pins the six-helpers reading (the only reading that yields exactly six).
 - The no-Node-types check must live at finalization, not field construction: `DjangoNodeField()` runs at class-body time, typically before any `DjangoType` module imports; only the finalizer sees the settled registry.
 
 ### Alternatives considered (and rejected)
 
-- **Skip the named branch (the generic rejection already fires).** Rejected: the card explicitly requires the helper-naming messages; a generic "not an interface" for `relay.Connection` leaves the consumer to guess that `Meta.connection` exists.
+- **A named branch per helper with a remediation message.** Rejected: it restates the generic refusal, which fires for all six at the same time with the same error class.
 - **Validate the no-Node-types case at the first `node(id:)` request.** Rejected: a schema-shape error must fail at build time (the package's fail-loud-at-finalization posture), not on first traffic.
 
 ## Decision 9 — Cursor mechanics stay delegated to Strawberry; this card pins the conformance contract
