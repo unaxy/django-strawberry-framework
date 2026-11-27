@@ -141,82 +141,84 @@ class _RelationDouble:
     related_model: type[Model]
 
 
-def test_relation_kind_classifies_many_to_many_as_many() -> None:
+@pytest.mark.parametrize(
+    (
+        "many_to_many",
+        "one_to_many",
+        "one_to_one",
+        "auto_created",
+        "expected",
+    ),
+    [
+        pytest.param(True, False, False, False, "many", id="many_to_many"),
+        # A ``one_to_many`` shape that is no ``GenericRelation`` is a reverse FK.
+        pytest.param(False, True, False, False, "reverse_many_to_one", id="one_to_many"),
+        # The reverse-FK descriptor (Django ``ManyToOneRel``) is also ``auto_created``.
+        pytest.param(
+            False,
+            True,
+            False,
+            True,
+            "reverse_many_to_one",
+            id="auto_created_one_to_many",
+        ),
+        pytest.param(False, False, True, False, "forward_single", id="forward_one_to_one"),
+    ],
+)
+def test_relation_kind_classifies_relation_flags(
+    *,
+    many_to_many: bool,
+    one_to_many: bool,
+    one_to_one: bool,
+    auto_created: bool,
+    expected: str,
+) -> None:
+    """``relation_kind`` reads the cardinality flags; ``auto_created`` alone moves no verdict."""
     field = SimpleNamespace(
-        many_to_many=True,
-        one_to_many=False,
-        one_to_one=False,
-        auto_created=False,
+        many_to_many=many_to_many,
+        one_to_many=one_to_many,
+        one_to_one=one_to_one,
+        auto_created=auto_created,
     )
 
-    assert relation_kind(field) == "many"
+    assert relation_kind(field) == expected
 
 
-def test_relation_kind_classifies_one_to_many_as_reverse_many_to_one() -> None:
-    """A ``one_to_many`` shape that is no ``GenericRelation`` is a reverse FK, ``auto_created`` or not."""
-    field = SimpleNamespace(
-        many_to_many=False,
-        one_to_many=True,
-        one_to_one=False,
-        auto_created=False,
-    )
+@pytest.mark.parametrize(
+    ("content_type_field_name", "object_id_field_name", "expected"),
+    [
+        pytest.param("content_type", "object_id", "generic", id="generic_relation"),
+        pytest.param(None, None, "reverse_many_to_one", id="none_valued_slots"),
+    ],
+)
+def test_relation_kind_classifies_generic_relation(
+    content_type_field_name: str | None,
+    object_id_field_name: str | None,
+    expected: str,
+) -> None:
+    """Non-``None`` generic slots classify as ``"generic"`` BEFORE the ``one_to_many`` arm.
 
-    assert relation_kind(field) == "reverse_many_to_one"
-
-
-def test_relation_kind_classifies_generic_relation() -> None:
-    """A ``GenericRelation``-shaped field classifies as ``"generic"`` before the ``one_to_many`` arm.
-
-    Detected duck-typed by non-``None`` ``content_type_field_name`` /
-    ``object_id_field_name`` slots, BEFORE the ``one_to_many`` arm below.
+    A ``GenericRelation`` is detected duck-typed by its ``content_type_field_name`` /
+    ``object_id_field_name`` slots. ``FieldMeta`` is a slotted dataclass that always
+    carries both slots defaulted to ``None``, so the detector reads
+    ``getattr(...) is not None``, not ``hasattr``: otherwise every ``FieldMeta``
+    snapshot would misclassify as ``"generic"``.
     """
     field = SimpleNamespace(
         many_to_many=False,
         one_to_many=True,
         one_to_one=False,
         auto_created=False,
-        content_type_field_name="content_type",
-        object_id_field_name="object_id",
+        content_type_field_name=content_type_field_name,
+        object_id_field_name=object_id_field_name,
     )
 
-    assert relation_kind(field) == "generic"
-
-
-def test_relation_kind_none_valued_generic_slots_are_not_generic() -> None:
-    """``None`` content-type / object-id slots (a plain ``FieldMeta``) are NOT generic.
-
-    ``FieldMeta`` is a slotted dataclass that always carries the two slots
-    defaulted to ``None``, so the detector reads ``getattr(...) is not None``,
-    not ``hasattr`` - otherwise every ``FieldMeta`` snapshot would misclassify
-    as ``"generic"``.
-    """
-    field = SimpleNamespace(
-        many_to_many=False,
-        one_to_many=True,
-        one_to_one=False,
-        auto_created=False,
-        content_type_field_name=None,
-        object_id_field_name=None,
-    )
-
-    assert relation_kind(field) == "reverse_many_to_one"
+    assert relation_kind(field) == expected
 
 
 def test_relation_kind_generic_is_in_literal() -> None:
     """The ``RelationKind`` alias enumerates ``"generic"``."""
     assert "generic" in typing.get_args(RelationKind)
-
-
-def test_relation_kind_classifies_auto_created_one_to_many_as_reverse_many_to_one() -> None:
-    """Reverse-FK descriptor (Django ``ManyToOneRel``): ``one_to_many`` + ``auto_created``."""
-    field = SimpleNamespace(
-        many_to_many=False,
-        one_to_many=True,
-        one_to_one=False,
-        auto_created=True,
-    )
-
-    assert relation_kind(field) == "reverse_many_to_one"
 
 
 def test_relation_kind_reverse_many_to_one_is_in_literal() -> None:
@@ -279,40 +281,29 @@ def test_relation_kind_classifies_a_visible_reverse_generic_rel_as_reverse_gener
     assert path_traverses_to_many(RpGenericTag, "holder__title") is False
 
 
-def test_relation_kind_classifies_auto_created_one_to_one_as_reverse() -> None:
+@pytest.mark.parametrize(
+    ("concrete", "expected"),
+    [
+        pytest.param(False, "reverse_one_to_one", id="reverse_one_to_one"),
+        # An auto-created MTI parent link is concrete and forward.
+        pytest.param(True, "forward_single", id="concrete_mti_parent_link"),
+    ],
+)
+def test_relation_kind_classifies_auto_created_one_to_one_by_concreteness(
+    *,
+    concrete: bool,
+    expected: str,
+) -> None:
+    """An ``auto_created`` one-to-one is a reverse accessor unless it is ``concrete``."""
     field = SimpleNamespace(
         many_to_many=False,
         one_to_many=False,
         one_to_one=True,
         auto_created=True,
-        concrete=False,
+        concrete=concrete,
     )
 
-    assert relation_kind(field) == "reverse_one_to_one"
-
-
-def test_relation_kind_classifies_forward_single_relations() -> None:
-    field = SimpleNamespace(
-        many_to_many=False,
-        one_to_many=False,
-        one_to_one=True,
-        auto_created=False,
-    )
-
-    assert relation_kind(field) == "forward_single"
-
-
-def test_relation_kind_classifies_concrete_auto_created_o2o_as_forward_single() -> None:
-    """An auto-created MTI parent link is concrete and forward."""
-    field = SimpleNamespace(
-        many_to_many=False,
-        one_to_many=False,
-        one_to_one=True,
-        auto_created=True,
-        concrete=True,
-    )
-
-    assert relation_kind(field) == "forward_single"
+    assert relation_kind(field) == expected
 
 
 def test_is_forward_many_to_many_accepts_concrete_forward_m2m() -> None:
@@ -952,28 +943,26 @@ def test_validate_lookup_expr_plain_lookups_on_scalar(lookup_expr: str, lookup_n
     assert resolved.__name__ == lookup_name
 
 
-def test_validate_lookup_expr_transform_chain_advances_output_field() -> None:
-    """A ``date__year__gte`` chain validates through each transform's output field.
+@pytest.mark.parametrize(
+    ("lookup_expr", "expected"),
+    [
+        # ``date`` -> ``DateField``, ``year`` -> ``IntegerField``, then ``gte`` resolves
+        # as the integer lookup against the year transform's output.
+        pytest.param("date__year__gte", "YearGte", id="transform_chain_advances_output_field"),
+        # ``date`` is a transform, not a lookup: Django treats a path ending on a
+        # transform as an implicit ``exact`` on the transform output.
+        pytest.param("date", "Exact", id="trailing_transform_implies_exact"),
+    ],
+)
+def test_validate_lookup_expr_resolves_through_transforms(lookup_expr: str, expected: str) -> None:
+    """A lookup path validates through each transform's output field.
 
-    ``Decision.created_date`` is a ``DateTimeField``: ``date`` -> ``DateField``,
-    ``year`` -> ``IntegerField``, then ``gte`` resolves as the integer lookup.
+    ``Decision.created_date`` is a ``DateTimeField``; the returned lookup class is
+    the one resolved on the last transform's output.
     """
     terminal = Decision._meta.get_field("created_date")
-    resolved = validate_lookup_expr(terminal, "date__year__gte")
-    # The lookup is resolved against the year transform's IntegerField output.
-    assert resolved.__name__ == "YearGte"
-
-
-def test_validate_lookup_expr_trailing_transform_implies_exact() -> None:
-    """A trailing transform (no final lookup) is accepted as ``transform + exact``.
-
-    ``date`` on a ``DateTimeField`` is a transform, not a lookup; Django treats
-    a lookup path ending on a transform as an implicit ``exact`` on the
-    transform output, so validation returns the ``Exact`` lookup class.
-    """
-    terminal = Decision._meta.get_field("created_date")
-    resolved = validate_lookup_expr(terminal, "date")
-    assert resolved.__name__ == "Exact"
+    resolved = validate_lookup_expr(terminal, lookup_expr)
+    assert resolved.__name__ == expected
 
 
 def test_validate_lookup_expr_invalid_final_lookup_raises() -> None:

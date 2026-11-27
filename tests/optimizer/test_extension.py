@@ -270,6 +270,71 @@ def _force_unregister_after_finalize(type_cls: type[DjangoType]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _category_type() -> type[DjangoType]:
+    """Declare and return ``CategoryType`` over ``Category`` with ``id`` and ``name``."""
+
+    class CategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    return CategoryType
+
+
+def _item_type() -> type[DjangoType]:
+    """Declare and return ``ItemType`` over ``Item`` with ``id``, ``name`` and ``category``."""
+
+    class ItemType(DjangoType):
+        class Meta:
+            model = Item
+            fields = ("id", "name", "category")
+
+    return ItemType
+
+
+def _all_items_query(item_type: type[DjangoType]) -> type:
+    """Declare and return a ``Query`` whose ``allItems`` lists every ``Item`` as ``item_type``."""
+
+    @strawberry.type
+    class Query:
+        def _all_items(self) -> QuerySet[Item]:
+            return Item.objects.all()
+
+        all_items: QuerySet[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[item_type],
+        )
+
+    return Query
+
+
+def _all_categories_query(category_type: type[DjangoType]) -> type:
+    """Declare and return a ``Query`` whose ``allCategories`` lists every ``Category``."""
+
+    @strawberry.type
+    class Query:
+        def _all_categories(self) -> QuerySet[Category]:
+            return Category.objects.all()
+
+        all_categories: QuerySet[Category] = strawberry.field(
+            resolver=_all_categories,
+            graphql_type=list[category_type],
+        )
+
+    return Query
+
+
+def _category_type_with_items() -> type[DjangoType]:
+    """Declare and return ``CategoryType`` over ``Category`` with ``id``, ``name`` and ``items``."""
+
+    class CategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name", "items")
+
+    return CategoryType
+
+
 @pytest.mark.django_db
 def test_optimize_coerces_manager_through_all_records_cache_miss() -> None:
     """The optimizer's plan cache records a miss when coercing ``Manager`` -> ``.all()``.
@@ -287,17 +352,11 @@ def test_optimize_coerces_manager_through_all_records_cache_miss() -> None:
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
@@ -332,29 +391,15 @@ def test_optimizer_plans_merged_duplicate_root_field_nodes_plan_shape() -> None:
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension(strictness="raise")
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -385,27 +430,13 @@ def test_optimizer_elides_forward_fk_id_only_selection_plan_shape() -> None:
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -441,10 +472,7 @@ def test_optimizer_elides_forward_fk_id_only_selection_for_each_alias_plan_shape
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
@@ -453,15 +481,7 @@ def test_optimizer_elides_forward_fk_id_only_selection_for_each_alias_plan_shape
             model = Item
             fields = ("id", "category")
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -500,27 +520,13 @@ def test_optimizer_does_not_elide_forward_fk_when_extra_scalar_selected_plan_sha
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -579,20 +585,9 @@ def test_optimizer_does_not_elide_forward_fk_when_target_has_custom_get_queryset
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -618,20 +613,9 @@ def test_optimizer_passes_through_unregistered_return_type(
     """If the return type isn't in the registry, the queryset is unchanged."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
-    @strawberry.type
-    class Query:
-        def _all_categories(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        all_categories: QuerySet[Category] = strawberry.field(
-            resolver=_all_categories,
-            graphql_type=list[CategoryType],
-        )
+    Query = _all_categories_query(CategoryType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -671,17 +655,11 @@ def test_evaluated_root_queryset_does_not_record_a_plan_cache_miss() -> None:
     """
     services.seed_data(2)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
@@ -863,10 +841,7 @@ async def test_resolve_hops_a_sync_root_under_the_async_executor_only_to_build_a
     """
     await sync_to_async(services.seed_data)(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
@@ -1042,10 +1017,7 @@ def test_resolve_passes_through_non_root_resolvers() -> None:
     """Non-root resolvers (info.path.prev is not None) bypass _optimize entirely."""
     ext = DjangoOptimizerExtension()
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
@@ -1078,10 +1050,7 @@ def test_resolve_handles_async_root_resolver() -> None:
     """An async root resolver's coroutine is awaited before optimization."""
     ext = DjangoOptimizerExtension()
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
@@ -1112,21 +1081,9 @@ def test_resolve_handles_async_root_resolver() -> None:
 
 def test_optimize_handles_empty_field_nodes() -> None:
     """If field_nodes is empty, _optimize returns the queryset unchanged."""
+    CategoryType = _category_type()
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    @strawberry.type
-    class Query:
-        def _all_categories(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        all_categories: QuerySet[Category] = strawberry.field(
-            resolver=_all_categories,
-            graphql_type=list[CategoryType],
-        )
+    Query = _all_categories_query(CategoryType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -1150,21 +1107,9 @@ def test_optimize_returns_original_queryset_for_empty_plan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If the walker produces an empty plan, _optimize returns the original queryset."""
+    CategoryType = _category_type()
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    @strawberry.type
-    class Query:
-        def _all_categories(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        all_categories: QuerySet[Category] = strawberry.field(
-            resolver=_all_categories,
-            graphql_type=list[CategoryType],
-        )
+    Query = _all_categories_query(CategoryType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -1218,29 +1163,15 @@ def test_cache_differentiates_queries() -> None:
     """Different queries produce different cache entries."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -1256,29 +1187,15 @@ def test_cache_differentiates_reachable_named_fragment_bodies() -> None:
     """Matching operation text with different fragment bodies gets distinct plans."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -1318,10 +1235,7 @@ def test_cache_differentiates_same_model_root_fields(
 
     assert registry.get(Item) is ItemType
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name", "items")
+    CategoryType = _category_type_with_items()
 
     ext = DjangoOptimizerExtension()
 
@@ -1434,27 +1348,13 @@ def test_mutation_real_execution_records_columns_and_introduces_no_projection() 
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     @strawberry.type
     class Mutation:
@@ -1571,15 +1471,7 @@ def test_cache_clear_makes_the_next_request_build_its_plan_again() -> None:
 
     ext = DjangoOptimizerExtension()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -1679,17 +1571,11 @@ def test_filter_vars_do_not_affect_cache() -> None:
     """Variables not used in @skip/@include don't split cache entries."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
@@ -1719,29 +1605,15 @@ def test_cache_separates_operation_names_in_same_document() -> None:
     """Executing two named operations in one document yields two cache entries."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -2228,10 +2100,7 @@ def test_root_pagination_variable_one_plan_through_schema() -> None:
     """
     services.seed_data(2)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     ext = DjangoOptimizerExtension()
 
@@ -2473,17 +2342,11 @@ def test_strictness_warn_logs_unplanned_relation(caplog: pytest.LogCaptureFixtur
     """strictness='warn' logs a warning for unplanned uncached relation access."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     @strawberry.type
     class Query:
@@ -2520,17 +2383,11 @@ def test_strictness_arms_a_nested_execution_and_its_enclosing_one(
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     def _items() -> list[Item]:
         return list(Item.objects.all()[:1])
@@ -2570,20 +2427,9 @@ def test_strictness_off_does_not_stash_sentinel() -> None:
     """strictness='off' does not stash the sentinel on context."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
-    @strawberry.type
-    class Query:
-        def _all_categories(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        all_categories: QuerySet[Category] = strawberry.field(
-            resolver=_all_categories,
-            graphql_type=list[CategoryType],
-        )
+    Query = _all_categories_query(CategoryType)
 
     ext = DjangoOptimizerExtension(strictness="off")
     finalize_django_types()
@@ -2600,27 +2446,13 @@ def test_strictness_warn_stashes_sentinel() -> None:
     """strictness='warn' stashes the sentinel on context."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     ext = DjangoOptimizerExtension(strictness="warn")
     finalize_django_types()
@@ -2650,20 +2482,9 @@ def test_strictness_with_empty_plan_still_stashes_its_sentinels(mode: str) -> No
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
-    @strawberry.type
-    class Query:
-        def _all_categories(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        all_categories: QuerySet[Category] = strawberry.field(
-            resolver=_all_categories,
-            graphql_type=list[CategoryType],
-        )
+    Query = _all_categories_query(CategoryType)
 
     ext = DjangoOptimizerExtension(strictness=mode)
     finalize_django_types()
@@ -2683,27 +2504,13 @@ def test_strictness_includes_fk_id_elision_in_planned_paths(
     """FK-id-elided relations are planned and do not warn."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     ext = DjangoOptimizerExtension(strictness="warn")
     finalize_django_types()
@@ -2773,27 +2580,13 @@ def test_strictness_warn_planned_alias_no_warning(caplog: pytest.LogCaptureFixtu
     """Aliased relation that IS planned does not trigger a warning."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     ext = DjangoOptimizerExtension(strictness="warn")
     finalize_django_types()
@@ -2842,15 +2635,7 @@ def test_optimizer_strictness_stashes_the_nested_planned_relation_key() -> None:
             model = Category
             fields = ("id", "items")
 
-    @strawberry.type
-    class Query:
-        def _all_categories(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        all_categories: QuerySet[Category] = strawberry.field(
-            resolver=_all_categories,
-            graphql_type=list[CategoryType],
-        )
+    Query = _all_categories_query(CategoryType)
 
     ext = DjangoOptimizerExtension(strictness="raise")
     finalize_django_types()
@@ -2905,15 +2690,7 @@ def test_optimizer_nested_prefetch_with_custom_get_queryset_marks_uncacheable() 
 
     ext = DjangoOptimizerExtension()
 
-    @strawberry.type
-    class Query:
-        def _all_categories(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        all_categories: QuerySet[Category] = strawberry.field(
-            resolver=_all_categories,
-            graphql_type=list[CategoryType],
-        )
+    Query = _all_categories_query(CategoryType)
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -2925,24 +2702,24 @@ def test_optimizer_nested_prefetch_with_custom_get_queryset_marks_uncacheable() 
     assert ext.cache_info().size == 0
 
 
-def test_directive_var_family_in_named_fragment() -> None:
-    """The directive family follows named fragment spreads."""
-    doc = parse(
-        "query Q($show: Boolean!) { allItems { ...ItemBits } } "
-        "fragment ItemBits on ItemType { category @include(if: $show) { name } }",
-    )
-    operation = doc.definitions[0]
-    fragments = {d.name.value: d for d in doc.definitions if isinstance(d, FragmentDefinitionNode)}
-    names = _collect_cache_var_families(operation, fragments, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
-    assert names == frozenset({"show"})
-
-
-def test_directive_var_family_includes_fragment_spread_directives() -> None:
-    """Directives on a ``...Spread`` itself feed the cache key, not just the body."""
-    doc = parse(
-        "query Q($show: Boolean!) { allItems { ...ItemBits @include(if: $show) } } "
-        "fragment ItemBits on ItemType { category { name } }",
-    )
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param(
+            "query Q($show: Boolean!) { allItems { ...ItemBits } } "
+            "fragment ItemBits on ItemType { category @include(if: $show) { name } }",
+            id="directive_in_named_fragment_body",
+        ),
+        pytest.param(
+            "query Q($show: Boolean!) { allItems { ...ItemBits @include(if: $show) } } "
+            "fragment ItemBits on ItemType { category { name } }",
+            id="directive_on_the_fragment_spread",
+        ),
+    ],
+)
+def test_directive_var_family_follows_named_fragment_spreads(document: str) -> None:
+    """The directive family follows named fragment spreads, the ``...Spread`` itself included."""
+    doc = parse(document)
     operation = doc.definitions[0]
     fragments = {d.name.value: d for d in doc.definitions if isinstance(d, FragmentDefinitionNode)}
     names = _collect_cache_var_families(operation, fragments, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
@@ -2997,13 +2774,9 @@ def test_check_schema_skips_unreachable_and_missing_field_map(
 
 def test_check_schema_warns_unregistered_target() -> None:
     """check_schema warns when a relation's target has no registered DjangoType."""
-
     # Must register CategoryType first so ItemType's category relation resolves at finalize time,
     # then clear it from the registry so check_schema sees the gap.
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     class ItemType(DjangoType):
         class Meta:
@@ -3122,11 +2895,7 @@ def test_check_schema_descends_into_interface_implementations() -> None:
 
 def test_check_schema_no_warnings_when_all_covered() -> None:
     """check_schema returns no warnings when all relations have registered targets."""
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
@@ -3150,12 +2919,8 @@ def test_check_schema_no_warnings_when_all_covered() -> None:
 
 def test_check_schema_skip_hint_suppresses_warning() -> None:
     """Relations with OptimizerHint.SKIP are not flagged."""
-
     # Register CategoryType so the ItemType.category PendingRelation resolves at finalize time.
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     class ItemType(DjangoType):
         class Meta:
@@ -3240,29 +3005,15 @@ def test_plan_stashed_with_select_related() -> None:
     """The stashed plan contains the expected select_related entries."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -3297,20 +3048,9 @@ def test_plan_stashed_with_prefetch_related() -> None:
 
     assert registry.get(Property) is PropertyType
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name", "items")
+    CategoryType = _category_type_with_items()
 
-    @strawberry.type
-    class Query:
-        def _all_categories(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        all_categories: QuerySet[Category] = strawberry.field(
-            resolver=_all_categories,
-            graphql_type=list[CategoryType],
-        )
+    Query = _all_categories_query(CategoryType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -3745,17 +3485,11 @@ def test_a_nested_operation_does_not_take_the_outer_operations_optimizer_state()
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     seen_contexts: list[ExecutionContext | None] = []
     seen_published: list[dict[str, object]] = []
@@ -3844,27 +3578,13 @@ def test_an_operation_started_from_a_consumer_teardown_leaves_the_request_its_pl
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     seen: dict[str, list[dict[str, object]]] = {}
 
@@ -3920,27 +3640,13 @@ def test_on_execute_clears_reused_context_fk_elisions_before_full_selection() ->
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -3976,27 +3682,13 @@ def test_on_execute_clears_reused_context_planned_keys_across_executions() -> No
     """Reused ``context_value``: planned-resolver keys must not leak into a later op."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension(strictness="raise")
@@ -4024,20 +3716,9 @@ def test_empty_plan_still_stashed() -> None:
     """Even when no relations are selected, the scalar-only plan is stashed."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
-    @strawberry.type
-    class Query:
-        def _all_categories(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        all_categories: QuerySet[Category] = strawberry.field(
-            resolver=_all_categories,
-            graphql_type=list[CategoryType],
-        )
+    Query = _all_categories_query(CategoryType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -4071,15 +3752,7 @@ def test_optimizer_applies_only_for_selected_scalars() -> None:
             model = Category
             fields = ("id", "name", "description")
 
-    @strawberry.type
-    class Query:
-        def _all_categories(self) -> QuerySet[Category]:
-            return Category.objects.all()
-
-        all_categories: QuerySet[Category] = strawberry.field(
-            resolver=_all_categories,
-            graphql_type=list[CategoryType],
-        )
+    Query = _all_categories_query(CategoryType)
 
     finalize_django_types()
     ext = DjangoOptimizerExtension()
@@ -4131,22 +3804,11 @@ def test_optimizer_downgrades_select_related_for_custom_get_queryset() -> None:
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -4193,22 +3855,11 @@ def test_optimizer_does_not_cache_custom_get_queryset_prefetch_plans() -> None:
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -4233,17 +3884,11 @@ def test_consumer_select_related_does_not_mutate_cached_plan() -> None:
     """A consumer's pre-applied ``select_related`` must not mutate the cached plan."""
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
@@ -4303,10 +3948,7 @@ def test_consumer_prefetch_object_suppresses_optimizer_entry() -> None:
 
     assert registry.get(Item) is ItemType
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name", "items")
+    CategoryType = _category_type_with_items()
 
     consumer_pf = Prefetch("items", queryset=Item.objects.all())
     captured: list[object] = []
@@ -4379,10 +4021,7 @@ def test_consumer_plain_string_upgraded_to_optimizer_prefetch() -> None:
 
     assert registry.get(Item) is ItemType
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name", "items")
+    CategoryType = _category_type_with_items()
 
     captured: list[object] = []
 
@@ -4559,13 +4198,9 @@ def test_schema_audit_warns_on_relation_field_exposed_only_on_secondary_type() -
     audited and the missing-target warning is produced. Switching to a
     primary-only iterator would silently drop this warning.
     """
-
     # Register CategoryType first so AdminItemType.category can resolve
     # during __init_subclass__, then clear it before check_schema runs.
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     class ItemType(DjangoType):
         class Meta:
@@ -4602,13 +4237,9 @@ def test_schema_audit_dedupes_when_same_relation_field_visited_via_multiple_type
     ``DjangoType``. Without dedupe, ``registry.iter_types()`` (one
     yield per registered type) would produce two identical warnings.
     """
-
     # Register CategoryType so the type declarations succeed, then drop
     # its registration before check_schema runs.
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     class ItemType(DjangoType):
         class Meta:
@@ -4649,11 +4280,7 @@ def test_schema_audit_warning_names_the_source_type_for_multi_type_models() -> N
     entry so a consumer can disambiguate; the source type's name is rendered
     alongside ``model.field`` so the dedupe artifact never loses provenance.
     """
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     class ItemType(DjangoType):
         class Meta:
@@ -4749,17 +4376,11 @@ def test_optimize_delegates_to_the_shared_apply_to_core(monkeypatch: pytest.Monk
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension(strictness="raise")
     delegations: list[tuple[object, ...]] = []
@@ -4776,15 +4397,7 @@ def test_optimize_delegates_to_the_shared_apply_to_core(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(ext, "apply_to", _spy_apply_to)
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
@@ -4811,17 +4424,11 @@ def test_apply_connection_optimization_uses_active_optimizer_cache() -> None:
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
     captured: dict[str, object] = {}
@@ -5040,22 +4647,11 @@ def test_cascading_target_downgrades_join_to_prefetch() -> None:
 
     assert registry.get(Category) is CategoryType
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     ext = DjangoOptimizerExtension()
 
-    @strawberry.type
-    class Query:
-        def _all_items(self) -> QuerySet[Item]:
-            return Item.objects.all()
-
-        all_items: QuerySet[Item] = strawberry.field(
-            resolver=_all_items,
-            graphql_type=list[ItemType],
-        )
+    Query = _all_items_query(ItemType)
 
     finalize_django_types()
     # One public category whose name matches the request user, one item under it.
@@ -5226,15 +4822,9 @@ def test_consumer_prefetch_preserves_nested_fk_id_elision() -> None:
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name", "items")
+    CategoryType = _category_type_with_items()
 
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
+    ItemType = _item_type()
 
     assert registry.get(Item) is ItemType
 
@@ -5291,10 +4881,7 @@ def test_strictness_reaches_an_execution_with_no_stashable_context() -> None:
     """
     services.seed_data(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 
@@ -5350,10 +4937,7 @@ async def test_strictness_reaches_every_subscription_event(
     """
     await sync_to_async(services.seed_data)(1)
 
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
+    CategoryType = _category_type()
 
     assert registry.get(Category) is CategoryType
 

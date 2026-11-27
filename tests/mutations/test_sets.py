@@ -610,8 +610,21 @@ def test_permission_classes_bare_class_raises() -> None:
                 permission_classes = AllowAll
 
 
-def test_permission_classes_bare_string_raises() -> None:
-    """A bare string ``permission_classes`` raises (would iterate as characters)."""
+@pytest.mark.parametrize(
+    "value",
+    [
+        # A bare string would iterate as characters; the text-atom guard catches it.
+        pytest.param("AllowAll", id="bare_string"),
+        # Any other non-iterable trips the ``list(value)`` ``TypeError`` branch instead.
+        pytest.param(5, id="non_iterable_int"),
+    ],
+)
+def test_permission_classes_not_a_sequence_raises(value: object) -> None:
+    """A ``Meta.permission_classes`` that is no sequence of classes raises at class creation.
+
+    Both the explicit text-atom guard and the ``list()`` guard surface the same
+    fail-loud ``ConfigurationError``.
+    """
     with pytest.raises(ConfigurationError, match="must be a sequence of"):
 
         @definition_raises
@@ -619,7 +632,7 @@ def test_permission_classes_bare_string_raises() -> None:
             class Meta:
                 model = product_models.Item
                 operation = "create"
-                permission_classes = "AllowAll"
+                permission_classes = value
 
 
 def test_permission_classes_instance_entry_raises() -> None:
@@ -1592,23 +1605,6 @@ def test_meta_exclude_lazy_translation_string_raises() -> None:
                 model = product_models.Item
                 operation = "create"
                 exclude = gettext_lazy("name")
-
-
-def test_meta_permission_classes_non_iterable_raises() -> None:
-    """A non-iterable ``Meta.permission_classes`` (an int) raises via the ``list()`` guard.
-
-    A bare text atom or class is caught by the explicit text-atom and class guards;
-    any *other* non-iterable (here an ``int``) trips the ``list(value)`` ``TypeError``
-    branch instead, surfacing the same fail-loud ``ConfigurationError`` at class creation.
-    """
-    with pytest.raises(ConfigurationError, match="must be a sequence of"):
-
-        @definition_raises
-        class CreateItem(DjangoMutation):
-            class Meta:
-                model = product_models.Item
-                operation = "create"
-                permission_classes = 5
 
 
 def test_bind_skips_relation_lock_for_non_relay_target() -> None:

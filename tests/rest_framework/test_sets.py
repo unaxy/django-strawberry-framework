@@ -2836,56 +2836,48 @@ def test_validate_nested_fields_rejects_non_config_value() -> None:
         )
 
 
-def test_validate_nested_fields_rejects_unknown_field() -> None:
-    """A ``nested_fields`` key not in the serializer's field map fails loud."""
-    serializer_cls, field_map = _category_field_map()
-    with pytest.raises(ConfigurationError, match="not in the serializer's schema-time field map"):
-        _validate_serializer_nested_fields(
-            "M",
-            serializer_cls,
+@pytest.mark.parametrize(
+    (
+        "with_create",
+        "operation",
+        "nested_key",
+        "match",
+    ),
+    [
+        pytest.param(
+            True,
             "create",
-            field_map,
-            {"ghost": NestedSerializerConfig()},
-        )
+            "ghost",
+            "not in the serializer's schema-time field map",
+            id="unknown_field",
+        ),
+        pytest.param(True, "create", "name", "not a nested serializer", id="non_nested_field"),
+        pytest.param(False, "create", "items", "does not override create", id="create_override"),
+        # The class overrides create() but NOT update(); an update op needs update().
+        pytest.param(True, "update", "items", "does not override update", id="update_override"),
+    ],
+)
+def test_validate_nested_fields_rejects_a_misconfigured_key(
+    *,
+    with_create: bool,
+    operation: str,
+    nested_key: str,
+    match: str,
+) -> None:
+    """A ``nested_fields`` key fails loud unless the serializer can honour it.
 
-
-def test_validate_nested_fields_rejects_non_nested_field() -> None:
-    """A ``nested_fields`` key naming a scalar (not a nested serializer) fails loud."""
-    serializer_cls, field_map = _category_field_map()
-    with pytest.raises(ConfigurationError, match="not a nested serializer"):
+    The key must name a field in the serializer's field map, that field must be a
+    nested serializer, and the serializer must override the ``create()`` or
+    ``update()`` the operation runs.
+    """
+    serializer_cls, field_map = _category_field_map(with_create=with_create)
+    with pytest.raises(ConfigurationError, match=match):
         _validate_serializer_nested_fields(
             "M",
             serializer_cls,
-            "create",
+            operation,
             field_map,
-            {"name": NestedSerializerConfig()},
-        )
-
-
-def test_validate_nested_fields_requires_create_override() -> None:
-    """``nested_fields`` on a create op requires the serializer to override ``create()``."""
-    serializer_cls, field_map = _category_field_map(with_create=False)
-    with pytest.raises(ConfigurationError, match="does not override create"):
-        _validate_serializer_nested_fields(
-            "M",
-            serializer_cls,
-            "create",
-            field_map,
-            {"items": NestedSerializerConfig()},
-        )
-
-
-def test_validate_nested_fields_requires_update_override_for_update_op() -> None:
-    """``nested_fields`` on an update op requires the serializer to override ``update()``."""
-    serializer_cls, field_map = _category_field_map(with_create=True)
-    # The class overrides create() but NOT update(); an update op needs update().
-    with pytest.raises(ConfigurationError, match="does not override update"):
-        _validate_serializer_nested_fields(
-            "M",
-            serializer_cls,
-            "update",
-            field_map,
-            {"items": NestedSerializerConfig()},
+            {nested_key: NestedSerializerConfig()},
         )
 
 

@@ -384,20 +384,17 @@ def test_decode_rejects_non_list_values() -> None:
         )
 
 
-def test_decode_rejects_non_string_value_entries() -> None:
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param([1, 2], id="non_string_value_entries"),
+        pytest.param(["not-an-int", "2"], id="unparsable_value_shape"),
+    ],
+)
+def test_decode_rejects_malformed_values(values: list[object]) -> None:
     with pytest.raises(GraphQLError, match="invalid cursor"):
         decode_keyset_cursor(
-            _encrypted_payload_cursor({"o": _fingerprint(), "v": [1, 2]}),
-            _issue_columns(),
-            fingerprint=_fingerprint(),
-            argument="after",
-        )
-
-
-def test_decode_rejects_unparsable_value_shape() -> None:
-    with pytest.raises(GraphQLError, match="invalid cursor"):
-        decode_keyset_cursor(
-            _encrypted_payload_cursor({"o": _fingerprint(), "v": ["not-an-int", "2"]}),
+            _encrypted_payload_cursor({"o": _fingerprint(), "v": values}),
             _issue_columns(),
             fingerprint=_fingerprint(),
             argument="after",

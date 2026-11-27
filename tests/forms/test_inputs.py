@@ -223,24 +223,21 @@ def test_get_form_fields_does_not_instantiate_kwarg_requiring_form() -> None:
         KwargForm()  # pyright: ignore[reportCallIssue]
 
 
-def test_normalize_form_field_basis_rejects_none() -> None:
-    """A mutation hook returning ``None`` raises a fail-loud ``ConfigurationError``."""
+@pytest.mark.parametrize(
+    ("basis", "match"),
+    [
+        pytest.param(None, r"must return a mapping.*not None", id="none"),
+        pytest.param(123, "must return a mapping of field names", id="non_mapping_source"),
+    ],
+)
+def test_normalize_form_field_basis_rejects_a_non_mapping(basis: object, match: str) -> None:
+    """A mutation hook basis that is no mapping raises a fail-loud ``ConfigurationError``."""
 
     class ProbeForm(forms.Form):
         pass
 
-    with pytest.raises(ConfigurationError, match=r"must return a mapping.*not None"):
-        normalize_form_field_basis(ProbeForm, None)
-
-
-def test_form_field_basis_rejects_non_mapping_source() -> None:
-    """A non-mapping basis object raises a fail-loud ``ConfigurationError``."""
-
-    class ProbeForm(forms.Form):
-        pass
-
-    with pytest.raises(ConfigurationError, match="must return a mapping of field names"):
-        normalize_form_field_basis(ProbeForm, 123)
+    with pytest.raises(ConfigurationError, match=match):
+        normalize_form_field_basis(ProbeForm, basis)
 
 
 def test_form_field_basis_rejects_malformed_names_and_field_values() -> None:

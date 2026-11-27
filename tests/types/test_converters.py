@@ -1111,83 +1111,40 @@ def test_convert_choices_to_enum_raises_on_empty_choices(
         field.choices = original
 
 
+@pytest.mark.parametrize(
+    "choices",
+    [
+        # ``a-b`` and ``a_b`` both sanitize to ``a_b``.
+        pytest.param((("a-b", "Hyphen"), ("a_b", "Underscore")), id="sanitized_member"),
+        # The keyword ``if`` is mangled to ``_if`` and meets a raw ``_if``.
+        pytest.param((("if", "Conditional"), ("_if", "Underscored")), id="keyword_prefix"),
+        # GraphQL-reserved ``true`` is rewritten to ``MEMBER_true`` and meets a raw one.
+        pytest.param(
+            (("true", "Reserved"), ("MEMBER_true", "Already prefixed")),
+            id="graphql_safe_name",
+        ),
+        # ``-x-`` and ``_x_`` both sanitize to ``MEMBER__x_`` (the Python-``enum``-reserved rewrite).
+        pytest.param(
+            (("-x-", "Symbol wrapped"), ("_x_", "Sunder shaped")),
+            id="enum_reserved_sanitize",
+        ),
+    ],
+)
 def test_convert_choices_to_enum_raises_on_sanitized_member_collision(
     choice_fixture_model: type[models.Model],
+    choices: tuple[tuple[str, str], ...],
 ) -> None:
-    """Two choice values that sanitize to the same Python identifier raise.
+    """Two choice values that land on the same enum member raise ``ConfigurationError``.
 
-    Without the collision check, the dict comprehension silently keeps the last
-    value, leaving the GraphQL enum missing one of the choices and
-    producing a runtime coercion error long after schema build.
+    Collision detection runs after every rewrite: identifier sanitizing, keyword
+    prefixing, and the GraphQL- and Python-``enum``-reserved renames. Without it the
+    dict comprehension silently keeps the last value, leaving the GraphQL enum missing
+    one of the choices and producing a runtime coercion error long after schema build.
     """
     field = choice_fixture_model._meta.get_field("status")
     assert isinstance(field, models.Field)
     original = field.choices
-    # ``a-b`` and ``a_b`` both sanitize to ``a_b``.
-    field.choices = (("a-b", "Hyphen"), ("a_b", "Underscore"))
-    registry.clear()
-    try:
-        with pytest.raises(ConfigurationError, match="sanitize to the same enum member"):
-            convert_choices_to_enum(field, "FixtureType")
-    finally:
-        field.choices = original
-        registry.clear()
-
-
-def test_convert_choices_to_enum_raises_on_keyword_prefix_collision(
-    choice_fixture_model: type[models.Model],
-) -> None:
-    """Keyword-prefix collisions also raise: ``"if"`` mangles to ``"_if"`` and collides with raw ``"_if"``.
-
-    The second collision shape: the value ``"if"`` is a Python keyword
-    and is sanitized to ``"_if"``;
-    a sibling raw value ``"_if"`` would silently overwrite the first
-    without the guard.
-    """
-    field = choice_fixture_model._meta.get_field("status")
-    assert isinstance(field, models.Field)
-    original = field.choices
-    field.choices = (("if", "Conditional"), ("_if", "Underscored"))
-    registry.clear()
-    try:
-        with pytest.raises(ConfigurationError, match="sanitize to the same enum member"):
-            convert_choices_to_enum(field, "FixtureType")
-    finally:
-        field.choices = original
-        registry.clear()
-
-
-def test_convert_choices_to_enum_raises_on_graphql_safe_name_collision(
-    choice_fixture_model: type[models.Model],
-) -> None:
-    """Collision detection runs after GraphQL reserved-name rewriting."""
-    field = choice_fixture_model._meta.get_field("status")
-    assert isinstance(field, models.Field)
-    original = field.choices
-    field.choices = (("true", "Reserved"), ("MEMBER_true", "Already prefixed"))
-    registry.clear()
-    try:
-        with pytest.raises(ConfigurationError, match="sanitize to the same enum member"):
-            convert_choices_to_enum(field, "FixtureType")
-    finally:
-        field.choices = original
-        registry.clear()
-
-
-def test_convert_choices_to_enum_raises_on_enum_reserved_sanitize_collision(
-    choice_fixture_model: type[models.Model],
-) -> None:
-    """Collision detection still fires after the Python-``enum``-reserved rewrite.
-
-    ``"-x-"`` and ``"_x_"`` both sanitize to ``MEMBER__x_``; the collision must
-    surface as the localised ``ConfigurationError`` rather than a silently
-    dropped member -- the same contract already held for the
-    ``true`` / ``MEMBER_true`` GraphQL-reserved collision above.
-    """
-    field = choice_fixture_model._meta.get_field("status")
-    assert isinstance(field, models.Field)
-    original = field.choices
-    field.choices = (("-x-", "Symbol wrapped"), ("_x_", "Sunder shaped"))
+    field.choices = choices
     registry.clear()
     try:
         with pytest.raises(ConfigurationError, match="sanitize to the same enum member"):

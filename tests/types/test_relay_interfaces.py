@@ -103,6 +103,18 @@ def _as_definition(stand_in: object) -> DjangoTypeDefinition:
 # ---------------------------------------------------------------------------
 
 
+def _category_node() -> type[DjangoType]:
+    """Declare and return a ``relay.Node`` ``CategoryNode`` over ``Category`` (``id``, ``name``)."""
+
+    class CategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+
+    return CategoryNode
+
+
 def test_meta_interfaces_accepted() -> None:
     """``interfaces = (relay.Node,)`` is normalized to ``(relay.Node,)``."""
     meta = _meta(interfaces=(relay.Node,))
@@ -269,12 +281,7 @@ def test_relay_node_with_composite_pk_raises(monkeypatch: pytest.MonkeyPatch) ->
     The error message names the model and proposes the two remediation
     paths (declare ``id: relay.NodeID[...]`` or remove ``relay.Node``).
     """
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     assert registry.get(Category) is CategoryNode
 
@@ -512,12 +519,7 @@ def test_relay_node_injects_default_resolvers(attr: str) -> None:
     Strawberry's ``Node.resolve_node`` answers one id through ``resolve_nodes``, so the
     package installs no ``resolve_node`` of its own.
     """
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     assert relay.Node in CategoryNode.__mro__
@@ -530,12 +532,7 @@ def test_relay_node_injects_default_resolvers(attr: str) -> None:
 
 def test_resolve_id_attr_falls_back_to_pk() -> None:
     """No ``relay.NodeID[...]`` annotation -> ``resolve_id_attr()`` returns ``"pk"``."""
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     assert implements_relay_node(CategoryNode)
@@ -549,11 +546,7 @@ def test_resolve_id_reads_the_loaded_pk_without_a_query() -> None:
     """The installed ``resolve_id`` reads the pk a projected row already loaded."""
     services.seed_data(1)
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     row = Category.objects.only("id", "name").first()
@@ -610,11 +603,7 @@ def test_resolve_node_accepts_strawberry_positional_call_shape() -> None:
     """
     services.seed_data(1)
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     target = Category.objects.first()
@@ -634,11 +623,7 @@ def test_resolve_node_required_raises_for_missing() -> None:
     """``required=True`` raises ``Model.DoesNotExist`` when no row matches."""
     services.seed_data(1)
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     hooks = relay_hooks(CategoryNode, Category)
@@ -651,11 +636,7 @@ def test_resolve_nodes_accepts_generator_node_ids() -> None:
     """Plural lookup materializes one-shot ``node_ids`` before filtering and ordering."""
     services.seed_data(1)
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     rows = list(Category.objects.order_by("id")[:2])
@@ -687,11 +668,7 @@ def test_resolve_nodes_required_raises_for_missing() -> None:
     """
     services.seed_data(1)
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     a = Category.objects.first()
@@ -710,11 +687,7 @@ def test_resolve_nodes_without_ids_returns_full_queryset() -> None:
     """``node_ids=None`` returns the unfiltered queryset (caller materializes)."""
     services.seed_data(1)
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     qs = relay_hooks(CategoryNode, Category).resolve_nodes(info=None)
@@ -1327,12 +1300,7 @@ def test_resolve_id_attr_reads_stamp_without_rescanning(monkeypatch: pytest.Monk
     that; poisoning the upstream scan proves the steady-state path never
     calls it.
     """
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     assert CategoryNode.__dict__["_dsf_relay_id_attr"] == "pk"
@@ -1553,12 +1521,7 @@ def test_model_for_returns_registered_model() -> None:
     ``utils/querysets.py``. A divergence between the helper and the
     direct attribute read would surface here.
     """
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     assert model_for(CategoryNode) is Category
     assert model_for(CategoryNode) is CategoryNode.__django_strawberry_definition__.model
@@ -1569,11 +1532,7 @@ def test_resolve_nodes_default_invoked_via_helper() -> None:
     """``_resolve_nodes_default`` exercised as a free function with a ``relay.GlobalID``-coerced id."""
     services.seed_data(1)
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     assert implements_relay_node(CategoryNode)
@@ -1594,12 +1553,7 @@ def test_resolve_nodes_default_invoked_via_helper() -> None:
 
 def test_install_relay_node_resolvers_idempotent() -> None:
     """Calling ``install_relay_node_resolvers`` twice yields the same ``__func__`` identity."""
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     assert implements_relay_node(CategoryNode)
@@ -1824,12 +1778,7 @@ def _definition_of(type_cls: type[DjangoType]) -> DjangoTypeDefinition:
 
 def test_globalid_model_strategy_emits_model_label() -> None:
     """The default (``model``) emits ``app_label.modelname`` in the type-name slot."""
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     assert _definition_of(CategoryNode).effective_globalid_strategy == "model"
@@ -1947,12 +1896,7 @@ def test_globalid_callable_non_string_return_raises(bad_return: object) -> None:
 
 def test_encode_typename_helper_dispatch() -> None:
     """``encode_typename`` computes the slot for each resolved strategy directly."""
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     definition = _definition_of(CategoryNode)
@@ -2424,12 +2368,7 @@ def test_plain_or_static_resolve_typename_is_classified_override(shape: str) -> 
     ``(root, info)``, so both shapes run; the framework records ``custom``,
     installs no closure over it, and the type emits the consumer's slot.
     """
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     stored = _plant_resolve_typename(CategoryNode, shape)
     finalize_django_types()
@@ -2547,11 +2486,7 @@ def test_callable_setting_well_formed_accepted(settings: pytest_django.Settings)
 
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RELAY_GLOBALID_STRATEGY": encoder}
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     assert _definition_of(CategoryNode).effective_globalid_strategy == "callable"
@@ -2566,11 +2501,7 @@ def test_callable_setting_wrong_arity_raises(settings: pytest_django.Settings) -
 
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RELAY_GLOBALID_STRATEGY": encoder}
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     assert registry.get(Category) is CategoryNode
 
@@ -2586,11 +2517,7 @@ def test_callable_setting_async_raises(settings: pytest_django.Settings) -> None
 
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RELAY_GLOBALID_STRATEGY": encoder}
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     assert registry.get(Category) is CategoryNode
 
@@ -2617,11 +2544,7 @@ def test_callable_setting_async_callable_object_raises(settings: pytest_django.S
 
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RELAY_GLOBALID_STRATEGY": Encoder()}
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     assert registry.get(Category) is CategoryNode
 
@@ -2652,11 +2575,7 @@ def test_callable_setting_partial_wrapped_async_callable_raises(
         "RELAY_GLOBALID_STRATEGY": functools.partial(Encoder()),
     }
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     assert registry.get(Category) is CategoryNode
 
@@ -2708,11 +2627,7 @@ def test_setting_error_framing_tracks_the_conf_key_constant(
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {conf.RELAY_GLOBALID_STRATEGY_KEY: "nonsense"}
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     assert registry.get(Category) is CategoryNode
 
@@ -2797,11 +2712,7 @@ def test_setting_read_and_validated_once_per_finalize(
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RELAY_GLOBALID_STRATEGY": "type"}
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     class ItemNode(DjangoType):
         class Meta:
@@ -2845,11 +2756,7 @@ def test_no_request_time_setting_read(
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {}
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
 
@@ -2872,11 +2779,7 @@ def test_retry_lifecycle_keeps_snapshot_until_clear(
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RELAY_GLOBALID_STRATEGY": "type"}
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     def _boom(*_args: object, **_kwargs: object) -> NoReturn:
         raise RuntimeError("phase-3 boom")
@@ -2913,11 +2816,7 @@ def test_clear_and_rebuild_flips_strategy_no_process_global(
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"RELAY_GLOBALID_STRATEGY": "type"}
 
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
+    CategoryNode = _category_node()
 
     finalize_django_types()
     assert _definition_of(CategoryNode).effective_globalid_strategy == "type"

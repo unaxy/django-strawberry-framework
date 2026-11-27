@@ -268,30 +268,27 @@ async def test_actor_lease_returns_scope_lock() -> None:
     assert not lock.locked()
 
 
-async def test_actor_transition_with_authenticated_latches_provenance() -> None:
-    """actor_transition(was_authenticated=True) latches provenance and holds lease."""
+@pytest.mark.parametrize(
+    "was_authenticated",
+    [
+        pytest.param(True, id="authenticated_latches_provenance"),
+        pytest.param(False, id="unauthenticated_does_not_latch_provenance"),
+    ],
+)
+async def test_actor_transition_latches_provenance_only_when_authenticated(
+    *,
+    was_authenticated: bool,
+) -> None:
+    """actor_transition holds the lease and latches provenance iff ``was_authenticated``."""
     scope: dict[str, object] = {}
     assert connection_was_authenticated(scope) is False
 
-    async with actor_transition(scope, was_authenticated=True):
-        assert connection_was_authenticated(scope) is True
+    async with actor_transition(scope, was_authenticated=was_authenticated):
+        assert connection_was_authenticated(scope) is was_authenticated
         assert actor_lease(scope).locked()
 
     assert not actor_lease(scope).locked()
-    assert connection_was_authenticated(scope) is True
-
-
-async def test_actor_transition_without_authenticated_does_not_latch_provenance() -> None:
-    """actor_transition(was_authenticated=False) holds lease without latching provenance."""
-    scope: dict[str, object] = {}
-    assert connection_was_authenticated(scope) is False
-
-    async with actor_transition(scope, was_authenticated=False):
-        assert connection_was_authenticated(scope) is False
-        assert actor_lease(scope).locked()
-
-    assert not actor_lease(scope).locked()
-    assert connection_was_authenticated(scope) is False
+    assert connection_was_authenticated(scope) is was_authenticated
 
 
 async def test_actor_transition_failure_still_latches_provenance_and_releases_lease() -> None:

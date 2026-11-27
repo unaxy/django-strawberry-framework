@@ -278,25 +278,25 @@ def test_upstream_patches_enabled_mapping_accepts_non_dict_mappings(
     assert upstream_patches_enabled("strawberry") is False
 
 
-def test_upstream_patches_enabled_rejects_unknown_mapping_name(
+@pytest.mark.parametrize(
+    ("mapping", "match"),
+    [
+        # A typo'd dependency name must not silently keep patching; the whole mapping
+        # is validated on every read, so the raise fires even though the requested
+        # dependency itself is spelled correctly.
+        pytest.param({"stawberry": False}, "stawberry", id="unknown_mapping_name"),
+        # ``"false"`` must fail loud, not silently invert intent.
+        pytest.param({"strawberry": "false"}, "must be a bool", id="non_bool_mapping_value"),
+    ],
+)
+def test_upstream_patches_enabled_rejects_a_malformed_mapping(
     settings: pytest_django.Settings,
+    mapping: dict[str, object],
+    match: str,
 ) -> None:
-    """A typo'd dependency name must not silently keep patching.
-
-    The whole mapping is validated on every read: the raise fires even when
-    the requested dependency itself is spelled correctly.
-    """
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"stawberry": False}}
-    with pytest.raises(ConfigurationError, match="stawberry"):
-        upstream_patches_enabled("strawberry")
-
-
-def test_upstream_patches_enabled_rejects_non_bool_mapping_value(
-    settings: pytest_django.Settings,
-) -> None:
-    """``{"strawberry": "false"}`` must fail loud, not silently invert intent."""
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"strawberry": "false"}}
-    with pytest.raises(ConfigurationError, match="must be a bool"):
+    """A malformed ``APPLY_UPSTREAM_PATCHES`` mapping raises ``ConfigurationError`` on read."""
+    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": mapping}
+    with pytest.raises(ConfigurationError, match=match):
         upstream_patches_enabled("strawberry")
 
 
