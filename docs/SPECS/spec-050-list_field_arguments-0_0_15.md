@@ -525,7 +525,7 @@ Its `extensions` are stable:
 For numeric-domain failures, `reason` is `negative` or `over_ceiling`; both carry `value`
 and only the latter carries `ceiling`. A direct Python call that bypasses GraphQL coercion
 uses `non_integer` and a safe string value rendered by
-[`django_strawberry_framework/utils/truth.py::describe`][truth].
+[`django_strawberry_framework/utils/introspection.py::describe`][introspection].
 `order_required` carries the rejected offset as `value`. The source-shape reason
 `queryset_required` carries neither `value` nor `ceiling`, because serializing an order input
 is not a stable wire contract. Pre-sliced querysets are the shared sealed visibility
@@ -624,12 +624,9 @@ the field, rather than surfacing later as an engine runtime-type error over a Gr
 Django model that are unrelated. List, connection, and Relay node fields all enter through that
 one validator, so "registered target" cannot drift by factory.
 
-Every identity fact the validator reads is read truthfully through
-[`django_strawberry_framework/utils/truth.py`][truth]. The class and subclass gates read the
-target's real type and MRO, so a `__class__` property that raises or lies is the typed
-`requires a DjangoType class` rejection. The registry stores definitions in a `django_strawberry_framework/utils/truth.py::IdentityMap`, so
-the lookup compares the class object itself and never runs a target metaclass's `__hash__` or
-`__eq__` (`tests/test_list_field.py::test_djangolistfield_registry_lookup_never_hashes_the_target`).
+The class gate reads the target's real type
+([`django_strawberry_framework/utils/_narrowing.py::is_class`][narrowing]), so a `__class__`
+property that raises or lies is the typed `requires a DjangoType class` rejection.
 
 The generated-connection cache
 (`django_strawberry_framework/connection.py::_connection_type_for`) keys on target identity: a
@@ -3226,7 +3223,9 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
 [conf]: ../../django_strawberry_framework/conf.py
 [connection]: ../../django_strawberry_framework/connection.py
 [execution-mode]: ../../django_strawberry_framework/utils/execution_mode.py
+[introspection]: ../../django_strawberry_framework/utils/introspection.py
 [list-field]: ../../django_strawberry_framework/list_field.py
+[narrowing]: ../../django_strawberry_framework/utils/_narrowing.py
 [operation-state]: ../../django_strawberry_framework/extensions/operation_state.py
 [optimizer-extension]: ../../django_strawberry_framework/optimizer/extension.py
 [orders-factories]: ../../django_strawberry_framework/orders/factories.py
@@ -3236,7 +3235,6 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
 [querysets]: ../../django_strawberry_framework/utils/querysets.py
 [resource-policy]: ../../django_strawberry_framework/resource_policy.py
 [schema]: ../../django_strawberry_framework/schema.py
-[truth]: ../../django_strawberry_framework/utils/truth.py
 [typing-utils]: ../../django_strawberry_framework/utils/typing.py
 
 <!-- tests/ -->

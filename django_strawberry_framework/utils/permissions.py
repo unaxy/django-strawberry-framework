@@ -48,10 +48,14 @@ from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 
-from . import introspection, truth
+from . import introspection
 from ._narrowing import (
+    class_namespace,
     dict_items,
+    is_class,
+    is_dict,
     is_mapping,
+    is_real_instance,
     is_str,
     optional_instance,
     read_attr,
@@ -221,7 +225,7 @@ def _is_request(value: object) -> bool:
     stand-in that only forwards ``__class__`` (a Django lazy proxy included) is
     not a request.
     """
-    return truth.is_instance(value, HttpRequest) or truth.is_instance(
+    return is_real_instance(value, HttpRequest) or is_real_instance(
         value,
         ChannelsRequestAdapter,
     )
@@ -277,7 +281,7 @@ def request_from_info(info: object, *, family_label: str) -> object:
         return request
     raise ConfigurationError(
         f"{family_label} could not resolve a Django HttpRequest from `info.context` "
-        f"(got {truth.kind(context)}). Expected `info.context.request`, a bare "
+        f"(got {introspection.kind(context)}). Expected `info.context.request`, a bare "
         "HttpRequest, a mapping whose `request` is an HttpRequest, or a Strawberry "
         "Channels mapping context whose `request` carries an ASGI scope "
         '(`context["request"].consumer.scope` for the HTTP consumer, '
@@ -410,13 +414,13 @@ def invoke_permission_method(
     method: object = getattr(bare_instance, method_name, None)
     if method is not None and not callable(method):
         raise ConfigurationError(
-            f"The {truth.name(type(bare_instance))} permission gate "
-            f"{method_name!r} must be callable; got {truth.render(method)}. "
+            f"The {introspection.name(type(bare_instance))} permission gate "
+            f"{method_name!r} must be callable; got {method!r}. "
             "Define check_<field>_permission as a method (def, not async def) "
             "or remove the attribute.",
         )
     if method is not None:
-        owner = truth.name(type(bare_instance))
+        owner = introspection.name(type(bare_instance))
         result = reject_async_in_sync_context(
             method(request),
             owner=owner,
@@ -729,7 +733,7 @@ def walk_declared_relation_path(
             break
         consumed, declared_attr, related_obj = max(matches, key=lambda match: match[0])
         target: object = getattr(related_obj, target_attr, None)
-        resolved = target if truth.is_type(target) else None
+        resolved = target if is_class(target) else None
         hops.append(DeclaredHop(current_cls, declared_attr, related_obj, resolved))
         index += consumed
         if resolved is None:
@@ -759,7 +763,7 @@ def descendant_relation_path_of(
     """
     target_cls: object = getattr(related_obj, target_attr, None)
     model = _set_model(owner)
-    target = _set_model(target_cls) if truth.is_type(target_cls) else None
+    target = _set_model(target_cls) if is_class(target_cls) else None
     if not is_model_class(model) or not is_model_class(target):
         return field_name
     return descendant_relation_path(model, field_name, target)
@@ -785,8 +789,10 @@ def set_bound_definition(set_cls: object) -> DjangoTypeDefinition | None:
     # The binder is the one writer of a class's own slot and stores a ``DjangoTypeDefinition``;
     # the set bases' own ``None`` is the unbound default. Anything else in the slot is a
     # defect, refused rather than read as an owner.
+    if not is_class(set_cls):
+        return None
     return optional_instance(
-        truth.class_dict(set_cls).get("_owner_definition"),
+        class_namespace(set_cls).get("_owner_definition"),
         DjangoTypeDefinition,
     )
 
@@ -884,7 +890,7 @@ def _alias_hop(
     if len(crossed) != len(relations):
         raise ConfigurationError(
             f"FilteredRelation alias {alias!r} joins {relation!r}, which is not a path of "
-            f"relations of {truth.qualname(model)} a filter can scope.",
+            f"relations of {model.__qualname__} a filter can scope.",
         )
     via = tuple(
         UndeclaredHop(
@@ -993,24 +999,22 @@ def _related_declarations(cls: type[object], related_attr: str) -> tuple[tuple[s
     except RelatedDeclarationError as exc:
         # The only rejection the shared read raises: the declaration is not a mapping.
         raise ConfigurationError(
-            f"{truth.kind(cls)} related permission declarations under "
-            f"{related_attr!r} must be a mapping; got {truth.kind(exc.value)}.",
+            f"{introspection.kind(cls)} related permission declarations under "
+            f"{related_attr!r} must be a mapping; got {introspection.kind(exc.value)}.",
         ) from None
     # No emptiness short-circuit: an empty mapping already materializes to
     # ``()`` through the read below.
     # ``sets_mixins.py::collect_related_declarations`` keys the collection by each
     # declaration's class-attribute name; a hand-assigned collection is held to the same
     # shape here, since the key becomes the hop's declared attribute name.
-    items = (
-        tuple(dict_items(related)) if truth.is_instance(related, dict) else tuple(related.items())
-    )
+    items = tuple(dict_items(related)) if is_dict(related) else tuple(related.items())
     declarations: list[tuple[str, object]] = []
     for declared_attr, related_obj in items:
         if not isinstance(declared_attr, str):
             raise ConfigurationError(
-                f"{truth.kind(cls)} related permission declarations under "
+                f"{introspection.kind(cls)} related permission declarations under "
                 f"{related_attr!r} must be keyed by attribute name strings; got a "
-                f"{truth.kind(declared_attr)} key.",
+                f"{introspection.kind(declared_attr)} key.",
             )
         declarations.append((declared_attr, related_obj))
     return tuple(declarations)
@@ -1033,7 +1037,7 @@ def _permission_mixin() -> type[ActiveInputPermissionMixin]:
 
 def _is_permission_set(value: object) -> TypeIs[type[ActiveInputPermissionMixin]]:
     """Return whether ``value`` is a set class carrying the shared permission facade (real MRO)."""
-    return truth.is_subclass(value, _permission_mixin())
+    return is_class(value) and issubclass(value, _permission_mixin())
 
 
 def run_active_input_permission_checks(

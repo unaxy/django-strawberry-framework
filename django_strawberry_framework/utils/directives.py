@@ -27,9 +27,7 @@ the consumer's behaviour and runs untouched; whatever it raises propagates.
 Exception policy, package-wide. ``SystemExit``, ``KeyboardInterrupt``,
 ``GeneratorExit`` and ``asyncio.CancelledError`` always propagate: no handler
 in the package catches ``BaseException`` (or one of those) except to clean up
-and re-raise. Identity is read from the interpreter (``utils/truth.py``), never
-asked of a consumer object, so no handler exists to contain a raising or lying
-dunder. Consumer behaviour - hooks, resolvers, iterators, a consumer object's
+and re-raise. Consumer behaviour - hooks, resolvers, iterators, a consumer object's
 ``__repr__`` / ``__str__`` - runs untouched, and its exceptions propagate to the
 one boundary, the schema's production error policy. Untrusted wire bytes are
 parsed with pre-validation or one arm no wider than the parse's own documented
@@ -38,7 +36,7 @@ error. ``scripts/check_truthful_reads.py`` enforces the ``BaseException`` half.
 
 from django_strawberry_framework.exceptions import ConfigurationError
 
-from . import truth
+from . import introspection
 from ._narrowing import is_text_atom, list_of
 from .lazy import unwrap_lazy_object
 
@@ -66,7 +64,7 @@ def validated_field_directives(label: str, directives: object) -> tuple[object, 
     if is_text_atom(unwrap_lazy_object(directives)):
         raise ConfigurationError(
             f"{label} directives must be a sequence of directive instances; "
-            f"got {truth.kind(directives)}.",
+            f"got {introspection.kind(directives)}.",
         )
     try:
         return tuple(list_of(directives))
@@ -74,5 +72,5 @@ def validated_field_directives(label: str, directives: object) -> tuple[object, 
         # ``list()``'s documented refusal of a non-iterable. The message names
         # the exception's type, never its text.
         raise ConfigurationError(
-            f"{label} directives could not be read ({truth.kind(exc)}).",
+            f"{label} directives could not be read ({introspection.kind(exc)}).",
         ) from exc

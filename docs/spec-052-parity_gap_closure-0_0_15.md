@@ -1138,7 +1138,7 @@ Value handling, in one accessor read by every site: a falsy value (`""`,
 `None` — Django accepts and stores `help_text=None`, so a third-party model
 may carry it) is no description (⚛️'s `if field.help_text`); a `str` (any
 subclass, read as plain text through
-`django_strawberry_framework/utils/truth.py::text`) is kept; a lazy
+`django_strawberry_framework/utils/introspection.py::text`) is kept; a lazy
 translation `Promise` is rendered by `str()` at the site that builds the
 field object, in the active language of the `finalize_django_types` call
 that builds it (graphql-core's `GraphQLField` refuses a non-`str`
@@ -1250,7 +1250,7 @@ checks, after the cache and before minting, whether the column is a
 `django_choices_field` `TextChoicesField` / `IntegerChoicesField`. Detection
 is `django_strawberry_framework/utils/imports.py::loaded_attr` (a
 `sys.modules`-only read that never imports) for each class name, then
-`django_strawberry_framework/utils/truth.py::is_instance`; when
+`isinstance`; when
 `django-choices-field` is not loaded the branch is dead and nothing changes.
 On a hit the field's `choices_enum` is the enum: wrapped with
 `strawberry.enum` when it carries no `__strawberry_definition__` (🍓's rule;

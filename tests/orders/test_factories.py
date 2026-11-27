@@ -31,7 +31,7 @@ from django_strawberry_framework.orders.inputs import (
     _field_specs,
     _materialized_names,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr
 from django_strawberry_framework.utils.inputs import _type_name_claims
 from tests._idioms import canonical_order, scrambled, type_args
@@ -376,7 +376,7 @@ def test_factory_dedupes_double_enqueued_target_via_seen_check(
     visits: list[object] = []
     building = False
     build = OrderArgumentsFactory._build_class_type
-    read = truth.static_attr
+    read = introspection.mro_attr
 
     def tracked_build(factory: OrderArgumentsFactory, set_class: type[OrderSet]) -> None:
         nonlocal building
@@ -392,7 +392,7 @@ def test_factory_dedupes_double_enqueued_target_via_seen_check(
         return read(obj, attr, default)
 
     monkeypatch.setattr(OrderArgumentsFactory, "_build_class_type", tracked_build)
-    monkeypatch.setattr(truth, "static_attr", tracked_read)
+    monkeypatch.setattr(introspection, "mro_attr", tracked_read)
 
     factory = OrderArgumentsFactory(ParentOrderDedup)
     _ = factory.arguments  # must not raise; the pop-time guard fires.

@@ -36,10 +36,12 @@ from django_filters.widgets import SuffixedMultiWidget
 
 from django_strawberry_framework.exceptions import ConfigurationError
 
-from . import truth
+from . import introspection
 from ._narrowing import (
     call_method,
+    is_class,
     is_list_or_tuple,
+    is_real_instance,
     list_of,
     read_attr,
     require_instance,
@@ -67,7 +69,7 @@ def _postgres_split_array_widget() -> type[Widget] | None:
     consumer form can declare the widget either.
     """
     cls = import_attr_if_importable("django.contrib.postgres.forms", "SplitArrayWidget")
-    return cls if truth.is_subclass(cls, Widget) else None
+    return cls if is_class(cls) and issubclass(cls, Widget) else None
 
 
 #: PostgreSQL's ``SplitArrayWidget`` (``None`` without a PostgreSQL driver).
@@ -157,7 +159,7 @@ def reads_json_text(field: object) -> bool:
     widget reads parts under several keys (a ``SplitArrayWidget``, a ``MultiWidget``) is
     handed the list the widget assembles, never text, so it reads the value as given.
     """
-    if not truth.is_instance(field, forms.JSONField):
+    if not isinstance(field, forms.JSONField):
         return False
     return widget_keys(read_attr(field, "widget"), "name") == ["name"]
 
@@ -228,18 +230,24 @@ def _decompressed(
                 code=FIELD_ERROR_CODE_INVALID,
             ) from error
         raise ConfigurationError(
-            _unsplittable(widget, key, value, part_keys, f"raised {truth.kind(error)}: {error}"),
+            _unsplittable(
+                widget,
+                key,
+                value,
+                part_keys,
+                f"raised {introspection.kind(error)}: {error}",
+            ),
         ) from error
     if not is_list_or_tuple(parts):
         raise ConfigurationError(
-            _unsplittable(widget, key, value, part_keys, f"answered {truth.kind(parts)}"),
+            _unsplittable(widget, key, value, part_keys, f"answered {introspection.kind(parts)}"),
         )
     return list(parts)
 
 
 def _is_aware_datetime(value: object) -> bool:
     """Whether ``value`` is an aware ``datetime``, the value ``to_current_timezone`` converts."""
-    return truth.is_instance(value, datetime.datetime) and timezone.is_aware(value)
+    return is_real_instance(value, datetime.datetime) and timezone.is_aware(value)
 
 
 def _unsplittable(
@@ -251,7 +259,7 @@ def _unsplittable(
 ) -> str:
     """Return the ``ConfigurationError`` message for a value ``widget`` cannot split."""
     return (
-        f"{truth.kind(widget)}.decompress cannot split the {truth.kind(value)} bound under "
+        f"{introspection.kind(widget)}.decompress cannot split the {introspection.kind(value)} bound under "
         f"{key!r} into the parts the widget reads ({', '.join(map(repr, part_keys))}): it "
         f"{answer}. decompress takes the field's value as the package binds it, so a "
         "mapping a get_form or get_form_kwargs hook or the form's __init__ binds keeps that "

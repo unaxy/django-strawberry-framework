@@ -56,9 +56,10 @@ from strawberry import relay
 
 from django_strawberry_framework.registry import registry
 
-from . import truth
+from . import introspection
 from ._narrowing import (
     enum_value,
+    is_class,
     is_list,
     is_text_atom,
     list_of,
@@ -223,7 +224,7 @@ def raw_choice_value(value: object) -> object:
 def _raw_choice_scalar(value: object) -> object:
     """Unwrap one non-list value: an enum member to its value, a ``str`` to the base ``str``."""
     raw_value = enum_value(value) if isinstance(value, Enum) else value
-    return truth.plain_str(raw_value)
+    return introspection.plain_str(raw_value)
 
 
 def coerce_relation_pk_or_none(related_model: type[models.Model], pk: object) -> object:
@@ -246,7 +247,7 @@ def coerce_relation_pk_or_none(related_model: type[models.Model], pk: object) ->
     visible set, which makes it the same not-found ``relation_field_error`` as a
     genuinely missing pk, never a backend crash.
     """
-    meta = truth.static_attr(related_model, "_meta")
+    meta = introspection.mro_attr(related_model, "_meta")
     if meta is None:
         return None
     pk_field = getattr(meta, "pk", None)
@@ -267,10 +268,7 @@ def relation_takes_global_id(related_primary_type: type[DjangoType] | None) -> b
     ``strawberry.relay.Node`` directly, so ``utils`` imports no ``types`` module); a
     target with no registered primary, or a non-Relay one, takes its raw pk.
     """
-    return related_primary_type is not None and truth.is_subclass(
-        related_primary_type,
-        relay.Node,
-    )
+    return related_primary_type is not None and issubclass(related_primary_type, relay.Node)
 
 
 def type_check_relation_id(
@@ -460,7 +458,7 @@ def materialize_relation_id_container(
     Returns ``(provided_values, None)`` or ``(None, field_error)``.
     """
     unwrapped = unwrap_lazy_object(values)
-    if is_text_atom(unwrapped) or issubclass(truth.class_of(unwrapped), Mapping):
+    if is_text_atom(unwrapped) or issubclass(type(unwrapped), Mapping):
         return None, relation_field_error(graphql_name)
     try:
         return list_of(values), None
@@ -843,12 +841,12 @@ def saves_rows_of(model: type[models.Model], sender: object) -> bool:
     proxies and children) sends its own class, never ``model``, and a receiver
     connected with ``sender=model`` hears none of them. Every such class is a subclass
     of ``model``, the rule the write flavors' saved-result checks read a returned row by
-    (``truth.is_instance``), so a recorder filtering by this predicate hears exactly the
+    (``isinstance``), so a recorder filtering by this predicate hears exactly the
     saves whose instance those checks accept: ``model``'s own, a proxy's, a multi-table
     child's. A concrete base of a proxy ``model``, a sibling proxy, a multi-table parent
     and an unrelated model are not subclasses and stay unheard.
     """
-    return truth.is_subclass(sender, model)
+    return is_class(sender) and issubclass(sender, model)
 
 
 @contextmanager

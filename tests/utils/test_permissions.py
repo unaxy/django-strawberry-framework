@@ -1300,68 +1300,6 @@ def test_auth_aliases_for_permission_classes_gates_alias_resolution(
     assert calls == [None]
 
 
-def test_related_depth_error_survives_hostile_child_qualname() -> None:
-    """The depth-limit error names the child set from its real qualname.
-
-    A metaclass ``__getattribute__`` that raises on ``__qualname__`` never runs:
-    the label is read from the interpreter, so the typed depth error surfaces.
-    """
-
-    class _HostileMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__qualname__":
-                raise RuntimeError("qualname exploded")
-            return object_result(super().__getattribute__, name)
-
-    class _Child(ActiveInputPermissionMixin, metaclass=_HostileMeta):
-        _MAX_LOGIC_DEPTH = 0
-
-        @override
-        @classmethod
-        def _run_permission_checks(
-            cls,
-            input_value: object,
-            request: object,
-            *,
-            _fired: dict[type[object], set[str]] | None = None,
-            _bare: ActiveInputPermissionMixin | None = None,
-            _depth: int = 0,
-        ) -> NoReturn:
-            raise AssertionError("depth gate should fire before recursion")
-
-    related = type("Related", (), {"child_set": _Child})()
-
-    class _Parent(ActiveInputPermissionMixin):
-        @override
-        @classmethod
-        def _permission_walk_gates(
-            cls,
-            input_value: object,
-        ) -> tuple[tuple[type[object], str], ...]:
-            return ()
-
-        @override
-        @classmethod
-        def _active_permission_targets(
-            cls,
-            input_value: object,
-        ) -> tuple[list[str], list[tuple[str, object, object]]]:
-            return [], [("child", related, input_value)]
-
-    with pytest.raises(ConfigurationError, match="nesting exceeded") as excinfo:
-        run_active_input_permission_checks(
-            _Parent,
-            {"child": {}},
-            HttpRequest(),
-            fired={},
-            bare=object.__new__(_Parent),
-            target_attr="child_set",
-            related_attr="related",
-        )
-    assert "._Child" in str(excinfo.value)
-
-
 def test_run_active_input_permission_checks_falls_back_to_default_traversal_depth() -> None:
     """When child set defines no _MAX_LOGIC_DEPTH, traversal uses DEFAULT_SET_INPUT_TRAVERSAL_DEPTH."""
 

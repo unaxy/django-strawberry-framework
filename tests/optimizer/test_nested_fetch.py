@@ -43,7 +43,7 @@ from django_strawberry_framework.optimizer.plans import (
     WINDOW_TOTAL_COUNT,
     OptimizationPlan,
 )
-from tests._idioms import ClaimsClassBase, ClassReadRaisesBase, HostileNameMeta
+from tests._idioms import ClaimsClassBase, ClassReadRaisesBase
 from tests.optimizer._builders import nested_connection_request
 
 
@@ -133,21 +133,6 @@ def test_resolve_strategy_rejects_unknown_name_and_bad_type() -> None:
         resolve_strategy("correlated")
     with pytest.raises(ConfigurationError, match="plan\\(request, plan\\) method"):
         resolve_strategy(42)
-
-
-def test_resolve_strategy_rejects_hostile_type_and_class_name() -> None:
-    """Hostile types fail safely with ConfigurationError and classes report their name."""
-
-    class NotStrategy(metaclass=HostileNameMeta):
-        pass
-
-    notstrategy = NotStrategy()
-
-    with pytest.raises(ConfigurationError, match="nested_connection_strategy"):
-        resolve_strategy(notstrategy)
-
-    with pytest.raises(ConfigurationError, match="WindowedPrefetchStrategy"):
-        resolve_strategy(WindowedPrefetchStrategy)
 
 
 def test_resolve_strategy_str_subclass_rejection_renders_by_its_repr() -> None:

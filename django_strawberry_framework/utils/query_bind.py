@@ -23,11 +23,12 @@ from django.db import connections, models
 from django.db.models.sql.where import WhereNode
 
 from django_strawberry_framework._completion import _syntax_shape
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._array_field import array_leaf_field
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     dict_items,
+    instance_state,
     is_dict,
     is_list,
     is_list_or_tuple,
@@ -193,19 +194,19 @@ def guard_query(
             return result
 
         guarded_compiler_type = type(
-            f"_Guarded{truth.name(compiler_type)}",
+            f"_Guarded{introspection.name(compiler_type)}",
             (compiler_type,),
             {"compile": _compile, "as_sql": _as_sql},
         )
-        compiler.__class__ = guarded_compiler_type  # truth: ok per-instance compiler subtype
+        compiler.__class__ = guarded_compiler_type  # per-instance compiler subtype
         return compiler
 
     guarded_query_type = type(
-        f"_Guarded{truth.name(query_type)}",
+        f"_Guarded{introspection.name(query_type)}",
         (query_type,),
         {"build_filter": _build_filter, "get_compiler": _get_compiler},
     )
-    query.__class__ = guarded_query_type  # truth: ok instance-local query guard subtype
+    query.__class__ = guarded_query_type  # instance-local query guard subtype
     return query
 
 
@@ -411,7 +412,7 @@ def date_checks_guarded(
     if _date_checks_digest(read_attr(type(instance), _DATE_CHECKS)) not in _AUDITED_DATE_CHECKS:
         yield
         return
-    namespace = truth.instance_state(instance)
+    namespace = instance_state(instance)
     perform = require(read_attr(instance, _DATE_CHECKS), callable)
 
     def checked(date_checks: object) -> dict[str, list[ValidationError]]:

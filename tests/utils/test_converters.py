@@ -16,7 +16,6 @@ from django import forms
 from rest_framework import serializers
 from typing_extensions import override
 
-from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms import converter as form_converter
 from django_strawberry_framework.rest_framework import serializer_converter as ser_converter
 from django_strawberry_framework.utils.converters import (
@@ -26,7 +25,6 @@ from django_strawberry_framework.utils.converters import (
     make_kind_converter,
 )
 from django_strawberry_framework.utils.inputs import FILE, SCALAR, FieldConversionBase
-from django_strawberry_framework.utils.typing import object_result
 
 
 def _answer(value: object) -> Callable[[object], object]:
@@ -161,93 +159,6 @@ def test_unhandled_field_raises_via_factory() -> None:
             scalar_registry=scalar_registry,
             fallthrough_error_factory=_factory,
         )
-
-
-def test_mro_walk_bypasses_hostile_field_metaclass_attribute_access() -> None:
-    """A hostile ``__getattribute__`` cannot replace typed converter failure."""
-
-    class HostileMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__mro__":
-                raise RuntimeError("mro descriptor failed")
-            return object_result(super().__getattribute__, name)
-
-    class HostileFormField(forms.Field, metaclass=HostileMeta):
-        pass
-
-    class HostileSerializerField(
-        serializers.Field[object, object, object, object],
-        metaclass=HostileMeta,
-    ):
-        pass
-
-    hostile_form = object.__new__(HostileFormField)
-    hostile_serializer = object.__new__(HostileSerializerField)
-    hostile_serializer.field_name = "hostile"
-
-    with pytest.raises(ConfigurationError, match="Unsupported form field type"):
-        form_converter.convert_form_field(hostile_form)
-    with pytest.raises(ConfigurationError, match="Unsupported serializer field type"):
-        ser_converter.convert_serializer_field(hostile_serializer)
-
-
-def test_mro_walk_bypasses_a_hostile_metaclass_mro_property() -> None:
-    """A metaclass ``__mro__`` PROPERTY cannot raise into the walk.
-
-    ``type.__getattribute__`` still honors a data descriptor defined ON the
-    metaclass: a property there wins over ``type``'s own ``__mro__`` getset
-    inside CPython's ``type_getattro`` algorithm. The skeleton therefore reads
-    the MRO through ``type.__dict__``'s raw descriptor, so a raising property
-    lands the typed unsupported-field error instead of a raw ``RuntimeError``
-    escaping schema build.
-    """
-
-    class RaisingMroMeta(type):
-        @property
-        @override
-        def __mro__(cls) -> NoReturn:
-            raise RuntimeError("hostile __mro__ property")
-
-    class HostileFormField(forms.Field, metaclass=RaisingMroMeta):
-        pass
-
-    class HostileSerializerField(
-        serializers.Field[object, object, object, object],
-        metaclass=RaisingMroMeta,
-    ):
-        pass
-
-    hostile_form = object.__new__(HostileFormField)
-    hostile_serializer = object.__new__(HostileSerializerField)
-    hostile_serializer.field_name = "hostile"
-
-    with pytest.raises(ConfigurationError, match="Unsupported form field type"):
-        form_converter.convert_form_field(hostile_form)
-    with pytest.raises(ConfigurationError, match="Unsupported serializer field type"):
-        ser_converter.convert_serializer_field(hostile_serializer)
-
-
-def test_mro_walk_ignores_a_fake_mro_claiming_a_registered_class() -> None:
-    """A lying ``__mro__`` naming a registered class cannot silently convert.
-
-    An impostor field whose metaclass property claims CharField's MRO must
-    reach the typed unsupported-field fallthrough (its REAL class is an
-    unregistered ``forms.Field`` subclass), not resolve the registry hit and
-    crash later on a missing attribute.
-    """
-
-    class FakeMroMeta(type):
-        @property
-        @override
-        def __mro__(cls) -> tuple[type, ...]:
-            return (forms.CharField, object)
-
-    class ImpostorFormField(forms.Field, metaclass=FakeMroMeta):
-        pass
-
-    with pytest.raises(ConfigurationError, match="Unsupported form field type"):
-        form_converter.convert_form_field(object.__new__(ImpostorFormField))
 
 
 def test_registry_walk_scans_a_snapshot_not_a_live_items_view() -> None:

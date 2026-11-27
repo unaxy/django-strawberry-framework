@@ -1,10 +1,10 @@
 """Exceptions raised by django-strawberry-framework.
 
 Lives at the bottom of the import graph - no Django, no Strawberry, and from
-the package only ``utils/truth.py`` (which imports nothing) - so the exception
-hierarchy can be raised from anywhere without circulars. ``truth`` is imported
-where a message is built, not at module scope: importing it runs the ``utils``
-package, whose modules import this one.
+the package only ``utils/introspection.py`` - so the exception hierarchy can be
+raised from anywhere without circulars. ``introspection`` is imported where a
+message is built, not at module scope: importing it runs the ``utils`` package,
+whose modules import this one.
 """
 
 from __future__ import annotations
@@ -28,10 +28,8 @@ class DjangoStrawberryFrameworkError(Exception):
     granular handling is needed.
 
     Rendering is the standard ``Exception`` behaviour. Every message the
-    framework raises is built as an exact ``str`` at the raise site, from
-    truthful renders (``utils/truth.py``), so ``str`` / ``repr`` of a
-    framework-raised error never runs consumer code. A consumer that raises one
-    of these with its own object as the message gets that object's own
+    framework raises is built as a ``str`` at the raise site. A consumer that raises
+    one of these with its own object as the message gets that object's own
     ``__str__`` / ``__repr__``, exactly as with any other exception.
     """
 
@@ -66,27 +64,26 @@ class ConfigurationError(DjangoStrawberryFrameworkError):
 def _model_label(model: object) -> str:
     """Return ``app_label.ModelName`` for a Django model, or the value's kind for anything else.
 
-    ``_meta`` is read from the real namespaces (``truth.static_attr``), so a
-    consumer class cannot answer it through a metaclass hook; the ``label`` it
+    ``_meta`` is read statically (``utils/introspection.py::mro_attr``); the ``label`` it
     holds is Django's own ``Options`` property.
     """
-    from .utils import truth  # noqa: PLC0415 - import cycle
+    from .utils import introspection  # noqa: PLC0415 - import cycle
 
-    meta = truth.static_attr(model, "_meta")
+    meta = introspection.mro_attr(model, "_meta")
     label = None if meta is None else getattr(meta, "label", None)
-    if truth.is_instance(label, str):
-        return truth.text(label, fallback=truth.kind(model))
-    return truth.kind(model)
+    if isinstance(label, str):
+        return introspection.text(label, fallback=introspection.kind(model))
+    return introspection.kind(model)
 
 
 def _terminal_label(terminal: object) -> str:
     """Return a Django field's ``name``, or the value's kind for anything else."""
-    from .utils import truth  # noqa: PLC0415 - import cycle
+    from .utils import introspection  # noqa: PLC0415 - import cycle
 
     name = getattr(terminal, "name", None)
-    if truth.is_instance(name, str):
-        return truth.text(name, fallback=truth.kind(terminal))
-    return truth.kind(terminal)
+    if isinstance(name, str):
+        return introspection.text(name, fallback=introspection.kind(terminal))
+    return introspection.kind(terminal)
 
 
 class PathResolutionError(ConfigurationError):
@@ -129,11 +126,9 @@ class PathResolutionError(ConfigurationError):
         segment: str,
     ) -> None:
         """Build the message from the unclassifiable ``segment`` of ``field_path`` on ``model``."""
-        from .utils import truth  # noqa: PLC0415 - import cycle
-
         super().__init__(
-            f"Cannot classify path {truth.render(field_path)} on model {_model_label(model)}: "
-            f"segment {truth.render(segment)} is not a traversable model-field relation.",
+            f"Cannot classify path {field_path!r} on model {_model_label(model)}: "
+            f"segment {segment!r} is not a traversable model-field relation.",
         )
         self.model: object = model
         self.field_path: str = field_path
@@ -145,7 +140,7 @@ class PathResolutionError(ConfigurationError):
         return (
             type(self),
             (self.model, self.field_path, self.segment),
-            vars(self),  # truth: ok the exception's own pickle state, read by its own __reduce__
+            vars(self),  # the exception's own pickle state, read by its own __reduce__
         )
 
 
@@ -182,11 +177,9 @@ class LookupValidationError(ConfigurationError):
         part: str,
     ) -> None:
         """Build the message from the invalid ``part`` of ``lookup_expr`` for ``terminal``."""
-        from .utils import truth  # noqa: PLC0415 - import cycle
-
         super().__init__(
-            f"Invalid lookup expression {truth.render(lookup_expr)} for terminal "
-            f"{_terminal_label(terminal)}: part {truth.render(part)} is not a valid transform "
+            f"Invalid lookup expression {lookup_expr!r} for terminal "
+            f"{_terminal_label(terminal)}: part {part!r} is not a valid transform "
             "or lookup.",
         )
         self.terminal: object = terminal
@@ -199,7 +192,7 @@ class LookupValidationError(ConfigurationError):
         return (
             type(self),
             (self.terminal, self.lookup_expr, self.part),
-            vars(self),  # truth: ok the exception's own pickle state, read by its own __reduce__
+            vars(self),  # the exception's own pickle state, read by its own __reduce__
         )
 
 

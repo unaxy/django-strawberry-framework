@@ -1896,7 +1896,7 @@ def test_django_mutation_validate_meta_reads_a_hostile_hash_operation_as_its_tex
     """DjangoMutation._validate_meta reads ``Meta.operation`` as the plain text it spells.
 
     A str subclass's ``__hash__`` may raise; the membership test runs over the exact
-    ``str`` copy ``truth.text`` makes, so the override never runs and the operation is
+    ``str`` copy ``introspection.text`` makes, so the override never runs and the operation is
     the ``create`` it spells.
     """
     declare_products_primaries()

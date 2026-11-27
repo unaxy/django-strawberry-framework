@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, final
 
 from typing_extensions import override
 
-from . import truth
+from . import introspection
 from .inputs import FieldConversionBase
 
 if TYPE_CHECKING:
@@ -113,10 +113,8 @@ def convert_with_mro(
        bare-``forms.Field`` exact-type pattern). ``None`` is a real result, not a
        continue signal.
 
-    2. **Scalar registry MRO walk.** ``utils/truth.py::mro_entry`` walks the
-       field class's real ``__mro__`` (read from the interpreter, so a consumer
-       metaclass cannot intercept the read) against one snapshot of
-       ``scalar_registry``, matching keys by identity, so the
+    2. **Scalar registry MRO walk.** ``utils/introspection.py::mro_entry`` walks the
+       field class's ``__mro__`` against one snapshot of ``scalar_registry``, so the
        MOST-specific registered class wins regardless of dict insertion order
        (``FloatField`` / ``DecimalField`` resolve to their own entry, NOT the
        ``IntegerField`` they subclass; a supported field's UNregistered
@@ -138,7 +136,7 @@ def convert_with_mro(
             result = handler(field)
             if type(result) is not MroContinue:
                 return result
-    entry = truth.mro_entry(scalar_registry, truth.class_of(field))
+    entry = introspection.mro_entry(scalar_registry, type(field))
     if entry is not None:
         return entry[1]
     raise fallthrough_error_factory(field)

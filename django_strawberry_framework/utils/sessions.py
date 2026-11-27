@@ -104,8 +104,8 @@ from django.utils.module_loading import import_string
 from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 
-from . import truth
-from ._narrowing import require_instance
+from . import introspection
+from ._narrowing import is_str, require_instance
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -191,11 +191,11 @@ def session_store_class() -> type[SessionBase]:
     ) as exc:
         raise ConfigurationError(
             "SESSION_ENGINE could not be read from settings "
-            f"({truth.name(type(exc))}); check settings.SESSION_ENGINE.",
+            f"({introspection.name(type(exc))}); check settings.SESSION_ENGINE.",
         ) from exc
-    if not truth.is_instance(engine, str):
+    if not is_str(engine):
         raise ConfigurationError(
-            f"SESSION_ENGINE must be a string; got {truth.describe(engine)}.",
+            f"SESSION_ENGINE must be a string; got {introspection.describe(engine)}.",
         )
     if not engine:
         raise ConfigurationError(
@@ -215,7 +215,7 @@ def session_store_class() -> type[SessionBase]:
     ) as exc:
         raise ConfigurationError(
             f"Could not resolve SESSION_ENGINE {engine!r}'s SessionStore "
-            f"({truth.name(type(exc))}); check settings.SESSION_ENGINE.",
+            f"({introspection.name(type(exc))}); check settings.SESSION_ENGINE.",
         ) from exc
 
 

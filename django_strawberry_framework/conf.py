@@ -49,8 +49,13 @@ from django.conf import settings as django_settings
 from django.test.signals import setting_changed
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_exact_dict, is_mapping, read_attr
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import (
+    is_exact_dict,
+    is_mapping,
+    is_str,
+    read_attr,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -214,7 +219,7 @@ def _normalize_user_settings(value: object) -> dict[object, object]:
         return {}
     if not is_mapping(value):
         raise ConfigurationError(
-            f"`{DJANGO_SETTINGS_KEY}` must be a mapping or None; got {truth.kind(value)}.",
+            f"`{DJANGO_SETTINGS_KEY}` must be a mapping or None; got {introspection.kind(value)}.",
         )
     mapping = value
     if is_exact_dict(mapping):
@@ -382,10 +387,10 @@ def _validated_patch_flags(plain: dict[object, object]) -> dict[str, bool]:
     # ``types/base.py::_validate_relation_shapes`` key-guard precedent).
     keyed: dict[str, object] = {}
     for name, entry in plain.items():
-        if not truth.is_instance(name, str):
+        if not is_str(name):
             raise ConfigurationError(
                 f"`{APPLY_UPSTREAM_PATCHES_KEY}` keys must be dependency name strings; "
-                f"got {truth.render(name)}.",
+                f"got {name!r}.",
             )
         keyed[name] = entry
     unknown = set(keyed) - UPSTREAM_PATCH_DEPENDENCIES
@@ -398,8 +403,8 @@ def _validated_patch_flags(plain: dict[object, object]) -> dict[str, bool]:
     for name, value in keyed.items():
         if type(value) is not bool:
             raise ConfigurationError(
-                f"`{APPLY_UPSTREAM_PATCHES_KEY}[{truth.render(name)}]` must be a bool; "
-                f"got {truth.kind(value)}.",
+                f"`{APPLY_UPSTREAM_PATCHES_KEY}[{name!r}]` must be a bool; "
+                f"got {introspection.kind(value)}.",
             )
         flags[name] = value
     return flags
@@ -455,7 +460,7 @@ def upstream_patches_enabled(dependency: str) -> bool:
     if not is_mapping(configured):
         raise ConfigurationError(
             f"`{APPLY_UPSTREAM_PATCHES_KEY}` must be a bool or a mapping of dependency names "
-            f"to bools; got {truth.kind(configured)}.",
+            f"to bools; got {introspection.kind(configured)}.",
         )
     # One copy is the single consumption point, so a one-shot mapping cannot
     # answer validation and the final ``get`` differently; the copy runs the

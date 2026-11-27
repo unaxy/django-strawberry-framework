@@ -27,7 +27,8 @@ from strawberry.file_uploads.scalars import UploadDefinition as _UploadDefinitio
 from strawberry.schema.config import StrawberryConfig
 from strawberry.types.scalar import ScalarDefinition
 
-from .utils import truth
+from .utils import introspection
+from .utils._narrowing import is_real_instance, is_str
 from .utils.typing import call_forwarded
 
 if TYPE_CHECKING:
@@ -75,24 +76,24 @@ def _parse_bigint(value: object) -> int:
         - non-decimal strings ("abc", "1.9", "1e3", "0x10")
         - None and other types
     """
-    if truth.is_instance(value, bool):
+    if type(value) is bool:
         # This parser uniformly raises ValueError (never TypeError) for every
         # invalid BigInt input; bool is rejected here
         # (before the int check, since bool is an int subclass) as an invalid
         # *value*, matching the GraphQL scalar parse_value contract.
         raise ValueError("BigInt does not accept boolean values")
-    if truth.is_instance(value, int):
+    if is_real_instance(value, int):
         # The base slot, so an int subclass's own ``__int__`` never decides the
         # value handed to a resolver.
         return int.__int__(value)
-    if not truth.is_instance(value, str):
-        raise ValueError(f"BigInt cannot parse {truth.kind(value)}")
+    if not is_str(value):
+        raise ValueError(f"BigInt cannot parse {introspection.kind(value)}")
     if not _BIGINT_STRING_PATTERN.fullmatch(value):
         raise ValueError(
             f"BigInt requires a plain ASCII decimal integer string "
             f"(optional leading minus for non-zero, no leading zeroes, "
             f"no underscores, no plus sign, no Unicode digits); got "
-            f"{truth.render(value)}",
+            f"{value!r}",
         )
     return int(value)
 
@@ -111,16 +112,16 @@ def _serialize_bigint(value: object) -> str:
     permissive ``serialize=str`` would let a schema emit values the parser
     rejects, breaking the input/output symmetry contract.
     """
-    if truth.is_instance(value, bool):
+    if type(value) is bool:
         raise TypeError(f"BigInt cannot serialize bool value {value!r}")
-    if truth.is_instance(value, int):
+    if is_real_instance(value, int):
         # ``str(value)`` dispatches to a subclass's override. In CPython,
         # ``int.__str__`` inherits ``object.__str__`` which delegates to
         # ``tp_repr`` (the subclass's ``__repr__``), so the serializer normalizes via
         # ``int.__repr__`` to bypass consumer-supplied ``__repr__`` / ``__str__``
         # implementations and guarantee canonical decimal serialization.
         return int.__repr__(value)
-    raise TypeError(f"BigInt cannot serialize {truth.kind(value)}")
+    raise TypeError(f"BigInt cannot serialize {introspection.kind(value)}")
 
 
 BigInt = NewType("BigInt", int)

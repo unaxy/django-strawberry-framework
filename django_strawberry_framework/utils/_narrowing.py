@@ -49,12 +49,12 @@ narrows like any other consumer value.
 class's own type arguments, for a generic class (``ModelChoiceField[Model]`` through a typed
 alias) where a bare ``isinstance`` leaves them ``Unknown``.
 
-``is_concrete_field``, ``is_queryset``, ``is_options``, ``is_lookup`` and ``is_identity_map``
+``is_concrete_field``, ``is_queryset``, ``is_options`` and ``is_lookup``
 are ``isinstance`` checks (like ``is_dict``, each name IS the class's own ``__instancecheck__``)
 whose claim is only what the check proves: a model ``Field`` (never a reverse
 ``ForeignObjectRel``), a ``QuerySet`` whose rows are ``object`` (a ``.values()`` queryset
 passes the same check, so no model-row claim is made), a model's ``Options``, a Django
-``Lookup`` whose output is ``object``, and an identity map read with ``object`` keys and values.
+``Lookup`` whose output is ``object``.
 ``is_real_mapping`` / ``is_real_collection`` stand with ``is_str``: the
 ``issubclass(type(value), ABC)`` check asked of the real type.
 
@@ -77,8 +77,6 @@ from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, TypeGuard, TypeVar, overload
 
 from django.utils.functional import Promise
-
-from . import truth
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, ItemsView, Iterator
@@ -144,10 +142,6 @@ if TYPE_CHECKING:
 
     def is_lookup(_value: object, /) -> TypeIs[_LookupAny]:
         """Return whether the value is a Django ``Lookup`` (subclasses included)."""
-        ...
-
-    def is_identity_map(_value: object, /) -> TypeIs[truth.IdentityMap[object, object]]:
-        """Return whether the value is a ``truth.IdentityMap``; the claim is ``object`` keys and values."""
         ...
 
     def dict_items(_value: dict[_KeyT, _ValueT], /) -> ItemsView[_KeyT, _ValueT]:
@@ -277,7 +271,6 @@ else:
     is_queryset = models.QuerySet.__instancecheck__
     is_options = Options.__instancecheck__
     is_lookup = Lookup.__instancecheck__
-    is_identity_map = truth.IdentityMap.__instancecheck__
     dict_items = dict.items
     dict_get = dict.get
     list_iter = list.__iter__
@@ -327,7 +320,6 @@ __all__ = (
     "is_exact_list",
     "is_exact_pair",
     "is_exact_tuple",
-    "is_identity_map",
     "is_instance",
     "is_iterable",
     "is_list",
@@ -391,11 +383,16 @@ def is_real_collection(value: object) -> TypeIs[Collection[object]]:
 _InstanceT = TypeVar("_InstanceT")
 
 
+def _kind(value: object) -> str:
+    """Name ``value`` for a refusal: a class by its own name, anything else by its class's."""
+    return value.__name__ if isinstance(value, type) else type(value).__name__
+
+
 def require_instance(value: object, cls: type[_InstanceT], /) -> _InstanceT:
     """Return ``value`` as the ``cls`` instance it must be, raising ``TypeError`` when it is not."""
     if not isinstance(value, cls):
         raise TypeError(
-            f"expected an instance of {truth.kind(cls)}, got {truth.kind(value)}",
+            f"expected an instance of {cls.__name__}, got {_kind(value)}",
         )
     return value
 
@@ -421,7 +418,7 @@ def require(value: object, predicate: Callable[[object], bool], /) -> object:
     """
     if not predicate(value):
         raise TypeError(
-            f"expected the type the source guarantees, got {truth.kind(value)}",
+            f"expected the type the source guarantees, got {_kind(value)}",
         )
     return value
 
@@ -441,11 +438,39 @@ def is_class(value: object) -> TypeIs[type[object]]:
     return issubclass(type(value), type)
 
 
-def is_real_instance(value: object, cls: type[_InstanceT], /) -> TypeIs[_InstanceT]:
+# The builtin containers narrow through their own overloads to a container of ``object``
+# (a bare ``type[_InstanceT]`` solves a generic class with ``Unknown`` arguments), which
+# the caller then checks member by member.
+@overload
+def is_real_instance(
+    value: object,
+    cls: type[dict[object, object]],
+    /,
+) -> TypeIs[dict[object, object]]: ...
+@overload
+def is_real_instance(value: object, cls: type[list[object]], /) -> TypeIs[list[object]]: ...
+@overload
+def is_real_instance(
+    value: object,
+    cls: type[tuple[object, ...]],
+    /,
+) -> TypeIs[tuple[object, ...]]: ...
+@overload
+def is_real_instance(value: object, cls: type[set[object]], /) -> TypeIs[set[object]]: ...
+@overload
+def is_real_instance(
+    value: object,
+    cls: type[frozenset[object]],
+    /,
+) -> TypeIs[frozenset[object]]: ...
+@overload
+def is_real_instance(value: object, cls: type[_InstanceT], /) -> TypeIs[_InstanceT]: ...
+def is_real_instance(value: object, cls: type[object], /) -> bool:
     """Return whether ``value`` is an instance of ``cls`` (subclasses included), asked of its real type.
 
     A Django lazy proxy forwards ``__class__``, so ``isinstance`` would run its factory
-    and answer for the wrapped value; the real type answers for the proxy itself.
+    and answer for the wrapped value; the real type answers for the proxy itself, which
+    the base slots (``dict_items``, ``list_iter``, ...) refuse.
     """
     return issubclass(type(value), cls)
 

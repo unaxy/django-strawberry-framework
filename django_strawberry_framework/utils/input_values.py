@@ -40,8 +40,8 @@ from strawberry.types.unset import UnsetType
 
 from django_strawberry_framework.exceptions import ConfigurationError
 
-from . import truth
-from ._narrowing import dict_get, is_mapping, read_attr
+from . import introspection
+from ._narrowing import dict_get, is_mapping, is_real_instance, is_str, read_attr
 from .canonical import base_container_values
 
 if TYPE_CHECKING:
@@ -78,22 +78,20 @@ LEAF = "leaf"
 def _field_name(value: object, *, input_value: object) -> str:
     """Normalize one input key or reject it before lookup/permission dispatch.
 
-    The key's real type decides (``truth.is_instance``): a ``__class__`` property can
-    neither claim ``str`` for an object the base ``str`` slot refuses nor raise out of
-    the check.
+    The key's real type decides (``utils/_narrowing.py::is_str``).
     """
-    if not truth.is_instance(value, str):
+    if not is_str(value):
         raise ConfigurationError(
             "Set input field names must be strings; received an invalid field name in an "
-            f"input of type {truth.kind(input_value)}.",
+            f"input of type {introspection.kind(input_value)}.",
         )
-    return truth.text(value)
+    return introspection.text(value)
 
 
 def _walk_error(input_value: object, detail: str) -> ConfigurationError:
     """Build a typed, safe traversal error for malformed consumer input."""
     return ConfigurationError(
-        f"Could not traverse set input of type {truth.kind(input_value)}: {detail}.",
+        f"Could not traverse set input of type {introspection.kind(input_value)}: {detail}.",
     )
 
 
@@ -108,10 +106,10 @@ def iter_input_items(input_value: object) -> list[tuple[str, object]] | None:
 
     Single-sited here as the lowest-level traversal primitive.
     """
-    if truth.is_instance(input_value, dict):
+    if is_real_instance(input_value, dict):
         pairs = base_container_values(input_value)
         return [(_field_name(name, input_value=input_value), value) for name, value in pairs]
-    dataclass_fields: object = truth.static_attr(input_value, "__dataclass_fields__")
+    dataclass_fields: object = introspection.mro_attr(input_value, "__dataclass_fields__")
     if dataclass_fields is None:
         return None
     if not is_mapping(dataclass_fields):
@@ -132,7 +130,7 @@ def input_field_value(input_value: object, name: str) -> object:
     composes this with ``is_inactive_value`` instead of re-spelling the sniff.
     """
     field_name = _field_name(name, input_value=input_value)
-    if truth.is_instance(input_value, dict):
+    if is_real_instance(input_value, dict):
         return dict_get(input_value, field_name)
     return getattr(input_value, field_name, None)
 
@@ -229,12 +227,12 @@ def assert_set_traversal_depth(
     so the sentence is shared and only the three words that name WHICH walk hit
     the cap are per-caller.
     """
-    declared = truth.static_attr(set_cls, "_MAX_LOGIC_DEPTH")
-    knob_governs = truth.is_instance(declared, int)
+    declared = introspection.mro_attr(set_cls, "_MAX_LOGIC_DEPTH")
+    knob_governs = isinstance(declared, int)
     cap = declared if knob_governs else DEFAULT_SET_INPUT_TRAVERSAL_DEPTH
     if depth <= cap:
         return
-    label = truth.qualname(set_cls)
+    label = str(read_attr(set_cls, "__qualname__"))
     if subject:
         label = f"{subject} {label}"
     cap_detail = (
@@ -267,7 +265,7 @@ def related_declaration_mapping(owner: object, related_attr: str) -> Mapping[obj
     """Read a set's related-declaration attribute and prove it is a mapping.
 
     The shared front half of every related-branch traversal: read the attribute
-    from the class's real namespaces (``truth.static_attr``), treat an absent or ``None``
+    from the class statically (``utils/introspection.py::mro_attr``), treat an absent or ``None``
     declaration as "no related fields", and reject anything that is not a
     ``Mapping`` before a caller starts indexing it. The permission walker and
     the neutral input traversal both need exactly this and had it written out
@@ -281,7 +279,7 @@ def related_declaration_mapping(owner: object, related_attr: str) -> Mapping[obj
 
     Raises :class:`RelatedDeclarationError` for the caller to translate.
     """
-    related: object = truth.static_attr(owner, related_attr)
+    related: object = introspection.mro_attr(owner, related_attr)
     if related is None:
         return {}
     if not is_mapping(related):
@@ -319,15 +317,15 @@ def iter_active_fields(
     handle_top_level_list = config.handle_top_level_list
     if is_inactive_value(input_value, unset_sentinel=unset_sentinel):
         return
-    if handle_top_level_list and truth.is_instance(input_value, list):
+    if handle_top_level_list and is_real_instance(input_value, list):
         elements = base_container_values(input_value)
         for element in elements:
             if is_inactive_value(element, unset_sentinel=unset_sentinel):
                 continue
-            if truth.is_instance(element, list) or iter_input_items(element) is None:
+            if is_real_instance(element, list) or iter_input_items(element) is None:
                 raise ConfigurationError(
                     "Order input list elements must be mapping or dataclass values; "
-                    f"received {truth.kind(element)}.",
+                    f"received {introspection.kind(element)}.",
                 )
             yield from iter_active_fields(set_cls, element, config)
         return

@@ -69,11 +69,6 @@ instances (``ClaimsClass(claimed)`` takes the claim per instance); both render a
 ``<ClassReadRaises>`` / ``<ClaimsClass>`` so a rejection message that quotes the value is
 deterministic.
 
-``UnreadableStateQuerySet`` is a ``QuerySet`` whose instance ``__dict__`` read raises, the
-hostile shape a reader of queryset state through ``object.__getattribute__`` must refuse; the
-two redeclarations the checker rejects (the ``Final`` ``__dict__``, and a property over an
-attribute) are suppressed here once rather than at each row.
-
 ``comparing_metaclass`` derives a metaclass from ``base`` whose ``__eq__`` answers every
 comparison of its classes with ``verdict`` (equal, unequal, or a raised ``RuntimeError``) and
 records each call, so a row declares a consumer class under it and asserts both the honest
@@ -85,7 +80,7 @@ for a row whose class also passes through a standard-library equality test it ca
 ``HostileNameMeta`` is a metaclass whose classes answer every ``__name__`` read with
 ``RuntimeError``, the hostile shape a rejection that names the received value's type must
 survive: a guard that reads ``type(value).__name__`` raises the consumer's error instead of its
-own, while one that asks the interpreter (``truth.kind``) still names the class. A row declares
+own, while one that asks the interpreter (``introspection.kind``) still names the class. A row declares
 its own ``class Evil(metaclass=HostileNameMeta)`` and instantiates it. The hostility lives in
 ``__getattribute__`` rather than a ``__name__`` property, so the metaclass keeps typeshed's
 contract for ``type.__name__`` (a writable ``str``): a read may raise and a write still stores,
@@ -187,8 +182,12 @@ from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoType
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_awaitable, pk_of, read_attr
+from django_strawberry_framework.utils._narrowing import (
+    instance_state,
+    is_awaitable,
+    pk_of,
+    read_attr,
+)
 from django_strawberry_framework.utils.canonical import canonical_sort_key
 from django_strawberry_framework.utils.querysets import model_for
 from django_strawberry_framework.utils.typing import object_result
@@ -512,19 +511,6 @@ class ClassReadRaises(ClassReadRaisesBase):
         return "<ClassReadRaises>"
 
 
-class UnreadableStateQuerySet(QuerySet[_ModelT]):
-    """A queryset whose instance ``__dict__`` read raises, so its state cannot be read or rebuilt."""
-
-    # basedpyright: the hostile shape under test; a raising __dict__ descriptor is what a state
-    # reader must refuse, and the checker forbids redeclaring the Final __dict__
-    @property  # pyright: ignore[reportGeneralTypeIssues]
-    @override
-    # basedpyright: a ``__dict__`` property whose read raises; the checker rejects any property
-    # overriding a base class attribute
-    def __dict__(self) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-        raise RuntimeError("unreadable instance state")
-
-
 class ClaimsClass(ClaimsClassBase):
     """The ready-made ``ClaimsClassBase`` claiming ``claimed``, rendered ``<ClaimsClass>``."""
 
@@ -572,7 +558,7 @@ def definition_raises(cls: _ClassT) -> _ClassT:
 
 def module_binding(module: ModuleType, name: str) -> object:
     """Return ``module``'s own binding for ``name`` (its ``__dict__`` entry)."""
-    return truth.instance_state(module)[name]
+    return instance_state(module)[name]
 
 
 def stub_module(name: str, **attributes: object) -> ModuleType:

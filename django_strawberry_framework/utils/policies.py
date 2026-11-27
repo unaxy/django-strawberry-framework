@@ -25,8 +25,8 @@ from typing import TYPE_CHECKING, TypeVar
 
 from django_strawberry_framework.exceptions import ConfigurationError
 
-from . import truth
-from ._narrowing import is_real_mapping
+from . import introspection
+from ._narrowing import is_real_instance, is_real_mapping, is_str
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -67,12 +67,12 @@ def resolve_policy(
     so a Django lazy proxy (``SimpleLazyObject``) of a policy or a mapping is the
     typed rejection below, like any other value of the wrong class.
     """
-    if truth.is_instance(explicit, policy_cls):
+    if is_real_instance(explicit, policy_cls):
         return explicit
     overrides = explicit if explicit is not None else read_setting()
     if overrides is None:
         return default
-    if truth.is_instance(overrides, policy_cls):
+    if is_real_instance(overrides, policy_cls):
         # An instance behind the SETTING slot is the same declaration the
         # explicit argument accepts: one ladder with two spellings.
         return overrides
@@ -80,9 +80,9 @@ def resolve_policy(
     # ``__class__`` raises or lies is the typed rejection below, never its own error.
     if not is_real_mapping(overrides):
         raise ConfigurationError(
-            f"The {display_name} must be {_article(truth.name(policy_cls))} "
-            f"{truth.name(policy_cls)} or a mapping of {unit} names to values; "
-            f"got {truth.describe(overrides)}.",
+            f"The {display_name} must be {_article(introspection.name(policy_cls))} "
+            f"{introspection.name(policy_cls)} or a mapping of {unit} names to values; "
+            f"got {introspection.describe(overrides)}.",
         )
     # Materialize ONCE, and read only the plain copy afterwards. A ``Mapping``
     # may be stateful: validating unknown keys over one iteration and then
@@ -98,14 +98,14 @@ def resolve_policy(
     # (the ``conf.py::upstream_patches_enabled`` key-guard precedent). A string
     # key is recognised by its real class.
     for name in plain:
-        if not truth.is_instance(name, str):
+        if not is_str(name):
             raise ConfigurationError(
-                f"The {display_name} {unit} names must be strings; got {truth.describe(name)}.",
+                f"The {display_name} {unit} names must be strings; got {introspection.describe(name)}.",
             )
     # Subclass keys are copied to the base ``str`` before anything compares or
     # orders them, so the constructor below receives exact strings carrying
     # the name the deployment wrote.
-    normalized = {truth.text(name): value for name, value in plain.items()}
+    normalized = {introspection.text(name): value for name, value in plain.items()}
     known = {field.name for field in fields(policy_cls)}
     unknown = sorted(name for name in normalized if name not in known)
     if unknown:

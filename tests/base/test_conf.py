@@ -49,7 +49,7 @@ from django_strawberry_framework.conf import (
 from django_strawberry_framework.conf import settings as bound_settings
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils._narrowing import read_attr
-from tests._idioms import ClaimsClassBase, ClassReadRaises, HostileNameMeta
+from tests._idioms import ClaimsClassBase, ClassReadRaises
 
 _PATCH_DEPENDENCIES = sorted(conf.UPSTREAM_PATCH_DEPENDENCIES)
 
@@ -820,62 +820,5 @@ def test_upstream_patches_enabled_hostile_key_isinstance_becomes_configurationer
     with (
         mock.patch.object(conf, "settings", s),
         pytest.raises(ConfigurationError, match="dependency name strings"),
-    ):
-        upstream_patches_enabled("strawberry")
-
-
-def test_normalize_rejection_skips_raising_metaclass_name() -> None:
-    """A non-mapping whose metaclass ``__name__`` raises takes the typed rejection.
-
-    The non-mapping rejection assembles its message with the received
-    value's type name at the raise site - before any exception object
-    exists. That name is read from the interpreter (``truth.kind``), so a
-    metaclass whose ``__name__`` read raises never runs and the message
-    names the real class.
-    """
-
-    class Evil(metaclass=HostileNameMeta):
-        pass
-
-    evil = Evil()
-
-    with pytest.raises(ConfigurationError, match="must be a mapping or None; got Evil"):
-        conf._normalize_user_settings(evil)
-    with pytest.raises(ConfigurationError, match="must be a mapping or None; got Evil"):
-        # basedpyright: the object whose class __name__ raises is the hostile input under test;
-        # Settings types the parameter as Mapping[str, object] | None
-        Settings(evil)  # pyright: ignore[reportArgumentType]
-
-
-def test_upstream_patches_toggle_rejection_skips_raising_metaclass_name() -> None:
-    """A non-bool/non-mapping toggle whose metaclass ``__name__`` raises is refused typed."""
-
-    class Evil(metaclass=HostileNameMeta):
-        pass
-
-    evil = Evil()
-
-    s = Settings({"APPLY_UPSTREAM_PATCHES": evil})
-
-    with (
-        mock.patch.object(conf, "settings", s),
-        pytest.raises(ConfigurationError, match="bool or a mapping"),
-    ):
-        upstream_patches_enabled("strawberry")
-
-
-def test_upstream_patches_mapping_value_rejection_skips_raising_metaclass_name() -> None:
-    """A non-bool per-dependency value whose metaclass ``__name__`` raises is refused typed."""
-
-    class Evil(metaclass=HostileNameMeta):
-        pass
-
-    evil = Evil()
-
-    s = Settings({"APPLY_UPSTREAM_PATCHES": {"strawberry": evil}})
-
-    with (
-        mock.patch.object(conf, "settings", s),
-        pytest.raises(ConfigurationError, match="must be a bool"),
     ):
         upstream_patches_enabled("strawberry")

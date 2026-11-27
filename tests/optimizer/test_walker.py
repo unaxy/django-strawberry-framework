@@ -114,7 +114,6 @@ from django_strawberry_framework.optimizer.walker import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.finalizer import _record_relation_connection
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_list,
     list_of,
@@ -6453,7 +6452,7 @@ def test_single_valued_child_hook_reads_every_target_row_in_the_default_manager_
         @classmethod
         def get_queryset(cls, queryset: QuerySet[Shelf], info: strawberry.Info) -> QuerySet[Shelf]:
             seen.append(
-                (truth.class_of(queryset), tuple(sorted(queryset.values_list("code", flat=True)))),
+                (type(queryset), tuple(sorted(queryset.values_list("code", flat=True)))),
             )
             return queryset
 

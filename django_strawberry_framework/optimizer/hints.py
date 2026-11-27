@@ -29,8 +29,8 @@ from typing import TYPE_CHECKING, ClassVar
 from django.db.models import Prefetch
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import is_real_instance, is_str, read_attr
 
 # The shared public strategy-selection type (and the validator it feeds) are
 # owned by ``nested_fetch`` beside ``NestedConnectionStrategy``. They are
@@ -78,15 +78,15 @@ def _require_prefetch(obj: object) -> _PrefetchAny:
     legitimate "no prefetch object" default - without a factory-side
     check, ``prefetch(None)`` would become a silent no-op.
 
-    The check reads the value's real class (``truth.is_instance``), so a
+    The check reads the value's real class (``is_real_instance``), so a
     ``Prefetch`` subclass passes and a value whose ``__class__`` read raises (or
     claims ``Prefetch``) is the typed ``ConfigurationError``, as is a Django lazy
     proxy of a ``Prefetch`` (``SimpleLazyObject``), refused like ``strategy``'s.
     """
-    if not truth.is_instance(obj, _PREFETCH):
+    if not is_real_instance(obj, _PREFETCH):
         raise ConfigurationError(
             "OptimizerHint.prefetch(obj) requires a django.db.models.Prefetch "
-            f"instance; got {truth.kind(obj)}.",
+            f"instance; got {introspection.kind(obj)}.",
         )
     return obj
 
@@ -114,12 +114,12 @@ def _require_strategy(name: object) -> StrategySelection:
     if name is None:
         raise ConfigurationError(
             "OptimizerHint.strategy(name) requires a strategy name ('windowed' | 'lateral' | 'auto') "
-            f"or a NestedConnectionStrategy instance; got {truth.kind(name)}.",
+            f"or a NestedConnectionStrategy instance; got {introspection.kind(name)}.",
         )
     # ``resolve_strategy`` raises for anything that is not a strategy selection and hands a
     # non-name selection back unchanged.
     strategy = resolve_strategy(name)
-    return name if truth.is_instance(name, str) else strategy
+    return name if is_str(name) else strategy
 
 
 @dataclass(frozen=True)

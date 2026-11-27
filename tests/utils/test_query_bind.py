@@ -38,9 +38,10 @@ from django.db.models.lookups import BuiltinLookup
 from django.test.utils import register_lookup
 from typing_extensions import override
 
-from django_strawberry_framework.utils import query_bind, truth
+from django_strawberry_framework.utils import query_bind
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    instance_state,
     is_list,
     read_attr,
 )
@@ -488,7 +489,7 @@ def test_unaudited_date_checks_body_is_never_shadowed(
         assert _date_checks_digest(method) is None
     row = _DatedSequence(seq=1, pub=datetime.datetime(2021, 1, 1, tzinfo=datetime.timezone.utc))
     with date_checks_guarded(row, provided={"seq", "pub"}, alias="default", answer=_answer):
-        assert "_perform_date_checks" not in truth.instance_state(row)
+        assert "_perform_date_checks" not in instance_state(row)
 
 
 def test_date_checks_body_is_hashed_once_per_function(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -505,7 +506,7 @@ def test_date_checks_body_is_hashed_once_per_function(monkeypatch: pytest.Monkey
     row = _DatedSequence(seq=1, pub=datetime.datetime(2021, 1, 1, tzinfo=datetime.timezone.utc))
     for _ in range(2):
         with date_checks_guarded(row, provided={"seq", "pub"}, alias="default", answer=_answer):
-            assert "_perform_date_checks" in truth.instance_state(row)
+            assert "_perform_date_checks" in instance_state(row)
     query_bind._date_checks_digest.cache_clear()
 
     assert len(calls) == 1

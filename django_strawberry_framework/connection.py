@@ -116,9 +116,10 @@ from .optimizer.selections import (
 from .registry import register_subsystem_clear
 from .resource_policy import check_deadline
 from .types.resolvers import _check_n1
-from .utils import truth
 from .utils._narrowing import (
+    class_namespace,
     is_awaitable,
+    is_class,
     is_list,
     is_queryset,
     optional_annotation,
@@ -221,7 +222,7 @@ def _keyset_connection_context(cls: type[_ConnectionT]) -> CursorState | None:
     this module carries no slot and resolves as offset-mode.
     """
     # ``_generate_connection_class`` writes the state, or ``False`` for offset mode.
-    state = truth.class_dict(cls).get("_dst_keyset_state")
+    state = class_namespace(cls).get("_dst_keyset_state")
     if state is None or state is False:
         return None
     return require_instance(state, CursorState)
@@ -383,7 +384,7 @@ def _build_windowed_fallback(
 
 def _is_edge_class(value: object) -> TypeIs[type[relay.Edge[relay.Node]]]:
     """Return whether ``value`` is a ``relay.Edge`` subclass; its node parameter is erased at run time."""
-    return truth.is_subclass(value, relay.Edge)
+    return is_class(value) and issubclass(value, relay.Edge)
 
 
 @functools.cache
@@ -1447,10 +1448,10 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
 # (the documented test-only registry reset; production never reloads the schema) so a
 # registry-clearing test or fixture also drops the generated ``<TypeName>Connection``
 # classes.
-_connection_type_cache: truth.IdentityMap[
+_connection_type_cache: dict[
     type[DjangoType],
     type[DjangoConnection[DjangoType]],
-] = truth.IdentityMap()
+] = {}
 register_subsystem_clear(_connection_type_cache.clear, owner="connection.type_cache")
 
 

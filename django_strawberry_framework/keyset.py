@@ -102,7 +102,7 @@ from graphql import GraphQLError
 from strawberry.relay.utils import from_base64, to_base64
 
 from .exceptions import ConfigurationError
-from .utils import truth
+from .utils import introspection
 from .utils._narrowing import is_concrete_field, is_dict, is_list, list_of, read_attr, require
 from .utils.connections import pagination_argument_error
 from .utils.imports import CRYPTOGRAPHY_FLOOR, require_optional_module
@@ -257,12 +257,12 @@ def split_order_ref(order_ref: str, *, owner: str | None = None) -> tuple[str, b
     name = order_ref[1:] if descending else order_ref
     if not name or name.startswith("-"):
         raise ConfigurationError(
-            f"{lead} {truth.render(order_ref)} is not a valid order string. Expected one optional "
+            f"{lead} {order_ref!r} is not a valid order string. Expected one optional "
             "leading '-' followed by a local field name.",
         )
     if "__" in name:
         raise ConfigurationError(
-            f"{lead} {truth.render(order_ref)} traverses a relation; keyset cursor columns must be "
+            f"{lead} {order_ref!r} traverses a relation; keyset cursor columns must be "
             "local columns.",
         )
     return name, descending
@@ -284,7 +284,7 @@ def validate_cursor_field_references(
     for order_ref in order_refs:
         name, descending = split_order_ref(order_ref, owner=owner)
         if name in seen:
-            raise ConfigurationError(f"{owner} names {truth.render(name)} more than once.")
+            raise ConfigurationError(f"{owner} names {name!r} more than once.")
         seen.add(name)
         parsed.append((name, descending))
     return tuple(parsed)
@@ -398,24 +398,24 @@ def validate_cursor_field_columns(
             field = _resolve_segment_field(model, name)
         except FieldDoesNotExist:
             raise ConfigurationError(
-                f"{lead} entry {truth.render(order_ref)} does not resolve to a field on {truth.name(model)}.",
+                f"{lead} entry {order_ref!r} does not resolve to a field on {introspection.name(model)}.",
             ) from None
         if not is_stored_column(field) or field.is_relation:
             raise ConfigurationError(
-                f"{lead} entry {truth.render(order_ref)} must be a local concrete column; "
+                f"{lead} entry {order_ref!r} must be a local concrete column; "
                 "relation and reverse fields cannot anchor a keyset cursor.",
             )
         column = generated_column(field) or field
         if column.null:
             raise ConfigurationError(
-                f"{lead} entry {truth.render(order_ref)} is nullable. Keyset cursor columns "
+                f"{lead} entry {order_ref!r} is nullable. Keyset cursor columns "
                 "must be non-nullable: NULL placement diverges across database "
                 "backends and poisons tuple comparisons. Use a non-nullable "
                 "column (or a defaulted denormalization of the nullable one).",
             )
         if not _is_supported_cursor_field(column):
             raise ConfigurationError(
-                f"{lead} entry {truth.render(order_ref)} uses JSONField. Keyset cursor columns "
+                f"{lead} entry {order_ref!r} uses JSONField. Keyset cursor columns "
                 "must have portable ordering semantics across database backends; "
                 "JSON ordering differs between SQLite and PostgreSQL. Use a scalar "
                 "column containing the intended ordering key.",
@@ -425,7 +425,7 @@ def validate_cursor_field_columns(
     if not (terminal.primary_key or terminal.unique):
         raise ConfigurationError(
             f"{lead} must end in a unique column so the cursor order is a total "
-            f"order; got {truth.render(cursor_field[-1])}. Append the pk (e.g. "
+            f"order; got {cursor_field[-1]!r}. Append the pk (e.g. "
             f"cursor_field = ({', '.join(repr(entry) for entry in cursor_field)}, 'id')).",
         )
 

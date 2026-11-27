@@ -55,8 +55,13 @@ from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.base import _build_annotations
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import dict_of, is_tuple, read_attr, require
+from django_strawberry_framework.utils._narrowing import (
+    class_namespace,
+    dict_of,
+    is_tuple,
+    read_attr,
+    require,
+)
 from tests._idioms import definition_raises, is_object_dict, is_object_list, resolver_function
 
 if TYPE_CHECKING:
@@ -1553,7 +1558,7 @@ def test_inherited_id_annotation_on_relay_node_subclass_is_handled_by_pk_suppres
     # because Python does not promote inherited annotations into the
     # subclass's dict.
     # Raw ``__dict__`` on purpose: the subclass's OWN dict is the subject here.
-    assert "id" not in dict_of(truth.class_dict(ChildRelayType).get("__annotations__", {}))
+    assert "id" not in dict_of(class_namespace(ChildRelayType).get("__annotations__", {}))
 
     finalize_django_types()
 

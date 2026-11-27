@@ -63,7 +63,7 @@ from django_strawberry_framework.extensions.operation_state import (
     operation_is_nested,
 )
 from django_strawberry_framework.registry import register_subsystem_clear, registry
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     is_awaitable,
     is_dict,
@@ -618,7 +618,7 @@ class CacheInfo(NamedTuple):
     size: int
 
 
-def _collect_schema_reachable_types(schema: object) -> "truth.IdentitySet[type[DjangoType]]":
+def _collect_schema_reachable_types(schema: object) -> "set[type[DjangoType]]":
     """Return the set of ``DjangoType`` classes reachable from the schema's root types.
 
     Traverses from ``query_type``, ``mutation_type``, and
@@ -632,7 +632,7 @@ def _collect_schema_reachable_types(schema: object) -> "truth.IdentitySet[type[D
     schema construction are excluded to avoid false-positive audit
     warnings.
     """
-    reachable: truth.IdentitySet[type[DjangoType]] = truth.IdentitySet()
+    reachable: set[type[DjangoType]] = set()
     strawberry_schema = require_instance(schema, Schema)
     # Strawberry's ``Schema.__init__`` stores the graphql-core schema it builds at
     # ``_schema``.
@@ -809,7 +809,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # neither claim ``str`` nor raise.
         accepted_strictness = _STRICTNESS_MODES.get(strictness) if is_str(strictness) else None
         if accepted_strictness is None:
-            msg = f"strictness must be 'off', 'warn', or 'raise', got {truth.render(strictness)}"
+            msg = f"strictness must be 'off', 'warn', or 'raise', got {strictness!r}"
             raise ValueError(msg)
         # The nested-connection fetch strategy is fixed per extension INSTANCE
         # at construction (``None`` reads the ``NESTED_CONNECTION_STRATEGY``
@@ -1400,7 +1400,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
                         continue
                     seen.add(key)
                     warnings.append(
-                        f"{truth.name(type_cls)} ({truth.name(_model)}.{field_name}) "
+                        f"{introspection.name(type_cls)} ({introspection.name(_model)}.{field_name}) "
                         "has no registered target DjangoType",
                     )
         return warnings

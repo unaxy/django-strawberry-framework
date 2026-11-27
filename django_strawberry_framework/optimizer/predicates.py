@@ -70,9 +70,9 @@ from django.db.models.fields.reverse_related import ForeignObjectRel
 from django.db.models.sql.datastructures import Join
 
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    instance_state,
     is_concrete_field,
     is_dict,
     is_str,
@@ -154,7 +154,7 @@ def resolving_filtered_relations(
     # pk, so a per-row annotation reads that row's value.
     rows = rows.all()
     query = rows.query
-    state = truth.instance_state(query)
+    state = instance_state(query)
     state["_filtered_relations"] = {
         **require(state.get("_filtered_relations"), is_dict),
         **require(read_attr(source.query, "_filtered_relations", None), is_dict),
@@ -222,10 +222,10 @@ def _same_forward_chain(
     """
     while alias != base:
         join = outer.get(alias)
-        if not truth.is_instance(join, Join) or join != inner.get(alias):
+        if not isinstance(join, Join) or join != inner.get(alias):
             return False
         field = read_attr(join, "join_field")
-        if truth.is_instance(field, ForeignObjectRel) or not (
+        if isinstance(field, ForeignObjectRel) or not (
             read_attr(field, "many_to_one", None) is True
             or read_attr(field, "one_to_one", None) is True
         ):
@@ -239,7 +239,7 @@ def _condition_names(condition: Q) -> set[str]:
     return {
         require(read_attr(node, "name"), is_str).split(LOOKUP_SEP)[0]
         for node in list_of(call_method(condition, "flatten"))
-        if truth.is_instance(node, F)
+        if isinstance(node, F)
     }
 
 
@@ -248,7 +248,7 @@ def _read_tables(expression: object) -> set[str]:
     return {
         require_instance(read_attr(node, "alias"), str)
         for node in list_of(call_method(expression, "flatten"))
-        if truth.is_instance(node, Col)
+        if isinstance(node, Col)
     }
 
 
@@ -431,7 +431,7 @@ def _correlation_steps(
         for link_model, pairs, link_segment, referenced in links:
             if not pairs or not isinstance(link_model, type):
                 raise ConfigurationError(
-                    f"{truth.qualname(model)}.{relation_path}: segment {segment!r} is not a "
+                    f"{model.__qualname__}.{relation_path}: segment {segment!r} is not a "
                     "relation with link columns, so a related row cannot be correlated to "
                     "the outer row.",
                 )

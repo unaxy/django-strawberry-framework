@@ -30,7 +30,7 @@ from django_strawberry_framework.keyset import (
     decode_keyset_cursor,
 )
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_str,
@@ -140,8 +140,8 @@ _PostgresBTreeIndex: type[models.Index] | None = cast(
     import_attr_if_importable("django.contrib.postgres.indexes", "BTreeIndex"),
 )
 
-_BTREE_INDEX_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
-    (models.Index,) if _PostgresBTreeIndex is None else (models.Index, _PostgresBTreeIndex),
+_BTREE_INDEX_TYPES: tuple[type[object], ...] = (
+    (models.Index,) if _PostgresBTreeIndex is None else (models.Index, _PostgresBTreeIndex)
 )
 
 
@@ -507,7 +507,7 @@ def _index_leading_terms(meta: _OptionsAny, index: object) -> list[tuple[str, bo
       so the direction is trusted only when EVERY alias supports it -
       ``_every_backend_supports_index_column_ordering``).
     """
-    if not truth.is_exact_one_of(index, _BTREE_INDEX_TYPES):
+    if type(index) not in _BTREE_INDEX_TYPES:
         return None
     if getattr(index, "condition", None) is not None:
         return None
@@ -1717,7 +1717,7 @@ def plan_connection_relation(
             _log_connection_fallback(
                 relation_field_name,
                 [resp_key] if resp_key is not None else response_keys(sel),
-                f"strategy {getattr(strategy, 'name', truth.name(type(strategy)))!r} "
+                f"strategy {getattr(strategy, 'name', introspection.name(type(strategy)))!r} "
                 "refused the window",
             )
     if not planned_keys:

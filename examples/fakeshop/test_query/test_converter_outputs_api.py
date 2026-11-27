@@ -200,20 +200,6 @@ class _HostileStr(str):
         raise RuntimeError("int exploded")
 
 
-class _HostileTypeMeta(type):
-    """A metaclass whose ``__name__`` lookup raises, so naming the class through it explodes."""
-
-    @override
-    def __getattribute__(cls, name: str) -> object:
-        if name == "__name__":
-            raise RuntimeError("type name exploded")
-        return object_result(super().__getattribute__, name)
-
-
-class _HostileTypeName(metaclass=_HostileTypeMeta):
-    """A resolver value whose class name only the interpreter can read."""
-
-
 def _bigint_refusal(raw_value: object) -> list[tuple[object, object]]:
     """Serve ``raw_value`` from a ``BigInt`` resolver; return its errors' ``(path, message)``.
 
@@ -262,16 +248,6 @@ def test_an_outbound_bigint_refuses_a_non_int_resolver_value(raw_value: object, 
     ``str(float)`` and a numeric ``str`` (or a ``str`` subclass) is not passed through.
     """
     assert _bigint_refusal(raw_value) == [(["value"], f"BigInt cannot serialize {kind}")]
-
-
-def test_an_outbound_bigint_refusal_names_the_class_past_a_hostile_type_name_hook() -> None:
-    """The refusal reads the class name from the interpreter, so a metaclass hook never runs.
-
-    The value is built here and never reaches an assertion: pytest renders a failing
-    test's arguments and asserted operands, and naming this class through Python raises.
-    """
-    refusal = _bigint_refusal(_HostileTypeName())
-    assert refusal == [(["value"], "BigInt cannot serialize _HostileTypeName")]
 
 
 class _HostileInt(int):

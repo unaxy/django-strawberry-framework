@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from . import truth
+from ._narrowing import is_class
 from .imports import import_attr_if_importable
 from .relations import generated_column
 
@@ -60,13 +60,12 @@ def array_element_field(field: object) -> ConcreteField | None:
     """Return an ``ArrayField``'s ``base_field``, the column each element is stored through.
 
     ``None`` for any other column, and for every column when ``django.contrib.postgres``
-    is unavailable. The class is matched through ``utils/truth.py::is_instance``, so a
-    field class cannot claim to be an ``ArrayField``. An ``ArrayField`` reads as
+    is unavailable. An ``ArrayField`` reads as
     ``list[<base_field's type>]``, so its element choices live on ``base_field``, never
     on the array column itself. A ``GeneratedField`` is read as the column it computes.
     """
     field = generated_column(field) or field
-    if ARRAY_FIELD_CLS is not None and truth.is_instance(field, ARRAY_FIELD_CLS):
+    if ARRAY_FIELD_CLS is not None and isinstance(field, ARRAY_FIELD_CLS):
         return field.base_field
     return None
 
@@ -97,4 +96,4 @@ def is_array_in_lookup(lookup: object) -> bool:
     ``django.contrib.postgres`` is unavailable.
     """
     cls = ARRAY_IN_LOOKUP_CLS
-    return truth.is_type(cls) and truth.is_subclass(lookup, cls)
+    return is_class(cls) and is_class(lookup) and issubclass(lookup, cls)

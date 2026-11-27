@@ -94,8 +94,10 @@ from .resource_policy import (
 )
 from .types import DjangoType
 from .types.base import _is_relay_shaped
-from .utils import truth
+from .utils import introspection
 from .utils._narrowing import (
+    instance_state,
+    is_class,
     is_exact_dict,
     is_list_or_tuple,
     is_set_or_frozenset,
@@ -179,14 +181,14 @@ def _validate_djangotype_target(
     finalize-time.
 
     Order is load-bearing - each target-type check assumes the previous one
-    passed. The class and subclass gates read the real metaclass chain and MRO
-    (``utils/truth.py``); the registration check accepts only a target the registry
+    passed. The class gate reads the value's real class
+    (``utils/_narrowing.py::is_class``); the registration check accepts only a target the registry
     holds a definition for (``registry.py::TypeRegistry.get_definition``), so a
     Meta-less abstract base and a class the registry dropped are rejected here, at
     the line that constructed the field, instead
     of surfacing later as a Strawberry runtime-type error over an unrelated
-    model. Rejection messages render the target through ``truth.render`` /
-    ``truth.name``.
+    model. Rejection messages render the target through ``repr`` /
+    ``utils/introspection.py::name``.
 
     Raises ``ConfigurationError`` on failure; returns the canonical
     ``DjangoTypeDefinition`` when every guard passes, so the Relay validator
@@ -194,19 +196,19 @@ def _validate_djangotype_target(
     The caller runs any factory-specific guards (e.g. the connection field's
     Relay-Node guard) AFTER this returns.
     """
-    if not truth.is_type(target_type):
+    if not is_class(target_type):
         raise ConfigurationError(
-            f"{field} requires a DjangoType class; got {truth.render(target_type)}.",
+            f"{field} requires a DjangoType class; got {target_type!r}.",
         )
-    if not truth.is_subclass(target_type, DjangoType):
+    if not issubclass(target_type, DjangoType):
         raise ConfigurationError(
-            f"{field} requires a DjangoType subclass; got {truth.name(target_type)}.",
+            f"{field} requires a DjangoType subclass; got {introspection.name(target_type)}.",
         )
     definition = registry.get_definition(target_type)
     if definition is None:
         raise ConfigurationError(
-            f"{field} target {truth.name(target_type)} is not a registered DjangoType. "
-            f"This usually means {truth.name(target_type)} declares no `class Meta` "
+            f"{field} target {introspection.name(target_type)} is not a registered DjangoType. "
+            f"This usually means {introspection.name(target_type)} declares no `class Meta` "
             "(a Meta-less abstract base never registers a definition), or its definition "
             "was cleared.",
         )
@@ -264,12 +266,9 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
     ``DjangoStrawberryFrameworkError`` (so consumers can catch it alongside any
     other framework error).
 
-    Every numeric value interpolated into the wording renders through
-    ``truth.render``. For the ordinary ``int`` the boundary admits that is
-    byte-identical to the value itself; what it closes is the direct call
-    carrying an integer with more digits than CPython will convert to a string,
-    which would raise ``ValueError`` from the f-string assembled at the raise
-    site and replace this typed rejection with an unrelated exception.
+    Every numeric value interpolated into the wording is an exact ``int`` the boundary
+    admitted. A wire ``Int`` is a 32-bit value, and any int parsed from request text is
+    within ``sys.get_int_max_str_digits()``, so its ``repr`` never raises.
     """
 
     def __init__(
@@ -293,7 +292,7 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
 
         if reason == "non_integer":
             self.value = (
-                truth.text(value) if truth.is_instance(value, str) else truth.describe(value)
+                introspection.text(value) if is_str(value) else introspection.describe(value)
             )
             msg = (
                 f"Invalid argument {argument!r} on {field}: expected a non-negative "
@@ -302,11 +301,11 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
         elif reason == "negative":
             msg = (
                 f"Invalid argument {argument!r} on {field}: expected a non-negative "
-                f"integer, got {truth.render(value)}."
+                f"integer, got {value!r}."
             )
         elif reason == "over_ceiling":
             msg = (
-                f"Invalid argument {argument!r} on {field}: value {truth.render(value)} "
+                f"Invalid argument {argument!r} on {field}: value {value!r} "
                 f"exceeds the maximum allowed ceiling of {ceiling}."
             )
         elif reason == "order_required":
@@ -316,7 +315,7 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
                 ordering_phrase = "via model 'Meta.ordering'"
             msg = (
                 f"Invalid argument {argument!r} on {field}: non-zero offset "
-                f"({truth.render(value)}) requires an active ordering {ordering_phrase}."
+                f"({value!r}) requires an active ordering {ordering_phrase}."
             )
         elif reason == "queryset_required":
             msg = (
@@ -347,7 +346,7 @@ class ListArgumentError(GraphQLError, DjangoStrawberryFrameworkError):  # pyrigh
                 self.ceiling,
                 self.order_argument,
             ),
-            vars(self),  # truth: ok the exception's own pickle state, read by its own __reduce__
+            vars(self),  # the exception's own pickle state, read by its own __reduce__
         )
 
 
@@ -381,7 +380,7 @@ def _checked_bound(
             field_name,
             published_page_argument_name(info, argument),
             reason="non_integer",
-            value=truth.describe(value),
+            value=introspection.describe(value),
         )
     if value < 0:
         raise ListArgumentError(
@@ -421,7 +420,7 @@ def _normalize_list_arguments(
     the argument boundary and replacing the typed rejection with whatever that
     consumer hook raised. Everything that is not exactly an ``int`` -- ``bool``
     included, which is a subclass -- takes the ``non_integer`` arm and renders
-    through ``truth.describe``.
+    through ``introspection.describe``.
 
     Delegation guarantee:
         While offset and limit are validated here (integer type, non-negative, and limit
@@ -536,7 +535,7 @@ def _order_by_parameter(orderset_class: type[OrderSet]) -> tuple[inspect.Paramet
 #: ``as_sql``. ``VisibleRowExists`` decides only whether an ``OrderSet`` term reads
 #: its column or ``NULL``, and its rows are a target type's ``get_queryset``, which
 #: this guard trusts for the parent rows as well.
-_READABLE_ORDER_LEAVES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+_READABLE_ORDER_LEAVES: frozenset[type[object]] = frozenset(
     (
         models.Value,
         Col,
@@ -555,7 +554,7 @@ def _aggregate_filter_classes() -> tuple[type[object], ...]:
     does not exist and the predicate sits directly among the aggregate's sources.
     """
     aggregate_filter = read_attr(aggregates, "AggregateFilter", None)
-    return (aggregate_filter,) if truth.is_type(aggregate_filter) else ()
+    return (aggregate_filter,) if is_class(aggregate_filter) else ()
 
 
 #: Expressions whose own SQL is punctuation around their sources - the branches of
@@ -606,7 +605,7 @@ _APPROVED_ORDER_AGGREGATES: tuple[type[object], ...] = (models.Count, models.Max
 #: transform piece of an ``F`` or a predicate's left-hand side is applied by
 #: resolution, so it is read as the node it resolves into: ``F("stamp__year")``
 #: is ``ExtractYear(...)`` ordered directly and annotated alike.
-_APPROVED_ORDER_TRANSFORMS: truth.IdentitySet[type[object]] = truth.IdentitySet(
+_APPROVED_ORDER_TRANSFORMS: frozenset[type[object]] = frozenset(
     (
         ExtractDay,
         ExtractMonth,
@@ -626,7 +625,7 @@ _APPROVED_ORDER_TRANSFORMS: truth.IdentitySet[type[object]] = truth.IdentitySet(
 #: spellings are listed beside the general ones because Django substitutes them
 #: by field type for the same operators - an exact-type match sees the class the
 #: field hands back, not the base it derives from.
-_APPROVED_ORDER_LOOKUPS: truth.IdentitySet[type[object]] = truth.IdentitySet(
+_APPROVED_ORDER_LOOKUPS: frozenset[type[object]] = frozenset(
     (
         Exact,
         GreaterThan,
@@ -658,7 +657,7 @@ _APPROVED_ORDER_LOOKUPS: truth.IdentitySet[type[object]] = truth.IdentitySet(
 
 #: Every node read THROUGH to its sources. A term whose type is absent from this
 #: union and from ``_READABLE_ORDER_LEAVES`` is refused, whatever it holds.
-_APPROVED_ORDER_NODES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+_APPROVED_ORDER_NODES: frozenset[type[object]] = frozenset(
     (
         *_TRANSPARENT_ORDER_EXPRESSIONS,
         *_APPROVED_ORDER_FUNCTIONS,
@@ -674,7 +673,7 @@ _APPROVED_ORDER_NODES: truth.IdentitySet[type[object]] = truth.IdentitySet(
 #: held to the same constants: ``DurationExpression`` hands it to the backend's
 #: duration arithmetic, while ``TemporalSubtraction`` stores ``-`` and compiles
 #: the backend's own subtraction without reading it.
-_COMBINED_ORDER_NODES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+_COMBINED_ORDER_NODES: frozenset[type[object]] = frozenset(
     (CombinedExpression, DurationExpression, TemporalSubtraction),
 )
 _COMBINED_ORDER_CONNECTORS: tuple[str, ...] = (
@@ -698,7 +697,7 @@ _WHERE_ORDER_CONNECTORS: tuple[str, ...] = (AND, OR, XOR)
 #: ``Value.as_sql`` asks it for a placeholder and ``Cast.as_sql`` for the type it
 #: casts to. Either hook emits SQL, so such a node is read only over one of
 #: Django's own field classes.
-_FIELD_HOOK_ORDER_NODES: truth.IdentitySet[type[object]] = truth.IdentitySet((models.Value, Cast))
+_FIELD_HOOK_ORDER_NODES: frozenset[type[object]] = frozenset((models.Value, Cast))
 
 
 def _resolve_order_field_path(opts: _OptionsAny, path: str) -> ResolvedOrderName | None:
@@ -955,7 +954,7 @@ def _order_select_references(
     if not _is_readable_order_node(term) or not isinstance(term, BaseExpression | models.F):
         return ()
     ordered = term if type(term) is OrderBy else term.asc()
-    placement = truth.instance_state(ordered)
+    placement = instance_state(ordered)
     if not nulls_modifier and (
         placement.get("nulls_first") is not None or placement.get("nulls_last") is not None
     ):
@@ -1038,19 +1037,19 @@ def _is_readable_order_node(node: object) -> bool:
         return type(read_attr(node, "name")) is str
     if type(node) is models.Q:
         return _is_readable_order_condition(node)
-    if truth.is_exact_one_of(node, _READABLE_ORDER_LEAVES):
+    if type(node) in _READABLE_ORDER_LEAVES:
         return _order_node_state_is_stock(node)
     if type(node) is WhereNode:
-        children = truth.instance_state(node).get("children")
+        children = instance_state(node).get("children")
         return (
             is_list_or_tuple(children)
             and _order_node_state_is_stock(node)
             and all(_is_readable_order_node(child) for child in children)
         )
-    if truth.is_exact_one_of(node, _APPROVED_ORDER_LOOKUPS):
+    if type(node) in _APPROVED_ORDER_LOOKUPS:
         # Both operands are read from the instance state, as the seal reads them:
         # ``Lookup.get_source_expressions`` omits a direct right-hand side.
-        operands = truth.instance_state(node)
+        operands = instance_state(node)
         return (
             _order_node_state_is_stock(node)
             and _is_readable_order_node(operands.get("lhs"))
@@ -1058,7 +1057,7 @@ def _is_readable_order_node(node: object) -> bool:
         )
     # Every approved node is a ``BaseExpression`` subclass, so the instance test only
     # states for the reader of ``get_source_expressions`` what the membership proved.
-    if not truth.is_exact_one_of(node, _APPROVED_ORDER_NODES) or not isinstance(
+    if type(node) not in _APPROVED_ORDER_NODES or not isinstance(
         node,
         BaseExpression,
     ):
@@ -1118,18 +1117,18 @@ def _order_node_state_is_stock(term: object) -> bool:
     and is refused like any other. A column's field is the model's own and is
     not constrained, because no hook of it reaches the order SQL.
     """
-    state = truth.instance_state(term)
+    state = instance_state(term)
     for attr in _SQL_TEMPLATE_ATTRS:
         if attr not in state:
             continue
         connector = state[attr]
         if type(connector) is not str:
             return False
-        if connector == truth.mro_attr(type(term), attr):
+        if connector == introspection.class_mro_attr(type(term), attr):
             continue
         if attr != "connector":
             return False
-        if truth.is_exact_one_of(term, _COMBINED_ORDER_NODES):
+        if type(term) in _COMBINED_ORDER_NODES:
             connectors = _COMBINED_ORDER_CONNECTORS
         elif type(term) is WhereNode:
             connectors = _WHERE_ORDER_CONNECTORS
@@ -1140,7 +1139,7 @@ def _order_node_state_is_stock(term: object) -> bool:
     extra = state.get("extra")
     if extra is not None and (not is_exact_dict(extra) or extra):
         return False
-    if truth.is_exact_one_of(term, _FIELD_HOOK_ORDER_NODES):
+    if type(term) in _FIELD_HOOK_ORDER_NODES:
         output_field = state.get("output_field")
         return output_field is None or _type_is_genuinely_django(type(output_field))
     return True

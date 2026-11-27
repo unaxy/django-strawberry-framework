@@ -10,14 +10,14 @@ functions instead of the attribute.
 
 These are attribute reads and writes on a value already known to be a
 ``QuerySet``. The related objects are cleared, and the fetch mode is read, through
-``truth.instance_state``; only Django's own fetch modes are admitted
+the instance ``__dict__``; only Django's own fetch modes are admitted
 (``is_django_fetch_mode``), so the write pipeline's base-manager read carries only a
 mode Django defines.
 
 The model-row state Django's queryset iterators set lives here too: the
 ``_state.peers`` list of weak references an iteration under a peer-tracking
 fetch mode shares across the rows it yields. A row may come from a consumer
-``resolve_nodes`` override, so the read goes through ``truth.instance_state``
+``resolve_nodes`` override, so the read goes through the instance ``__dict__``
 and dispatches nothing.
 """
 
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypeGuard, TypeVar
 
-from . import truth
+from ._narrowing import instance_state, is_class
 from .imports import import_attr_if_importable
 
 if TYPE_CHECKING:
@@ -80,10 +80,10 @@ def clear_queryset_known_related_objects(queryset: models.QuerySet[models.Model,
     runs, and Django then skips a ``Prefetch`` on that relation. Django declares the slot on
     every ``QuerySet`` and django-stubs does not, so it is written in the instance namespace.
     """
-    truth.instance_state(queryset)["_known_related_objects"] = {}
+    instance_state(queryset)["_known_related_objects"] = {}
 
 
-def _django_fetch_mode_classes() -> truth.IdentitySet[type[object]]:
+def _django_fetch_mode_classes() -> frozenset[type[object]]:
     """Return Django's own fetch-mode classes, empty on a release without fetch modes.
 
     Django 6.1 added ``QuerySet.fetch_mode`` and ``django.db.models.fetch_modes``;
@@ -95,9 +95,9 @@ def _django_fetch_mode_classes() -> truth.IdentitySet[type[object]]:
     classes: list[type[object]] = []
     for class_name in ("FetchOne", "FetchPeers", "FetchRaise"):
         fetch_mode_class = import_attr_if_importable("django.db.models.fetch_modes", class_name)
-        if truth.is_type(fetch_mode_class):
+        if is_class(fetch_mode_class):
             classes.append(fetch_mode_class)
-    return truth.IdentitySet(classes)
+    return frozenset(classes)
 
 
 # The fetch modes the framework carries from one queryset onto another it builds: an
@@ -109,16 +109,16 @@ _DJANGO_FETCH_MODE_CLASSES = _django_fetch_mode_classes()
 
 def is_django_fetch_mode(value: object) -> TypeGuard[FetchMode]:
     """Return whether ``value`` is an instance of exactly one of Django's own fetch-mode classes."""
-    return truth.is_exact_one_of(value, _DJANGO_FETCH_MODE_CLASSES)
+    return type(value) in _DJANGO_FETCH_MODE_CLASSES
 
 
 def queryset_fetch_mode(queryset: models.QuerySet[models.Model, object]) -> FetchMode | None:
     """Return ``queryset``'s fetch mode when it is one of Django's own, else ``None``.
 
     ``None`` below Django 6.1, where no queryset carries one. The slot is read from the
-    instance namespace (``truth.instance_state``), so the read dispatches nothing.
+    instance namespace (``vars``), so the read dispatches nothing.
     """
-    fetch_mode = truth.instance_state(queryset).get("_fetch_mode")
+    fetch_mode = instance_state(queryset).get("_fetch_mode")
     return fetch_mode if is_django_fetch_mode(fetch_mode) else None
 
 
@@ -134,7 +134,7 @@ def set_queryset_fetch_mode(
 
 def _model_row_state(row: models.Model) -> dict[str, object]:
     """Return the instance namespace of ``row``'s ``ModelState``, read without dispatch."""
-    return truth.instance_state(truth.instance_state(row)["_state"])
+    return instance_state(instance_state(row)["_state"])
 
 
 def model_row_peers(row: models.Model) -> object | None:

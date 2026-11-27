@@ -21,7 +21,7 @@ from django_strawberry_framework.optimizer.nested_fetch import (
     WindowedPrefetchStrategy,
 )
 from django_strawberry_framework.utils.typing import object_result
-from tests._idioms import ClaimsClassBase, ClassReadRaisesBase, HostileNameMeta
+from tests._idioms import ClaimsClassBase, ClassReadRaisesBase
 
 _RAISING_CLASS_ERRORS = [RuntimeError, TypeError, KeyboardInterrupt]
 
@@ -206,19 +206,6 @@ class TestStrategyFactory:
     def test_strategy_with_prefetch_obj_raises(self) -> None:
         with pytest.raises(ConfigurationError, match="nested_strategy"):
             OptimizerHint(prefetch_obj=Prefetch("items"), nested_strategy="windowed")
-
-    def test_strategy_rejects_hostile_type_name_safely(self) -> None:
-        """A hostile metaclass cannot replace the typed strategy rejection."""
-
-        class NotStrategy(metaclass=HostileNameMeta):
-            pass
-
-        notstrategy = NotStrategy()
-
-        with pytest.raises(ConfigurationError, match="nested_connection_strategy"):
-            # basedpyright: the non-strategy object is the hostile input under test;
-            # OptimizerHint.strategy types the parameter as StrategySelection
-            OptimizerHint.strategy(notstrategy)  # pyright: ignore[reportArgumentType]
 
     def test_strategy_rejects_class_with_clean_name(self) -> None:
         """Passing a strategy class instead of an instance names the class, not 'type'."""
@@ -420,19 +407,6 @@ class TestInvalidStatesRejected:
             # basedpyright: the lookup string is the hostile input under test; OptimizerHint types
             # prefetch_obj as a Prefetch
             OptimizerHint(prefetch_obj="entries__items")  # pyright: ignore[reportArgumentType]
-
-    def test_prefetch_obj_rejects_hostile_type_name_safely(self) -> None:
-        """A hostile metaclass cannot replace the typed Prefetch rejection."""
-
-        class NotPrefetch(metaclass=HostileNameMeta):
-            pass
-
-        notprefetch = NotPrefetch()
-
-        with pytest.raises(ConfigurationError, match="Prefetch"):
-            # basedpyright: the non-Prefetch object is the hostile input under test;
-            # OptimizerHint.prefetch types the parameter as a Prefetch
-            OptimizerHint.prefetch(notprefetch)  # pyright: ignore[reportArgumentType]
 
     @pytest.mark.parametrize("raised", _RAISING_CLASS_ERRORS)
     @pytest.mark.parametrize(

@@ -85,8 +85,13 @@ from typing_extensions import override
 
 from django_strawberry_framework.conf import nested_connection_strategy_setting
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_str, require, require_instance
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import (
+    is_class,
+    is_str,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.utils._queryset_private import (
     chain_queryset,
     super_clone_queryset,
@@ -156,7 +161,7 @@ def unwindowable_child_queryset_reason(queryset: object) -> str | None:
     if getattr(query, "distinct", False):
         return "distinct"
     iterable_class = getattr(queryset, "_iterable_class", ModelIterable)
-    if not truth.is_subclass(iterable_class, ModelIterable):
+    if not (is_class(iterable_class) and issubclass(iterable_class, ModelIterable)):
         return "values"
     return None
 
@@ -211,7 +216,7 @@ class RecognizedFetchQuerySet(QuerySet[models.Model, models.Model]):
         from .lateral_fetch import window_predicate_signature  # noqa: PLC0415 - import cycle
 
         clone = chain_queryset(queryset)
-        clone.__class__ = cls  # truth: ok a write that rebinds a framework-built clone, not a read
+        clone.__class__ = cls  # a write that rebinds a framework-built clone, not a read
         rebound = require_instance(clone, cls)
         setattr(rebound, cls._dst_spec_attr, spec)
         rebound._dst_window_signature = window_predicate_signature(queryset.query)
@@ -456,30 +461,29 @@ def resolve_strategy(value: object) -> NestedConnectionStrategy:
     ``NESTED_CONNECTION_STRATEGY`` setting, defaulting to ``"windowed"``.
 
     The selection's kind (a name, a class) reads the real class
-    (``truth.is_instance`` / ``truth.is_type``, neither of which reads
-    ``__class__``), so a ``__class__`` that raises or claims ``str``, and a lazy
-    proxy of a name (``SimpleLazyObject``), is not a ``str`` and has no ``plan``,
+    (``utils/_narrowing.py::is_str``, which never reads ``__class__``), so a lazy
+    proxy of a name (``SimpleLazyObject``) is not a ``str`` and has no ``plan``,
     and takes the typed rejection. A name is looked up in the registry. The
-    rejection message renders through ``truth.render``.
+    rejection message renders the value's ``repr``.
     """
     if value is None:
         value = nested_connection_strategy_setting()
-    if truth.is_instance(value, str):
+    if is_str(value):
         registry = _builtin_strategies()
         strategy = AUTO_STRATEGY if value == "auto" else registry.get(value)
         if strategy is None:
             raise ConfigurationError(
-                f"Unknown nested_connection_strategy {truth.render(value)}; expected "
+                f"Unknown nested_connection_strategy {value!r}; expected "
                 f"one of {sorted(registry)} or 'auto' or a NestedConnectionStrategy "
                 f"instance.",
             )
         return strategy
-    if not truth.is_type(value) and callable(getattr(value, "plan", None)):
+    if not is_class(value) and callable(getattr(value, "plan", None)):
         # A non-class value with a callable ``plan`` is a consumer strategy.
         return cast("NestedConnectionStrategy", value)
     raise ConfigurationError(
         f"nested_connection_strategy must be a strategy name, 'auto', or an object "
-        f"with a plan(request, plan) method; got {truth.kind(value)}.",
+        f"with a plan(request, plan) method; got {introspection.kind(value)}.",
     )
 
 

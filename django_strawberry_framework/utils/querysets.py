@@ -103,10 +103,13 @@ from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import registry
 
-from . import truth
+from . import introspection
 from ._narrowing import (
+    instance_state,
     is_awaitable,
+    is_class,
     is_exact_dict,
+    is_queryset,
     is_str,
     pk_of,
     read_attr,
@@ -348,7 +351,7 @@ def base_queryset(model: type[_ModelT], *, using: str | None = None) -> models.Q
     """
     if model._meta.abstract:
         raise ConfigurationError(
-            f"{truth.name(model)} is an abstract model and has no default manager to seed a "
+            f"{introspection.name(model)} is an abstract model and has no default manager to seed a "
             f"queryset from. Point Meta.model at a concrete model, or resolve the field with "
             f"a custom resolver that returns concrete rows.",
         )
@@ -365,10 +368,10 @@ def _yields_model_rows(value: object) -> TypeGuard[models.QuerySet[models.Model]
     rows). The class alone proves no row type. Read from the instance ``__dict__``, so a
     class-level property dispatches nothing.
     """
-    return _is_queryset_class(truth.class_of(value)) and truth.is_subclass(
-        truth.instance_state(value).get("_iterable_class"),
-        ModelIterable,
-    )
+    if not _is_queryset_class(type(value)):
+        return False
+    iterable = instance_state(value).get("_iterable_class")
+    return is_class(iterable) and issubclass(iterable, ModelIterable)
 
 
 def related_queryset(
@@ -408,13 +411,14 @@ def related_queryset(
     """
     # The manager's override runs (trusted project code) only to name its class and alias.
     supplied = base_queryset(model)
-    queryset_class = require(truth.class_of(supplied), _is_queryset_class)
+    queryset_class = require(type(supplied), _is_queryset_class)
     rows = queryset_class(model=model, using=using if using is not None else queryset_db(supplied))
     if not _yields_model_rows(rows):
-        iterable = truth.instance_state(rows).get("_iterable_class")
+        iterable = instance_state(rows).get("_iterable_class")
         raise ConfigurationError(
-            f"{truth.name(model)}'s default manager returns {truth.name(queryset_class)}, whose "
-            f"__init__ leaves the row iterable {truth.name(iterable)}. A relation's rows are "
+            f"{introspection.name(model)}'s default manager returns "
+            f"{introspection.name(queryset_class)}, whose "
+            f"__init__ leaves the row iterable {introspection.name(iterable)}. A relation's rows are "
             f"model instances: the QuerySet class must keep a ModelIterable row iterable.",
         )
     set_queryset_hints(rows, dict(queryset_hints(supplied)))
@@ -1076,8 +1080,8 @@ def coerce_field_value_or_none(field: ModelField | None, value: object, *, alias
     # column the value is stored in (``stored_value_column``).
     try:
         coerced = column_python_value(field, unwrap_lazy_object(value))
-        if truth.is_instance(coerced, str):
-            _PROHIBIT_NULL_CHARACTERS(truth.text(coerced))
+        if is_str(coerced):
+            _PROHIBIT_NULL_CHARACTERS(coerced)
         bound = coerced
         for codec in _value_codecs(field):
             bound = object_result(codec.get_db_prep_value, bound, connection, prepared=False)
@@ -1301,12 +1305,12 @@ def _concrete_or_none(candidate: object) -> type[models.Model] | None:
 
     ``types/base.py::_hinted_prefetch_seed_defect`` compares a hinted ``Prefetch``
     seed's model with the relation's target by their concrete models; a value that is
-    not a model class answers ``None``. Read from the real MRO (``truth.is_subclass`` /
-    ``truth.static_attr``).
+    not a model class answers ``None``. ``_meta`` is read statically
+    (``utils/introspection.py::mro_attr``).
     """
-    if not truth.is_subclass(candidate, models.Model):
+    if not (is_class(candidate) and issubclass(candidate, models.Model)):
         return None
-    meta: object = truth.static_attr(candidate, "_meta", None)
+    meta: object = introspection.mro_attr(candidate, "_meta", None)
     if meta is None:
         return None
     # ``ModelBase.__new__`` sets ``_meta.concrete_model`` on every model class to a
@@ -1343,13 +1347,12 @@ def _type_is_genuinely_django(node_type: type[object]) -> bool:
     ``False``. A dotted (nested) qualname, or a module absent from ``sys.modules``, also
     answers ``False``. The one framework type admitted beside Django's own is
     ``VisibleRowExists``, matched by identity: it overrides nothing, so its ``as_sql``
-    is Django's ``Exists`` code. ``__module__`` and ``__qualname__`` are read through
-    ``truth.module`` / ``truth.qualname``.
+    is Django's ``Exists`` code. ``__module__`` and ``__qualname__`` are the class's own.
     """
     if node_type is VisibleRowExists:
         return True
-    module_name = truth.module(node_type)
-    qualname = truth.qualname(node_type)
+    module_name = node_type.__module__
+    qualname = node_type.__qualname__
     if not module_name.startswith("django."):
         return False
     if "." in qualname:
@@ -1418,7 +1421,7 @@ def _prefetch_relation_target_or_none(
         if not getattr(field, "is_relation", False):
             return None
         related: object = getattr(field, "related_model", None)
-        if not truth.is_subclass(related, models.Model):
+        if not (is_class(related) and issubclass(related, models.Model)):
             return None
         current = related
     return current
@@ -1584,14 +1587,14 @@ def _snapshot_routing_intent(queryset: models.QuerySet[models.Model]) -> _Routin
     unrouted source resolves just as it would at execution - only earlier, while
     the hint values still hold the state the source intended. A ``TextChoices`` /
     ``StrEnum`` alias a router answers is frozen as its exact text
-    (``truth.text``), the alias the seal pins.
+    (``utils/introspection.py::text``), the alias the seal pins.
 
     Routing reads come from the instance ``__dict__``; the model is the
     queryset's own, because the source reaching this seam is already a sealed
     queryset whose ``model`` the visibility boundary checked. The router is the deployment's own
     code and is trusted: whatever it raises propagates.
     """
-    state: dict[str, object] = truth.instance_state(queryset)
+    state: dict[str, object] = instance_state(queryset)
     # The source is a queryset this package built, so its routing slots are the ones
     # Django's own ``QuerySet`` writes: ``_db`` an alias or ``None`` (``using``), and
     # ``_hints`` a str-keyed dict.
@@ -1605,10 +1608,10 @@ def _snapshot_routing_intent(queryset: models.QuerySet[models.Model]) -> _Routin
         return _RoutingIntent(db=db, hints=hints, effective_alias=db)
     resolve = router.db_for_write if for_write else router.db_for_read
     alias = resolve(model, **(hints if type(hints) is dict else {}))
-    return _RoutingIntent(db=None, hints=hints, effective_alias=truth.text(alias))
+    return _RoutingIntent(db=None, hints=hints, effective_alias=introspection.text(alias))
 
 
-_ROUTING_SCALAR_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
+_ROUTING_SCALAR_TYPES: frozenset[type[object]] = frozenset(
     (
         int,
         float,
@@ -1631,18 +1634,18 @@ def _routing_repr(value: object) -> str:
     if value is None:
         return "None"
     if type(value) is str:
-        return truth.render(value)
+        return repr(value)
     if is_exact_dict(value):
         items: list[str] = []
-        for k in sorted(value.keys(), key=truth.text):
+        for k in sorted(value.keys(), key=str):
             v = value[k]
-            if truth.is_exact_one_of(v, _ROUTING_SCALAR_TYPES):
-                v_repr = truth.render(v)
+            if type(v) in _ROUTING_SCALAR_TYPES:
+                v_repr = repr(v)
             else:
-                v_repr = f"<{truth.name(v)} at {hex(id(v))}>"
-            items.append(f"{truth.render(k)}: {v_repr}")
+                v_repr = f"<{introspection.name(v)} at {hex(id(v))}>"
+            items.append(f"{k!r}: {v_repr}")
         return "{" + ", ".join(items) + "}"
-    return truth.render(value)
+    return repr(value)
 
 
 def _validate_post_orderset_result(
@@ -1679,7 +1682,7 @@ def _validate_post_orderset_result(
         expected_routing=expected_routing,
     )
     if defect is not None:
-        model_name = truth.name(model)
+        model_name = introspection.name(model)
         # Every SHAPE defect renders one wording: the public method's contract is a
         # single sentence, and naming the code plus its detail is what makes each
         # rejection actionable. ``routing`` is the one defect that is not a shape
@@ -1736,7 +1739,7 @@ def require_orderset_class(
     """
     if orderset_class is None:
         raise ConfigurationError(
-            f"Field target {truth.name(target_type)} has no orderset_class configured.",
+            f"Field target {introspection.name(target_type)} has no orderset_class configured.",
         )
     return orderset_class
 
@@ -1770,7 +1773,7 @@ def apply_sidecar_sync(
     pre-evaluates its result is rejected here rather than silently serving
     foreign rows or a wrong page.
     """
-    method_name = f"{truth.name(set_class)}.apply_sync"
+    method_name = f"{introspection.name(set_class)}.apply_sync"
     # Frozen BEFORE the override receives the queryset: it can mutate the
     # object it was handed, so a post-call read is not a baseline.
     expected_routing = _snapshot_routing_intent(queryset)
@@ -1804,19 +1807,19 @@ async def apply_sidecar_async(
     the extra arms reject a public method that never returned an awaitable at
     all, and one that awaited to a second awaitable.
     """
-    method_name = f"{truth.name(set_class)}.apply_async"
+    method_name = f"{introspection.name(set_class)}.apply_async"
     expected_routing = _snapshot_routing_intent(queryset)
     candidate_awaitable = set_class.apply_async(input_value, queryset, info)
     if not inspect.isawaitable(candidate_awaitable):
         raise ConfigurationError(
             f"{method_name} returned a non-awaitable value "
-            f"({truth.kind(candidate_awaitable)}); expected an awaitable coroutine or Future.",
+            f"({introspection.kind(candidate_awaitable)}); expected an awaitable coroutine or Future.",
         )
     candidate = await candidate_awaitable
     if _disposed_awaitable(candidate):
         raise ConfigurationError(
             f"{method_name} returned a residual awaitable value "
-            f"({truth.kind(candidate)}); expected a QuerySet.",
+            f"({introspection.kind(candidate)}); expected a QuerySet.",
         )
     return _validate_post_orderset_result(
         target_type,
@@ -1960,7 +1963,7 @@ def _combined_lost_property(
         for entry in query.order_by:
             if not _is_carried_order_term(entry, model):
                 return (
-                    f"its ordering by {entry!r} is not a {truth.name(model)} column, so the "
+                    f"its ordering by {entry!r} is not a {introspection.name(model)} column, so the "
                     "rewritten query cannot carry it (it carries a column name or an F() "
                     "over a column, with .asc() / .desc(); never a lookup, transform or "
                     "other expression)"
@@ -2044,12 +2047,12 @@ def _pk_membership_query_or_defect(
 
 def _is_queryset_class(value: object) -> TypeIs[type[models.QuerySet[models.Model, object]]]:
     """Whether ``value`` is a ``QuerySet`` class by its real MRO."""
-    return truth.is_subclass(value, models.QuerySet)
+    return is_class(value) and issubclass(value, models.QuerySet)
 
 
 def _is_queryset(value: object) -> TypeIs[models.QuerySet[models.Model, object]]:
     """Whether ``value`` is a ``QuerySet`` by its real class, never a ``__class__`` claim."""
-    return _is_queryset_class(truth.class_of(value))
+    return _is_queryset_class(type(value))
 
 
 def _foreign_combined_model(query: sql.Query, concrete: type[models.Model] | None) -> str | None:
@@ -2065,7 +2068,7 @@ def _foreign_combined_model(query: sql.Query, concrete: type[models.Model] | Non
     for branch in branches:
         branch_model = branch.model
         if branch_model is None or branch_model._meta.concrete_model is not concrete:
-            return truth.name(branch_model)
+            return introspection.name(branch_model)
         if branch.combinator:
             nested = _foreign_combined_model(branch, concrete)
             if nested is not None:
@@ -2116,9 +2119,9 @@ def _with_prefetch_children_served(
             return None, (
                 "prefetch",
                 (
-                    f"{truth.name(parent)} prefetch {path!r} queryset is over "
-                    f"{truth.name(child.model)} rows, but the {path!r} relation targets "
-                    f"{truth.name(target)} rows; a prefetch child over an unrelated table "
+                    f"{introspection.name(parent)} prefetch {path!r} queryset is over "
+                    f"{introspection.name(child.model)} rows, but the {path!r} relation targets "
+                    f"{introspection.name(target)} rows; a prefetch child over an unrelated table "
                     "would populate the relation with rows the related type's visibility "
                     "hook never saw"
                 ),
@@ -2128,7 +2131,7 @@ def _with_prefetch_children_served(
             return None, (
                 "prefetch",
                 (
-                    f"{truth.name(parent)} prefetch {path!r} queryset is routed to alias "
+                    f"{introspection.name(parent)} prefetch {path!r} queryset is routed to alias "
                     f"{child_db!r}, but this resolution reads alias {alias!r}; one "
                     "resolution never spans two database connections"
                 ),
@@ -2248,10 +2251,10 @@ def _seal_or_defect(
       combined candidate.
     """
     if not _is_queryset(candidate):
-        return None, ("type", truth.kind(candidate))
+        return None, ("type", introspection.kind(candidate))
     concrete = model._meta.concrete_model
     if candidate.model._meta.concrete_model is not concrete:
-        return None, ("table", truth.name(candidate.model))
+        return None, ("table", introspection.name(candidate.model))
     db = queryset_db(candidate)
     if expected_routing is not None:
         hints = queryset_hints(candidate)
@@ -2276,7 +2279,7 @@ def _seal_or_defect(
     if policy.reject_sliced and query.is_sliced:
         return None, ("sliced", f"rows {query.low_mark}:{query.high_mark}")
     if policy.require_model_rows and not _yields_model_rows(queryset):
-        return None, ("projection", truth.name(queryset._iterable_class))
+        return None, ("projection", introspection.name(queryset._iterable_class))
     if query.combinator:
         foreign = _foreign_combined_model(query, concrete)
         if foreign is not None:
@@ -2343,10 +2346,10 @@ def _coerced_manager_queryset(
     Manager's own code: whatever it raises propagates.
     """
     queryset = manager.all()
-    if not truth.is_instance(queryset, models.QuerySet):
+    if not is_queryset(queryset):
         raise ConfigurationError(
-            f"A {truth.kind(manager)}.all() coercion must produce a QuerySet, but "
-            f"returned {truth.kind(queryset)}; a Manager that degrades into a list "
+            f"A {introspection.kind(manager)}.all() coercion must produce a QuerySet, but "
+            f"returned {introspection.kind(queryset)}; a Manager that degrades into a list "
             f"or other non-queryset cannot enter the visibility boundary and must not "
             f"be treated as the deliberate plain-iterable bypass.",
         )
@@ -2404,8 +2407,8 @@ def _visibility_result_error(
     code, detail = defect
     if render_error is not None:
         return ConfigurationError(render_error(code, detail))
-    name = truth.name(type_cls)
-    model_name = truth.name(model)
+    name = introspection.name(type_cls)
+    model_name = introspection.name(model)
     return ConfigurationError(
         _defect_message(
             {
@@ -2548,8 +2551,8 @@ def _prepared_visibility_source(
         code, detail = defect
         if render_error is not None:
             raise ConfigurationError(render_error(code, detail))
-        name = truth.name(type_cls)
-        model_name = truth.name(model)
+        name = introspection.name(type_cls)
+        model_name = introspection.name(model)
         raise ConfigurationError(
             _defect_message(
                 {
@@ -2597,7 +2600,7 @@ def _prepared_visibility_source(
         sealed = pin_write_queryset(
             sealed,
             pipeline.alias,
-            owner=f"The {truth.name(type_cls)} visibility source",
+            owner=f"The {introspection.name(type_cls)} visibility source",
         )
         required_alias = pipeline.alias
     else:
@@ -2729,7 +2732,7 @@ def apply_type_visibility_sync(
     result = type_cls.get_queryset(queryset, info)
     result = reject_async_in_sync_context(
         result,
-        owner=truth.name(type_cls),
+        owner=introspection.name(type_cls),
         method="get_queryset",
         context="resolver",
         recourse=async_recourse,
@@ -3112,7 +3115,7 @@ async def apply_type_visibility_async(
     hook = type_cls.get_queryset
     # ``_is_default_get_queryset`` is stamped at class creation
     # (``DjangoType.has_custom_get_queryset`` reads it): the identity default does no I/O.
-    identity = truth.static_attr(type_cls, "_is_default_get_queryset", default=False)
+    identity = introspection.mro_attr(type_cls, "_is_default_get_queryset", default=False)
     result: object = (
         hook(queryset, info)
         if identity is True or is_async_callable(hook)
@@ -3122,7 +3125,7 @@ async def apply_type_visibility_async(
         result = await result
         if _disposed_awaitable(result):
             raise ConfigurationError(
-                f"{truth.name(type_cls)}.get_queryset resolved to a nested awaitable; an "
+                f"{introspection.name(type_cls)}.get_queryset resolved to a nested awaitable; an "
                 f"async get_queryset must resolve to a QuerySet (or Manager) after ONE "
                 f"await, and an unbounded awaitable chain is never consumed.",
             )
@@ -3151,7 +3154,7 @@ def reject_awaitable_sync_source(source: object, type_cls: type[DjangoType]) -> 
     if not _disposed_awaitable(source):
         return
     raise SyncMisuseError(
-        f"A sync {truth.name(type_cls)} consumer resolver returned an awaitable. "
+        f"A sync {introspection.name(type_cls)} consumer resolver returned an awaitable. "
         "Declare the resolver `async def` (or use an async callable) so the "
         "field awaits it and applies the get_queryset visibility hook; a plain "
         "`def` resolver that returns an awaitable is committed to the sync path "
@@ -3181,7 +3184,7 @@ def reject_residual_async_source(source: object, type_cls: type[DjangoType]) -> 
     if not _disposed_awaitable(source):
         return
     raise ConfigurationError(
-        f"An async {truth.name(type_cls)} consumer resolver resolved to another "
+        f"An async {introspection.name(type_cls)} consumer resolver resolved to another "
         f"awaitable after being awaited; a nested awaitable is neither a QuerySet "
         f"nor a plain iterable, and passing it through would silently skip the "
         f"get_queryset visibility hook. Return the queryset (or iterable) directly.",

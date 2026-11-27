@@ -65,7 +65,7 @@ import threading
 import uuid
 from collections.abc import Callable, Generator, Iterable, Iterator
 from types import SimpleNamespace
-from typing import Literal, NoReturn, TypeAlias
+from typing import NoReturn, TypeAlias
 from unittest import mock
 
 import pytest
@@ -119,7 +119,7 @@ from django_strawberry_framework.permissions import (
     apply_cascade_permissions,
 )
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     is_tuple,
@@ -132,7 +132,6 @@ from django_strawberry_framework.utils._queryset_private import (
 from django_strawberry_framework.utils.relations import is_single_column_foreign_key
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import (
-    comparing_metaclass,
     is_object_dict,
     saved_pk,
 )
@@ -280,60 +279,6 @@ def test_mutual_cycle_fails_closed_with_path() -> None:
         apply_cascade_permissions(venue_type, Venue.objects.all(), _INFO)
     # Every token reset fired despite the raise.
     assert _cascade_state.get() is None
-
-
-@pytest.mark.parametrize("hostile", ["active", "entering"])
-@pytest.mark.parametrize("verdict", ["equal", "unequal", "raises"])
-def test_cascade_cycle_check_matches_active_types_by_identity(
-    verdict: Literal["equal", "unequal", "raises"],
-    hostile: Literal["active", "entering"],
-) -> None:
-    """An acyclic cascade composes whatever the types' metaclass ``__eq__`` says.
-
-    The cycle check looks for the entering type among the active types by identity, so a
-    consumer metaclass ``__eq__`` (on the active root type or on the type the walk enters) is
-    never called: an always-equal answer cannot report a false cycle, a raising one cannot
-    escape the walk. No fakeshop type carries a consumer metaclass, and giving one such a
-    metaclass would put a test-only class shape into the acceptance schema, so the row is
-    package tier. The walk needs only the registry, so the row does not finalize (before
-    Python 3.12, Phase 3's ``strawberry.type`` reads the class signature and ``inspect`` tests
-    ``obj in (type, object)``, which dispatches the same ``__eq__`` outside the package).
-    """
-    calls: list[str] = []
-    meta = comparing_metaclass(type, verdict, calls)
-
-    def declare(
-        name: str,
-        model: type[models.Model],
-        hook: _Hook,
-        *,
-        hostile_here: bool,
-    ) -> type:
-        namespace = {
-            "__module__": __name__,
-            "Meta": type("Meta", (), {"model": model, "fields": ("id",)}),
-            "get_queryset": classmethod(hook),
-        }
-        return (meta if hostile_here else type)(name, (DjangoType,), namespace)
-
-    shelf_type = declare(
-        "IdentityShelfType",
-        Shelf,
-        _cascading_hook(code="hidden_shelf"),
-        hostile_here=hostile == "active",
-    )
-    _ = declare(
-        "IdentityBranchType",
-        Branch,
-        _cascading_hook(name="hidden_branch"),
-        hostile_here=hostile == "entering",
-    )
-    assert issubclass(shelf_type, DjangoType)
-
-    result = apply_cascade_permissions(shelf_type, Shelf.objects.all(), _INFO)
-    assert "IN (SELECT" in str(result.query)
-    assert "hidden_branch" in str(result.query)
-    assert calls == []
 
 
 def test_hook_exception_propagates_and_resets_state() -> None:
@@ -970,9 +915,9 @@ def test_zero_edge_root_issues_no_filter_call() -> None:
 
 
 def test_error_renderers_build_without_naming_calls() -> None:
-    """Both error-renderer factories build while ``truth.name`` raises.
+    """Both error-renderer factories build while ``introspection.name`` raises.
 
-    The ``truth.name(...)`` / edge-label computations live inside the ``_render``
+    The ``introspection.name(...)`` / edge-label computations live inside the ``_render``
     closures (defect path only); construction on the happy path pays no naming
     cost. Rendered prose stays pinned by the defect-path tests.
     """
@@ -982,7 +927,11 @@ def test_error_renderers_build_without_naming_calls() -> None:
 
     field = Entry._meta.get_field("item")
     assert is_single_column_foreign_key(field)
-    with mock.patch.object(truth, "name", side_effect=AssertionError("named at construction")):
+    with mock.patch.object(
+        introspection,
+        "name",
+        side_effect=AssertionError("named at construction"),
+    ):
         _root_error_renderer(entry_type, Entry)
         _edge_error_renderer(item_type, field, "default")
 
@@ -1226,12 +1175,12 @@ def test_cascade_returns_the_sources_queryset_class(
 
         result = cascade(parent_type, root)
 
-        assert truth.class_of(result) is truth.class_of(root)
+        assert type(result) is type(root)
         assert result is not root
         assert queryset_db(result) == queryset_db(root)
         assert sorted(result.values_list("name", flat=True)) == ["keeps"]
         assert list(root.values_list("name", flat=True).order_by("name")) == ["drops", "keeps"]
-        if truth.class_of(root) is _CtParentQuerySet:
+        if type(root) is _CtParentQuerySet:
             assert list(require_instance(result, _CtParentQuerySet).named("keeps")) != []
         if root.query.values_select:
             assert list(result) == [{"name": "keeps"}]
@@ -1276,7 +1225,7 @@ def test_reentrant_zero_edge_cascade_returns_the_sources_queryset_class() -> Non
 
     def hook(cls: type[DjangoType], qs: models.QuerySet[models.Model], info: object) -> object:
         narrowed = apply_cascade_permissions(cls, qs, info, fields=[])
-        seen.append(truth.class_of(narrowed))
+        seen.append(type(narrowed))
         return require_instance(narrowed, _ReNodeQuerySet).visible()
 
     with _tables(_ReNode):
@@ -1290,7 +1239,7 @@ def test_reentrant_zero_edge_cascade_returns_the_sources_queryset_class() -> Non
         result = apply_cascade_permissions(node_type, _ReNode.objects.all(), _INFO)
 
         assert seen == [_ReNodeQuerySet]
-        assert truth.class_of(result) is _ReNodeQuerySet
+        assert type(result) is _ReNodeQuerySet
         assert sorted(result.values_list("name", flat=True)) == ["hidden", "keeps", "shown"]
 
 
@@ -1324,7 +1273,7 @@ def test_cascade_edge_hook_reads_every_target_row_in_the_default_manager_class(
         qs: models.QuerySet[models.Model],
         _info: object,
     ) -> models.QuerySet[models.Model]:
-        seen.append((truth.class_of(qs), tuple(sorted(qs.values_list("code", flat=True)))))
+        seen.append((type(qs), tuple(sorted(qs.values_list("code", flat=True)))))
         return qs
 
     _make_type("ShapedShelfType", Shelf, get_queryset=shelf_hook)

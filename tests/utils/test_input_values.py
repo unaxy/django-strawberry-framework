@@ -425,7 +425,7 @@ _FIELD_NAME_REFUSAL = (
 def test_field_name_asks_the_real_type_and_refuses_a_key_that_is_not_one(key: object) -> None:
     """A key that only claims ``str`` (or whose class read raises) is the typed refusal.
 
-    ``truth.text`` copies only a real ``str`` through the base slot, so a
+    ``introspection.text`` copies only a real ``str`` through the base slot, so a
     ``__class__``-based answer would let the key through the check and render it through
     its own ``__str__`` / raise the key's own exception. Both entry points share the check.
     """
@@ -607,47 +607,3 @@ def test_assert_set_traversal_depth_words_a_non_int_knob_with_the_default_senten
         "_Set: related-branch nesting exceeded the maximum traversal depth (8). Flatten the "
         "related input or split into multiple queries."
     )
-
-
-@pytest.mark.parametrize("raised", [RuntimeError, KeyboardInterrupt])
-def test_depth_cap_error_label_survives_a_qualname_whose_class_read_raises(
-    raised: type[BaseException],
-) -> None:
-    """The label is the interpreter's qualname: the metaclass's ``__qualname__`` answer never runs."""
-
-    class _HostileMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__qualname__":
-                return ClassReadRaises(raised)
-            return object_result(super().__getattribute__, name)
-
-    class _Set(metaclass=_HostileMeta):
-        _MAX_LOGIC_DEPTH = 1
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        assert_set_traversal_depth(_Set, 2, branch="logical-branch", input_noun="filter")
-    assert str(excinfo.value) == (
-        "test_depth_cap_error_label_survives_a_qualname_whose_class_read_raises.<locals>._Set: "
-        "logical-branch nesting exceeded _MAX_LOGIC_DEPTH=1. Flatten the "
-        "filter input or split into multiple queries."
-    )
-
-
-def test_depth_cap_error_label_reads_qualname_defensively() -> None:
-    """A hostile ``__qualname__`` hook never runs: the label is read from the interpreter."""
-
-    class _HostileMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "__qualname__":
-                raise RuntimeError("hostile qualname")
-            return object_result(super().__getattribute__, name)
-
-    class _Set(metaclass=_HostileMeta):
-        _MAX_LOGIC_DEPTH = 1
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        assert_set_traversal_depth(_Set, 2, branch="related-branch", input_noun="related")
-    assert "hostile qualname" not in str(excinfo.value)
-    assert "nesting exceeded" in str(excinfo.value)

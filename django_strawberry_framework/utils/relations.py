@@ -28,6 +28,7 @@ from django_strawberry_framework.exceptions import (
     PathResolutionError,
 )
 from django_strawberry_framework.utils._narrowing import (
+    is_class,
     is_concrete_field,
     is_list_or_tuple,
     is_str,
@@ -36,8 +37,6 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.typing import MISSING_ATTRIBUTE
-
-from . import truth
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -90,7 +89,7 @@ __all__ = [
 
 def is_model_class(value: object) -> TypeIs[type[models.Model]]:
     """Return whether ``value`` is a Django model class, asked of its real type."""
-    return truth.is_type(value) and issubclass(value, models.Model)
+    return is_class(value) and issubclass(value, models.Model)
 
 
 RelationKind: TypeAlias = Literal[
@@ -321,7 +320,7 @@ def choice_key_field(model: type[models.Model], key: str | None) -> ConcreteFiel
         return None
     # ``get_field`` answers a ``models.Field`` for every forward name; a reverse relation
     # or a generic relation is no column of the row and reads as ``None`` below.
-    return field if truth.is_instance(field, models.Field) else None
+    return field if isinstance(field, models.Field) else None
 
 
 def _is_traversable_relation(field: object) -> TypeGuard[_TraversableRelationLike]:
@@ -531,7 +530,7 @@ def lookup_registry(field: ModelField) -> ModelField:
     holds is answered by the copy's original, and the copy's ``get_lookups()`` lists
     neither kind of later registration.
     """
-    if truth.is_instance(field, models.GeneratedField) and field.output_field is not None:
+    if isinstance(field, models.GeneratedField) and field.output_field is not None:
         return field.output_field
     return field
 
@@ -551,7 +550,7 @@ def _walk_lookup_expr(terminal: ModelField | Expression, lookup_expr: str) -> _L
         if not part:
             raise LookupValidationError(terminal, lookup_expr, part)
     cursor: Expression | models.ForeignObjectRel = (
-        terminal.cached_col if truth.is_instance(terminal, Field) else terminal
+        terminal.cached_col if isinstance(terminal, Field) else terminal
     )
     # ``str.split`` always yields at least one part, so the final part always exists.
     *transform_parts, final_part = parts
@@ -1258,7 +1257,7 @@ def respell_relation_path(
         if field is None or not getattr(field, "is_relation", False):
             return None
         related: object = getattr(field, "related_model", None)
-        if not truth.is_subclass(related, models.Model):
+        if not (is_class(related) and issubclass(related, models.Model)):
             return None
         if isinstance(field, ForeignObjectRel):
             spelled: object = field.name if source == "accessor" else field.get_accessor_name()
@@ -1324,7 +1323,7 @@ def generated_column(field: object) -> ConcreteField | None:
     declaring FilterSet's context before input dispatch. The identity codec reads it
     through ``stored_value_link``.
     """
-    if not truth.is_instance(field, models.GeneratedField):
+    if not isinstance(field, models.GeneratedField):
         return None
     filed = _filed_generated_column(field)
     if filed is not None:
@@ -1374,7 +1373,7 @@ def generated_column_source(column: ConcreteField) -> models.GeneratedField | No
     if not is_model_class(model) or not isinstance(name, str):
         return None
     field = model._meta.get_field(name)
-    if truth.is_instance(field, models.GeneratedField) and generated_column(field) is column:
+    if isinstance(field, models.GeneratedField) and generated_column(field) is column:
         return field
     return None
 

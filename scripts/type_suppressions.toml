@@ -189,7 +189,6 @@
 "tests/_idioms.py::ClassReadRaisesBase.__class__" = { reportIncompatibleMethodOverride = 1 }
 "tests/_idioms.py::ModelSerializerBase.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/_idioms.py::STR_ENUM" = { cast = 1 }
-"tests/_idioms.py::UnreadableStateQuerySet.__dict__" = { reportGeneralTypeIssues = 1, reportIncompatibleVariableOverride = 1 }
 "tests/_idioms.py::bind_unparented" = { reportArgumentType = 1, reportUnknownMemberType = 1 }
 "tests/_info.py::make_info" = { reportArgumentType = 1 }
 "tests/_mti_relations.py::declare_mti_tag_models.MtiShop.Meta" = { reportIncompatibleVariableOverride = 1 }
@@ -209,7 +208,6 @@
 "tests/auth/test_queries.py::test_a_raising_is_authenticated_propagates_to_the_error_policy" = { reportAttributeAccessIssue = 1 }
 "tests/auth/test_queries.py::test_async_gated_me_forces_the_lazy_user_inside_the_one_sync_boundary" = { reportAttributeAccessIssue = 1 }
 "tests/auth/test_queries.py::test_me_is_null_not_a_crash_when_the_request_user_is_absent" = { reportAttributeAccessIssue = 2 }
-"tests/base/test_conf.py::test_normalize_rejection_skips_raising_metaclass_name" = { reportArgumentType = 1 }
 "tests/base/test_conf.py::test_settings_reload_rejects_non_mapping_value" = { reportArgumentType = 1 }
 "tests/extensions/test_debug.py::_as_connection" = { reportReturnType = 1 }
 "tests/extensions/test_debug.py::test_a_nan_duration_costs_only_its_own_row_and_the_rest_keep_their_order._InjectingQuery.ok" = { reportArgumentType = 1 }
@@ -277,13 +275,11 @@
 "tests/optimizer/test_hints.py::TestFrozenImmutability.test_cannot_mutate_skip" = { reportAttributeAccessIssue = 1 }
 "tests/optimizer/test_hints.py::TestFrozenImmutability.test_skip_sentinel_cannot_be_mutated" = { reportAttributeAccessIssue = 1 }
 "tests/optimizer/test_hints.py::TestInvalidStatesRejected.test_non_bool_flags_raise" = { reportArgumentType = 1 }
-"tests/optimizer/test_hints.py::TestInvalidStatesRejected.test_prefetch_obj_rejects_hostile_type_name_safely" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::TestInvalidStatesRejected.test_prefetch_obj_rejects_non_prefetch_value" = { reportArgumentType = 2 }
 "tests/optimizer/test_hints.py::TestPrefetchFactory.test_none_rejected" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::TestStrategyFactory.test_none_rejected" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::TestStrategyFactory.test_strategy_non_str_lookalikes_stay_typed" = { reportArgumentType = 2 }
 "tests/optimizer/test_hints.py::TestStrategyFactory.test_strategy_rejects_class_with_clean_name" = { reportArgumentType = 1 }
-"tests/optimizer/test_hints.py::TestStrategyFactory.test_strategy_rejects_hostile_type_name_safely" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::_prefetch_through_constructor" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::_prefetch_through_factory" = { reportArgumentType = 1 }
 "tests/optimizer/test_join_taxonomy.py::_as_field" = { reportReturnType = 1 }
@@ -451,7 +447,6 @@
 "tests/utils/test_inputs.py::test_lazy_annotation_message_is_pinned" = { reportArgumentType = 1 }
 "tests/utils/test_inputs.py::test_plain_set_meta_fields_reads_a_lazy_declaration_as_the_object_it_stands_for" = { cast = 1 }
 "tests/utils/test_inputs.py::test_plain_set_meta_fields_reads_every_str_subclass_name_as_plain_text" = { cast = 2 }
-"tests/utils/test_inputs.py::test_reject_unknown_meta_keys_non_string_dict_keys" = { reportArgumentType = 1 }
 "tests/utils/test_policies.py::_resolve_through" = { reportArgumentType = 1 }
 "tests/utils/test_policies.py::test_a_hashable_non_string_key_is_typed_rejected_at_the_key_guard" = { reportArgumentType = 1 }
 "tests/utils/test_policies.py::test_a_non_mapping_override_is_rejected_with_the_derived_article" = { reportArgumentType = 1 }
@@ -460,7 +455,6 @@
 "tests/utils/test_querysets.py::test_extra_order_by_none_and_string_sequence_seal" = { reportAttributeAccessIssue = 1 }
 "tests/utils/test_querysets.py::test_manager_result_degrading_to_list_fails_closed._ListManager.all" = { reportIncompatibleMethodOverride = 1 }
 "tests/utils/test_querysets.py::test_none_hints_seals_to_fresh_dict" = { reportArgumentType = 1 }
-"tests/utils/test_querysets.py::test_provenance_of_type_with_raising_module_descriptor_fails_closed._RaisingMeta.__module__" = { reportIncompatibleVariableOverride = 1 }
 "tests/utils/test_querysets.py::test_validate_post_orderset_result_routing_hints_none_vs_empty" = { reportArgumentType = 1 }
 "tests/utils/test_querysets.py::test_visibility_source_must_be_a_queryset" = { reportArgumentType = 1 }
 "tests/utils/test_relations.py::test_classify_path_non_string_path_raises_typed_path_error" = { reportArgumentType = 1 }
@@ -471,13 +465,6 @@
 "tests/utils/test_sessions.py::test_connection_actor_state_slots_prevent_arbitrary_attributes" = { reportAttributeAccessIssue = 1 }
 "tests/utils/test_strings.py::test_string_helpers_reject_a_value_that_is_not_really_a_string" = { reportArgumentType = 1 }
 "tests/utils/test_strings.py::test_string_helpers_reject_non_string_inputs" = { reportArgumentType = 1 }
-"tests/utils/test_truth.py::_ClassClaimer.__class__" = { reportIncompatibleMethodOverride = 1 }
-"tests/utils/test_truth.py::_ClassRaiser.__class__" = { reportIncompatibleMethodOverride = 1 }
-"tests/utils/test_truth.py::_DictLiar.__dict__" = { reportIncompatibleVariableOverride = 1 }
-"tests/utils/test_truth.py::_DictRaiser.__dict__" = { reportIncompatibleVariableOverride = 1 }
-"tests/utils/test_truth.py::_NonStrModule.__module__" = { reportAssignmentType = 1 }
-"tests/utils/test_truth.py::test_callable_instance_without_a_declared_name_is_named_by_its_class" = { reportAttributeAccessIssue = 1 }
-"tests/utils/test_truth.py::test_planted_colliding_key_runs_its_eq_in_every_namespace_lookup" = { reportArgumentType = 1 }
 "tests/utils/test_typing.py::_info_stand_in" = { cast = 1 }
 "tests/utils/test_write_values.py::_OMITTED" = { reportAny = 1 }
 "tests/utils/test_write_values.py::test_coerce_relation_pk_or_none_handles_non_models_and_uncoercible_values" = { reportArgumentType = 2 }

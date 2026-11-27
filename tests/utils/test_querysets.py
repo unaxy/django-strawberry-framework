@@ -101,9 +101,9 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.orders import Ordering, OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import querysets as querysets_module
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    instance_state,
     is_exact_dict,
     is_iterable,
     is_str,
@@ -329,7 +329,7 @@ def test_related_queryset_is_every_row_in_the_default_manager_class(
     with default_manager_shape(Shelf, shape, "code") as queryset_class:
         rows = related_queryset(Shelf)
 
-        assert truth.class_of(rows) is queryset_class
+        assert type(rows) is queryset_class
         assert sorted(rows.values_list("code", flat=True)) == ["aa-ok", "zz-hidden"]
         assert list(base_queryset(Shelf).values_list("code", flat=True)) == ["aa-ok"]
         assert read_attr(rows, "shape_state", None) is (True if shape == "polymorphic" else None)
@@ -344,7 +344,7 @@ def test_related_queryset_reads_no_filtering_base_manager(
     with default_manager_shape(Shelf, "base", "code"):
         rows = related_queryset(Shelf)
 
-        assert truth.class_of(rows) is models.QuerySet
+        assert type(rows) is models.QuerySet
         assert sorted(rows.values_list("code", flat=True)) == ["aa-ok", "zz-hidden"]
         assert list(Shelf._base_manager.values_list("code", flat=True)) == ["aa-ok"]
 
@@ -417,8 +417,8 @@ def test_related_queryset_keeps_a_model_iterable_subclass(monkeypatch: pytest.Mo
 
     rows = related_queryset(Shelf)
 
-    assert truth.class_of(rows) is _PolymorphicRowsQuerySet
-    assert truth.instance_state(rows)["_iterable_class"] is _PolymorphicRowIterable
+    assert type(rows) is _PolymorphicRowsQuerySet
+    assert instance_state(rows)["_iterable_class"] is _PolymorphicRowIterable
 
 
 def test_related_queryset_refuses_a_class_whose_init_stores_a_projection(
@@ -2138,7 +2138,7 @@ def test_a_subclass_result_with_a_pending_deferred_filter_seals_with_it_baked() 
         pass
 
     result = _DeferredSub(model=Category)
-    truth.instance_state(result)["_deferred_filter"] = (False, (), {"name": "later"})
+    instance_state(result)["_deferred_filter"] = (False, (), {"name": "later"})
     hook = _sync_hook_type(result)
     sealed = apply_type_visibility_sync(
         hook,
@@ -2162,7 +2162,7 @@ def test_exact_queryset_pending_deferred_filter_is_resolved() -> None:
     it lands in the sealed SQL.
     """
     result = Category.objects.all()
-    truth.instance_state(result)["_deferred_filter"] = (False, (), {"name": "later"})
+    instance_state(result)["_deferred_filter"] = (False, (), {"name": "later"})
     sealed, defect = _seal_or_defect(result, Category, None)
     assert defect is None
     assert sealed is not None
@@ -2667,7 +2667,7 @@ def test_deferred_plain_model_instance_still_seals() -> None:
     ``category`` FK and seals cleanly.
     """
     result = Item.objects.all()
-    truth.instance_state(result)["_deferred_filter"] = (
+    instance_state(result)["_deferred_filter"] = (
         False,
         (),
         {"category": Category(name="p", pk=7)},
@@ -2718,51 +2718,6 @@ def test_legit_filtered_relation_seals_byte_identical() -> None:
     got_sql, got_params = _compiled_sql(sealed.query)
     assert got_sql == expected_sql
     assert list(got_params) == list(expected_params)
-
-
-def test_module_spoofing_metaclass_is_not_invoked_and_fails_closed() -> None:
-    """Provenance reads ``__module__`` / ``__qualname__`` via ``type.__getattribute__``.
-
-    A consumer metaclass overriding ``__getattribute__`` would otherwise run during the
-    provenance read that is meant to reject the type; ``type.__getattribute__`` resolves
-    both names without dispatching the metaclass hook.
-    """
-    fired: list[str] = []
-
-    class _NoisyMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:  # must never run for provenance
-            fired.append(name)
-            return object_result(super().__getattribute__, name)
-
-    class _NoisyType(metaclass=_NoisyMeta):
-        __module__ = "django.db.models.functions"
-
-    assert _type_is_genuinely_django(_NoisyType) is False
-    assert fired == []
-    assert _type_is_genuinely_django(models.Value) is True
-
-
-def test_provenance_of_type_with_raising_module_descriptor_fails_closed() -> None:
-    """A metaclass whose ``__module__`` descriptor raises fails closed, not errors.
-
-    ``type.__getattribute__`` still consults a metaclass DATA descriptor, so a hostile
-    ``__module__`` property that raises would propagate past the typed contract; the
-    provenance read catches it and fails closed.
-    """
-
-    class _RaisingMeta(type):
-        @property
-        @override
-        # basedpyright: the hostile shape under test, a ``__module__`` property whose read raises;
-        # the checker rejects any property overriding a base class attribute
-        def __module__(cls) -> str:  # pyright: ignore[reportIncompatibleVariableOverride]
-            raise AttributeError("no module")
-
-    class _Raiser(metaclass=_RaisingMeta):
-        pass
-
-    assert _type_is_genuinely_django(_Raiser) is False
 
 
 def test_none_hints_seals_to_fresh_dict() -> None:
@@ -3957,7 +3912,7 @@ def test_snapshot_routing_intent_is_frozen_before_consumer_code_can_mutate_the_s
     tenant = expected.hints["tenant"]
     assert isinstance(tenant, int)
     queryset_hints(source_qs)["tenant"] = tenant
-    truth.instance_state(source_qs)["_db"] = "other"
+    instance_state(source_qs)["_db"] = "other"
     with pytest.raises(ConfigurationError, match=r"expected db=None, .* got db='other'"):
         _validate_post_orderset_result(DummyType, expected, source_qs, "MyOrderSet.apply_sync")
 
@@ -4091,7 +4046,7 @@ def _pending(
     args: tuple[object, ...] = (),
 ) -> models.QuerySet[models.Model, object]:
     """``queryset`` carrying ``args`` / ``kwargs`` as the pending filter a manager leaves."""
-    truth.instance_state(queryset)["_deferred_filter"] = (False, args, kwargs)
+    instance_state(queryset)["_deferred_filter"] = (False, args, kwargs)
     return queryset
 
 
@@ -4251,7 +4206,7 @@ def test_the_seal_carries_each_django_fetch_mode(mode_name: str) -> None:
     )
     assert defect is None
     assert sealed is not None
-    assert truth.instance_state(sealed)["_fetch_mode"] is mode
+    assert instance_state(sealed)["_fetch_mode"] is mode
 
 
 @pytest.mark.django_db

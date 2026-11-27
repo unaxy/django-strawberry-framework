@@ -105,10 +105,11 @@ from django.core.validators import ProhibitNullCharactersValidator
 from django.db import connections, models
 from django.utils import timezone
 
-from . import truth
+from . import introspection
 from ._array_field import array_leaf_field
 from ._narrowing import (
     call_method,
+    is_class,
     is_dict,
     is_iterable,
     is_list,
@@ -321,7 +322,7 @@ def field_error(path: str, messages: object, *, codes: object = None) -> FieldEr
     ``ErrorDetail.code``s / Django ``ValidationError.code``s (or a framework code); ``None``
     yields ``[]``.
     """
-    normalized_path = truth.text(path)
+    normalized_path = introspection.text(path)
     key = normalized_path or NON_FIELD_ERROR_KEY
     # Root rule: a model-wide / non-field error (an empty path, or the bare
     # ``"__all__"`` sentinel as the WHOLE path - the DRF flattener joins the top-level
@@ -415,7 +416,7 @@ def relation_field_error(graphql_name: str) -> FieldError:
     + leaf construction are single
     sourced across every flavor.
     """
-    name = truth.text(graphql_name)
+    name = introspection.text(graphql_name)
     return field_error(
         name,
         f"Invalid id for relation {name!r}.",
@@ -636,8 +637,8 @@ def join_error_path(prefix: str, segment: str) -> str:
     ``items.0.__all__`` (the root-vs-nested ``__all__`` distinction itself
     stays with each flattener's key handling).
     """
-    normalized_prefix = truth.text(prefix)
-    normalized_segment = truth.text(segment)
+    normalized_prefix = introspection.text(prefix)
+    normalized_segment = introspection.text(segment)
     return f"{normalized_prefix}.{normalized_segment}" if normalized_prefix else normalized_segment
 
 
@@ -731,7 +732,7 @@ def _unstorable_leaf(path: str, text: str) -> UnstorableText | None:
         _PROHIBIT_NULL_CHARACTERS(text)
     except ValidationError as exc:
         (message,) = exc.messages
-        return UnstorableText(path, message, truth.text(exc.code))
+        return UnstorableText(path, message, introspection.text(exc.code))
     return None
 
 
@@ -948,8 +949,8 @@ def _binds_client_side(connection: BaseDatabaseWrapper) -> bool:
     client_cursor = read_attr(read_attr(connection, "Database"), "ClientCursor", None)
     params: dict[str, object] = connection.get_connection_params()
     factory = params.get("cursor_factory")
-    return not truth.is_type(client_cursor) or (
-        truth.is_type(factory) and issubclass(factory, client_cursor)
+    return not is_class(client_cursor) or (
+        is_class(factory) and issubclass(factory, client_cursor)
     )
 
 
@@ -1411,7 +1412,7 @@ def _psycopg_refuses_list(
     if (
         adapters is None
         or not callable(transformer_cls)
-        or not (truth.is_type(refusal) and issubclass(refusal, Exception))
+        or not (is_class(refusal) and issubclass(refusal, Exception))
     ):
         return False
     try:

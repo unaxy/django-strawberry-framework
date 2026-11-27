@@ -143,7 +143,7 @@ def test_string_helpers_reject_a_value_that_is_not_really_a_string(
 ) -> None:
     """A value is a string only if its real type is: its ``__class__`` is never consulted.
 
-    ``truth.text`` copies only a real ``str`` through the base slot and renders anything else
+    ``introspection.text`` copies only a real ``str`` through the base slot and renders anything else
     through its own ``__str__``, so a value whose ``__class__`` raises or claims ``str`` (or a
     lazy proxy of a string) has to meet the typed rejection before that read, without its
     ``__class__`` being read.

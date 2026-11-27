@@ -1,7 +1,7 @@
 """Django lazy-proxy unwrapping: the object a ``LazyObject`` stands for, before a type check.
 
 A proxy passes ``isinstance`` for the object it wraps only by forwarding
-``__class__``, which ``utils/truth.py::is_instance`` deliberately ignores. The
+``__class__``, which ``utils/_narrowing.py::is_real_instance`` deliberately ignores. The
 wrapped object is read here in exactly two kinds of place. One is where Django
 hands over a real runtime lazy object: ``request.user`` is a
 ``SimpleLazyObject``, and what stands behind it reaches the Relay node paths.
@@ -18,8 +18,7 @@ other object that forwards ``__class__`` (a ``Mock(spec=...)``, a hand-written
 stand-in) wraps no real object and is never unwrapped, so an ``isinstance``
 gate takes it for the class it claims, as Python does.
 
-This module is Django-aware and sits below every subsystem that unwraps, so
-``utils/truth.py`` stays Django-free.
+This module sits below every subsystem that unwraps.
 """
 
 from __future__ import annotations
@@ -28,8 +27,7 @@ from typing import TYPE_CHECKING
 
 from django.utils.functional import LazyObject, empty
 
-from . import truth
-from ._narrowing import call_method, read_attr
+from ._narrowing import call_method, is_real_instance, read_attr
 
 __all__ = ("unwrap_lazy_object",)
 
@@ -46,7 +44,7 @@ def unwrap_lazy_object(obj: object) -> object:
     """Return the object a Django lazy proxy stands for; any other value unchanged.
 
     Django's ``LazyObject`` (``request.user`` is a ``SimpleLazyObject``) passes
-    for the object it wraps by forwarding ``__class__``, which a truthful class
+    for the object it wraps by forwarding ``__class__``, which a real-class
     read deliberately ignores. The proxy is recognised by its real class and
     the wrapped object is read from it, so the type check runs against the
     object itself. The factory runs on first use, as any attribute access on
@@ -57,7 +55,7 @@ def unwrap_lazy_object(obj: object) -> object:
     factory built, which no static type of the argument states, so a caller
     checks it like any other value of unknown type.
     """
-    while truth.is_instance(obj, _LAZY_OBJECT):
+    while is_real_instance(obj, _LAZY_OBJECT):
         if read_attr(obj, "_wrapped") is empty:
             _ = call_method(obj, "_setup")
         obj = read_attr(obj, "_wrapped")

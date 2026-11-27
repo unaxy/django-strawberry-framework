@@ -76,7 +76,7 @@ def _registry_registration_identity() -> tuple[object, ...]:
         tuple(
             sorted(
                 (id(type_cls), id(definition))
-                for type_cls, definition in registry._definitions.items()
+                for type_cls, definition in registry.iter_definitions()
             ),
         ),
         tuple(id(pending) for pending in registry._pending),

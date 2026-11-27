@@ -75,7 +75,6 @@ from django_strawberry_framework.types.resolvers import (
     _make_relation_resolver,
     _visible_related_object,
 )
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_awaitable, is_iterable, read_attr
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._idioms import saved_pk
@@ -1743,7 +1742,7 @@ def test_unplanned_relation_recheck_reads_every_target_row_in_the_default_manage
         @classmethod
         @override
         def get_queryset(cls, queryset: QuerySet[Shelf], info: object) -> QuerySet[Shelf]:
-            seen.append(truth.class_of(queryset))
+            seen.append(type(queryset))
             return queryset
 
     with default_manager_shape(Shelf, shape, "code") as queryset_class:

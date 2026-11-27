@@ -65,7 +65,7 @@ from django_strawberry_framework.relay import (
 )
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.relay import implements_relay_node
-from django_strawberry_framework.utils import truth as real_truth
+from django_strawberry_framework.utils import introspection as real_introspection
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.querysets import SyncMisuseError
 from tests._idioms import (
@@ -984,9 +984,9 @@ def test_sync_node_path_builds_no_owner_name(monkeypatch: pytest.MonkeyPatch) ->
     """Sync node(s) success paths skip the error-only owner-name build.
 
     ``reject_async_in_sync_context`` reads ``owner`` only on the raise path, so
-    both sync resolvers guard the ``truth.name`` call with ``isawaitable``: one
+    both sync resolvers guard the ``introspection.name`` call with ``isawaitable``: one
     sync single refetch plus one sync batch refetch build zero owner names. The
-    spy is scoped to this module's own ``truth`` reference (other subsystems
+    spy is scoped to this module's own ``introspection`` reference (other subsystems
     name eagerly on their own paths), and the ``SyncMisuseError`` rows still pin
     the raise path.
     """
@@ -1008,17 +1008,17 @@ def test_sync_node_path_builds_no_owner_name(monkeypatch: pytest.MonkeyPatch) ->
 
     calls: list[object] = []
 
-    class _CountingTruth:
-        """Delegate every truth read while counting ``name`` calls."""
+    class _CountingIntrospection:
+        """Delegate every introspection read while counting ``name`` calls."""
 
         def __getattr__(self, attr: str) -> object:
-            return read_attr(real_truth, attr)
+            return read_attr(real_introspection, attr)
 
         def name(self, obj: object) -> str:
             calls.append(obj)
-            return real_truth.name(obj)
+            return real_introspection.name(obj)
 
-    monkeypatch.setattr(relay_module, "truth", _CountingTruth())
+    monkeypatch.setattr(relay_module, "introspection", _CountingIntrospection())
     single = single_schema.execute_sync(_CATEGORY_QUERY, variable_values={"id": gid})
     assert single.errors is None
     batch = batch_schema.execute_sync(_CATEGORIES_QUERY, variable_values={"ids": [gid, gid]})

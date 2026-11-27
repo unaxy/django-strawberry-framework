@@ -59,11 +59,16 @@ from typing_extensions import override
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear
 
-from . import truth
+from . import introspection
 from ._narrowing import (
     call_method,
+    class_namespace,
+    is_class,
+    is_dict,
+    is_list_or_tuple,
     is_mapping,
     is_real_collection,
+    is_set_or_frozenset,
     is_str,
     is_text_atom,
     list_of,
@@ -371,7 +376,7 @@ def emit_set_input_field_triples(
         prior_attr = seen_attr.get(python_attr)
         if prior_attr is not None:
             raise ConfigurationError(
-                f"{truth.qualname(set_cls)}: members {prior_attr!r} and "
+                f"{set_cls.__qualname__}: members {prior_attr!r} and "
                 f"{top_name!r} both generate the input attribute {python_attr!r} (Django "
                 "path separators flatten to '_'), so one would silently overwrite the "
                 "other in the generated input type. Rename one member or drop one via "
@@ -709,11 +714,6 @@ def _sorted_meta_values(value: object) -> list[object]:
     return sorted(base_container_values(value), key=canonical_sort_key)
 
 
-# The builtin unordered containers a field-name declaration is canonicalized from: the set
-# families' ``Meta.fields`` and the write flavors' unordered name keys.
-_UNORDERED_TYPES = (set, frozenset)
-
-
 FILTERSET_FIELDS_ALIAS = "filter_fields"
 
 _META_ABSENT = object()
@@ -727,15 +727,17 @@ def reject_unknown_meta_keys(name: str, meta: object, allowed: frozenset[str]) -
     both set metaclasses (``FilterSetMetaclass`` / ``OrderSetMetaclass``) call it
     with their OWN allowed-key frozenset rather than re-spelling the
     own-keys-only (no MRO walk) scan + the reject. The declared keys are
-    ``truth.declared_meta_keys(meta)`` (underscore-prefixed keys skipped), the
-    read ``types/base.py::_validate_meta`` shares; a declared key outside
+    the ``str`` keys of ``meta``'s own namespace (underscore-prefixed keys skipped); a
+    declared key outside
     ``allowed`` raises ``ConfigurationError`` naming the offending key(s). A non-class
     ``meta`` raises first; otherwise ``meta`` comes back narrowed to the class it
     proved, which is the value every caller goes on to read.
     """
-    if not truth.is_type(meta):
-        raise ConfigurationError(f"{name}.Meta must be a class; got {truth.render(meta)}.")
-    unknown = [key for key in truth.declared_meta_keys(meta) if key not in allowed]
+    if not is_class(meta):
+        raise ConfigurationError(f"{name}.Meta must be a class; got {meta!r}.")
+    unknown = sorted(
+        key for key in class_namespace(meta) if not key.startswith("_") and key not in allowed
+    )
     if unknown:
         raise ConfigurationError(f"{name}.Meta has unknown keys: {unknown}.")
     return meta
@@ -754,7 +756,7 @@ def resolve_set_meta_fields(
     only when the caller should populate ``fields`` from the synonym.
 
     This is the one fingerprint both set families apply to a class ``Meta``.
-    Each key is read as declared through the real MRO (``truth.static_attr``),
+    Each key is read as declared through the MRO (``utils/introspection.py::mro_attr``),
     so inherited Meta attributes count -- the ``FilterSetMetaclass`` contract:
     a ``__dict__`` read would promote ``filter_fields`` onto a subclass Meta
     that inherits ``fields``.
@@ -764,11 +766,11 @@ def resolve_set_meta_fields(
     """
     if source is None:
         return None, False
-    fields = truth.static_attr(source, "fields", _META_ABSENT)
+    fields = introspection.mro_attr(source, "fields", _META_ABSENT)
     if fields is not _META_ABSENT:
         return fields, False
     if fields_alias is not None:
-        alias_fields = truth.static_attr(source, fields_alias, _META_ABSENT)
+        alias_fields = introspection.mro_attr(source, fields_alias, _META_ABSENT)
         if alias_fields is not _META_ABSENT:
             return alias_fields, True
     return None, False
@@ -787,25 +789,14 @@ def canonicalize_set_meta_fields(fields: object) -> object:
     shape is decided by the value's real class; any other value passes through
     to the family's typed declaration gate.
     """
-    if truth.is_one_of(fields, _UNORDERED_TYPES):
+    if is_set_or_frozenset(fields):
         return _sorted_meta_values(fields)
-    if truth.is_instance(fields, dict):
+    if is_dict(fields):
         return {
-            key: (
-                _sorted_meta_values(value) if truth.is_one_of(value, _UNORDERED_TYPES) else value
-            )
+            key: (_sorted_meta_values(value) if is_set_or_frozenset(value) else value)
             for key, value in base_container_values(fields)
         }
     return fields
-
-
-# The builtin containers whose members ``plain_set_meta_fields`` rebuilds as the same kind.
-_MEMBER_CONTAINER_TYPES = (
-    list,
-    tuple,
-    set,
-    frozenset,
-)
 
 
 def is_re_readable_field_declaration(value: object) -> TypeGuard[Collection[object]]:
@@ -897,10 +888,11 @@ def plain_set_meta_fields(fields: object) -> object:
     later reader sees the real container kind.
     """
     fields = unwrap_lazy_object(fields)
-    if truth.is_instance(fields, dict):
+    if is_dict(fields):
         pairs = base_container_values(fields)
         plain_pairs = tuple(
-            (truth.plain_str(key), plain_set_meta_fields(lookups)) for key, lookups in pairs
+            (introspection.plain_str(key), plain_set_meta_fields(lookups))
+            for key, lookups in pairs
         )
         # Identity, never ``==``: the comparison must not reach a consumer ``__eq__``.
         if all(
@@ -909,25 +901,25 @@ def plain_set_meta_fields(fields: object) -> object:
         ):
             return fields
         return dict(plain_pairs)
-    if truth.is_one_of(fields, _MEMBER_CONTAINER_TYPES):
+    if is_list_or_tuple(fields) or is_set_or_frozenset(fields):
         members = base_container_values(fields)
-        plain = tuple(truth.plain_str(member) for member in members)
+        plain = tuple(introspection.plain_str(member) for member in members)
         if _unchanged(members, plain):
             return fields
-        if truth.is_instance(fields, frozenset):
+        if isinstance(fields, frozenset):
             return frozenset(plain)
-        if truth.is_instance(fields, set):
+        if isinstance(fields, set):
             return set(plain)
-        return plain if truth.is_instance(fields, tuple) else list(plain)
+        return plain if isinstance(fields, tuple) else list(plain)
     if is_re_readable_field_declaration(fields):
         members = tuple(fields)
-        plain = tuple(truth.plain_str(member) for member in members)
+        plain = tuple(introspection.plain_str(member) for member in members)
         return fields if _unchanged(members, plain) else _PlainNames(plain)
-    return truth.plain_str(fields)
+    return introspection.plain_str(fields)
 
 
 def _unchanged(members: tuple[object, ...], plain: tuple[object, ...]) -> bool:
-    """Return whether ``truth.plain_str`` left every member as the same object (identity, never ``==``)."""
+    """Return whether ``introspection.plain_str`` left every member as the same object (identity)."""
     return all(new is old for old, new in zip(members, plain, strict=True))
 
 
@@ -1185,14 +1177,14 @@ def normalize_field_name_sequence(
     if is_text_atom(value):
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be a sequence of field "
-            f"names, not a bare string: {truth.render(value)}.",
+            f"names, not a bare string: {value!r}.",
         )
-    unordered = truth.is_one_of(value, _UNORDERED_TYPES)
+    unordered = is_set_or_frozenset(value)
     if unordered and ordered:
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be an ordered sequence of field name "
-            f"strings (a list or tuple), not an unordered {truth.kind(value)}: "
-            f"{truth.render(value)}. The order of Meta.{label} is the generated "
+            f"strings (a list or tuple), not an unordered {introspection.kind(value)}: "
+            f"{value!r}. The order of Meta.{label} is the generated "
             "input's field order, and a set's iteration order varies between "
             "processes.",
         )
@@ -1201,20 +1193,20 @@ def normalize_field_name_sequence(
     except TypeError as exc:
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be a readable sequence of field name strings; "
-            f"got {truth.kind(value)}.",
+            f"got {introspection.kind(value)}.",
         ) from exc
     names: list[str] = []
     non_strings: list[object] = []
     for name in entries:
-        if truth.is_instance(name, str):
-            names.append(truth.text(name))
+        if is_str(name):
+            names.append(introspection.text(name))
         else:
             non_strings.append(name)
     if non_strings:
         raise ConfigurationError(
             f"{flavor} Meta.{label} must be a sequence of field name strings; "
             "got non-string entry(ies): "
-            f"[{', '.join(truth.render(name) for name in non_strings)}].",
+            f"[{', '.join(repr(name) for name in non_strings)}].",
         )
     duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
     if duplicates:
@@ -1383,10 +1375,11 @@ def is_input_attribute_name(name: object) -> TypeIs[str]:
     and passes. A caller whose names come from consumer code asks this before building
     and keeps its own diagnostic. Each test reads the real ``str`` value through base
     slots: ``is_str`` asks the real type, ``str.isidentifier`` is the base method, and
-    ``keyword.iskeyword`` receives the exact ``str`` copy ``truth.text`` returns, so no
-    ``str`` subclass override (``isidentifier``, ``__hash__``, ``__eq__``) runs.
+    ``keyword.iskeyword`` receives the exact ``str`` copy ``introspection.text`` returns.
     """
-    return is_str(name) and str.isidentifier(name) and not keyword.iskeyword(truth.text(name))
+    return (
+        is_str(name) and str.isidentifier(name) and not keyword.iskeyword(introspection.text(name))
+    )
 
 
 def build_strawberry_input_class(
@@ -1468,7 +1461,7 @@ def build_strawberry_input_class(
             raise ConfigurationError(
                 "Generated input field specifications must contain "
                 f"(python_attr, annotation, field_kwargs) triples; entry {index} is "
-                f"{truth.kind(field_spec)}.",
+                f"{introspection.kind(field_spec)}.",
             ) from exc
         kwargs: dict[str, object] = {} if raw_kwargs is None else dict(raw_kwargs)
         if python_attr in annotations:
@@ -1486,13 +1479,13 @@ def build_strawberry_input_class(
             )
         requested_name = kwargs.get("name")
         field_description = kwargs.pop("description", None)
-        if (requested_name is not None and not truth.is_instance(requested_name, str)) or (
-            field_description is not None and not truth.is_instance(field_description, str)
+        if (requested_name is not None and not isinstance(requested_name, str)) or (
+            field_description is not None and not isinstance(field_description, str)
         ):
             raise ConfigurationError(
                 f"Generated input {name!r} field {python_attr!r} takes a string name and "
-                f"description; got {truth.kind(requested_name)} and "
-                f"{truth.kind(field_description)}.",
+                f"description; got {introspection.kind(requested_name)} and "
+                f"{introspection.kind(field_description)}.",
             )
         # The PRESENCE of ``default`` (not its value) decides required-vs-optional:
         # a required field gets NO class default at all, so ``None`` is a legal
@@ -1531,7 +1524,7 @@ def _sources_of(field: StrawberryField) -> GeneratedFieldSources | None:
     # Strawberry types ``origin`` over resolver wrappers it leaves unparameterized; a
     # resolver field's origin is its resolver, never a generated class.
     origin: object = read_attr(field, "origin")
-    return _generated_field_sources.get(origin) if truth.is_type(origin) else None
+    return _generated_field_sources.get(origin) if is_class(origin) else None
 
 
 def field_name_collision_remedy(first: StrawberryField, second: StrawberryField) -> str:
@@ -1698,7 +1691,7 @@ def duplicate_name_message(
     The one skeleton behind every generated-input name collision: ``{name!r} is
     {verb} by two distinct {family_label} classes: A vs B. Rename one
     {rename_noun} so its class-derived input type name is unique.`` - with the
-    two ``truth.label`` (``module.qualname``) interpolations spelled once. The pinned
+    two ``module.qualname`` interpolations spelled once. The pinned
     per-site wording stays byte-stable via the threaded nouns
     (``materialize_generated_input_class`` passes ``verb="materialized"`` +
     ``family_label="<family> input"``; ``GeneratedInputArgumentsFactory``
@@ -1707,8 +1700,8 @@ def duplicate_name_message(
     """
     return (
         f"{name!r} is {verb} by two distinct {family_label} classes: "
-        f"{truth.label(existing)} vs "
-        f"{truth.label(claimant)}. Rename one {rename_noun} "
+        f"{existing.__module__}.{existing.__qualname__} vs "
+        f"{claimant.__module__}.{claimant.__qualname__}. Rename one {rename_noun} "
         "so its class-derived input type name is unique."
     )
 
@@ -1808,7 +1801,7 @@ def _claim_type_key(field_type: object) -> object:
         return ("enum", field_type.name, field_type.wrapped_cls)
     definition = get_object_definition(field_type)
     if definition is not None:
-        return ("type", definition.name, truth.qualname(field_type))
+        return ("type", definition.name, read_attr(field_type, "__qualname__"))
     return field_type
 
 
@@ -1886,19 +1879,19 @@ def claim_generated_type_name(
     hold until ``registry.clear()``.
     """
     definition = get_object_definition(cls)
-    if definition is None or truth.module(cls) != __name__:
+    if definition is None or cls.__module__ != __name__:
         # Only ``build_strawberry_input_class`` classes share this module; any other
         # class keeps its own identity, and Strawberry refuses a same-named twin of
         # it at schema build.
         return
     name = definition.name
     variants = _type_name_claims.setdefault(name, [])
-    if truth.is_among(cls, (held for variant in variants for held in variant.classes)):
+    if any(held is cls for variant in variants for held in variant.classes):
         return
     for field in definition.fields:
         # A lazy reference is not a class: the root it names claims its own name.
         embedded = peel_strawberry_containers(field.type)[1]
-        if not truth.is_type(embedded):
+        if not is_class(embedded):
             continue
         embedded_definition = get_object_definition(embedded)
         if embedded_definition is not None and embedded_definition.is_input:
@@ -1925,7 +1918,7 @@ def claim_generated_type_name(
     for variant in variants:
         if variant.claim.shape == shape:
             matched = variant
-        elif scope is not None and truth.is_among(scope, variant.scopes):
+        elif scope is not None and scope in variant.scopes:
             raise ConfigurationError(_type_name_collision_message(name, variant.claim, claim))
     if matched is None:
         matched = _TypeNameVariant(
@@ -1938,7 +1931,7 @@ def claim_generated_type_name(
     matched.classes.append(cls)
     if scope is not None:
         matched.scopes.append(scope)
-    cls.__qualname__ = matched.qualname  # truth: ok minted class takes its shape variant
+    cls.__qualname__ = matched.qualname  # minted class takes its shape variant
     _class_claims[cls] = claim
 
 
@@ -1952,7 +1945,7 @@ def generated_type_name_collision(
     were claimed by ``claim_generated_type_name``; ``None`` for any other pair, whose
     error is not this package's to restate.
     """
-    if not truth.is_type(first_cls) or not truth.is_type(second_cls):
+    if not is_class(first_cls) or not is_class(second_cls):
         return None
     first = _class_claims.get(first_cls)
     second = _class_claims.get(second_cls)
@@ -2070,12 +2063,12 @@ def build_lazy_input_annotation(
     materialized the input class as a module global.
 
     ``TypeError`` for ANY other argument, including one whose ``__class__`` raises or
-    claims a class it is not (the test reads the real class, ``truth.is_subclass``), so a
+    claims a class it is not (the test reads the real class, ``is_class``), so a
     Django lazy proxy of a set class is refused too.
     """
-    if not truth.is_subclass(set_class, expected_base):
+    if not (is_class(set_class) and issubclass(set_class, expected_base)):
         raise TypeError(
-            f"{helper_spelling} requires {expected_label} subclass; got {truth.render(set_class)}",
+            f"{helper_spelling} requires {expected_label} subclass; got {set_class!r}",
         )
     ledger.add(set_class)
     lazy_input: strawberry.LazyType[str, str] = strawberry.LazyType(
@@ -2096,14 +2089,14 @@ def iter_set_subclasses(root: type[_SetT]) -> list[type[_SetT]]:
     """
     seen: set[int] = set()
     result: list[type[_SetT]] = []
-    stack = list(type.__subclasses__(root))  # truth: ok base type slot, no dispatch
+    stack = list(type.__subclasses__(root))  # base type slot, no dispatch
     while stack:
         cls = stack.pop()
         if id(cls) in seen:
             continue
         seen.add(id(cls))
         result.append(cls)
-        stack.extend(type.__subclasses__(cls))  # truth: ok base type slot, no dispatch
+        stack.extend(type.__subclasses__(cls))  # base type slot, no dispatch
     return result
 
 
@@ -2161,14 +2154,14 @@ def clear_generated_input_namespace(
         # The set base declares ``_lifecycle`` as a ``SetLifecycleAttrs``.
         binding_attrs: tuple[str, ...] = getattr(lifecycle, "binding_attrs", ())
         # The family names its own set base class (``make_set_input_namespace``'s kwargs).
-        for subclass in iter_set_subclasses(require(set_root, truth.is_type)):
+        for subclass in iter_set_subclasses(require(set_root, is_class)):
             # ``delattr`` on the subclass so it reads as unbound again: its own
             # slot is gone (``utils/permissions.py::set_bound_definition`` reads
             # only that one). Each attribute is removed only when set directly
             # on the subclass (its own real namespace) so a subclass that never
             # had a binding tolerates the clear.
             for attr in binding_attrs:
-                if attr in truth.class_dict(subclass):
+                if attr in class_namespace(subclass):
                     delattr(subclass, attr)
 
 
@@ -2277,7 +2270,7 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
             if target_name not in self.input_object_types:
                 self._build_class_type(set_cls)
 
-            related_map: object = truth.static_attr(set_cls, self._related_attr, {}) or {}
+            related_map: object = introspection.mro_attr(set_cls, self._related_attr, {}) or {}
             if is_mapping(related_map):
                 for related in related_map.values():
                     # A related declaration's target property admits only ``None`` or the
@@ -2312,7 +2305,7 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
             triples,
             empty_message=(
                 f"{self._factory_label}: {self._family_label} "
-                f"{truth.qualname(set_cls)} "
+                f"{set_cls.__qualname__} "
                 f"generates the GraphQL input type {type_name!r} with no fields. "
                 "Strawberry rejects a zero-field input object at schema build "
                 f"('Input Object type {type_name} must define one or more fields'). "
@@ -2323,7 +2316,7 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
         )
         claim_generated_type_name(
             input_cls,
-            owner=f"{self._family_label} {truth.label(set_cls)}",
+            owner=f"{self._family_label} {set_cls.__module__}.{set_cls.__qualname__}",
             scope=set_cls,
         )
         self.input_object_types[type_name] = input_cls
@@ -2349,7 +2342,7 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
             else:
                 members[attr], levers[attr] = spec.member, self._member_lever(set_cls, spec.member)
         return GeneratedFieldSources(
-            subject=f"{self._family_label} {truth.qualname(set_cls)!r}",
+            subject=f"{self._family_label} {set_cls.__qualname__!r}",
             field_noun="members",
             rename_clause="Rename one member",
             members=members,

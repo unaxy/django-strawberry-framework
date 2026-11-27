@@ -46,8 +46,7 @@ from typing_extensions import Never
 
 from django_strawberry_framework.exceptions import ConfigurationError
 
-from . import truth
-from ._narrowing import optional_instance, read_attr, require
+from ._narrowing import class_namespace, optional_instance, read_attr, require
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
@@ -413,15 +412,21 @@ def is_async_callable(
     # Inspecting ``__call__``'s async-ness, not testing callability -- so
     # ``callable()`` is the wrong tool here. The interpreter looks ``__call__``
     # up in the real MRO of the CLASS of whatever is called, never that class's
-    # metaclass, so that is where it is read (``truth.mro_attr``): calling a
+    # metaclass, so that is where it is read (each MRO class's own namespace): calling a
     # class runs its metaclass's ``__call__`` (a plain class resolves to the
     # sync ``type.__call__`` slot wrapper, a metaclass carrying ``async def
     # __call__`` is genuinely async to call), and calling an instance runs its
     # class's (an instance whose class declares no ``__call__`` is not callable,
     # whatever its class's metaclass carries).
-    return inspect.iscoroutinefunction(
-        truth.mro_attr(type(target), "__call__"),
+    call = next(
+        (
+            namespace["__call__"]
+            for namespace in map(class_namespace, type(target).__mro__)
+            if "__call__" in namespace
+        ),
+        None,
     )
+    return inspect.iscoroutinefunction(call)
 
 
 # basedpyright: a guard replaces the caller's type, and awaiting the narrowed callable must still

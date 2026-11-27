@@ -100,8 +100,14 @@ from .types.relay import (
     require_published_node,
     require_returned_node,
 )
-from .utils import truth
-from .utils._narrowing import optional_instance, read_attr, require_instance
+from .utils import introspection
+from .utils._narrowing import (
+    is_class,
+    is_real_instance,
+    optional_instance,
+    read_attr,
+    require_instance,
+)
 from .utils._queryset_private import model_row_peers, set_model_row_peers
 from .utils.directives import validated_field_directives
 from .utils.errors import GLOBALID_INVALID_ERROR_CODE, coded_error_extensions
@@ -702,7 +708,7 @@ def _check_nodes_result(
     result = list(result)
     if len(result) != len(node_ids):
         raise ConfigurationError(
-            f"{truth.name(resolved_type)}.resolve_nodes returned {len(result)} row(s) for "
+            f"{introspection.name(resolved_type)}.resolve_nodes returned {len(result)} row(s) for "
             f"{len(node_ids)} requested id(s); a resolve_nodes override must return a list "
             "input-ordered and 1:1 with node_ids (None for missing) - the "
             "_resolve_nodes_default / _order_nodes shape.",
@@ -741,9 +747,9 @@ def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: object) -> obj
     if node is None:
         return node
     node = unwrap_lazy_object(node)
-    definition = truth.static_attr(resolved_type, "__django_strawberry_definition__", None)
+    definition = introspection.mro_attr(resolved_type, "__django_strawberry_definition__", None)
     model = getattr(definition, "model", None)
-    if truth.is_type(model) and truth.is_instance(node, model):
+    if is_class(model) and isinstance(node, model):
         node = copy.copy(node)
     with contextlib.suppress(AttributeError):
         node = strawberry.cast(resolved_type, node)
@@ -776,8 +782,8 @@ def _stamp_nodes(resolved_type: type[_RelayDjangoType], rows: Iterable[object]) 
         # Only a copy is re-linked; it and its original are rows of the type's model.
         if (
             node is original
-            or not truth.is_instance(original, models.Model)
-            or not truth.is_instance(node, models.Model)
+            or not is_real_instance(original, models.Model)
+            or not is_real_instance(node, models.Model)
         ):
             continue
         peers = model_row_peers(original)
@@ -840,7 +846,7 @@ def _resolve_one_through_nodes(
     # As in ``DjangoNodesField``: the owner name is built only for the awaitable it refuses.
     rows = reject_async_in_sync_context(
         result,
-        owner=truth.name(resolved_type) if inspect.isawaitable(result) else "",
+        owner=introspection.name(resolved_type) if inspect.isawaitable(result) else "",
         method="resolve_nodes",
         context="Relay refetch",
         recourse=_SYNC_RESOLVER_RECOURSE,
@@ -934,7 +940,7 @@ def DjangoNodeField(  # noqa: N802 - PascalCase for graphene-django parity
             return None
         # Mode first: an async override called before a refusal leaves its coroutine unawaited.
         is_async = async_execution()
-        if not truth.overrides(resolved, relay.Node, "resolve_node"):
+        if not introspection.overrides(resolved, relay.Node, "resolve_node"):
             return _resolve_one_through_nodes(resolved, node_id, info, is_async=is_async)
         # A consumer ``resolve_node`` override is called as written. In async context it
         # may return a coroutine Strawberry's executor awaits as a plain-field return
@@ -946,7 +952,7 @@ def DjangoNodeField(  # noqa: N802 - PascalCase for graphene-django parity
         if not is_async and inspect.isawaitable(result):
             result = reject_async_in_sync_context(
                 result,
-                owner=truth.name(resolved),
+                owner=introspection.name(resolved),
                 method="resolve_node",
                 context="Relay refetch",
                 recourse=_SYNC_RESOLVER_RECOURSE,
@@ -1108,7 +1114,7 @@ def DjangoNodesField(  # noqa: N802 - PascalCase for graphene-django parity
             # that one value and the success path builds none.
             rows = reject_async_in_sync_context(
                 result,
-                owner=truth.name(resolved_type) if inspect.isawaitable(result) else "",
+                owner=introspection.name(resolved_type) if inspect.isawaitable(result) else "",
                 method="resolve_nodes",
                 context="Relay refetch",
                 recourse=_SYNC_RESOLVER_RECOURSE,

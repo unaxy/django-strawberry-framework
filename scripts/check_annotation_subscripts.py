@@ -177,8 +177,6 @@ SUBSCRIPTABLE: dict[str, bool | tuple[int, int]] = {
     "django_strawberry_framework.types.finalizer._SidecarBindingSpec": True,
     "django_strawberry_framework.utils.inputs.GeneratedInputArgumentsFactory": True,
     "django_strawberry_framework.utils.querysets._SealPolicy": True,
-    "django_strawberry_framework.utils.truth.IdentityMap": True,
-    "django_strawberry_framework.utils.truth.IdentitySet": True,
     "django_strawberry_framework.write_mixins.DeclarationRegistry": True,
 }
 

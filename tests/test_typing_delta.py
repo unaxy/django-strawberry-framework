@@ -64,12 +64,12 @@ _PREDICATES_BEFORE = '''\
 from django.db import models
 from typing_extensions import TypeIs
 
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import is_class
 
 
 def _is_queryset_class(value: object) -> TypeIs[type[models.QuerySet[models.Model, object]]]:
     """Old."""
-    return truth.is_subclass(value, models.QuerySet)
+    return is_class(value) and issubclass(value, models.QuerySet)
 '''
 
 

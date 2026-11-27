@@ -37,7 +37,7 @@ from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import _field_specs
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.relay import apply_interfaces
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import is_tuple, read_attr, require
 from django_strawberry_framework.utils.typing import peel_strawberry_containers
 from tests._idioms import declare_django_type
@@ -146,7 +146,7 @@ def test_filter_arguments_factory_dedupes_target_enqueued_twice(
     visits: list[object] = []
     building = False
     build = FilterArgumentsFactory._build_class_type
-    read = truth.static_attr
+    read = introspection.mro_attr
 
     def tracked_build(factory: FilterArgumentsFactory, set_class: type[FilterSet]) -> None:
         nonlocal building
@@ -162,7 +162,7 @@ def test_filter_arguments_factory_dedupes_target_enqueued_twice(
         return read(obj, attr, default)
 
     monkeypatch.setattr(FilterArgumentsFactory, "_build_class_type", tracked_build)
-    monkeypatch.setattr(truth, "static_attr", tracked_read)
+    monkeypatch.setattr(introspection, "mro_attr", tracked_read)
 
     factory = FilterArgumentsFactory(AFilter)
     _ = factory.arguments  # BFS: D is enqueued by both B and C, deduped at pop.

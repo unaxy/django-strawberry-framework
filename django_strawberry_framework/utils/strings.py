@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 
 from django_strawberry_framework.exceptions import ConfigurationError
 
-from . import truth
+from . import introspection
+from ._narrowing import is_str
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,17 +30,16 @@ def _plain_text(value: object) -> str:
 
     A string is a value whose real type is one: a lazy proxy, or an object whose
     ``__class__`` raises or claims ``str``, is a non-string. A ``str`` subclass is
-    copied through the base slot (``truth.text``) so its overridden ``split`` /
-    ``replace`` / ``strip`` never run inside these helpers. The exact-``str`` test,
+    copied through the base slot (``utils/introspection.py::text``). The exact-``str`` test,
     the common case, runs first.
     """
     if type(value) is str:
         return value
-    if not truth.is_instance(value, str):
+    if not is_str(value):
         raise ConfigurationError(
-            f"String helper input must be a string; got {truth.kind(value)}.",
+            f"String helper input must be a string; got {introspection.kind(value)}.",
         )
-    return truth.text(value)
+    return introspection.text(value)
 
 
 def pascal_case(name: str) -> str:

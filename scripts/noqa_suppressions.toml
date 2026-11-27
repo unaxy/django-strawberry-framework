@@ -17,8 +17,6 @@
 "django_strawberry_framework/connection.py::_synthesized_signature" = { PLC0415 = 1 }
 "django_strawberry_framework/consumers.py::DjangoWebSocketHostValidator.__call__" = { PLC0415 = 1, TRY401 = 1 }
 "django_strawberry_framework/consumers.py::_refreshed_actor" = { PLC0415 = 1 }
-"django_strawberry_framework/exceptions.py::LookupValidationError.__init__" = { PLC0415 = 1 }
-"django_strawberry_framework/exceptions.py::PathResolutionError.__init__" = { PLC0415 = 1 }
 "django_strawberry_framework/exceptions.py::_model_label" = { PLC0415 = 1 }
 "django_strawberry_framework/exceptions.py::_terminal_label" = { PLC0415 = 1 }
 "django_strawberry_framework/extensions/operation_state.py::_binds_operation_state" = { PLC0415 = 1 }

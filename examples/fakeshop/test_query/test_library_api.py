@@ -116,8 +116,12 @@ from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.testing.relay import decode_global_id, global_id_for
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_list_or_tuple, pk_of, read_attr
+from django_strawberry_framework.utils._narrowing import (
+    class_namespace,
+    is_list_or_tuple,
+    pk_of,
+    read_attr,
+)
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
@@ -7635,9 +7639,9 @@ def _unwired_target_holder_schema(*, subclass_target: bool) -> strawberry.Schema
         (HolderUnwiredShelfFilter, target_filter),
         (HolderUnwiredShelfOrder, target_order),
     ):
-        owner = read_attr(truth.class_dict(bound)["_owner_definition"], "origin")
+        owner = read_attr(class_namespace(bound)["_owner_definition"], "origin")
         assert owner is HolderUnwiredPlainShelfType
-        assert "_owner_definition" not in truth.class_dict(target)
+        assert "_owner_definition" not in class_namespace(target)
     return strawberry.Schema(query=Query, config=strawberry_config())
 
 

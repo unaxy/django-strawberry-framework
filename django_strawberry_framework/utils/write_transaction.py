@@ -91,9 +91,10 @@ from django.db.models.signals import pre_save
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils.errors import FIELD_ERROR_CODE_CONFLICT, field_error
 
-from . import truth
+from . import introspection
 from ._narrowing import (
     call_method,
+    is_str,
     list_of,
     pk_of,
 )
@@ -278,7 +279,7 @@ def require_managed_write(mutation_cls: WriteMutationClass) -> str:
     alias = _MANAGED_WRITE_ALIAS.get()
     if alias is None:
         raise ConfigurationError(
-            _UNMANAGED_SCHEMA_MESSAGE.format(name=truth.name(mutation_cls)),
+            _UNMANAGED_SCHEMA_MESSAGE.format(name=introspection.name(mutation_cls)),
         )
     return alias
 
@@ -511,12 +512,12 @@ def _sql_statement_token(sql: object) -> str:
     # ``execute_wrapper`` receives the object handed to ``cursor.execute``.
     # A consumer can supply a ``str`` subclass whose indexing / slicing methods
     # lie about the statement while the database adapter still executes the
-    # subclass's base string content. Normalize through ``truth.text`` before
+    # subclass's base string content. Normalize through ``introspection.text`` before
     # lexical inspection so the phase guard classifies exactly the text the
     # adapter sees, never consumer-controlled string behavior.
-    if not truth.is_instance(sql, str):
+    if not is_str(sql):
         return ""
-    text = truth.text(sql)
+    text = introspection.text(sql)
     index = 0
     length = len(text)
     while index < length:
@@ -577,7 +578,7 @@ def make_cross_alias_save_guard(alias: str, *, actor: str, recourse: str) -> _Pr
             return
         if using != alias:
             raise ConfigurationError(
-                f"{actor} attempted to save a {truth.name(sender)} row on "
+                f"{actor} attempted to save a {introspection.name(sender)} row on "
                 f"database alias {using!r}, but the mutation's transaction is pinned to "
                 f"{alias!r}; a write outside the pinned alias would escape the transaction "
                 "(it could not be rolled back with the mutation). Route the custom save "
@@ -772,7 +773,7 @@ def pin_write_queryset(
     hook_alias: object = queryset_db(queryset)
     if hook_alias is not None and hook_alias != alias:
         if owner is None:
-            owner = f"{truth.name(queryset.model)} get_queryset"
+            owner = f"{introspection.name(queryset.model)} get_queryset"
         raise ConfigurationError(
             f"{owner} returned a queryset routed to alias {hook_alias!r}, but this mutation's "
             f"write transaction is pinned to alias {alias!r}. A write pipeline runs every query "
@@ -799,7 +800,7 @@ def check_instance_write_alias(
     instance_alias = router.db_for_write(model, instance=instance)
     if instance_alias != alias:
         raise ConfigurationError(
-            f"The database router routes {truth.name(model)} writes to {instance_alias!r} for this "
+            f"The database router routes {introspection.name(model)} writes to {instance_alias!r} for this "
             f"instance, but the mutation's transaction is pinned to {alias!r} (the no-instance "
             "answer). An instance-sensitive write router cannot be honored mid-pipeline; make "
             "db_for_write deterministic for this model.",

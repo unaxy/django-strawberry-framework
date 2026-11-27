@@ -17,7 +17,7 @@ from strawberry.types.field import StrawberryField
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.relay import implements_relay_node
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     get_item,
     is_list,
@@ -222,7 +222,7 @@ def _hook_info(info: GraphQLResolveInfo[object] | None, target_type: type[Django
     """
     if info is None:
         raise OptimizerError(
-            f"{truth.name(target_type)}.get_queryset runs under an executing operation; a "
+            f"{introspection.name(target_type)}.get_queryset runs under an executing operation; a "
             f"relation to it cannot be planned without that operation's resolve info.",
         )
     strawberry_field = require_instance(
@@ -407,10 +407,10 @@ def _relay_id_field(node_type: type[_RelayDjangoType]) -> ConcreteField | None:
         _class_has_custom_id_resolver,
     )
 
-    if any(_class_has_custom_id_resolver(cls, "resolve_id") for cls in truth.mro(node_type)):
+    if any(_class_has_custom_id_resolver(cls, "resolve_id") for cls in node_type.__mro__):
         return None
     _id_attr, field = _node_id_slot(node_type)
-    if truth.is_instance(field, models.Field) and field.concrete:
+    if isinstance(field, models.Field) and field.concrete:
         return field
     return None
 
@@ -1022,7 +1022,7 @@ def _apply_hint(
             # loud at plan time with the fix spelled out.
             raise ConfigurationError(
                 f"OptimizerHint.prefetch(Prefetch(..., to_attr={hinted_to_attr!r})) on "
-                f"{truth.name(type_cls)}.{django_name}: the generated relation resolver "
+                f"{introspection.name(type_cls)}.{django_name}: the generated relation resolver "
                 "reads Django's prefetch cache (_prefetched_objects_cache) and would "
                 "ignore rows landed on the to_attr (per-row lazy loads behind a plan strictness "
                 "trusts). Drop to_attr from the hinted Prefetch, or assign your own "
@@ -1049,7 +1049,7 @@ def _apply_hint(
                 hint.prefetch_obj,
                 django_field=django_field,
                 django_name=django_name,
-                type_name=truth.name(type_cls),
+                type_name=introspection.name(type_cls),
                 target_type=target_type,
                 target_definition=target_definition,
                 info=info,
@@ -1057,7 +1057,7 @@ def _apply_hint(
             django_name=django_name,
             accessor=instance_accessor(django_field),
             full_path=f"{lookup_prefix}{instance_accessor(django_field)}",
-            type_name=truth.name(type_cls),
+            type_name=introspection.name(type_cls),
         )
         _record_relation_access(
             plan,
@@ -1105,7 +1105,7 @@ def _apply_hint(
         kind = relation_kind(django_field)
         if hint.force_select and is_many_side_relation_kind(kind):
             raise ConfigurationError(
-                f"OptimizerHint.select_related() on {truth.name(type_cls)}.{django_name}: "
+                f"OptimizerHint.select_related() on {introspection.name(type_cls)}.{django_name}: "
                 f"Django requires prefetch_related for {kind} relations; "
                 "use OptimizerHint.prefetch_related() or OptimizerHint.prefetch(obj) instead.",
             )
@@ -1188,7 +1188,7 @@ def _hint_prefetch_over_pk_set(
         raise ConfigurationError(
             f"OptimizerHint.prefetch(obj) on {type_name}.{django_name}: the hinted "
             f"Prefetch queryset is combined ({detail}); "
-            + _COMBINED_WHAT.format(model=truth.name(inner.model), detail=detail),
+            + _COMBINED_WHAT.format(model=introspection.name(inner.model), detail=detail),
         )
     queryset = inner.all()
     queryset.query = rewritten[0]

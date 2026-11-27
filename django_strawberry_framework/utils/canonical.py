@@ -25,10 +25,11 @@ from typing import TypeVar, overload
 
 from django_strawberry_framework.exceptions import ConfigurationError
 
-from . import truth
+from . import introspection
 from ._narrowing import (
     dict_items,
     frozenset_iter,
+    is_real_instance,
     list_iter,
     set_iter,
     tuple_iter,
@@ -67,18 +68,18 @@ def base_container_values(value: object) -> tuple[object, ...]:
     so the refusal fires only for a future caller that widened its gate without
     deciding how an arbitrary iterable should be read.
     """
-    if truth.is_instance(value, dict):
+    if is_real_instance(value, dict):
         return tuple(dict_items(value))
-    if truth.is_instance(value, set):
+    if is_real_instance(value, set):
         return tuple(set_iter(value))
-    if truth.is_instance(value, frozenset):
+    if is_real_instance(value, frozenset):
         return tuple(frozenset_iter(value))
-    if truth.is_instance(value, list):
+    if is_real_instance(value, list):
         return tuple(list_iter(value))
-    if truth.is_instance(value, tuple):
+    if is_real_instance(value, tuple):
         return tuple(tuple_iter(value))
     raise ConfigurationError(
-        f"Cannot canonically read a {truth.kind(value)} value: only the built-in "
+        f"Cannot canonically read a {introspection.kind(value)} value: only the built-in "
         "dict / set / frozenset / list / tuple containers (and their subclasses) have a "
         "base iterator that consumer code cannot override.",
     )
@@ -88,11 +89,10 @@ def canonical_sort_key(value: object) -> tuple[str, int, int]:
     """Return a TOTAL ordering key for a consumer value.
 
     Three parts, in order of decreasing usefulness and increasing reliability:
-    ``truth.render`` (the builtin slot for a builtin scalar, the value's own
-    ``__repr__`` otherwise, whose exceptions propagate), then the type's
+    ``repr`` (whose exceptions propagate), then the type's
     identity, then the value's identity. The last two make the key total - two
     values whose reprs collide still order deterministically - which is what a
     bare ``repr`` key cannot promise: a ``__repr__`` returning a constant would
     otherwise let structurally different values sort as equal.
     """
-    return (truth.render(value), id(type(value)), id(value))
+    return (repr(value), id(type(value)), id(value))

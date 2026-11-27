@@ -604,31 +604,6 @@ def test_normalize_list_arguments_rejects_int_subclasses_before_their_hooks_can_
     assert fired == []
 
 
-def test_normalize_list_arguments_renders_an_unprintable_large_int_without_raising(
-    arm_resource_budget: Callable[[object, ResourcePolicy], None],
-) -> None:
-    """A plain ``int`` too large for CPython to stringify still rejects as a typed error.
-
-    ``sys.set_int_max_str_digits`` caps integer-to-string conversion, so an
-    oversized value would detonate an f-string built at the raise site. The
-    over-ceiling arm renders it through ``truth.render`` instead.
-    """
-    info = make_info(context={})
-    arm_resource_budget(info.context, ResourcePolicy(max_list_rows=100))
-
-    with pytest.raises(ListArgumentError) as exc:
-        _normalize_list_arguments(
-            "items",
-            info,
-            None,
-            trusted_max_rows=False,
-            offset=10**10000,
-        )
-    assert exc.value.reason == "over_ceiling"
-    assert exc.value.ceiling == 100
-    assert "<unprintable int>" in str(exc.value)
-
-
 @pytest.mark.parametrize(
     ("argument", "value", "rendered"),
     [
@@ -2019,28 +1994,6 @@ class _ArmedHashMeta(type):
         if _ArmedHashMeta.armed:
             raise RuntimeError("hostile __hash__")
         return type.__hash__(cls)
-
-
-def test_djangolistfield_registry_lookup_never_hashes_the_target() -> None:
-    """The registry finds a registered target by identity, never through its ``__hash__``.
-
-    A metaclass ``__hash__`` that raises is never run: the lookup compares the
-    class object itself, so a registered target is accepted while the hook is armed.
-    """
-
-    class HashedTarget(DjangoType, metaclass=_ArmedHashMeta):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    _ArmedHashMeta.armed = True
-    try:
-        _ = DjangoListField(HashedTarget)
-        definition = registry.get_definition(HashedTarget)
-    finally:
-        _ArmedHashMeta.armed = False
-    assert definition is not None
-    assert definition is HashedTarget.__django_strawberry_definition__
 
 
 # ---------------------------------------------------------------------------

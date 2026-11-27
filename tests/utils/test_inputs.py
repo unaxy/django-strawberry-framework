@@ -40,7 +40,6 @@ from django_strawberry_framework.orders import sets as order_sets
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import inputs as ser_inputs
 from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
-from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_dict,
     is_list,
@@ -546,23 +545,6 @@ def test_meta_fields_canonicalization_bypasses_container_overrides() -> None:
     assert _sorted_meta_values(_HostileList(["z", "a"])) == ["a", "z"]
 
 
-@pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
-def test_meta_fields_canonicalization_passes_a_value_whose_class_read_raises_through(
-    escape: type[BaseException],
-) -> None:
-    """A value whose ``__class__`` raises is neither a set nor a dict, so it is returned untouched.
-
-    The re-readable gate that follows names it in its typed rejection; the canonicalizer's
-    own kind tests must not raise first. The same holds for a lookup-bag value.
-    """
-    hostile = ClassReadRaises(escape)
-
-    assert canonicalize_set_meta_fields(hostile) is hostile
-    bag = canonicalize_set_meta_fields({"name": hostile})
-    assert isinstance(bag, dict)
-    assert bag["name"] is hostile
-
-
 def test_read_set_meta_fields_sorts_a_lazy_set_as_the_set_it_stands_for() -> None:
     """A lazy proxy of a set expands as that set: sorted, never in hash order, never refused."""
     names = scrambled(set, _BOOK_NAMES)
@@ -571,21 +553,6 @@ def test_read_set_meta_fields_sorts_a_lazy_set_as_the_set_it_stands_for() -> Non
         fields = SimpleLazyObject(lambda: names)
 
     assert read_set_meta_fields(Meta) == canonical_order(names)
-
-
-@pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
-def test_normalize_field_name_sequence_rejects_a_value_whose_class_read_raises(
-    escape: type[BaseException],
-) -> None:
-    """The bare-string and unordered-set tests tolerate a ``__class__`` that raises.
-
-    Such a value is neither, so it reaches the tuple read, which it fails typed.
-    """
-    with pytest.raises(ConfigurationError) as excinfo:
-        normalize_field_name_sequence(ClassReadRaises(escape), flavor="Probe", ordered=True)
-    assert str(excinfo.value) == (
-        "Probe Meta.fields must be a readable sequence of field name strings; got ClassReadRaises."
-    )
 
 
 @pytest.mark.parametrize(
@@ -734,16 +701,6 @@ def test_reject_unknown_meta_keys_rejects_non_class_meta(invalid_meta: object) -
     """reject_unknown_meta_keys raises ConfigurationError if meta is not a class."""
     with pytest.raises(ConfigurationError, match=r"TestMutation\.Meta must be a class; got "):
         reject_unknown_meta_keys("TestMutation", invalid_meta, frozenset())
-
-
-@pytest.mark.filterwarnings("ignore:non-string key in the __dict__")
-def test_reject_unknown_meta_keys_non_string_dict_keys() -> None:
-    """reject_unknown_meta_keys handles non-string keys in vars(meta) cleanly."""
-    # basedpyright: the non-str namespace key is the hostile input under test; typeshed types the
-    # type() namespace as dict[str, Any]
-    meta = type("NonStrKeyMeta", (), {123: "foo"})  # pyright: ignore[reportArgumentType]
-    with pytest.raises(ConfigurationError, match=r"TestMutation\.Meta has unknown keys: \[123\]"):
-        reject_unknown_meta_keys("TestMutation", meta, frozenset({"model", "operation"}))
 
 
 def test_read_set_meta_fields_canonicalizes_sets_without_mutating_source() -> None:
@@ -1555,7 +1512,7 @@ def test_a_claim_names_each_field_shape_and_joins_the_shape_it_matches() -> None
     number = _claimed_input(int, "the second declaration")
     other_number = _claimed_input(int, "the third declaration")
 
-    assert [truth.qualname(cls) for cls in (text, number, other_number)] == [
+    assert [cls.__qualname__ for cls in (text, number, other_number)] == [
         "XIn",
         "XIn[1]",
         "XIn[1]",

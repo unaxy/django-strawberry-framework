@@ -54,8 +54,8 @@ from django_strawberry_framework.types.relay import (
     model_for_label_slot,
     published_node_type_name,
 )
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import require
+from django_strawberry_framework.utils import introspection
+from django_strawberry_framework.utils._narrowing import class_namespace, read_attr, require
 from django_strawberry_framework.utils.querysets import SyncMisuseError, model_for
 from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from tests._idioms import async_relay_hooks, comparing_metaclass, relay_hooks, saved_pk
@@ -72,7 +72,7 @@ def _is_classmethod(value: object) -> "TypeIs[classmethod[object, ..., object]]"
 
 def _classmethod_func(cls: type, attr: str) -> object:
     """The function behind the ``classmethod`` ``cls`` declares in its own namespace as ``attr``."""
-    return require(truth.class_dict(cls)[attr], _is_classmethod).__func__
+    return require(class_namespace(cls)[attr], _is_classmethod).__func__
 
 
 pytestmark = pytest.mark.usefixtures("isolate_global_registry")
@@ -354,7 +354,7 @@ def test_is_type_of_injected_for_all_djangotypes(
             fields = ("id", "name")
 
     assert "is_type_of" in DeclaredType.__dict__
-    is_type_of = truth.class_dict(DeclaredType)["is_type_of"]
+    is_type_of = class_namespace(DeclaredType)["is_type_of"]
     assert callable(is_type_of)
     assert is_type_of(model_cls(), None) is True
     assert is_type_of(other_model_cls(), None) is False
@@ -522,10 +522,10 @@ def test_relay_node_injects_default_resolvers(attr: str) -> None:
     finalize_django_types()
     assert relay.Node in CategoryNode.__mro__
     assert attr in CategoryNode.__dict__, f"{attr} was not injected"
-    descriptor = truth.class_dict(CategoryNode)[attr]
+    descriptor = class_namespace(CategoryNode)[attr]
     assert isinstance(descriptor, classmethod)
     assert "resolve_node" not in CategoryNode.__dict__
-    assert not truth.overrides(CategoryNode, relay.Node, "resolve_node")
+    assert not introspection.overrides(CategoryNode, relay.Node, "resolve_node")
 
 
 def test_resolve_id_attr_falls_back_to_pk() -> None:
@@ -2434,7 +2434,7 @@ def test_plain_or_static_resolve_typename_is_classified_override(shape: str) -> 
     stored = _plant_resolve_typename(CategoryNode, shape)
     finalize_django_types()
     assert _definition_of(CategoryNode).effective_globalid_strategy == "custom"
-    assert truth.class_dict(CategoryNode)["resolve_typename"] is stored
+    assert class_namespace(CategoryNode)["resolve_typename"] is stored
     assert _emitted_typename(CategoryNode) == "ConsumerOwned"
 
 
@@ -2456,8 +2456,9 @@ def test_resolve_typename_declared_none_is_not_an_override() -> None:
 
     finalize_django_types()
     assert _definition_of(CategoryNode).effective_globalid_strategy == "model"
-    installed = truth.stored_function(truth.class_dict(CategoryNode)["resolve_typename"])
-    assert truth.static_attr(installed, types_relay._FRAMEWORK_CLOSURE_MARKER) is True
+    stored = class_namespace(CategoryNode)["resolve_typename"]
+    installed = read_attr(stored, "__func__", stored)
+    assert introspection.mro_attr(installed, types_relay._FRAMEWORK_CLOSURE_MARKER) is True
     assert _emitted_typename(CategoryNode) == "products.category"
 
 
@@ -2497,12 +2498,13 @@ def test_relay_node_default_re_export_is_not_an_override() -> None:
         resolve_id = relay.Node.resolve_id
         resolve_typename = relay.Node.resolve_typename
 
-    assert type(truth.class_dict(CategoryNode)["resolve_id"]) is MethodType
-    assert type(truth.class_dict(CategoryNode)["resolve_typename"]) is MethodType
+    assert type(class_namespace(CategoryNode)["resolve_id"]) is MethodType
+    assert type(class_namespace(CategoryNode)["resolve_typename"]) is MethodType
     assert origin_has_custom_id_resolver(CategoryNode, "id") is False
     finalize_django_types()
-    assert _classmethod_func(CategoryNode, "resolve_id") is truth.stored_function(
-        truth.class_dict(relay.Node)["resolve_id"],
+    assert _classmethod_func(CategoryNode, "resolve_id") is read_attr(
+        class_namespace(relay.Node)["resolve_id"],
+        "__func__",
     )
     assert relay_hooks(CategoryNode, Category).resolve_id(Category(id=5), info=None) == 5
     assert _definition_of(CategoryNode).effective_globalid_strategy == "model"
@@ -2527,8 +2529,9 @@ def test_relay_node_resolve_id_re_export_on_a_mixin_is_re_bound_to_the_type() ->
 
     assert origin_has_custom_id_resolver(CategoryNode, "id") is False
     finalize_django_types()
-    assert _classmethod_func(CategoryNode, "resolve_id") is truth.stored_function(
-        truth.class_dict(relay.Node)["resolve_id"],
+    assert _classmethod_func(CategoryNode, "resolve_id") is read_attr(
+        class_namespace(relay.Node)["resolve_id"],
+        "__func__",
     )
     assert relay_hooks(CategoryNode, Category).resolve_id(Category(id=5), info=None) == 5
 

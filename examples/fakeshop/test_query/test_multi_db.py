@@ -133,7 +133,7 @@ from django_strawberry_framework.extensions import DjangoDebugExtension
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import TestClient
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import instance_state
 from django_strawberry_framework.utils._queryset_private import set_queryset_hints
 from django_strawberry_framework.views import DjangoGraphQLView
 
@@ -459,7 +459,7 @@ def _build_list_field_in_place_routing_mutation_schema(
     ) -> QuerySet[models.Branch]:
         # Mutates the very object it was handed and returns it unchanged otherwise:
         # a post-call read of that object would see the rewritten routing as the baseline.
-        truth.instance_state(queryset)["_db"] = "default"
+        instance_state(queryset)["_db"] = "default"
         set_queryset_hints(queryset, {"tenant": 2})
         return queryset
 

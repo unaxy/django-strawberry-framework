@@ -63,8 +63,9 @@ from django_strawberry_framework.keyset import (
     keyset_contract_error,
     order_fingerprint,
 )
-from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
+    instance_state,
     is_concrete_field,
     is_dict,
     is_options,
@@ -554,7 +555,7 @@ def resolver_key(
     path = ".".join(runtime_path)
     if parent_type is None:
         return f"{field_name}@{path}"
-    return f"{truth.name(parent_type)}.{field_name}@{path}"
+    return f"{introspection.name(parent_type)}.{field_name}@{path}"
 
 
 def runtime_path_from_info(info: object) -> tuple[str, ...]:
@@ -661,7 +662,7 @@ def _append_to_mutable(values: Sequence[_T], value: _T) -> None:
     if isinstance(values, MutableSequence):
         values.append(value)
         return
-    message = f"{truth.kind(values)!r} object has no attribute 'append'"
+    message = f"{introspection.kind(values)!r} object has no attribute 'append'"
     raise AttributeError(message)
 
 
@@ -1077,7 +1078,7 @@ def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Mode
         return False
     ref = parsed[0]
     # A model class's ``_meta`` is its ``Options``.
-    raw_meta = truth.static_attr(model, "_meta")
+    raw_meta = introspection.mro_attr(model, "_meta")
     meta = None if raw_meta is None else require(raw_meta, is_options)
     if meta is None:
         return False
@@ -2186,7 +2187,7 @@ def _sealed_consumer_prefetch(
     )
     if seed is None:
         return Prefetch(path, queryset=seal.seal(None, info))
-    if truth.instance_state(seed).get("model") is not seal.model or seed.query.is_sliced:
+    if instance_state(seed).get("model") is not seal.model or seed.query.is_sliced:
         return None
     return Prefetch(path, queryset=seal.seal(seed, info))
 

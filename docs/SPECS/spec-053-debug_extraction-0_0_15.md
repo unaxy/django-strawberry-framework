@@ -23,7 +23,7 @@ verdicts flow from the same evidence standard, applied to opposite facts.
 The optimizer is bidirectionally fused to the type system; the debug
 extension imports stdlib + Django + graphql-core + `typing_extensions`
 **plus a small set of package symbols (the root `logger`,
-`exceptions.ConfigurationError`, the `utils/truth.py` reads, and the
+`exceptions.ConfigurationError`, the `utils/introspection.py` reads, and the
 per-operation binding base in `extensions/operation_state.py`)**, nothing in the package imports
 it back, and it works against ANY
 `strawberry-graphql` + Django schema — no
@@ -164,7 +164,7 @@ a package-tier suite and a live tier riding a dedicated
 runtime module imports it back** (it is deliberately absent from the root
 `__all__`); **fakeshop deliberately does not enable it**; and — unlike every
 other subsystem — **it imports little from the package**: the root
-`logger`, `exceptions.ConfigurationError`, the `utils/truth.py` reads, and
+`logger`, `exceptions.ConfigurationError`, the `utils/introspection.py` reads, and
 the per-operation binding base (`OperationState`, `_OperationBoundExtension`) from
 `extensions/operation_state.py`. It is a low-coupling
 leaf with a genuine standalone audience: any `strawberry-graphql` + Django
@@ -308,7 +308,7 @@ standalone package.
 **Evidence** (the same standard that rejected the optimizer split): (a) the
 import surface is stdlib + Django + graphql-core + `typing_extensions` +
 a small set of package symbols (the root `logger`,
-`exceptions.ConfigurationError`, the `utils/truth.py` reads, and the
+`exceptions.ConfigurationError`, the `utils/introspection.py` reads, and the
 `extensions/operation_state.py` binding base) —
 no type-system contract, no registry, no optimizer; (b)
 reverse coupling is zero for the module — no package module imports
@@ -342,7 +342,7 @@ mirrors this package's family prefix (it is the maintainer's package, not a
 `from django_strawberry_framework import logger` becomes a module-level
 `logger = logging.getLogger("django_strawberry_debug")`, and
 `from django_strawberry_framework.exceptions import ConfigurationError` plus
-`utils/truth.py::describe` (the non-bool `allow_unsafe_production` refusal
+`utils/introspection.py::describe` (the non-bool `allow_unsafe_production` refusal
 path) are replaced by a package-local equivalent — the new package cannot depend on the framework,
 so it vendors a minimal configuration-error class and value describer of
 its own. The moved suite's `pytest.raises(ConfigurationError, ...)`

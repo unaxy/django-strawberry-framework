@@ -233,7 +233,7 @@ Each top-level item maps to one commit / PR.
         outbound operation frame), with a typed construction-time
         domain: a finite number `>= 0.0` that converts to a `float`, or
         [`ConfigurationError`][glossary-configurationerror] — whose `got ...` tail renders
-        through `django_strawberry_framework/utils/truth.py::describe`, the one shared value-describer, also used by
+        through `django_strawberry_framework/utils/introspection.py::describe`, the one shared value-describer, also used by
         both router injection seams and by the view's cap resolution.
   - [ ] Maximum connection lifetime, idle-socket lifetime, and aggregate connection limits
         documented as transport-resource policy the deployment owns, with the enforcement
@@ -2421,7 +2421,7 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
   is the only file in the package that names `HttpRequest._stream`, `_body`, or
   `_read_started`, it never raises `HTTPException` and never reads settings, and it hands the
   view one boolean; policy — which limit, what the `413` says — stays in `views.py`.
-- **The `got {type} {value!r}` tail is rendered by `django_strawberry_framework/utils/truth.py::describe`**, the one
+- **The `got {type} {value!r}` tail is rendered by `django_strawberry_framework/utils/introspection.py::describe`**, the one
   owner of that fragment. Every typed configuration rejection on this transport uses it — the
   revalidation window, both router injection seams, and the view's cap resolution.
 - **The session-store resolution is single-sited in `utils/sessions.py::session_store_class`**,

@@ -33,8 +33,11 @@ from django_strawberry_framework.optimizer.lateral_fetch import (
 )
 from django_strawberry_framework.optimizer.nested_fetch import NestedConnectionRequest
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
-from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import call_method, is_list_or_tuple
+from django_strawberry_framework.utils._narrowing import (
+    call_method,
+    instance_state,
+    is_list_or_tuple,
+)
 from tests._idioms import (
     is_object_list,
     run_capturing,
@@ -56,7 +59,7 @@ def _prefetched_rows(instance: Model, to_attr: str, model: type[_RowT]) -> list[
 
     The model class declares no such attribute; Django's prefetch writes it onto the instance.
     """
-    rows = truth.instance_state(instance)[to_attr]
+    rows = instance_state(instance)[to_attr]
     assert is_object_list(rows)
     typed = [row for row in rows if isinstance(row, model)]
     assert len(typed) == len(rows)
@@ -101,7 +104,7 @@ def test_stray_executor_thread_connections_are_tracked_for_session_close() -> No
 
     # The root conftest's Postgres wrapper plants the registry on the backend module at run
     # time; the module declares no such attribute, so it is read out of the module namespace.
-    registry_list = truth.instance_state(postgres_base)["_dst_stray_connection_registry"]
+    registry_list = instance_state(postgres_base)["_dst_stray_connection_registry"]
     assert is_object_list(registry_list)
     before = len(registry_list)
     failures: list[BaseException] = []
