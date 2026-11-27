@@ -2748,3 +2748,29 @@ def test_relation_spec_records_the_column_a_to_field_relation_stores(
         name: "name",
         "patron": None,
     }
+
+
+@pytest.mark.parametrize(
+    ("annotation", "text"),
+    [
+        (int, "<class 'int'>"),
+        (strawberry.ID, "strawberry.scalars.ID"),
+        (int | None, "int | None"),
+        (models.Model | None, "django.db.models.base.Model | None"),
+        (strawberry.ID | None, "typing.Optional[strawberry.scalars.ID]"),
+        (list[strawberry.ID] | None, "list[strawberry.scalars.ID] | None"),
+        (list[strawberry.ID | None], "list[typing.Optional[strawberry.scalars.ID]]"),
+        (int | strawberry.ID | None, "typing.Union[int, strawberry.scalars.ID, NoneType]"),
+        (int | str | None, "int | str | None"),
+        (dict[str, list[int]] | None, "dict[str, list[int]] | None"),
+        (tuple[int, ...], "tuple[int, ...]"),
+    ],
+)
+def test_annotation_repr_is_the_same_text_on_every_python(annotation: object, text: str) -> None:
+    """The text hashed into a narrowed input type's name does not move with the interpreter.
+
+    Python 3.14 prints ``strawberry.ID | None`` where 3.10 to 3.13 print
+    ``typing.Optional[strawberry.scalars.ID]``; a name digest over ``repr`` renamed
+    the generated input type on upgrade.
+    """
+    assert serializer_inputs._annotation_repr(annotation) == text

@@ -55,8 +55,8 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, replace
-from types import GenericAlias
-from typing import TYPE_CHECKING
+from types import GenericAlias, UnionType
+from typing import TYPE_CHECKING, get_args, get_origin
 
 from rest_framework import serializers
 from rest_framework.fields import empty
@@ -1099,6 +1099,46 @@ def describe_serializer_input(name: str) -> str | None:
     return "\n".join(lines)
 
 
+def _annotation_repr(annotation: object) -> str:
+    """Return ``repr(annotation)`` as Python 3.10 to 3.13 print it.
+
+    The text is hashed into a narrowed input type's name (``_shape_token``), so it
+    must not move with the interpreter. Python 3.14 prints every union ``X | None``;
+    earlier versions print ``typing.Optional[X]`` when a member is neither a class nor
+    a builtin generic alias (``strawberry.ID``, an ``Annotated`` alias), and that
+    spelling is the one kept.
+    """
+    if isinstance(annotation, (GenericAlias, UnionType)):
+        return _member_repr(annotation)
+    return repr(annotation)
+
+
+def _member_repr(annotation: object) -> str:
+    """Spell one annotation the way Python 3.10 to 3.13 print it inside an alias or union."""
+    if annotation is ...:
+        return "..."
+    # Alias first: on Python 3.10 ``isinstance(list[int], type)`` is true.
+    if not isinstance(annotation, (GenericAlias, UnionType)):
+        if isinstance(annotation, type):
+            module = annotation.__module__
+            return (
+                annotation.__qualname__
+                if module == "builtins"
+                else f"{module}.{annotation.__qualname__}"
+            )
+        return repr(annotation)
+    members: tuple[object, ...] = get_args(annotation)
+    texts = [_member_repr(member) for member in members]
+    if isinstance(annotation, GenericAlias):
+        return f"{_member_repr(get_origin(annotation))}[{', '.join(texts)}]"
+    if all(isinstance(member, (type, GenericAlias)) for member in members):
+        return " | ".join("None" if text == "NoneType" else text for text in texts)
+    others = [text for text in texts if text != "NoneType"]
+    if len(others) == 1 and len(others) < len(texts):
+        return f"typing.Optional[{others[0]}]"
+    return f"typing.Union[{', '.join(texts)}]"
+
+
 def _shape_token(
     spec: InputFieldSpec,
     annotation: str,
@@ -1494,7 +1534,7 @@ def _walk_serializer_fields(
         # mutation the other's nullability. Folding the widened annotation in is what the
         # descriptor cache key + ``_shape_token`` need; ``required_state`` records
         # requiredness, which is orthogonal (it does not move with ``allow_null`` here).
-        annotation_repr = repr(annotation)
+        annotation_repr = _annotation_repr(annotation)
         annotation_reprs.append(annotation_repr)
         field_specs.append(
             replace(
