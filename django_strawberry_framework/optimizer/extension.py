@@ -95,6 +95,7 @@ from ._context import (
     DST_OPTIMIZER_LOOKUP_PATHS,
     DST_OPTIMIZER_PLAN,
     DST_OPTIMIZER_PLANNED,
+    DST_OPTIMIZER_STRICTNESS,
     active_optimizer,
     begin_execution_frame,
     cache_key_parts_memo,
@@ -1326,6 +1327,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
                 plan_lookup_paths = frozenset(lookup_paths(plan))
             self._stash_union(context, DST_OPTIMIZER_PLANNED, planned_resolver_keys)
             self._stash_union(context, DST_OPTIMIZER_LOOKUP_PATHS, plan_lookup_paths)
+            stash_for_optimizer(context, DST_OPTIMIZER_STRICTNESS, self.strictness)
 
     @staticmethod
     def _stash_union(context: object, key: str, new: frozenset[str]) -> None:

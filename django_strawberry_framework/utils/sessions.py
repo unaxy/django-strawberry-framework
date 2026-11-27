@@ -182,7 +182,14 @@ def session_store_class() -> type[SessionBase]:
     engine = django_setting("SESSION_ENGINE")
     try:
         store = read_attr(import_module(str(engine)), "SessionStore")
-    except (ImportError, AttributeError, ValueError) as exc:
+    except (
+        ImportError,
+        AttributeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        IndexError,
+    ) as exc:
         raise ConfigurationError(
             f"Could not resolve SESSION_ENGINE {engine!r}'s SessionStore "
             f"({introspection.name(type(exc))}); check settings.SESSION_ENGINE.",

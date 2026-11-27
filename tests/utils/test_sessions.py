@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import sys
 import types
+from pathlib import Path
 from typing import NoReturn
 
 import pytest
@@ -109,6 +111,36 @@ def test_session_store_class_reports_a_storeless_engine_as_configuration_error(
         pytest.raises(ConfigurationError, match="SessionStore"),
     ):
         session_store_class()
+
+
+@override_settings(SESSION_ENGINE=".x")
+def test_session_store_class_reports_a_relative_engine_as_configuration_error() -> None:
+    """A relative engine path (``import_module`` raises ``TypeError``) is a ``ConfigurationError``."""
+    with pytest.raises(
+        ConfigurationError,
+        match=r"SESSION_ENGINE '\.x'.s SessionStore \(TypeError\)",
+    ):
+        session_store_class()
+
+
+@pytest.mark.parametrize("error", [TypeError, KeyError, IndexError])
+def test_session_store_class_reports_an_engine_raising_at_import_as_configuration_error(
+    error: type[Exception],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An engine module that raises while importing is a ``ConfigurationError`` naming the error."""
+    module_name = f"_dsf_session_engine_raising_{error.__name__.lower()}"
+    _ = (tmp_path / f"{module_name}.py").write_text(f"raise {error.__name__}('engine import')\n")
+    monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
+    importlib.invalidate_caches()
+
+    with (
+        override_settings(SESSION_ENGINE=module_name),
+        pytest.raises(ConfigurationError, match=rf"\({error.__name__}\)"),
+    ):
+        session_store_class()
+    assert module_name not in sys.modules
 
 
 class _PlainSubclassEngine(str):

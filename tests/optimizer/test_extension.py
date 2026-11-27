@@ -20,7 +20,15 @@ import decimal
 import uuid
 import warnings
 from collections import OrderedDict
-from collections.abc import Callable, Coroutine, Iterable, Iterator, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Coroutine,
+    Iterable,
+    Iterator,
+    Mapping,
+)
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn, TypeGuard
 
@@ -75,6 +83,7 @@ from django_strawberry_framework.optimizer._context import (
     DST_OPTIMIZER_LOOKUP_PATHS,
     DST_OPTIMIZER_PLAN,
     DST_OPTIMIZER_PLANNED,
+    DST_OPTIMIZER_STRICTNESS,
     active_strictness,
     begin_execution_frame,
     clear_optimizer_context,
@@ -88,6 +97,7 @@ from django_strawberry_framework.optimizer._context import (
     publish_scoped_relations,
     relation_is_optimizer_scoped,
     stash_on_context,
+    stashed_strictness,
 )
 from django_strawberry_framework.optimizer._context import (
     active_optimizer as _active_optimizer,
@@ -142,7 +152,6 @@ from tests._definition import make_definition
 from tests._idioms import (
     ClaimsClassBase,
     ClassReadRaisesBase,
-    armed_strictness,
     definition_raises,
     is_object_dict,
     is_object_list,
@@ -2485,14 +2494,16 @@ def test_strictness_warn_logs_unplanned_relation(caplog: pytest.LogCaptureFixtur
 
     finalize_django_types()
     schema = strawberry.Schema(query=Query)
-    ctx = SimpleNamespace(dst_optimizer_planned=set())
+    ctx = SimpleNamespace(
+        dst_optimizer_planned=set(),
+        dst_optimizer_strictness="warn",
+    )
 
     caplog.set_level("WARNING", logger="django_strawberry_framework")
-    with armed_strictness("warn"):
-        result = schema.execute_sync(
-            "{ allItems { name category { name } } }",
-            context_value=ctx,
-        )
+    result = schema.execute_sync(
+        "{ allItems { name category { name } } }",
+        context_value=ctx,
+    )
     assert result.errors is None
     assert any("Potential N+1 on category" in r.message for r in caplog.records)
 
@@ -2623,6 +2634,7 @@ def test_strictness_warn_stashes_sentinel() -> None:
     planned = getattr(ctx, "dst_optimizer_planned", None)
     assert planned is not None
     assert "ItemType.category@allItems.category" in planned
+    assert read_attr(ctx, DST_OPTIMIZER_STRICTNESS) == "warn"
 
 
 @pytest.mark.django_db
@@ -2631,7 +2643,7 @@ def test_strictness_with_empty_plan_still_stashes_its_sentinels(mode: str) -> No
     """An empty plan still publishes the strictness sentinels, with an empty planned set.
 
     ``_publish_plan_to_context`` stashes the strictness sentinels (planned set,
-    lookup paths) before ``_optimize`` short-circuits on ``plan.is_empty``.
+    lookup paths, mode) before ``_optimize`` short-circuits on ``plan.is_empty``.
     That a typename-only selection then neither raises nor warns is pinned live by
     ``examples/fakeshop/test_query/test_library_api.py::test_library_typename_only_selection_is_clean_under_armed_strictness``;
     this row keeps the private stash.
@@ -2660,6 +2672,7 @@ def test_strictness_with_empty_plan_still_stashes_its_sentinels(mode: str) -> No
     result = schema.execute_sync("{ allCategories { __typename } }", context_value=ctx)
     assert result.errors is None
     assert _stashed_plan(ctx).is_empty
+    assert read_attr(ctx, DST_OPTIMIZER_STRICTNESS) == mode
     assert _stashed_keys(ctx, DST_OPTIMIZER_PLANNED) == set()
 
 
@@ -3434,11 +3447,13 @@ def test_clear_optimizer_context_removes_all_keys_from_object_and_dict(
     stash_on_context(context, DST_OPTIMIZER_FK_ID_ELISIONS, frozenset({"k"}))
     stash_on_context(context, DST_OPTIMIZER_PLANNED, frozenset({"k"}))
     stash_on_context(context, DST_OPTIMIZER_LOOKUP_PATHS, frozenset({"p"}))
+    stash_on_context(context, DST_OPTIMIZER_STRICTNESS, "warn")
     clear_optimizer_context(context)
     assert get_context_value(context, DST_OPTIMIZER_PLAN) is None
     assert get_context_value(context, DST_OPTIMIZER_FK_ID_ELISIONS) is None
     assert get_context_value(context, DST_OPTIMIZER_PLANNED) is None
     assert get_context_value(context, DST_OPTIMIZER_LOOKUP_PATHS) is None
+    assert get_context_value(context, DST_OPTIMIZER_STRICTNESS) is None
 
 
 def test_clear_optimizer_context_clears_slots_mapping_via_item_delete() -> None:
@@ -3497,6 +3512,7 @@ def test_optimizer_context_all_exports() -> None:
         "DST_OPTIMIZER_LOOKUP_PATHS",
         "DST_OPTIMIZER_PLAN",
         "DST_OPTIMIZER_PLANNED",
+        "DST_OPTIMIZER_STRICTNESS",
         "active_nested_strategy",
         "active_optimizer",
         "active_strictness",
@@ -3516,6 +3532,7 @@ def test_optimizer_context_all_exports() -> None:
         "relation_is_optimizer_scoped",
         "stash_for_optimizer",
         "stash_on_context",
+        "stashed_strictness",
         "planned_window",
     }
     assert set(ctx_mod.__all__) == expected
@@ -3550,6 +3567,18 @@ def test_stashed_key_sets_refuse_a_stash_that_is_not_a_set(key: str) -> None:
 
     with pytest.raises(TypeError, match="expected the type the source guarantees, got list"):
         _ = read(ctx)
+
+
+def test_stashed_strictness_reads_the_stashed_string_or_off_when_absent() -> None:
+    """The stashed strictness string answers; an absent stash reads as ``"off"``."""
+    assert stashed_strictness({DST_OPTIMIZER_STRICTNESS: "raise"}) == "raise"
+    assert stashed_strictness({}) == "off"
+
+
+def test_stashed_strictness_refuses_a_non_string_stash() -> None:
+    """A strictness stash that is not a string raises rather than reading as ``"off"``."""
+    with pytest.raises(TypeError, match="expected an instance of str, got int"):
+        stashed_strictness({DST_OPTIMIZER_STRICTNESS: 1})
 
 
 def test_publish_scoped_relations_handles_empty_and_generator_keys_when_active_and_inactive() -> (
@@ -5304,6 +5333,71 @@ def test_strictness_reaches_an_execution_with_no_stashable_context() -> None:
     bare = schema.execute_sync(query)
     assert bare.errors is not None
     assert any("Unplanned N+1: category" in str(error) for error in bare.errors)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("strictness", ["raise", "warn"])
+async def test_strictness_reaches_every_subscription_event(
+    strictness: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An armed guard reports an unplanned relation in each subscription event.
+
+    Strawberry's ``executing`` hook wraps only the ``subscribe()`` call, so every
+    event resolves after ``on_execute`` has reset the per-execution strictness
+    ``ContextVar``; the strictness the extension stashes on the request context is
+    what arms the guard there.
+    """
+    await sync_to_async(services.seed_data)(1)
+
+    class CategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    assert registry.get(Category) is CategoryType
+
+    class ItemType(DjangoType):
+        class Meta:
+            model = Item
+            fields = ("id", "name", "category")
+            optimizer_hints = {"category": OptimizerHint.SKIP}
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def hello(self) -> str:
+            return "hello"
+
+    async def _projected_items() -> AsyncGenerator[QuerySet[Item], None]:
+        yield Item.objects.order_by("id").only("name")
+
+    @strawberry.type
+    class Subscription:
+        projected_items: AsyncGenerator[QuerySet[Item], None] = strawberry.subscription(
+            resolver=_projected_items,
+            graphql_type=list[ItemType],
+        )
+
+    finalize_django_types()
+    optimizer = DjangoOptimizerExtension(strictness=strictness)
+    schema = DjangoSchema(query=Query, subscription=Subscription, extensions=[lambda: optimizer])
+    caplog.set_level("WARNING", logger="django_strawberry_framework")
+
+    stream = await schema.subscribe(
+        "subscription { projectedItems { name category { name } } }",
+        context_value=SimpleNamespace(),
+    )
+    assert isinstance(stream, AsyncIterator)
+    event = await anext(stream)
+    await stream.aclose()
+
+    messages = [error.message for error in event.errors or ()]
+    if strictness == "raise":
+        assert messages == ["Unplanned N+1: category"]
+    else:
+        assert "Unplanned N+1: category" not in messages
+        assert any("Potential N+1 on category" in r.message for r in caplog.records)
 
 
 def test_optimizer_unadapted_non_queryset_passthrough() -> None:

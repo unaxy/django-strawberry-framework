@@ -182,10 +182,6 @@ from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoType
-from django_strawberry_framework.optimizer._context import (
-    begin_execution_frame,
-    end_execution_frame,
-)
 from django_strawberry_framework.utils._narrowing import (
     instance_state,
     is_awaitable,
@@ -582,16 +578,6 @@ def consumer_module(name: str, program: str) -> Generator[dict[str, object], Non
         yield vars(module)
     finally:
         del sys.modules[name]
-
-
-@contextmanager
-def armed_strictness(strictness: str) -> Generator[None, None, None]:
-    """Arm ``strictness`` for the block the way a running optimizer's execution frame does."""
-    scope = begin_execution_frame({}, nested=False, strictness=strictness)
-    try:
-        yield
-    finally:
-        end_execution_frame(scope)
 
 
 def consumer_query(namespace: Mapping[str, object]) -> type:

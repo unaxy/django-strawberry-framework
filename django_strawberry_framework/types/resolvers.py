@@ -50,6 +50,9 @@ from django_strawberry_framework.optimizer._context import (
 from django_strawberry_framework.optimizer._context import (
     relation_is_optimizer_scoped as _relation_is_optimizer_scoped,
 )
+from django_strawberry_framework.optimizer._context import (
+    stashed_strictness as _stashed_strictness,
+)
 from django_strawberry_framework.optimizer.plans import resolver_key, runtime_path_from_info
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.resource_policy import (
@@ -258,10 +261,13 @@ def _check_n1(
     three so this function neither re-reads a sentinel nor re-walks ``info.path``.
     Omitting them (every other call site) keeps the read-and-compute behavior.
 
-    Strictness is the per-execution ``ContextVar`` the running extension armed
-    at ``on_execute`` entry, which survives an execution carrying no
-    ``context_value`` and one whose root the walker could not plan; outside an
-    optimized execution it reads as ``"off"``.
+    Strictness prefers the per-execution ``ContextVar`` the running extension
+    armed at ``on_execute`` entry, which survives an execution carrying no
+    ``context_value`` and one whose root the walker could not plan, and falls back
+    to the ``DST_OPTIMIZER_STRICTNESS`` stash the extension writes on the request
+    context. The stash is the only channel that reaches a subscription event:
+    Strawberry's ``executing`` hook wraps only the ``subscribe()`` call, so each
+    event resolves after ``on_execute`` has reset the ``ContextVar``.
 
     A relation counts as planned when EITHER publish channel names its key -
     the ``DST_OPTIMIZER_PLANNED`` stash or the per-execution scoped-relation set,
@@ -284,8 +290,8 @@ def _check_n1(
     # sentinel means "the walker planned nothing here", which is precisely the
     # case strictness exists to report, not a reason to stay silent.
     if strictness is None:
-        strictness = _active_strictness()
-    if strictness is None or strictness == "off":
+        strictness = _active_strictness() or _stashed_strictness(context)
+    if strictness == "off":
         return
     # ``forward_resolver`` may have already read the PLAN sentinel and computed
     # the resolver key; reuse them when threaded so the ``info.path`` walk runs
