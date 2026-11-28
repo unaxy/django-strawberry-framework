@@ -68,7 +68,6 @@ from django_strawberry_framework import (
 from django_strawberry_framework.connection import (
     DjangoConnection,
     _connection_type_for,
-    _keyset_connection_context,
     _keyset_order_state,
     _resolve_from_window,
     _resolve_keyset_connection,
@@ -124,7 +123,7 @@ def _issue_connection_of(node_type: type[DjangoType]) -> type[DjangoConnection[D
 
 def _issue_state(issue_type: type) -> CursorState | None:
     finalize_django_types()
-    return _keyset_connection_context(_issue_connection_of(issue_type))
+    return _issue_connection_of(issue_type)._dst_keyset_state
 
 
 def _issue_connection_info(
@@ -163,33 +162,19 @@ def test_keyset_connection_context_resolves_and_caches() -> None:
     issue_type = _make_issue_type()
     finalize_django_types()
     connection_type = _issue_connection_of(issue_type)
-    state = _keyset_connection_context(connection_type)
+    state = connection_type._dst_keyset_state
     assert state is not None
     assert state.cursor_field == ISSUE_ORDER
     assert state.fingerprint == order_fingerprint(ISSUE_ORDER)
     # Second read serves the class-cached state object.
-    assert _keyset_connection_context(connection_type) is state
+    assert connection_type._dst_keyset_state is state
 
 
 def test_keyset_connection_context_is_none_for_offset_types() -> None:
     plain_type = make_django_type("PlainIssueNode", Issue, ("id", "number"))
     finalize_django_types()
     connection_type = _issue_connection_of(plain_type)
-    assert _keyset_connection_context(connection_type) is None
-    # The negative result is cached too (the ``False`` sentinel round-trip).
-    assert _keyset_connection_context(connection_type) is None
-
-
-def test_keyset_connection_context_refuses_a_slot_holding_no_cursor_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The generated slot holds a ``CursorState`` or ``False``; anything else is a ``TypeError``."""
-    issue_type = _make_issue_type("PlantedKeysetNode")
-    finalize_django_types()
-    connection_type = _issue_connection_of(issue_type)
-    monkeypatch.setattr(connection_type, "_dst_keyset_state", "not a cursor state")
-    with pytest.raises(TypeError, match="expected an instance of"):
-        _keyset_connection_context(connection_type)
+    assert connection_type._dst_keyset_state is None
 
 
 @pytest.mark.django_db
@@ -225,7 +210,7 @@ def test_keyset_connection_context_resolves_without_connection_opt_in() -> None:
     issue_type = _make_issue_type("BareKeysetNode", connection=None)
     finalize_django_types()
     connection_type = _issue_connection_of(issue_type)
-    state = _keyset_connection_context(connection_type)
+    state = connection_type._dst_keyset_state
     assert state is not None
     assert state.cursor_field == ISSUE_ORDER
 
@@ -267,7 +252,7 @@ def test_backward_args_over_a_window_wrapper_fall_back_to_the_keyset_slicer() ->
         fallback=Issue.objects.all,
         planned=PlannedWindow(
             ConnectionWindowBounds(offset=0, limit=2, reverse=False),
-            _keyset_connection_context(connection_type),
+            connection_type._dst_keyset_state,
         ),
     )
     # ``edges`` selected so the slicer's edge-resolution gate
@@ -298,7 +283,7 @@ def test_keyset_window_without_a_published_vocabulary_is_served_per_parent(*, se
     issue_type = _make_issue_type("KeysetUnpublishedWindowNode")
     finalize_django_types()
     connection_type = _issue_connection_of(issue_type)
-    state = _keyset_connection_context(connection_type)
+    state = connection_type._dst_keyset_state
     assert state is not None
     periodical = Periodical.objects.create(name="P")
     newest = None

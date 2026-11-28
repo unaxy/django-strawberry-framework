@@ -38,6 +38,7 @@ from django.db.models.lookups import BuiltinLookup
 from django.test.utils import register_lookup
 from typing_extensions import override
 
+from django_strawberry_framework._completion import _source_digest
 from django_strawberry_framework.utils import query_bind
 from django_strawberry_framework.utils._narrowing import (
     call_method,
@@ -495,13 +496,13 @@ def test_unaudited_date_checks_body_is_never_shadowed(
 def test_date_checks_body_is_hashed_once_per_function(monkeypatch: pytest.MonkeyPatch) -> None:
     """A second guarded write over the same body reads the cached digest, never re-hashing."""
     calls: list[str] = []
-    digest = query_bind._date_checks_source_digest
+    digest = _source_digest
 
     def counted(source: str) -> str:
         calls.append(source)
         return digest(source)
 
-    monkeypatch.setattr(query_bind, "_date_checks_source_digest", counted)
+    monkeypatch.setattr(query_bind, "_source_digest", counted)
     query_bind._date_checks_digest.cache_clear()
     row = _DatedSequence(seq=1, pub=datetime.datetime(2021, 1, 1, tzinfo=datetime.timezone.utc))
     for _ in range(2):

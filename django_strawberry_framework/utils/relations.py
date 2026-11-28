@@ -47,45 +47,6 @@ if TYPE_CHECKING:
 
     from .typing import ConcreteField, ForeignKeyField, ModelField
 
-__all__ = [
-    "MANY_SIDE_RELATION_KINDS",
-    "ClassifiedPath",
-    "RelationKind",
-    "RelationLink",
-    "RelationPathHop",
-    "carrier_backed_link",
-    "classify_path",
-    "descendant_relation_path",
-    "generated_column",
-    "generated_column_source",
-    "instance_accessor",
-    "is_forward_concrete_relation",
-    "is_forward_many_to_many",
-    "is_forward_single_relation",
-    "is_many_side_relation_kind",
-    "is_model_class",
-    "is_row_key_column",
-    "is_single_column_foreign_key",
-    "is_source_carried_relation_kind",
-    "is_stored_column",
-    "lookup_operand",
-    "lookup_registry",
-    "m2m_through_link_fields",
-    "m2m_through_model",
-    "non_pk_forward_link",
-    "non_pk_relation_key_attname",
-    "order_column_paths",
-    "path_traverses_to_many",
-    "relation_bool",
-    "relation_kind",
-    "relation_link",
-    "relation_name",
-    "stored_value_column",
-    "stored_value_link",
-    "validate_lookup_expr",
-    "written_model_field",
-]
-
 
 def is_model_class(value: object) -> TypeIs[type[models.Model]]:
     """Return whether ``value`` is a Django model class, asked of its real type."""
@@ -312,15 +273,7 @@ def choice_key_field(model: type[models.Model], key: str | None) -> ConcreteFiel
     looks up ``to_field_name or "pk"``); any other name resolves by name or attname.
     ``None`` when ``model`` has no column of that name.
     """
-    if not key or key == "pk":
-        return model._meta.pk
-    try:
-        field = model._meta.get_field(key)
-    except FieldDoesNotExist:
-        return None
-    # ``get_field`` answers a ``models.Field`` for every forward name; a reverse relation
-    # or a generic relation is no column of the row and reads as ``None`` below.
-    return field if isinstance(field, models.Field) else None
+    return written_model_field(model, key) if key else model._meta.pk
 
 
 def _is_traversable_relation(field: object) -> TypeGuard[_TraversableRelationLike]:

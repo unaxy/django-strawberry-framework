@@ -944,7 +944,7 @@ package's own.** The rule is structural rather than an allowlist: an error whose
 below the package that rejects an input by raising a plain `ValueError` / `TypeError` therefore
 reaches the client as `policy.message` plus a correlation id. Connection pagination arguments
 do not take that path. The package validates every offset `after` / `before` / `first` /
-`last` itself (`utils/connections.py::validate_offset_pagination`) before Strawberry's
+`last` itself (`utils/connections.py::offset_engine_arguments`) before Strawberry's
 `SliceMetadata.from_arguments` runs, so on the offset path the engine's own checks are never
 reached, and the keyset fork applies the same bound check
 (`utils/connections.py::assert_relay_pagination_bound`). Each rejection is raised as

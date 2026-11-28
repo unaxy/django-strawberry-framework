@@ -132,11 +132,6 @@ def set_queryset_fetch_mode(
     object.__setattr__(queryset, "_fetch_mode", fetch_mode)
 
 
-def _model_row_state(row: models.Model) -> dict[str, object]:
-    """Return the instance namespace of ``row``'s ``ModelState``, read without dispatch."""
-    return instance_state(instance_state(row)["_state"])
-
-
 def model_row_peers(row: models.Model) -> object | None:
     """Return the peers list ``row``'s queryset iteration shares across its rows, or ``None``.
 
@@ -144,7 +139,7 @@ def model_row_peers(row: models.Model) -> object | None:
     one no peer-tracking iteration yielded, or one copied or unpickled since
     (``ModelState.__getstate__`` drops the weak references).
     """
-    return _model_row_state(row).get("peers")
+    return instance_state(instance_state(row)["_state"]).get("peers")
 
 
 def set_model_row_peers(

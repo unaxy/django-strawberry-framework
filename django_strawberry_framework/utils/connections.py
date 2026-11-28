@@ -12,17 +12,17 @@ IDENTICALLY, or optimizer-on and optimizer-off behavior can split:
   reverse / limit rule, so the resolve-time window matches the plan-time window
   by construction (spec-033 Decision 4 / Decision 5, the cursor-parity
   invariant's resolve-time half).
-* The offset pagination validator (``validate_offset_pagination``, over
+* The offset pagination validator (``offset_engine_arguments``, over
   ``decode_offset_cursor`` and ``assert_relay_pagination_bound``) - the one
   validator of an offset page's ``after`` / ``before`` cursors and ``first`` /
-  ``last`` bounds, run with the page-end bound by ``offset_engine_arguments``,
-  which the window derivation above and the resolver's non-window slicing tail
-  both call, so the planned window and every ``ListConnection``-sliced source
-  accept and reject the same arguments and slice the same page. Each
-  rejection is a ``PaginationArgumentError`` raised where the argument is
-  validated: the package's own validation constructs the client-facing error,
-  so an exception from a consumer source or from row hydration is never caught
-  and re-raised as one.
+  ``last`` bounds, run with the page-end bound, which the window derivation
+  above and the resolver's non-window slicing tail both call, so the planned
+  window and every ``ListConnection``-sliced source accept and reject the same
+  arguments and slice the same page. Each rejection is a
+  ``PaginationArgumentError`` raised where the argument is validated: the
+  package's own validation constructs the client-facing error, so an exception
+  from a consumer source or from row hydration is never caught and re-raised
+  as one.
 * The connection sidecar kwarg names and the presence predicates over them -
   the walker refuses to window-plan a sidecar-bearing nested connection, and
   the resolver refuses to consume a window when sidecar kwargs are present
@@ -139,7 +139,7 @@ class UnwindowableConnection(Exception):  # noqa: N818 - control-flow signal, no
     results or page flags. This includes offset-bearing backward windows
     (``after`` + ``last``) and inverted ``after`` + ``before`` intervals. Per
     spec-033 Decision 5 these valid shapes fall back per parent rather than being
-    approximated. An invalid pagination argument (``validate_offset_pagination``)
+    approximated. An invalid pagination argument (``offset_engine_arguments``)
     raises ``PaginationArgumentError`` instead, keeping the field-local pagination
     error.
 
@@ -154,7 +154,7 @@ class UnwindowableConnection(Exception):  # noqa: N818 - control-flow signal, no
 
 
 def connection_sidecar_inputs_from_kwargs(
-    kwargs: Mapping[str, object] | None,
+    kwargs: Mapping[str, object],
 ) -> tuple[object, object]:
     """Extract ``(filter_input, order_by_input)`` from a kwargs/arguments dict.
 
@@ -163,8 +163,6 @@ def connection_sidecar_inputs_from_kwargs(
     Python name: a resolver passes its ``**kwargs``, the planner a selection's
     ``python_arguments``.
     """
-    if not kwargs:
-        return None, None
     return kwargs.get(CONNECTION_FILTER_KWARG), kwargs.get(CONNECTION_ORDER_KWARG)
 
 
@@ -218,7 +216,7 @@ def has_connection_sidecar_input(*, filter_input: object, order_by_input: object
     return is_supplied(filter_input) or is_supplied(order_by_input)
 
 
-def has_connection_sidecar_kwargs(kwargs: Mapping[str, object] | None) -> bool:
+def has_connection_sidecar_kwargs(kwargs: Mapping[str, object]) -> bool:
     """Return whether a kwargs/arguments dict carries any sidecar input.
 
     The walker's fallback predicate (a sidecar-bearing nested connection is not
@@ -290,45 +288,18 @@ class FetchMode(Enum):
     NONE = "none"
 
 
-def _is_probe_shape(
-    *,
-    offset: int,
-    limit: int | None,
-    reverse: bool,
-    plain_first_page: bool,
-) -> bool:
+def _is_probe_shape(*, limit: int | None, reverse: bool) -> bool:
     """Whether a window SHAPE can answer ``hasNextPage`` from an n+1 probe.
 
     The single spelling of the probe-shape predicate - the plain ``first: N``
-    page (``plain_first_page``) OR the bounded forward offset page (``offset > 0``
-    with a positive ``limit``). Shared by ``window_range_plan`` (deciding whether
-    to honor a ``next_page_probe`` request) and ``WindowRangePlan.probe_shape``
-    (which the resolver and ``fetch_mode`` read), so the three cannot drift.
+    page OR the bounded forward offset page (``offset > 0`` with a positive
+    ``limit``); ``window_range_plan`` refuses a negative offset, so together
+    they are every forward page with a positive ``limit``. Shared by
+    ``window_range_plan`` (deciding whether to honor a ``next_page_probe``
+    request) and ``WindowRangePlan.probe_shape`` (which the resolver and
+    ``fetch_mode`` read), so the three cannot drift.
     """
-    return plain_first_page or (not reverse and offset > 0 and limit is not None and limit > 0)
-
-
-def is_ambiguous_empty_window(offset: int, limit: int | None, *, reverse: bool = False) -> bool:
-    """Whether this window shape can produce an AMBIGUOUS empty page.
-
-    ``offset > 0`` (an overshot ``after:``) and ``limit == 0`` (``first: 0``)
-    both yield an empty page for a parent whose children all sit outside the
-    range AND for a parent with no children at all, which an unmarked window
-    could only settle with a per-parent fallback. spec-033 Decision 5
-    disambiguates these shapes with marker rows; reversed (``last``-only) windows never plan markers.
-
-    The plan-time/resolve-time contract shared - like the sidecar-kwarg family
-    above - by everything that must agree on "ambiguous": the window builders
-    that ADD the marker rows (``utils/connections.py::window_range_plan``, feeding both
-    ``apply_window_pagination`` and the lateral SQL) and the resolver that
-    CONSUMES rows as marker-classified (``connection.py::_resolve_from_window``).
-    The count decision is a SEPARATE axis owned by ``FetchMode`` /
-    ``WindowRangePlan.fetch_mode`` - these ambiguous shapes are NOT
-    shape-forced to a count: the offset page composes the count-free probe
-    with its marker, and only the ``first: 0`` marker still serves a count. One
-    predicate so the plan side and the consume side cannot drift.
-    """
-    return not reverse and (offset > 0 or limit == 0)
+    return not reverse and limit is not None and limit > 0
 
 
 @dataclass(frozen=True)
@@ -439,12 +410,7 @@ class WindowRangePlan:
         views of "is this a probe shape" cannot drift (both go through the shared
         ``_is_probe_shape``).
         """
-        return _is_probe_shape(
-            offset=self.offset,
-            limit=self.limit,
-            reverse=self.reverse,
-            plain_first_page=self.plain_first_page,
-        )
+        return _is_probe_shape(limit=self.limit, reverse=self.reverse)
 
     @property
     def constant_false_shape(self) -> bool:
@@ -544,14 +510,14 @@ def window_range_plan(
         limit = None
     lower_bound = offset if (offset or keyset_counted) else None
     upper_bound = (limit if reverse else offset + limit) if limit is not None else None
-    ambiguous = keyset_counted or is_ambiguous_empty_window(offset, limit, reverse=reverse)
+    # An overshot ``after:`` (``offset > 0``) and ``first: 0`` (``limit == 0``) both
+    # yield an empty page for a parent whose children all sit outside the range AND
+    # for a parent with no children at all; spec-033 Decision 5 disambiguates these
+    # AMBIGUOUS shapes with marker rows. Reversed (``last``-only) windows never plan
+    # markers.
+    ambiguous = keyset_counted or (not reverse and (offset > 0 or limit == 0))
     plain_first_page = not reverse and offset == 0 and limit is not None and limit > 0
-    probe_shape = _is_probe_shape(
-        offset=offset,
-        limit=limit,
-        reverse=reverse,
-        plain_first_page=plain_first_page,
-    )
+    probe_shape = _is_probe_shape(limit=limit, reverse=reverse)
     return WindowRangePlan(
         offset=offset,
         limit=limit,
@@ -712,16 +678,14 @@ class ConnectionWindowBounds:
     reverse: bool
 
 
-#: Digits in ``sys.maxsize``, the exclusive upper bound of an offset cursor index:
-#: a longer payload is rejected before ``int()`` converts it.
-_OFFSET_CURSOR_MAX_DIGITS = len(str(sys.maxsize))
-
 #: The canonical index an offset cursor carries: ASCII digits, no sign, no padding
 #: and no leading zero, matched in full. ``[0-9]`` is the ten ASCII digits only:
 #: ``str.isdigit`` also accepts digits ``int()`` raises on (a superscript such as
 #: ``U+00B2``) and Unicode ``\d`` digits ``int()`` reads as a second spelling of
-#: an index (``U+0661`` for ``1``), neither of which a mint writes.
-_OFFSET_CURSOR_INDEX_PATTERN = re.compile(r"0|[1-9][0-9]*")
+#: an index (``U+0661`` for ``1``), neither of which a mint writes. At most as many
+#: digits as ``sys.maxsize``, the exclusive upper bound of an index, so a longer
+#: payload is rejected before ``int()`` converts it.
+_OFFSET_CURSOR_INDEX_PATTERN = re.compile(rf"0|[1-9][0-9]{{0,{len(str(sys.maxsize)) - 1}}}")
 
 #: ``SliceMetadata``'s foreign-cursor rejection, worded as Strawberry words it.
 _NON_EXISTING_VALUE = "contains a non-existing value."
@@ -780,7 +744,7 @@ def decode_offset_cursor(
     as its unbounded-end sentinel, and ``after`` adds one, so ``sys.maxsize - 1`` is the last index
     whose start still fits a 64-bit SQL ``OFFSET`` (an ordinary past-the-end page under every page
     argument: ``offset_engine_arguments`` keeps a forward page's end below that sentinel). The
-    pattern and the length are checked before ``int()`` runs, so ``int()`` is handed only ASCII
+    pattern, which bounds the length too, is checked before ``int()`` runs, so ``int()`` is handed only ASCII
     digits it accepts and an arbitrarily long digit string is never converted: no undecodable
     payload escapes as ``ValueError``. Any other value raises ``PaginationArgumentError`` with
     Strawberry's own foreign-prefix wording, naming ``argument`` (its Python name) as ``info``'s
@@ -794,8 +758,6 @@ def decode_offset_cursor(
     except ValueError:
         raise pagination_argument_error(info, argument, _NON_EXISTING_VALUE) from None
     if cursor_prefix != prefix or not _OFFSET_CURSOR_INDEX_PATTERN.fullmatch(raw):
-        raise pagination_argument_error(info, argument, _NON_EXISTING_VALUE)
-    if len(raw) > _OFFSET_CURSOR_MAX_DIGITS:
         raise pagination_argument_error(info, argument, _NON_EXISTING_VALUE)
     position = int(raw)
     if position >= sys.maxsize:
@@ -934,7 +896,7 @@ def assert_relay_pagination_bound(
     cursor is not an offset), so ``derive_keyset_window_bounds`` (plan/resolve
     window bounds) and the root / per-parent keyset slicer
     (``connection.py::_resolve_keyset_connection``) call it directly; the offset
-    fork reaches it through ``validate_offset_pagination``. A connection's
+    fork reaches it through ``offset_engine_arguments``. A connection's
     consumer-visible pagination errors therefore cannot fork between the two
     vocabularies or between the windowed and per-parent paths. Non-``int``
     values are ignored - matching ``SliceMetadata``'s ``isinstance(..., int)``
@@ -947,48 +909,6 @@ def assert_relay_pagination_bound(
         raise pagination_argument_error(info, argument, "must be a non-negative integer.")
     if value > cap:
         raise pagination_argument_error(info, argument, f"cannot be higher than {cap}.")
-
-
-def validate_offset_pagination(
-    *,
-    before: str | None,
-    after: str | None,
-    first: object,
-    last: object,
-    cap: int,
-    prefix: str,
-    info: EitherInfo | None = None,
-) -> int | None:
-    """Reject every invalid offset pagination argument ``SliceMetadata.from_arguments`` rejects.
-
-    The package's own validation of an offset page, run before anything slices,
-    in the engine's check order: ``after``, ``before``, ``first``, ``last``, each
-    with the engine's wording, so the first invalid argument a client sends is
-    the one the engine would have named, under the name the client sent. The
-    cursors go through ``decode_offset_cursor`` (which is also strictly
-    narrower than the engine: a negative or non-canonical index is refused,
-    never sliced) and the bounds through ``assert_relay_pagination_bound``
-    against ``cap``, the already-resolved ``max_results`` the engine will be
-    handed. ``first`` and ``last`` are each checked when supplied, as the
-    engine checks them; their mutual exclusivity is the resolver's own guard.
-    ``prefix`` is the connection's edge-class ``CURSOR_PREFIX``, the one the
-    engine is handed (``ListConnection`` passes its edge class's). ``info``
-    names each rejected argument as its schema published it.
-
-    Returns the row index ``after`` names (``None`` when it is absent), the one
-    decode ``offset_engine_arguments`` bounds the page's end from. Once this
-    returns, the engine rejects none of these arguments under that same prefix;
-    with the page's end bounded as well, the one window derivation
-    (``derive_connection_window_bounds``) and the one non-window slicing tail
-    (``connection.py::_consume_fallback``) call the engine and
-    ``ListConnection`` without a ``try``: anything they still raise comes from
-    the source or the rows, not from the client's arguments.
-    """
-    position = decode_offset_cursor(after, argument="after", prefix=prefix, info=info)
-    _ = decode_offset_cursor(before, argument="before", prefix=prefix, info=info)
-    assert_relay_pagination_bound("first", first, cap=cap, info=info)
-    assert_relay_pagination_bound("last", last, cap=cap, info=info)
-    return position
 
 
 #: The largest exclusive end an offset page hands the engine. ``SliceMetadata``
@@ -1015,10 +935,26 @@ def offset_engine_arguments(
     The one owner of the arguments both offset slicers pass to Strawberry: the
     window derivation (``derive_connection_window_bounds``, at plan and resolve
     time) and the non-window slicing tail (``connection.py::_consume_fallback``).
-    ``first`` / ``last`` are the ``page_arguments`` values. The arguments pass
-    ``validate_offset_pagination`` first; then a forward page (an ``int``
-    ``first`` and no ``before`` bound) whose end ``start + first`` passes
-    ``_OFFSET_PAGE_END_CEILING`` is handed as the page that ends there:
+    ``first`` / ``last`` are the ``page_arguments`` values.
+
+    First it rejects every invalid argument ``SliceMetadata.from_arguments``
+    rejects, before anything slices, in the engine's check order: ``after``,
+    ``before``, ``first``, ``last``, each with the engine's wording, so the first
+    invalid argument a client sends is the one the engine would have named, under
+    the name the client sent (``info`` names it as its schema published it). The
+    cursors go through ``decode_offset_cursor`` (strictly narrower than the
+    engine: a negative or non-canonical index is refused, never sliced) and the
+    bounds through ``assert_relay_pagination_bound`` against ``cap``, the
+    already-resolved ``max_results`` the engine will be handed; their mutual
+    exclusivity is the resolver's own guard. ``prefix`` is the connection's
+    edge-class ``CURSOR_PREFIX``, the one the engine is handed. Once validated,
+    the engine rejects none of these arguments, so both slicers call the engine
+    and ``ListConnection`` without a ``try``: anything they still raise comes
+    from the source or the rows, not from the client's arguments.
+
+    Then a forward page (an ``int`` ``first`` and no ``before`` bound) whose end
+    ``start + first`` passes ``_OFFSET_PAGE_END_CEILING`` is handed as the page
+    that ends there:
     ``first`` is the rows left below the ceiling, and a ``start`` past it (the
     largest index's) is moved onto it with ``after`` re-minted to match. No
     node source holds ``sys.maxsize - 1`` rows (a list of nodes is bounded by
@@ -1030,15 +966,10 @@ def offset_engine_arguments(
     ``decode_offset_cursor`` accepts no ``before`` past the ceiling; a
     ``last``-only page reaches the sentinel by design, with its ``last`` set.
     """
-    position = validate_offset_pagination(
-        before=before,
-        after=after,
-        first=first,
-        last=last,
-        cap=cap,
-        prefix=prefix,
-        info=info,
-    )
+    position = decode_offset_cursor(after, argument="after", prefix=prefix, info=info)
+    _ = decode_offset_cursor(before, argument="before", prefix=prefix, info=info)
+    assert_relay_pagination_bound("first", first, cap=cap, info=info)
+    assert_relay_pagination_bound("last", last, cap=cap, info=info)
     if before or not isinstance(first, int):
         return after, first
     start = 0 if position is None else position + 1

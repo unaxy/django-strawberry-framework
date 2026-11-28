@@ -721,7 +721,7 @@ window arithmetic rather than only the field entry point. Its keyset twin
 negative and over-cap check, and it raises `PaginationArgumentError` with
 `SliceMetadata`'s own wording, naming the argument as the executing schema published it
 (upstream's text byte for byte under the default `NameConverter`). The offset fork reaches it through
-`utils/connections.py::validate_offset_pagination`, which `::offset_engine_arguments` runs
+`utils/connections.py::offset_engine_arguments`, which runs
 for `::derive_connection_window_bounds` and `connection.py::_consume_fallback` against the
 resolved cap before Strawberry's `SliceMetadata.from_arguments` or `ListConnection` sees
 the arguments, so the engine itself never rejects one. A keyset cursor is not an offset,
@@ -740,7 +740,7 @@ applies), and `last: 0` with no integer `first` is the `first: 0` page.
 are the same bounded page on both forks, and the `_page_bound` charge (0 for `last: 0`) is
 what the field serves. Nor does a negative cursor: `utils/connections.py::decode_offset_cursor`
 rejects a negative or non-canonical `after` / `before` index inside
-`::validate_offset_pagination`, which `::derive_connection_window_bounds` and
+`::offset_engine_arguments`, which `::derive_connection_window_bounds` and
 `connection.py::_consume_fallback` run before anything slices, so `before` on a list source
 can never cut a wrapped Python slice wider than the cap. Every other shape is unchanged.
 

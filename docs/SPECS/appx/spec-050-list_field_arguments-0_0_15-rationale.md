@@ -474,8 +474,6 @@ pipeline, which an override that widens, re-routes, pre-evaluates, slices or com
 would otherwise defeat.
 
 So both fields' sidecar returns run one seal.
-[`django_strawberry_framework/utils/querysets.py::apply_orderset_sync`][utils-querysets] /
-[`::apply_orderset_async`][utils-querysets], called from
 [`django_strawberry_framework/list_field.py::_execute_queryset_pipeline_sync`][list-field] /
 [`::_execute_queryset_pipeline_async`][list-field], and
 [`django_strawberry_framework/connection.py::_pipeline_sync`][connection] /

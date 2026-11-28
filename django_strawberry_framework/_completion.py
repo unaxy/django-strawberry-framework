@@ -267,6 +267,18 @@ def _syntax_shape(node: object) -> object:
     return node
 
 
+def _source_digest(source: str) -> str:
+    """Hash the docstring-free syntax (sha256) of the one function ``source`` defines."""
+    function = ast.parse(source).body[0]
+    for node in ast.walk(function):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and ast.get_docstring(node) is not None
+        ):
+            del node.body[0]
+    return hashlib.sha256(repr(_syntax_shape(function)).encode()).hexdigest()
+
+
 # The installed graphql-core 3.3.1 Executor methods run as installed: the rebuilt
 # function keeps their code object and swaps only its gather global, under the audited
 # digest allowlist. No upstream source is stored here.
@@ -296,15 +308,7 @@ def _completion_method(method: "Callable[_P, _R]") -> "Callable[_P, _R]":
             "do not require this adapter",
         ) from error
     method_name = introspection.name(method)
-    function = ast.parse(source).body[0]
-    for node in ast.walk(function):
-        if (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and ast.get_docstring(node) is not None
-        ):
-            del node.body[0]
-    digest = hashlib.sha256(repr(_syntax_shape(function)).encode()).hexdigest()
-    if digest not in _AUDITED.get(method_name, frozenset()):
+    if _source_digest(source) not in _AUDITED.get(method_name, frozenset()):
         raise RuntimeError(
             f"Cannot start async generated-mutation completion: unaudited graphql-core "
             f"{method_name} implementation. Use a supported release or audit its completion "

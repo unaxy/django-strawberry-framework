@@ -123,7 +123,6 @@ from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     predicted_input_field_name,
 )
-from django_strawberry_framework.utils.querysets import to_python_value
 from django_strawberry_framework.utils.relations import (
     non_pk_relation_key_attname,
     written_model_field,
@@ -1055,7 +1054,7 @@ def _stored_choice_value(column: ConcreteField, value: object) -> object:
     returned unchanged, so it matches no member. Anything else ``to_python`` raises propagates.
     """
     try:
-        return to_python_value(column, value)
+        return object_result(column.to_python, value)
     except ValidationError:
         return value
 

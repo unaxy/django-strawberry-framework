@@ -116,8 +116,8 @@ from .utils.querysets import (
     ORDER_FROM_MODEL_DEFAULT,
     VisibleRowExists,
     _type_is_genuinely_django,
-    apply_orderset_async,
-    apply_orderset_sync,
+    apply_sidecar_async,
+    apply_sidecar_sync,
     apply_type_visibility_async,
     apply_type_visibility_sync,
     base_queryset,
@@ -126,6 +126,7 @@ from .utils.querysets import (
     reject_async_iterable_in_sync_context,
     reject_awaitable_sync_source,
     reject_residual_async_source,
+    require_orderset_class,
     resolve_order_name,
     selected_order,
     take_order_expansion_step,
@@ -1353,9 +1354,9 @@ def _execute_queryset_pipeline_sync(
         model=model,
     )
     if args_record.order_by_supplied:
-        post_order_qs = apply_orderset_sync(
+        post_order_qs = apply_sidecar_sync(
             target_type,
-            orderset_class,
+            require_orderset_class(target_type, orderset_class),
             post_vis_qs,
             args_record.order_by,
             info,
@@ -1389,9 +1390,9 @@ async def _execute_queryset_pipeline_async(
 ) -> object:
     post_vis_qs = await apply_type_visibility_async(target_type, source, info, model=model)
     if args_record.order_by_supplied:
-        post_order_qs = await apply_orderset_async(
+        post_order_qs = await apply_sidecar_async(
             target_type,
-            orderset_class,
+            require_orderset_class(target_type, orderset_class),
             post_vis_qs,
             args_record.order_by,
             info,

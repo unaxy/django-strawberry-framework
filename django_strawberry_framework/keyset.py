@@ -86,7 +86,6 @@ the bare OR-chain misses.
 from __future__ import annotations
 
 import base64
-import binascii
 from dataclasses import dataclass
 from functools import cache, lru_cache
 from types import SimpleNamespace
@@ -138,15 +137,14 @@ _CRYPTOGRAPHY_INSTALL_HINT = (
 class CursorColumn:
     """One resolved ordering column of a keyset cursor.
 
-    ``order_ref`` is the Django ``order_by`` string the column came from
-    (``"-created_at"``); ``name`` / ``descending`` are its parse;
+    ``name`` / ``descending`` are the parse of the Django ``order_by`` string
+    the column came from (``"-created_at"``);
     ``field`` is the resolved model field (serialization + seek lookups);
     ``value_source`` is the attribute the mint reads the value from - the
     field's ``attname`` for a local column, or the annotation alias a root
     ``orderBy:`` seek attached for a related-path entry.
     """
 
-    order_ref: str
     name: str
     descending: bool
     field: ConcreteField
@@ -313,7 +311,6 @@ def cursor_columns_for(
         field = generated_column(field) or field
         columns.append(
             CursorColumn(
-                order_ref=order_ref,
                 name=name,
                 descending=descending,
                 field=field,
@@ -498,14 +495,11 @@ def _is_supported_cursor_field(field: ConcreteField) -> bool:
 def _cursor_crypto_types() -> tuple[type[AESSIV], type[Exception]]:
     """Load the soft crypto dependency only when keyset cursors are exercised."""
     _ = require_optional_module(
-        "cryptography.exceptions",
-        install_hint=_CRYPTOGRAPHY_INSTALL_HINT,
-    )
-    _ = require_optional_module(
         "cryptography.hazmat.primitives.ciphers.aead",
         install_hint=_CRYPTOGRAPHY_INSTALL_HINT,
     )
-    # Both modules imported above, so these name them rather than load them.
+    # Importing ``aead`` above loads ``cryptography.exceptions`` too, so these
+    # name both modules rather than load them.
     from cryptography.exceptions import InvalidTag  # noqa: PLC0415 - soft dependency
     from cryptography.hazmat.primitives.ciphers.aead import (  # noqa: PLC0415 - soft dependency
         AESSIV as _AESSIV,
@@ -550,7 +544,7 @@ def _decrypt_cursor_payload(value: str, argument: str, info: EitherInfo | None =
             altchars=b"-_",
             validate=True,
         )
-    except (UnicodeEncodeError, binascii.Error, ValueError):
+    except ValueError:
         raise pagination_argument_error(info, argument, _INVALID_CURSOR) from None
     _aessiv, invalid_tag = _cursor_crypto_types()
     secrets = (

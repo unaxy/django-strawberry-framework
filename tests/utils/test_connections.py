@@ -42,7 +42,6 @@ from django_strawberry_framework.utils.connections import (
     offset_engine_arguments,
     resolve_relay_max_results,
     split_window_rows,
-    validate_offset_pagination,
     window_range_plan,
 )
 from django_strawberry_framework.utils.input_values import UNSET
@@ -657,7 +656,7 @@ def test_validate_offset_pagination_matches_slice_metadata_text_and_order(
             max_results=10,
         )
     with pytest.raises(PaginationArgumentError) as rejection:
-        validate_offset_pagination(
+        offset_engine_arguments(
             before=cast("str | None", call["before"]),
             after=cast("str | None", call["after"]),
             first=call["first"],
@@ -670,7 +669,7 @@ def test_validate_offset_pagination_matches_slice_metadata_text_and_order(
 
 def test_validate_offset_pagination_accepts_what_the_engine_accepts() -> None:
     """Valid arguments, absent cursors and non-``int`` page sizes pass without a rejection."""
-    validate_offset_pagination(
+    offset_engine_arguments(
         before=None,
         after=None,
         first=None,
@@ -678,7 +677,7 @@ def test_validate_offset_pagination_accepts_what_the_engine_accepts() -> None:
         cap=10,
         prefix=_PREFIX,
     )
-    validate_offset_pagination(
+    offset_engine_arguments(
         before=to_base64("arrayconnection", "4"),
         after=to_base64("arrayconnection", "0"),
         first=10,
@@ -686,7 +685,7 @@ def test_validate_offset_pagination_accepts_what_the_engine_accepts() -> None:
         cap=10,
         prefix=_PREFIX,
     )
-    validate_offset_pagination(
+    offset_engine_arguments(
         before="",
         after="",
         first=_OMITTED,
@@ -1290,14 +1289,6 @@ def test_split_window_rows_handles_iterators_and_generators() -> None:
     page_plain, probe_plain = split_window_rows(plain_gen, plain_plan, row_number="rn")
     assert [r.rn for r in page_plain] == [1, 2]
     assert probe_plain is True
-
-
-def test_connection_sidecar_kwargs_handles_none_and_empty() -> None:
-    """Sidecar helper functions safely accept None and empty dicts."""
-    assert connection_sidecar_inputs_from_kwargs(None) == (None, None)
-    assert has_connection_sidecar_kwargs(None) is False
-    assert connection_sidecar_inputs_from_kwargs({}) == (None, None)
-    assert has_connection_sidecar_kwargs({}) is False
 
 
 def test_resolve_relay_max_results_handles_unset() -> None:

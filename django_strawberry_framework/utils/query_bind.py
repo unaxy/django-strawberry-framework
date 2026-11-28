@@ -10,9 +10,7 @@ for. A DRF uniqueness validator's queryset carries it on the serializer flavor
 
 from __future__ import annotations
 
-import ast
 import functools
-import hashlib
 import inspect
 import textwrap
 from contextlib import contextmanager
@@ -22,7 +20,7 @@ from django.core.exceptions import EmptyResultSet, FullResultSet, ValidationErro
 from django.db import connections, models
 from django.db.models.sql.where import WhereNode
 
-from django_strawberry_framework._completion import _syntax_shape
+from django_strawberry_framework._completion import _source_digest
 from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._array_field import array_leaf_field
 from django_strawberry_framework.utils._narrowing import (
@@ -518,16 +516,4 @@ def _date_checks_digest(method: object) -> str | None:
         source = textwrap.dedent(inspect.getsource(require(method, inspect.isfunction)))
     except (OSError, TypeError):
         return None
-    return _date_checks_source_digest(source)
-
-
-def _date_checks_source_digest(source: str) -> str:
-    """Hash the docstring-free syntax (sha256) of the one function ``source`` defines."""
-    function = ast.parse(source).body[0]
-    for node in ast.walk(function):
-        if (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and ast.get_docstring(node) is not None
-        ):
-            del node.body[0]
-    return hashlib.sha256(repr(_syntax_shape(function)).encode()).hexdigest()
+    return _source_digest(source)

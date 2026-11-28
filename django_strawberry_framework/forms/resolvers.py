@@ -268,12 +268,13 @@ from django_strawberry_framework.utils.errors import (
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.inputs import published_input_specs
 from django_strawberry_framework.utils.query_bind import date_checks_guarded
-from django_strawberry_framework.utils.querysets import sync_pipeline_recourse, to_python_value
+from django_strawberry_framework.utils.querysets import sync_pipeline_recourse
 from django_strawberry_framework.utils.relations import (
     choice_key_field,
     is_model_class,
     is_single_column_foreign_key,
 )
+from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.widgets import bound_value as _bound_value
 from django_strawberry_framework.utils.widgets import reads_json_text, widget_entries, widget_keys
 from django_strawberry_framework.utils.write_transaction import (
@@ -1733,7 +1734,7 @@ def _holds_own_cleaning(
         return True
     if cleaned in field.empty_values:
         return False
-    return held == to_python_value(field, cleaned)
+    return held == object_result(field.to_python, cleaned)
 
 
 def _set_initial(form: forms.BaseForm, name: str) -> object:
@@ -1852,7 +1853,7 @@ def _blank_type_errors(field: _FieldAny, value: object) -> list[ValidationError]
     if value != "" or not field.null:
         return []
     try:
-        _ = to_python_value(field, value)
+        _ = object_result(field.to_python, value)
     except ValidationError as exc:
         return [exc]
     except Exception:  # noqa: BLE001 - the save's own exception is the one that propagates

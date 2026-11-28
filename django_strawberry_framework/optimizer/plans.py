@@ -1484,7 +1484,6 @@ def effective_cursor_state(
         refs.append(ref)
         columns.append(
             CursorColumn(
-                order_ref=ref,
                 name=name,
                 descending=descending,
                 field=field,

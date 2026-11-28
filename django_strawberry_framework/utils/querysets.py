@@ -81,7 +81,6 @@ from typing import (
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import FieldDoesNotExist, FieldError, ValidationError
-from django.core.validators import ProhibitNullCharactersValidator
 from django.db import connections, models, router
 from django.db.models import sql
 from django.db.models.constants import LOOKUP_SEP
@@ -123,6 +122,7 @@ from ._queryset_private import (
     set_queryset_hints,
 )
 from .errors import (
+    _PROHIBIT_NULL_CHARACTERS,
     binds_integer,
     datetime_django_binds,
     refuses_numeric_format,
@@ -204,13 +204,6 @@ if TYPE_CHECKING:
         ``BaseManager.from_queryset(...)`` declaration leaves outside ``Manager``.
         """
         ...
-
-    class _PythonCoercing(Protocol):
-        """A model field as far as coercing a value to its Python type goes."""
-
-        def to_python(self, value: object, /) -> object:
-            """Return ``value`` coerced to the field's Python type."""
-            ...
 
 else:
     # ``Options`` has no ``__class_getitem__`` at runtime (only the ``django_stubs_ext``
@@ -863,11 +856,6 @@ def normalize_query_source(source: object) -> NormalizedSource:
     return source, False
 
 
-def to_python_value(field: _PythonCoercing, value: object) -> object:
-    """Return ``field.to_python(value)``; django-stubs types the coerced value ``Any``."""
-    return field.to_python(value)
-
-
 def identity_key(field: ModelField | None, value: object) -> object:
     """Return the key one identity of ``field``'s column compares by: the column's own value.
 
@@ -930,7 +918,7 @@ def _value_codecs(field: ConcreteField) -> tuple[ConcreteField, ...]:
 def _cast_value(field: ConcreteField, value: object) -> object:
     """Return ``value`` cast by each of ``_value_codecs(field)``'s ``to_python`` in turn."""
     for codec in _value_codecs(field):
-        value = to_python_value(codec, value)
+        value = object_result(codec.to_python, value)
     return value
 
 
@@ -976,10 +964,6 @@ def truncates_to_integer(field: ModelField | None, value: object) -> bool:
     if isinstance(value, Decimal):
         return value.is_finite() and value != value.to_integral_value()
     return isinstance(value, float) and math.isfinite(value) and not value.is_integer()
-
-
-#: Django's all-backend NUL rule; a text id holding a NUL names no row.
-_PROHIBIT_NULL_CHARACTERS = ProhibitNullCharactersValidator()
 
 
 def lookup_read_alias(model: type[models.Model]) -> str:
@@ -1826,45 +1810,6 @@ async def apply_sidecar_async(
         expected_routing,
         candidate,
         method_name,
-        model=model,
-    )
-
-
-def apply_orderset_sync(
-    target_type: type[DjangoType],
-    orderset_class: type[OrderSet] | None,
-    queryset: models.QuerySet[models.Model],
-    order_by: object,
-    info: object,
-    *,
-    model: type[models.Model],
-) -> models.QuerySet[models.Model]:
-    """Run ``OrderSet.apply_sync`` through the shared post-sidecar seal.
-
-    Both the list field and the Relay connection field enter here; see
-    :func:`apply_sidecar_sync` for the seal itself.
-    """
-    orderset_class = require_orderset_class(target_type, orderset_class)
-    return apply_sidecar_sync(target_type, orderset_class, queryset, order_by, info, model=model)
-
-
-async def apply_orderset_async(
-    target_type: type[DjangoType],
-    orderset_class: type[OrderSet] | None,
-    queryset: models.QuerySet[models.Model],
-    order_by: object,
-    info: object,
-    *,
-    model: type[models.Model],
-) -> models.QuerySet[models.Model]:
-    """Async sibling of :func:`apply_orderset_sync`."""
-    orderset_class = require_orderset_class(target_type, orderset_class)
-    return await apply_sidecar_async(
-        target_type,
-        orderset_class,
-        queryset,
-        order_by,
-        info,
         model=model,
     )
 
