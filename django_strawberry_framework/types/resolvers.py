@@ -261,13 +261,11 @@ def _check_n1(
     three so this function neither re-reads a sentinel nor re-walks ``info.path``.
     Omitting them (every other call site) keeps the read-and-compute behavior.
 
-    Strictness prefers the per-execution ``ContextVar`` the running extension
-    armed at ``on_execute`` entry, which survives an execution carrying no
-    ``context_value`` and one whose root the walker could not plan, and falls back
-    to the ``DST_OPTIMIZER_STRICTNESS`` stash the extension writes on the request
-    context. The stash is the only channel that reaches a subscription event:
-    Strawberry's ``executing`` hook wraps only the ``subscribe()`` call, so each
-    event resolves after ``on_execute`` has reset the ``ContextVar``.
+    Strictness reads the execution frame or subscription resolver scope, so it
+    stays armed without a writable ``context_value`` or a plannable root. Both
+    scopes read operation-owned stashes and belong to the runner active here.
+    Outside a managed operation, the ``DST_OPTIMIZER_STRICTNESS`` context stash
+    remains the compatibility channel for direct resolver callers.
 
     A relation counts as planned when EITHER publish channel names its key -
     the ``DST_OPTIMIZER_PLANNED`` stash or the per-execution scoped-relation set,
@@ -762,8 +760,8 @@ def _make_relation_resolver(
             _fk_id_elision_keys(context) if field_meta.attname is not None else _EMPTY_ELISIONS
         )
         planned = _planned_resolver_keys(context)
-        # Cheap per-row gate: a ``ContextVar`` read, not a second stash dispatch.
-        # ``None`` (no extension ran) plus an absent plan sentinel means nothing
+        # The execution frame or subscription resolver scope supplies the mode
+        # without another stash dispatch. ``None`` plus an absent plan means nothing
         # armed the guard and there is no plan to compare against, so the
         # resolver-key walk is skipped. A real value threads into ``_check_n1``
         # below, which then re-reads nothing.

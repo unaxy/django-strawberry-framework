@@ -125,6 +125,7 @@ from django_strawberry_framework.optimizer.selections import (
 )
 from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import iter_subsystem_clears, registry
+from django_strawberry_framework.resource_policy import _armed_budget
 from django_strawberry_framework.types.resolvers import (
     _will_lazy_load_many,
     _will_lazy_load_single,
@@ -3437,7 +3438,11 @@ def _published_optimizer_keys(context: object) -> dict[str, object]:
 
 
 @pytest.mark.django_db
-def test_a_nested_operation_does_not_take_the_outer_operations_optimizer_state() -> None:
+@pytest.mark.parametrize("inner_optimized", [False, True])
+def test_a_nested_operation_does_not_take_the_outer_operations_optimizer_state(
+    *,
+    inner_optimized: bool,
+) -> None:
     """An inner execution through the documented singleton leaves the outer one intact.
 
     The optimizer publishes its plan, its FK-id elisions, its planned-relation
@@ -3479,7 +3484,8 @@ def test_a_nested_operation_does_not_take_the_outer_operations_optimizer_state()
             """Run a whole inner operation on this request's own context object."""
             before = extension.execution_context
             published_before = _published_optimizer_keys(info.context)
-            inner = info.schema.execute_sync(
+            inner_schema = info.schema if inner_optimized else unoptimized
+            inner = inner_schema.execute_sync(
                 "{ allItems { name category { id } } }",
                 context_value=info.context,
             )
@@ -3491,6 +3497,7 @@ def test_a_nested_operation_does_not_take_the_outer_operations_optimizer_state()
     finalize_django_types()
     extension = DjangoOptimizerExtension(strictness="raise")
     schema = DjangoSchema(query=Query, extensions=[lambda: extension])
+    unoptimized = DjangoSchema(query=Query)
     shared = SimpleNamespace()
 
     outer = schema.execute_sync(
@@ -4894,17 +4901,22 @@ def test_strictness_reaches_an_execution_with_no_stashable_context() -> None:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("strictness", ["raise", "warn"])
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("context_kind", ["namespace", "absent", "readonly"])
+@pytest.mark.parametrize("schema_kind", ["django", "plain"])
 async def test_strictness_reaches_every_subscription_event(
     strictness: str,
+    context_kind: str,
+    schema_kind: str,
+    *,
+    materialized: bool,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An armed guard reports an unplanned relation in each subscription event.
 
-    Strawberry's ``executing`` hook wraps only the ``subscribe()`` call, so every
-    event resolves after ``on_execute`` has reset the per-execution strictness
-    ``ContextVar``; the strictness the extension stashes on the request context is
-    what arms the guard there. Every event the subscription yields is consumed and
-    checked on its own, so a guard armed for the first event alone fails.
+    Event resolvers retain operation-owned correctness state after the executing
+    hook closes, without requiring a writable request context or a plannable root.
+    Each event is resumed in its own task and leaves no guard bound to its caller.
     """
     await sync_to_async(services.seed_data)(1)
 
@@ -4924,30 +4936,50 @@ async def test_strictness_reaches_every_subscription_event(
         def hello(self) -> str:
             return "hello"
 
-    async def _projected_items() -> AsyncGenerator[QuerySet[Item], None]:
+    async def _projected_items() -> AsyncGenerator[QuerySet[Item] | list[Item], None]:
         for _ in range(3):
-            yield Item.objects.order_by("id").only("name")
+            items = Item.objects.order_by("id").only("name")
+            yield await sync_to_async(list)(items) if materialized else items
 
     @strawberry.type
     class Subscription:
-        projected_items: AsyncGenerator[QuerySet[Item], None] = strawberry.subscription(
-            resolver=_projected_items,
-            graphql_type=list[ItemType],
+        projected_items: AsyncGenerator[QuerySet[Item] | list[Item], None] = (
+            strawberry.subscription(
+                resolver=_projected_items,
+                graphql_type=list[ItemType],
+            )
         )
 
     finalize_django_types()
     optimizer = DjangoOptimizerExtension(strictness=strictness)
-    schema = DjangoSchema(query=Query, subscription=Subscription, extensions=[lambda: optimizer])
+    schema_class = DjangoSchema if schema_kind == "django" else strawberry.Schema
+
+    def _optimizer_entry() -> DjangoOptimizerExtension:
+        return (
+            optimizer
+            if schema_kind == "django"
+            else DjangoOptimizerExtension(strictness=strictness)
+        )
+
+    schema = schema_class(query=Query, subscription=Subscription, extensions=[_optimizer_entry])
+    context = {
+        "namespace": SimpleNamespace(),
+        "absent": None,
+        "readonly": MappingProxyType[str, object]({}),
+    }[context_kind]
     caplog.set_level("WARNING", logger="django_strawberry_framework")
 
     stream = await schema.subscribe(
         "subscription { projectedItems { name category { name } } }",
-        context_value=SimpleNamespace(),
+        context_value=context,
     )
     assert isinstance(stream, AsyncIterator)
     outcomes: list[tuple[list[str], bool]] = []
     seen = 0
-    async for event in stream:
+    for _ in range(3):
+        event = await asyncio.create_task(anext(stream))
+        assert active_strictness() is None
+        assert execution_plan_memo() is None
         records = caplog.records[seen:]
         seen = len(caplog.records)
         outcomes.append(
@@ -4957,6 +4989,8 @@ async def test_strictness_reaches_every_subscription_event(
             ),
         )
 
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.create_task(anext(stream))
     assert len(outcomes) == 3
     for messages, warned in outcomes:
         if strictness == "raise":
@@ -4964,6 +4998,182 @@ async def test_strictness_reaches_every_subscription_event(
         else:
             assert "Unplanned N+1: category" not in messages
             assert warned
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_subscription_event_plans_do_not_authorize_a_later_materialized_event() -> None:
+    """Each event declares its own plan even when response paths stay identical."""
+    await sync_to_async(services.seed_data)(1)
+    CategoryType = _category_type()
+    assert registry.get(Category) is CategoryType
+    ItemType = _item_type()
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def hello(self) -> str:
+            return "hello"
+
+    async def _items() -> AsyncGenerator[QuerySet[Item] | list[Item], None]:
+        yield Item.objects.all()
+        yield await sync_to_async(list)(Item.objects.all())
+        yield Item.objects.all()
+
+    @strawberry.type
+    class Subscription:
+        items: AsyncGenerator[QuerySet[Item] | list[Item], None] = strawberry.subscription(
+            resolver=_items,
+            graphql_type=list[ItemType],
+        )
+
+    finalize_django_types()
+    optimizer = DjangoOptimizerExtension(strictness="raise")
+    schema = DjangoSchema(query=Query, subscription=Subscription, extensions=[lambda: optimizer])
+    context = SimpleNamespace()
+    stream = await schema.subscribe(
+        "subscription { items { name category { name } } }",
+        context_value=context,
+    )
+    assert isinstance(stream, AsyncIterator)
+    for planned in (True, False, True):
+        event = await asyncio.create_task(anext(stream))
+        if planned:
+            assert event.errors is None, event.errors
+            assert get_context_value(context, DST_OPTIMIZER_PLANNED)
+        else:
+            assert [error.message for error in event.errors or ()] == ["Unplanned N+1: category"]
+            assert get_context_value(context, DST_OPTIMIZER_PLANNED) is None
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("offload", [False, True])
+async def test_overlapping_subscription_events_keep_their_own_correctness_declarations(
+    *,
+    offload: bool,
+) -> None:
+    """An awaited event and an inner unoptimized operation ignore a sibling's plan."""
+    await sync_to_async(services.seed_data)(1)
+    CategoryType = _category_type()
+    assert registry.get(Category) is CategoryType
+    ItemType = _item_type()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    context = SimpleNamespace()
+    nested_results: list[object] = []
+    nested_items = await sync_to_async(list)(Item.objects.select_related("category"))
+
+    @strawberry.type
+    class Query:
+        def _all_items(self, info: strawberry.Info[object, object]) -> QuerySet[Item] | list[Item]:
+            assert active_strictness() is None
+            assert _active_optimizer() is None
+            assert execution_plan_memo() is None
+            assert planned_resolver_keys(info.context) is None
+            assert not fk_id_elision_keys(info.context)
+            return Item.objects.all() if offload else nested_items
+
+        all_items: QuerySet[Item] | list[Item] = strawberry.field(
+            resolver=_all_items,
+            graphql_type=list[ItemType],
+        )
+
+    async def _items(*, hold: bool) -> AsyncGenerator[QuerySet[Item] | list[Item], None]:
+        for _ in range(2):
+            items = Item.objects.all()
+            yield await sync_to_async(list)(items) if hold else items
+
+    @strawberry.type
+    class Subscription:
+        items: AsyncGenerator[QuerySet[Item] | list[Item], None] = strawberry.subscription(
+            resolver=_items,
+            graphql_type=list[ItemType],
+        )
+
+    class _PauseMaterializedRoot(SchemaExtension):
+        @override
+        def resolve(
+            self,
+            _next: Callable[..., object],
+            root: object,
+            info: GraphQLResolveInfo[object],
+            *args: object,
+            **kwargs: object,
+        ) -> object:
+            result = _next(root, info, *args, **kwargs)
+            if info.path.prev is not None or not kwargs.get("hold"):
+                return result
+
+            async def _await_release() -> object:
+                entered.set()
+                await release.wait()
+                assert active_strictness() == "raise"
+                assert _active_optimizer() is None
+                assert execution_plan_memo() is None
+                mirrored = _published_optimizer_keys(info.context)
+                outer_budget = _armed_budget()
+                assert outer_budget is not None
+                document = "{ items: allItems { category { name } } }"
+                if offload:
+                    inner = await sync_to_async(unoptimized.execute_sync)(
+                        document,
+                        context_value=info.context,
+                    )
+                else:
+                    inner = unoptimized.execute_sync(document, context_value=info.context)
+                assert _armed_budget() is outer_budget
+                assert inner.errors is None, inner.errors
+                assert inner.data is not None
+                assert all(_at(item, "category", "name") for item in _list_at(inner.data, "items"))
+                assert _published_optimizer_keys(info.context) == mirrored
+                assert active_strictness() == "raise"
+                nested_results.append(inner.data)
+                return result
+
+            return _await_release()
+
+    finalize_django_types()
+    unoptimized = DjangoSchema(query=Query)
+    optimizer = DjangoOptimizerExtension(strictness="raise")
+    schema = DjangoSchema(
+        query=Query,
+        subscription=Subscription,
+        extensions=[_PauseMaterializedRoot, lambda: optimizer],
+    )
+    document = "subscription($hold: Boolean!) { items(hold: $hold) { category { %s } } }"
+    held = await schema.subscribe(
+        document % "name",
+        variable_values={"hold": True},
+        context_value=context,
+    )
+    planned = await schema.subscribe(
+        document % "id",
+        variable_values={"hold": False},
+        context_value=context,
+    )
+    assert isinstance(held, AsyncIterator)
+    assert isinstance(planned, AsyncIterator)
+    for _ in range(2):
+        entered.clear()
+        release.clear()
+        pending = asyncio.create_task(anext(held))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            sibling = await asyncio.create_task(anext(planned))
+            assert sibling.errors is None, sibling.errors
+            assert get_context_value(context, DST_OPTIMIZER_FK_ID_ELISIONS)
+        finally:
+            release.set()
+        event = await asyncio.wait_for(pending, timeout=5)
+        assert [error.message for error in event.errors or ()] == ["Unplanned N+1: category"]
+        assert active_strictness() is None
+        assert execution_plan_memo() is None
+        assert _armed_budget() is None
+    assert len(nested_results) == 2
+    for stream in (held, planned):
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.create_task(anext(stream))
 
 
 def test_optimizer_unadapted_non_queryset_passthrough() -> None:

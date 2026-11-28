@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
 from weakref import WeakKeyDictionary
 
 from django.db import models
+from graphql.language import OperationType
 from graphql.language.ast import (
     DocumentNode,
     FieldNode,
@@ -107,6 +108,7 @@ from ._context import (
     optimizer_value,
     publish_planned_windows,
     publish_scoped_relations,
+    resolver_read_scope,
     stash_for_optimizer,
 )
 from .hints import hint_is_skip
@@ -916,6 +918,38 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         completion fetches its rows off the loop (graphql-core completes a value
         exposing ``__aiter__`` through it).
         """
+        if info.operation.operation is not OperationType.SUBSCRIPTION:
+            return self._resolve(_next, root, info, *args, **kwargs)
+        state = self._operation_state()
+        stashes = {} if state is None else state.stashes
+        nested = operation_is_nested()
+        with resolver_read_scope(stashes, self.strictness, nested=nested):
+            # graphql-core calls the source subscriber directly; middleware sees
+            # the root only when executing an emitted event. Each event must
+            # declare its own planned keys, even when its root is materialized.
+            if read_attr(info.path, "prev") is None:
+                stashes.clear()
+                if operation_publishes_to_context():
+                    clear_optimizer_context(info.context)
+            result = self._resolve(_next, root, info, *args, **kwargs)
+        if is_awaitable(result):
+
+            async def _await_scoped() -> object:
+                with resolver_read_scope(stashes, self.strictness, nested=nested):
+                    return await result
+
+            return _await_scoped()
+        return result
+
+    def _resolve(
+        self,
+        _next: Callable[..., object],
+        root: object,
+        info: "GraphQLResolveInfo[object]",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        """Resolve a field and optimize a root queryset, in its read scope."""
         result = _next(root, info, *args, **kwargs)
         if read_attr(info.path, "prev") is not None:
             return result

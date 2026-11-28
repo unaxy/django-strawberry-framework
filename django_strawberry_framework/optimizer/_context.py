@@ -8,6 +8,12 @@ subpackage reads its own scratch out of. ``get_context_value`` and
 ``stash_on_context`` are re-exported so the whole hand-off is addressable from
 this module.
 
+Subscription resolvers also bind a lightweight correctness scope after the
+execution frame closes. It carries strictness and operation-owned stashes only;
+execution and graph memo lifetimes stay with their executing hooks. Both scopes
+are tied to the current native runner so nested operations without an optimizer
+cannot inherit an enclosing operation's declarations.
+
 The frame is here rather than in ``extension.py`` because its readers cannot
 import that module: the walker, the selection adapter and the nested-fetch
 strategy are all below the extension in the dependency order, and none owns a
@@ -23,6 +29,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
+from django_strawberry_framework.extensions.operation_state import operation_scope
 from django_strawberry_framework.utils._narrowing import (
     is_set_or_frozenset,
     require,
@@ -35,7 +42,7 @@ from django_strawberry_framework.utils.context import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Generator, Iterable, Mapping
     from collections.abc import Set as AbstractSet
     from typing import TypeAlias
 
@@ -95,6 +102,7 @@ __all__ = (
     "publish_planned_windows",
     "publish_scoped_relations",
     "relation_is_optimizer_scoped",
+    "resolver_read_scope",
     "stash_for_optimizer",
     "stash_on_context",
     "stashed_strictness",
@@ -194,6 +202,7 @@ class _ExecutionFrame:
     """
 
     stashes: dict[str, object]
+    runner: object | None
     publishes_to_context: bool
     optimizer: DjangoOptimizerExtension | None
     strategy: NestedConnectionStrategy | None
@@ -241,7 +250,8 @@ def _active_frame() -> _ExecutionFrame | None:
     ``None`` for a caller outside every managed execution - a direct call into a
     generated resolver, a test invoking a helper on its own.
     """
-    return _execution_frames.get()
+    frame = _execution_frames.get()
+    return frame if frame is not None and frame.runner is operation_scope() else None
 
 
 def begin_execution_frame(
@@ -260,6 +270,7 @@ def begin_execution_frame(
     """
     frame = _ExecutionFrame(
         stashes=stashes,
+        runner=operation_scope(),
         publishes_to_context=not (nested or _active_frame() is not None),
         optimizer=optimizer,
         strategy=strategy,
@@ -281,6 +292,60 @@ def end_execution_frame(scope: _FrameScope) -> None:
         _execution_frames.reset(scope.token)
 
 
+@dataclass(slots=True)
+class _ResolverReadScope:
+    """Resolver correctness declarations, without execution or graph memos."""
+
+    stashes: dict[str, object]
+    strictness: str
+    publishes_to_context: bool
+    runner: object | None
+
+
+_resolver_reads: ContextVar[_ResolverReadScope | None] = ContextVar(
+    "django_strawberry_framework_optimizer_resolver_reads",
+    default=None,
+)
+
+
+def _active_resolver_reads() -> _ResolverReadScope | None:
+    """Read only the resolver scope belonging to the runner active here."""
+    scope = _resolver_reads.get()
+    return scope if scope is not None and scope.runner is operation_scope() else None
+
+
+@contextlib.contextmanager
+def resolver_read_scope(
+    stashes: dict[str, object],
+    strictness: str,
+    *,
+    nested: bool,
+) -> Generator[None]:
+    """Bind operation-owned correctness state around one resolver continuation.
+
+    Subscription event execution runs after ``on_execute`` closes its frame.
+    Middleware still brackets each resolver, including its awaited continuation,
+    so it can provide strictness and stashes without extending memo lifetimes.
+    """
+    enclosing = _active_resolver_reads()
+    scope = _ResolverReadScope(
+        stashes,
+        strictness,
+        not (nested or (enclosing is not None and enclosing.stashes is not stashes)),
+        operation_scope(),
+    )
+    token = _resolver_reads.set(scope)
+    try:
+        yield
+    finally:
+        _resolver_reads.reset(token)
+
+
+def _active_read_scope() -> _ExecutionFrame | _ResolverReadScope | None:
+    """Prefer the execution frame, then the subscription resolver's declarations."""
+    return _active_frame() or _active_resolver_reads()
+
+
 def active_optimizer() -> DjangoOptimizerExtension | None:
     """Return the extension instance running this execution, or ``None`` outside one."""
     frame = _active_frame()
@@ -295,8 +360,8 @@ def active_nested_strategy() -> NestedConnectionStrategy | None:
 
 def active_strictness() -> str | None:
     """Return the strictness in force this execution, or ``None`` if no optimizer runs."""
-    frame = _active_frame()
-    return None if frame is None else frame.strictness
+    scope = _active_read_scope()
+    return None if scope is None else scope.strictness
 
 
 def execution_plan_memo() -> dict[PlanCacheKey, OptimizationPlan] | None:
@@ -357,8 +422,8 @@ def operation_publishes_to_context() -> bool:
     :func:`optimizer_value` and :func:`stash_for_optimizer` rather than through
     this.
     """
-    frame = _active_frame()
-    return frame is not None and frame.publishes_to_context
+    scope = _active_read_scope()
+    return scope is not None and scope.publishes_to_context
 
 
 def optimizer_value(context: object, key: str, default: object = None) -> object:
@@ -367,13 +432,17 @@ def optimizer_value(context: object, key: str, default: object = None) -> object
     The running operation's own mapping answers, without falling through to the
     context object: a value another operation published there is not this
     operation's, and a value this operation published is not on the object at
-    all when the context is read-only. Outside a managed execution the context
-    object answers, which is the only store an unmanaged caller has.
+    all when the context is read-only. Outside a managed operation the context
+    object answers, which is the only store a direct caller has. A native runner
+    without an optimizer reads only the default, even if a request context
+    mirrors another operation's plan.
     """
-    frame = _active_frame()
-    if frame is None:
-        return get_context_value(context, key, default)
-    return frame.stashes.get(key, default)
+    scope = _active_read_scope()
+    if scope is not None:
+        return scope.stashes.get(key, default)
+    if operation_scope() is not None:
+        return default
+    return get_context_value(context, key, default)
 
 
 def planned_resolver_keys(context: object) -> AbstractSet[object] | None:
@@ -418,12 +487,12 @@ def stash_for_optimizer(context: object, key: str, value: object) -> None:
     nothing, exactly as ``stash_on_context`` documents, and the operation still
     has its own copy.
     """
-    frame = _active_frame()
-    if frame is None:
-        stash_on_context(context, key, value)
-        return
-    frame.stashes[key] = value
-    if frame.publishes_to_context:
+    owner = _active_read_scope()
+    if owner is not None:
+        owner.stashes[key] = value
+        if owner.publishes_to_context:
+            stash_on_context(context, key, value)
+    elif operation_scope() is None:
         stash_on_context(context, key, value)
 
 

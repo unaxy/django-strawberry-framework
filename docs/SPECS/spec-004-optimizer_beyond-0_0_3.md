@@ -70,6 +70,17 @@ What this slice buys, and why each guard exists, are in the [rationale file][spe
 
 **Mechanism.** A `DjangoOptimizerExtension(strictness="warn")` flag emits a loud warning every time a resolver accesses a relation that was not covered by the optimization plan. When `strictness != "off"`, a sentinel listing the planned resolver keys is stashed under the key `dst_optimizer_planned` through B5's mechanism when the plan is published. The O1 relation resolvers (in `types/resolvers.py`) check the sentinel: a relation accessed that is not in the plan is reported naming the field, plus an optional reason the calling site supplies for an access it can characterise further. In dev mode this surfaces immediately in the console; in production it is a standard Python `logging.warning` that monitoring can alert on.
 
+Strictness is armed before planning, including materialized roots and executions without a
+writable context. Queries and mutations read their execution frame; subscription event
+resolvers read a lightweight scope bound by the optimizer's resolver middleware around both
+synchronous work and awaited continuations. This scope carries only the mode, operation-owned
+stashes and context-publication ownership, without execution or graph memos. Each subscription
+event root clears the operation's correctness declarations before it resolves, so a planned
+event cannot authorize a later unplanned event at the same response path. The native runner's
+identity masks enclosing optimizer state during an inner operation without an optimizer.
+Context stashes remain diagnostic mirrors; direct callers outside a managed operation retain
+the context fallback.
+
 The sentinel is a `set[str]` of planned resolver keys, e.g. `ItemType.category@allItems.category` or `ItemType.category@allItems.cat`. The resolver key combines the parent type, the Django field name the resolver closure binds, and the GraphQL runtime response path (`info.path` with list indexes stripped, response keys and aliases kept). This keeps aliases branch-sensitive without accepting bare field-name fallbacks that could leak across branches. Before warning or raising, the resolver also checks whether the access would actually lazy-load (via the instance's `__dict__` and `_state.fields_cache` for a single-valued relation, and `_prefetched_objects_cache` for many-side relations) — already-loaded relations are silently skipped even if not in the plan.
 
 **Prerequisite: resolver signature change.** The O1 resolvers (`_make_relation_resolver` in `types/resolvers.py`) take `info` alongside `root` so they can read the sentinel B5 published for the operation. Strawberry supports `info` in resolver signatures via type detection (`strawberry.types.Info`), so it is a backward-compatible parameter — Strawberry injects it automatically. The signature belongs to B3.

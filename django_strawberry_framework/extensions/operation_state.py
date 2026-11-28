@@ -311,6 +311,11 @@ def _declared_operation_mode(extensions: Iterable[SchemaExtension]) -> Operation
     return None
 
 
+def operation_scope() -> object | None:
+    """Return the current runner identity, or ``None`` outside a package runner."""
+    return _RUNNER_SCOPES.get()
+
+
 def operation_is_nested() -> bool:
     """Whether the operation running here belongs to a runner inside another one.
 
@@ -529,8 +534,12 @@ def _bind(
         carrier = extension._operation_carrier
         bindings.append(_binding(carrier, carrier.set(ref(state))))
         bindings.extend(rebind() for rebind in state.resumed_bindings())
-    if registrar:
-        bindings.append(_binding(_RESUME_REGISTRARS, _RESUME_REGISTRARS.set(bindings)))
+    if registrar or _RESUME_REGISTRARS.get() is not None:
+        # A different runner owns its registrations. In particular, a nested
+        # operation in a copied context must not hand its tokens to the outer
+        # resume's mutable registrar, whose context cannot reset them.
+        value = bindings if registrar else None
+        bindings.append(_binding(_RESUME_REGISTRARS, _RESUME_REGISTRARS.set(value)))
     return bindings
 
 
