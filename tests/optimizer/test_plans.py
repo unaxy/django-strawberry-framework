@@ -447,16 +447,6 @@ class TestIndexedList:
         indexed = _IndexedList(["a", "b", "a"])
         assert indexed == ["a", "b"]
 
-    def test_append_and_extend_keep_index_for_later_append_unique(self) -> None:
-        indexed: _IndexedList[str] = _IndexedList()
-        indexed.append("a")
-        indexed.extend(["b", "c"])
-        assert indexed == ["a", "b", "c"]
-        # The sidecar index was maintained, so a later ``append_unique`` of an
-        # already-present value is a no-op.
-        indexed.append_unique("b")
-        assert indexed == ["a", "b", "c"]
-
 
 class TestFlattenSelectRelated:
     """``_flatten_select_related`` normalizes Django's three select_related shapes."""
@@ -1234,22 +1224,6 @@ class TestDeterministicOrder:
         # Already ends in a unique column -> unchanged.
         assert deterministic_order(("name",), Category) == ("name",)
         assert deterministic_order(("id",), Item) == ("id",)
-
-    def test_ends_in_unique_column_defensive_for_non_model(self) -> None:
-        """Non-model objects without ``_meta`` safely return False."""
-        # basedpyright: each non-model is the hostile input under test; ends_in_unique_column
-        # types the parameter as type[Model]
-        assert ends_in_unique_column(("id",), object()) is False  # pyright: ignore[reportArgumentType]
-        assert ends_in_unique_column(("id",), SimpleNamespace()) is False  # pyright: ignore[reportArgumentType]
-
-    def test_ends_in_unique_column_refuses_a_meta_that_is_not_options(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A model whose ``_meta`` is not Django's ``Options`` raises instead of being read as one."""
-        monkeypatch.setattr(Category, "_meta", SimpleNamespace(pk=None))
-        with pytest.raises(TypeError, match="got SimpleNamespace"):
-            ends_in_unique_column(("id",), Category)
 
 
 class TestEffectiveConnectionOrder:

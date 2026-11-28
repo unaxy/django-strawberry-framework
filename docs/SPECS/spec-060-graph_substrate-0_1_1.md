@@ -354,8 +354,9 @@ of the first foundation card.
     with `OptimizerError`, a combined outer is Django's own `.alias()`
     refusal) and returns the `Q(alias=True)` branch
     for the caller to place. Reserved aliases are allocated against the
-    *current* queryset's effective names (fields, attnames, `pk`,
-    annotations, `extra`, `values_select`), and a duplicate `.alias()`
+    *current* queryset's effective names (annotations, `extra`,
+    `values_select`; a clash with a field name or attname is Django's own
+    `.alias()` refusal), and a duplicate `.alias()`
     silently overwrites, so successive attachments must each consume the
     previous returned queryset, and the branches must land in the outer
     query through one `.filter()` (separate calls would AND what the caller

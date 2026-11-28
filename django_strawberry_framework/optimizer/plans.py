@@ -53,7 +53,6 @@ from django.db.models.functions import Random, RowNumber
 from django.db.models.query_utils import select_related_descend
 from django.db.models.sql.where import WhereNode
 from graphql.pyutils import Path
-from typing_extensions import override
 
 from django_strawberry_framework.exceptions import OptimizerError
 from django_strawberry_framework.keyset import (
@@ -68,7 +67,6 @@ from django_strawberry_framework.utils._narrowing import (
     instance_state,
     is_concrete_field,
     is_dict,
-    is_options,
     list_of,
     optional_instance,
     read_attr,
@@ -144,14 +142,11 @@ def _lookup_path(entry: PrefetchLookup) -> str:
 class _IndexedList(list[_T]):
     """List with a construction-time membership index for optimizer builders.
 
-    Only ``append``, ``extend``, and ``append_unique`` maintain the ``_seen``
-    sidecar index. The other ``list`` mutators (``insert``, ``remove``,
-    ``pop``, slice assignment, and in-place ``+=``, which CPython routes
-    through ``list.__iadd__`` rather than the overridden ``extend``) would
-    desynchronize the index from the contents. Every optimizer writer goes
-    through the three maintained entry points, so this is a usage constraint,
-    not a runtime guard: a future caller reaching for any other mutator must
-    rebuild the list instead.
+    Only ``append_unique`` maintains the ``_seen`` sidecar index; every other
+    ``list`` mutator would desynchronize the index from the contents. Every
+    optimizer writer goes through ``append_unique``, so this is a usage
+    constraint, not a runtime guard: a future caller reaching for any other
+    mutator must rebuild the list instead.
     """
 
     __slots__: tuple[str, ...] = ("_key", "_seen")
@@ -181,19 +176,6 @@ class _IndexedList(list[_T]):
             return
         super().append(value)
         self._seen.add(index_key)
-
-    @override
-    def append(self, value: _T) -> None:
-        """Append directly and keep the sidecar index useful for later helper calls."""
-        super().append(value)
-        key = self._key
-        self._seen.add(value if key is None else key(value))
-
-    @override
-    def extend(self, values: Iterable[_T]) -> None:
-        """Extend directly and keep the sidecar index useful for later helper calls."""
-        for value in values:
-            self.append(value)
 
 
 def _indexed_list() -> _IndexedList[str]:
@@ -1068,13 +1050,8 @@ def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Mode
     if parsed is None:
         return False
     ref = parsed[0]
-    # A model class's ``_meta`` is its ``Options``.
-    raw_meta = introspection.mro_attr(model, "_meta")
-    meta = None if raw_meta is None else require(raw_meta, is_options)
-    if meta is None:
-        return False
-    pk = read_attr(meta, "pk", None)
-    if pk is not None and ref in ("pk", read_attr(pk, "attname", None)):
+    meta = model._meta
+    if ref in ("pk", meta.pk.attname):
         return True
     if "__" in ref:
         # A relation traversal (e.g. ``shelf__code``) is not the model's own
@@ -1943,29 +1920,14 @@ def diff_plan_for_queryset(
         and not dropped_keys
     ):
         return plan, queryset
-    new_planned = (
-        [k for k in plan.planned_resolver_keys if k not in dropped_keys]
-        if dropped_keys
-        else plan.planned_resolver_keys
-    )
-    new_elisions = (
-        [k for k in plan.fk_id_elisions if k not in dropped_keys]
-        if dropped_keys
-        else plan.fk_id_elisions
-    )
-    new_only = (
-        [f for f in plan.only_fields if not f.startswith(released_prefixes)]
-        if released_prefixes
-        else plan.only_fields
-    )
     return (
         replace(
             plan,
             select_related=new_select,
             prefetch_related=new_prefetch,
-            only_fields=new_only,
-            fk_id_elisions=new_elisions,
-            planned_resolver_keys=new_planned,
+            only_fields=[f for f in plan.only_fields if not f.startswith(released_prefixes)],
+            fk_id_elisions=[k for k in plan.fk_id_elisions if k not in dropped_keys],
+            planned_resolver_keys=[k for k in plan.planned_resolver_keys if k not in dropped_keys],
             prefetch_path_resolver_keys=new_prefetch_path_keys,
         ).finalize(),
         new_queryset,

@@ -17,7 +17,6 @@ from django.db.models.lookups import Lookup
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.optimizer.predicates import (
-    _effective_alias_names,
     _next_reserved_alias,
     attach_exists,
     correlated_inner_root,
@@ -73,12 +72,6 @@ def test_alias_allocation() -> None:
     inner = correlated_inner_root(outer).filter(genres__name__icontains="x")
     _qs, cond = attach_exists(outer, inner)
     assert cond.children == [("_dst_predicate_1", True)]
-
-    # (b) The effective namespace includes field names AND attnames AND "pk".
-    names = _effective_alias_names(Book.objects.all())
-    assert "shelf" in names
-    assert "shelf_id" in names
-    assert "pk" in names
 
     # (c) extra(select=) pre-occupies _dst_predicate_0 -> next counter used.
     extra_outer = Book.objects.all().extra(select={"_dst_predicate_0": "1"})

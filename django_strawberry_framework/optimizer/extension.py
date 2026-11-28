@@ -246,11 +246,10 @@ def _walk_cache_relevant_vars(
     fragments: "Mapping[str, FragmentDefinitionNode]",
     visited_fragments: "set[FragmentVisitKey]",
     depth: int,
-    directive_names: set[str],
-    pagination_names: set[str],
+    names: set[str],
     pagination_wire_names: frozenset[str],
 ) -> None:
-    """Collect BOTH cache-relevant variable families in a single AST traversal.
+    """Collect BOTH cache-relevant variable families into ``names`` in one AST traversal.
 
     One descent collects two families on different axes:
 
@@ -291,12 +290,12 @@ def _walk_cache_relevant_vars(
     # Directive variables: collected on every node, depth-independent. The
     # ``@skip`` / ``@include`` variable extraction is the shared AST-adapter
     # primitive (``optimizer/selections.py::directive_variable_names``).
-    directive_names.update(directive_variable_names(node))
+    names.update(directive_variable_names(node))
     # Nested pagination variables: only on a field node at depth >= 1.
     if depth >= 1 and isinstance(node, FieldNode):
         for arg in node.arguments or ():
             if arg.name.value in pagination_wire_names and isinstance(arg.value, VariableNode):
-                pagination_names.add(arg.value.name.value)
+                names.add(arg.value.name.value)
     # A field node deepens the response path for its children; a fragment
     # wrapper does not, so its body inherits the field node's depth here.
     child_depth = depth + 1 if isinstance(node, FieldNode) else depth
@@ -309,8 +308,7 @@ def _walk_cache_relevant_vars(
             fragments,
             visited_fragments,
             child_depth,
-            directive_names,
-            pagination_names,
+            names,
             pagination_wire_names,
         )
         # Resolve the fragment spread depth-aware: pass ``depth=child_depth`` so
@@ -330,40 +328,9 @@ def _walk_cache_relevant_vars(
                 fragments,
                 visited_fragments,
                 child_depth,
-                directive_names,
-                pagination_names,
+                names,
                 pagination_wire_names,
             )
-
-
-def _collect_cache_var_families(
-    node: "Node",
-    fragments: "Mapping[str, FragmentDefinitionNode]",
-    pagination_wire_names: frozenset[str],
-) -> tuple[set[str], set[str]]:
-    """Run the unified traversal and return ``(directive_names, pagination_names)``.
-
-    ``directive_names`` holds only the variables inside a ``@skip`` /
-    ``@include`` ``if`` argument: every other variable leaves the selection tree
-    unchanged and stays out of the cache key to avoid cardinality explosion.
-    ``pagination_names`` holds the variables under a pagination argument
-    (``pagination_wire_names``) on a non-root field node, which the planner bakes into windowed
-    prefetch querysets; the collection is a syntactic SUPERSET by design, since
-    over-collection costs a duplicate cache entry while under-collection would
-    serve wrong data (spec-033 Decision 7). Both families come from ONE AST walk.
-    """
-    directive_names: set[str] = set()
-    pagination_names: set[str] = set()
-    _walk_cache_relevant_vars(
-        node,
-        fragments,
-        set(),
-        0,
-        directive_names,
-        pagination_names,
-        pagination_wire_names,
-    )
-    return directive_names, pagination_names
 
 
 def _collect_cache_relevant_var_names(
@@ -375,17 +342,21 @@ def _collect_cache_relevant_var_names(
 
     Combines the ``@skip`` / ``@include`` directive variable names with the
     non-root pagination variable names -- in ONE AST traversal
-    (``_collect_cache_var_families``) -- so ``_build_cache_key`` folds one name
-    set through its single ``(name, value)`` comprehension. The result is what
-    ``_doc_cache_entry`` memoizes cross-request alongside the rendered document
-    key (both are pure functions of the document text).
+    (``_walk_cache_relevant_vars``) -- so ``_build_cache_key`` folds one name
+    set through its single ``(name, value)`` comprehension. Directive names hold
+    only the variables inside a ``@skip`` / ``@include`` ``if`` argument: every
+    other variable leaves the selection tree unchanged and stays out of the cache
+    key to avoid cardinality explosion. Pagination names hold the variables under
+    a pagination argument (``pagination_wire_names``) on a non-root field node,
+    which the planner bakes into windowed prefetch querysets; the collection is
+    a syntactic SUPERSET by design, since over-collection costs a duplicate cache
+    entry while under-collection would serve wrong data (spec-033 Decision 7).
+    The result is what ``_doc_cache_entry`` memoizes cross-request alongside the
+    rendered document key (both are pure functions of the document text).
     """
-    directive_names, pagination_names = _collect_cache_var_families(
-        operation,
-        fragments,
-        pagination_wire_names,
-    )
-    return frozenset(directive_names | pagination_names)
+    names: set[str] = set()
+    _walk_cache_relevant_vars(operation, fragments, set(), 0, names, pagination_wire_names)
+    return frozenset(names)
 
 
 def _hashable_variable_value(value: object) -> "FrozenVariableValue":

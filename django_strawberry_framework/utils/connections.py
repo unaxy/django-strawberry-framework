@@ -50,7 +50,7 @@ import re
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, TypeGuard, TypeVar, cast
 
 from graphql import GraphQLError
 from strawberry import Info
@@ -544,10 +544,9 @@ def assert_window_fetch_mode(range_plan: WindowRangePlan, *, with_total_count: b
     ``add_marker_rows`` DO compose on the offset page (probe XOR count is the
     only exclusion this enforces).
 
-    The single owner of the boundary check every window entry point shares
-    (``plans.py::apply_window_pagination`` for the ORM window,
-    ``nested_fetch.py::NestedConnectionRequest`` at construction, which every
-    strategy's window, the lateral spec included, is built from). Raises the loud
+    The single owner of the boundary check at the window entry point
+    (``plans.py::apply_window_pagination``, which every strategy's windowed
+    floor, the lateral one included, runs through). Raises the loud
     ``OptimizerError`` - never silently normalizes one flag - so a planner or
     strategy bug surfaces at its origin instead of corrupting a page. It is not a
     ``ValueError`` / ``TypeError``, so the planner's leave-unplanned pagination
@@ -560,42 +559,6 @@ def assert_window_fetch_mode(range_plan: WindowRangePlan, *, with_total_count: b
             "pass the overfetched sentinel row through as a real edge. These fetch "
             "modes are mutually exclusive.",
         )
-
-
-class _RawWindowArguments(Protocol):
-    """The raw window arguments a window-carrying dataclass exposes."""
-
-    @property
-    def offset(self) -> int: ...
-    @property
-    def limit(self) -> int | None: ...
-    @property
-    def reverse(self) -> bool: ...
-    @property
-    def next_page_probe(self) -> bool: ...
-    @property
-    def with_total_count(self) -> bool: ...
-
-
-def assert_window_fetch_mode_for(window: _RawWindowArguments) -> None:
-    """``assert_window_fetch_mode`` for callers holding RAW window arguments.
-
-    ``NestedConnectionRequest`` carries
-    ``(offset, limit, reverse, next_page_probe, with_total_count)`` rather than a
-    resolved ``WindowRangePlan``; this reads those attributes, resolves the plan
-    through the shared ``window_range_plan``, and delegates, so the
-    effective-state rule is spelled exactly once. The dataclass passes ``self``
-    from ``__post_init__``.
-    """
-    assert_window_fetch_mode(
-        window_range_plan(
-            offset=window.offset,
-            limit=window.limit,
-            reverse=window.reverse,
-            next_page_probe=window.next_page_probe,
-        ),
-        with_total_count=window.with_total_count,
-    )
 
 
 def split_window_rows(

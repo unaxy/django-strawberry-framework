@@ -595,8 +595,8 @@ def _plain_field_terms(meta: _OptionsAny, names: Sequence[str]) -> list[tuple[st
     return terms
 
 
-def _model_index_shapes(meta: _OptionsAny) -> tuple[list[list[tuple[str, bool]]], bool]:
-    """Return ``(inspectable leading-term shapes, saw_uninspectable)`` for a table-owning model.
+def _model_index_shapes(meta: _OptionsAny) -> list[list[tuple[str, bool]] | None]:
+    """Return the leading-term shape of every index of a table-owning model.
 
     The coverage inventory built from every PHYSICAL index shape model metadata
     represents inspectably, so the advisory reasons about the indexes PostgreSQL
@@ -621,19 +621,14 @@ def _model_index_shapes(meta: _OptionsAny) -> tuple[list[list[tuple[str, bool]]]
       own table.
 
     A conditional/partial or expression ``Index``/``UniqueConstraint``, or a
-    name that no longer resolves, is counted as UNINSPECTABLE (``saw_uninspectable
-    = True``) rather than a covering or an absent shape: its predicate cannot be
-    proven to imply the window's, so absence stays unproven. ``CheckConstraint``
-    and other non-unique constraints are simply irrelevant (never uninspectable).
+    name that no longer resolves, is an UNINSPECTABLE ``None`` entry rather than
+    a covering or an absent shape: its predicate cannot be proven to imply the
+    window's, so absence stays unproven. ``CheckConstraint`` and other non-unique
+    constraints are simply irrelevant (never uninspectable).
     """
-    shapes: list[list[tuple[str, bool]]] = []
-    saw_uninspectable = False
-    for index in list_of(meta.indexes):
-        terms = _index_leading_terms(meta, index)
-        if terms is None:
-            saw_uninspectable = True
-        else:
-            shapes.append(terms)
+    shapes: list[list[tuple[str, bool]] | None] = [
+        _index_leading_terms(meta, index) for index in list_of(meta.indexes)
+    ]
     total_unique = meta.total_unique_constraints
     # A conditional or expression ``UniqueConstraint`` is absent from Django's
     # total list; its index still exists, so it leaves absence unprovable.
@@ -641,27 +636,19 @@ def _model_index_shapes(meta: _OptionsAny) -> tuple[list[list[tuple[str, bool]]]
     if sum(
         isinstance(constraint, models.UniqueConstraint) for constraint in meta.constraints
     ) > len(total_unique):
-        saw_uninspectable = True
-    for constraint in total_unique:
-        if getattr(constraint, "opclasses", None):
-            # A non-default opclass (``varchar_pattern_ops`` etc.) is chosen for a
-            # lookup semantics that need not provide the window's ordinary
-            # ordering, exactly as ``_index_leading_terms`` rejects an ``Index``
-            # opclass - so route it through the SAME capability gate rather than
-            # letting the constraint claim an ordinary ascending B-tree.
-            saw_uninspectable = True
-            continue
-        terms = _plain_field_terms(meta, constraint.fields)
-        if terms is None:
-            saw_uninspectable = True
-        else:
-            shapes.append(terms)
-    for names in meta.unique_together or ():
-        terms = _plain_field_terms(meta, names)
-        if terms is None:
-            saw_uninspectable = True
-        else:
-            shapes.append(terms)
+        shapes.append(None)
+    # A non-default opclass (``varchar_pattern_ops`` etc.) is chosen for a lookup
+    # semantics that need not provide the window's ordinary ordering, exactly as
+    # ``_index_leading_terms`` rejects an ``Index`` opclass - so route it through
+    # the SAME capability gate rather than letting the constraint claim an
+    # ordinary ascending B-tree.
+    shapes.extend(
+        None
+        if getattr(constraint, "opclasses", None)
+        else _plain_field_terms(meta, constraint.fields)
+        for constraint in total_unique
+    )
+    shapes.extend(_plain_field_terms(meta, names) for names in meta.unique_together or ())
     shapes.extend(
         [(field.attname, False)]
         for field in meta.concrete_fields
@@ -672,7 +659,7 @@ def _model_index_shapes(meta: _OptionsAny) -> tuple[list[list[tuple[str, bool]]]
             or getattr(field, "db_index", False)
         )
     )
-    return shapes, saw_uninspectable
+    return shapes
 
 
 def _index_coverage(
@@ -696,11 +683,10 @@ def _index_coverage(
     represented in model metadata" is never conflated with "proved absent" (a
     DBA-created index outside model metadata stays invisible here).
     """
-    shapes, saw_uninspectable = _model_index_shapes(table_model._meta)
-    for index_terms in shapes:
-        if _index_serves_window(index_terms, equality, order_terms):
-            return _INDEX_COVERED
-    return _INDEX_UNKNOWN if saw_uninspectable else _INDEX_ABSENT
+    shapes = _model_index_shapes(table_model._meta)
+    if any(t is not None and _index_serves_window(t, equality, order_terms) for t in shapes):
+        return _INDEX_COVERED
+    return _INDEX_UNKNOWN if None in shapes else _INDEX_ABSENT
 
 
 # One plan shape warns at most once even when its plan is rebuilt on every

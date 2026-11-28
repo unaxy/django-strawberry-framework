@@ -96,7 +96,6 @@ from django_strawberry_framework.utils._queryset_private import (
     chain_queryset,
     super_clone_queryset,
 )
-from django_strawberry_framework.utils.connections import assert_window_fetch_mode_for
 
 from ._context import active_nested_strategy
 from .plans import OptimizationPlan, append_prefetch_unique, apply_window_pagination
@@ -282,16 +281,6 @@ class NestedConnectionRequest:
     # keyset first pages alike). Forward-only by the walker's fallback
     # discipline; ``apply_window_pagination`` enforces that loudly.
     keyset_seek: KeysetSeek | None = None
-
-    def __post_init__(self) -> None:
-        """Enforce the probe/count mutual-exclusion at the strategy seam.
-
-        The request is the boundary EVERY strategy consumes, so validating the
-        fetch mode here (the shared ``assert_window_fetch_mode_for``) guards the
-        windowed and lateral backends alike against an engaged-probe window that
-        also carries the partition count.
-        """
-        assert_window_fetch_mode_for(self)
 
 
 class NestedConnectionStrategy(Protocol):

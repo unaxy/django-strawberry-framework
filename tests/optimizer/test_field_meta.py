@@ -316,22 +316,8 @@ def test_from_django_field_reverse_one_to_one_is_nullable() -> None:
 
 
 def test_target_pk_name_resolves_or_answers_none() -> None:
-    """_target_pk_name returns the model's pk name, or None for a shape without one."""
+    """_target_pk_name returns the model's pk name, or None for no target model."""
     assert _target_pk_name(None) is None
-    # basedpyright: each non-model is the hostile input under test; _target_pk_name types the
-    # parameter as type[Model] | None
-    assert _target_pk_name("string_model") is None  # pyright: ignore[reportArgumentType]
-    assert _target_pk_name(object()) is None  # pyright: ignore[reportArgumentType]
-    assert _target_pk_name(SimpleNamespace(_meta=None)) is None  # pyright: ignore[reportArgumentType]
-    pk_less = SimpleNamespace(_meta=SimpleNamespace(pk=None))
-    nameless_pk = SimpleNamespace(_meta=SimpleNamespace(pk=SimpleNamespace()))
-    non_str_pk = SimpleNamespace(_meta=SimpleNamespace(pk=SimpleNamespace(name=123)))
-    # basedpyright: each malformed pk is the hostile input under test; _target_pk_name types the
-    # parameter as type[Model] | None
-    assert _target_pk_name(pk_less) is None  # pyright: ignore[reportArgumentType]
-    assert _target_pk_name(nameless_pk) is None  # pyright: ignore[reportArgumentType]
-    assert _target_pk_name(non_str_pk) is None  # pyright: ignore[reportArgumentType]
-
     assert _target_pk_name(Category) == "id"
 
 

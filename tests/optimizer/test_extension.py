@@ -104,7 +104,6 @@ from django_strawberry_framework.optimizer._context import (
 )
 from django_strawberry_framework.optimizer.extension import (
     _collect_cache_relevant_var_names,
-    _collect_cache_var_families,
     _collect_schema_reachable_types,
     _hashable_variable_value,
     _resolve_model_from_return_type,
@@ -1632,21 +1631,21 @@ def test_cache_separates_operation_names_in_same_document() -> None:
 def test_directive_var_family_with_skip() -> None:
     """The directive family finds vars in @skip directives."""
     doc = parse("query Q($show: Boolean!) { items @skip(if: $show) { name } }")
-    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
+    names = _collect_cache_relevant_var_names(_operation(doc), {}, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset({"show"})
 
 
 def test_directive_var_family_with_include() -> None:
     """The directive family finds vars in @include directives."""
     doc = parse("query Q($v: Boolean!) { items @include(if: $v) { name } }")
-    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
+    names = _collect_cache_relevant_var_names(_operation(doc), {}, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset({"v"})
 
 
 def test_directive_var_family_ignores_non_directive_vars() -> None:
     """Variables in field arguments (not directives) are not collected."""
     doc = parse("query Q($limit: Int!) { items(limit: $limit) { name } }")
-    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
+    names = _collect_cache_relevant_var_names(_operation(doc), {}, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset()
 
 
@@ -1661,19 +1660,17 @@ def test_walk_cache_relevant_vars_visits_each_fragment_once_across_sibling_sprea
     )
     operation = doc.definitions[0]
     fragments = _fragments_by_name(doc.definitions[1:])
-    directive_names: set[str] = set()
-    pagination_names: set[str] = set()
+    names: set[str] = set()
     visited: set[FragmentVisitKey] = set()
     _walk_cache_relevant_vars(
         operation,
         fragments,
         visited,
         0,
-        directive_names,
-        pagination_names,
+        names,
         _DEFAULT_PAGINATION_WIRE_NAMES,
     )
-    assert directive_names == {"v"}
+    assert names == {"v"}
     # Fragment F was descended exactly once even though it was spread twice: both
     # spread sites sit at the same response-path depth (inside an ``items`` field),
     # so the depth-aware ``(name, depth)`` guard dedupes them to a single entry.
@@ -1683,7 +1680,7 @@ def test_walk_cache_relevant_vars_visits_each_fragment_once_across_sibling_sprea
 def test_directive_var_family_ignores_other_directives() -> None:
     """Only @skip and @include directives split the plan cache."""
     doc = parse("query Q($v: Boolean!) { items @custom(if: $v) { name } }")
-    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
+    names = _collect_cache_relevant_var_names(_operation(doc), {}, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset()
 
 
@@ -1693,14 +1690,14 @@ def test_directive_var_family_nested_fragments() -> None:
         "query Q($a: Boolean!, $b: Boolean!) { "
         "items { name @skip(if: $a) entries @include(if: $b) { value } } }",
     )
-    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
+    names = _collect_cache_relevant_var_names(_operation(doc), {}, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset({"a", "b"})
 
 
 def test_directive_var_family_no_directives() -> None:
     """A query with no directives yields an empty directive family."""
     doc = parse("{ items { name } }")
-    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
+    names = _collect_cache_relevant_var_names(_operation(doc), {}, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset()
 
 
@@ -1824,10 +1821,10 @@ def test_fragment_spread_at_two_depths_collects_nested_pagination_variable(selec
     """
     fragment = "fragment F on Thing { booksConnection(first: $n) { edges { node { title } } } }"
     document = parse(f"query Q($n: Int!) {{ {selection} }} " + fragment)
-    operation = document.definitions[0]
+    operation = _operation(document)
     fragments = _fragments_by_name(document.definitions[1:])
 
-    names = _collect_cache_var_families(operation, fragments, _DEFAULT_PAGINATION_WIRE_NAMES)[1]
+    names = _collect_cache_relevant_var_names(operation, fragments, _DEFAULT_PAGINATION_WIRE_NAMES)
 
     assert names == frozenset({"n"})
 
@@ -1841,14 +1838,14 @@ def test_pagination_var_collection_is_syntactic_superset() -> None:
     cache entries; under-collection would serve wrong data.
     """
     doc = parse("{ parents { someField(first: $n) { value } } }")
-    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[1]
+    names = _collect_cache_relevant_var_names(_operation(doc), {}, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset({"n"})
 
 
 def test_nested_pagination_var_family_excludes_root_field() -> None:
     """Root-field pagination variables are excluded from the collected name set."""
     doc = parse("query Q($n: Int!) { rootConn(first: $n) { edges { node { name } } } }")
-    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[1]
+    names = _collect_cache_relevant_var_names(_operation(doc), {}, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset()
 
 
@@ -1859,7 +1856,7 @@ def test_nested_pagination_var_family_all_arg_names() -> None:
         "parents { conn(first: $f, last: $l, before: $b, after: $a, limit: $lim) "
         "{ edges { node { name } } } } }",
     )
-    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[1]
+    names = _collect_cache_relevant_var_names(_operation(doc), {}, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset(
         {
             "f",
@@ -1877,7 +1874,7 @@ def test_nested_pagination_var_family_ignores_inline_literals() -> None:
     only tracks variable references (mirroring the directive collector).
     """
     doc = parse("{ parents { booksConnection(first: 3) { edges { node { title } } } } }")
-    names = _collect_cache_var_families(doc.definitions[0], {}, _DEFAULT_PAGINATION_WIRE_NAMES)[1]
+    names = _collect_cache_relevant_var_names(_operation(doc), {}, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset()
 
 
@@ -2720,9 +2717,9 @@ def test_optimizer_nested_prefetch_with_custom_get_queryset_marks_uncacheable() 
 def test_directive_var_family_follows_named_fragment_spreads(document: str) -> None:
     """The directive family follows named fragment spreads, the ``...Spread`` itself included."""
     doc = parse(document)
-    operation = doc.definitions[0]
+    operation = _operation(doc)
     fragments = {d.name.value: d for d in doc.definitions if isinstance(d, FragmentDefinitionNode)}
-    names = _collect_cache_var_families(operation, fragments, _DEFAULT_PAGINATION_WIRE_NAMES)[0]
+    names = _collect_cache_relevant_var_names(operation, fragments, _DEFAULT_PAGINATION_WIRE_NAMES)
     assert names == frozenset({"show"})
 
 

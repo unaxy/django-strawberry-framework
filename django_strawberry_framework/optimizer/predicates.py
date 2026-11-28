@@ -255,28 +255,18 @@ def _read_tables(expression: object) -> set[str]:
 def _effective_alias_names(queryset: QuerySet[models.Model]) -> set[str]:
     """Return the effective alias namespace the reserved alias must avoid.
 
-    Django is lax in the dangerous direction - a duplicate ``.alias()`` silently
-    overwrites, and an ``extra(select=)`` name collision compiles ambiguous SQL -
-    so this covers every namespace a reserved alias could clash with:
+    Django refuses an alias that clashes with a model field name or attname
+    (``QuerySet._annotate``) but is lax in the dangerous direction elsewhere - a
+    duplicate ``.alias()`` silently overwrites, and an ``extra(select=)`` name
+    collision compiles ambiguous SQL - so this covers the namespaces Django leaves
+    open:
 
-    - model field names AND attnames (e.g. ``shelf`` and ``shelf_id``);
-    - the literal ``"pk"``;
     - ``query.annotations`` (covers both ``annotate`` and ``alias``);
     - ``query.extra`` names (``extra(select=...)``);
     - ``query.values_select`` (``values()`` / ``only()`` projected names).
     """
     query = queryset.query
-    names: set[str] = set()
-    for field in queryset.model._meta.get_fields():
-        names.add(field.name)
-        attname: str | None = getattr(field, "attname", None)
-        if attname is not None:
-            names.add(attname)
-    names.add("pk")
-    names.update(query.annotations)
-    names.update(query.extra)
-    names.update(query.values_select)
-    return names
+    return {*query.annotations, *query.extra, *query.values_select}
 
 
 def _next_reserved_alias(queryset: QuerySet[models.Model]) -> str:

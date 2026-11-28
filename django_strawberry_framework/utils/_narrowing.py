@@ -49,12 +49,12 @@ narrows like any other consumer value.
 class's own type arguments, for a generic class (``ModelChoiceField[Model]`` through a typed
 alias) where a bare ``isinstance`` leaves them ``Unknown``.
 
-``is_concrete_field``, ``is_queryset``, ``is_options`` and ``is_lookup``
+``is_concrete_field``, ``is_queryset`` and ``is_lookup``
 are ``isinstance`` checks (like ``is_dict``, each name IS the class's own ``__instancecheck__``)
 whose claim is only what the check proves: a model ``Field`` (never a reverse
 ``ForeignObjectRel``), a ``QuerySet`` whose rows are ``object`` (a ``.values()`` queryset
-passes the same check, so no model-row claim is made), a model's ``Options``, a Django
-``Lookup`` whose output is ``object``.
+passes the same check, so no model-row claim is made), a Django ``Lookup`` whose output
+is ``object``.
 ``is_real_mapping`` / ``is_real_collection`` stand with ``is_str``: the
 ``issubclass(type(value), ABC)`` check asked of the real type.
 
@@ -85,14 +85,12 @@ if TYPE_CHECKING:
 
     from django.db.models import Model, QuerySet
     from django.db.models.lookups import Lookup
-    from django.db.models.options import Options
     from typing_extensions import TypeIs
 
     from .typing import ConcreteField
 
     _KeyT = TypeVar("_KeyT")
     _ValueT = TypeVar("_ValueT")
-    _OptionsAny: TypeAlias = Options[Model]
     _LookupAny: TypeAlias = Lookup[object]
 
     def is_dict(_value: object, /) -> TypeIs[dict[object, object]]:
@@ -134,10 +132,6 @@ if TYPE_CHECKING:
         The claim is ``object`` rows: a ``.values()`` queryset passes the same check, so
         a caller reads ``model`` / ``db`` and nothing about the rows.
         """
-        ...
-
-    def is_options(_value: object, /) -> TypeIs[_OptionsAny]:
-        """Return whether the value is a model's ``Options`` (its ``_meta``)."""
         ...
 
     def is_lookup(_value: object, /) -> TypeIs[_LookupAny]:
@@ -259,7 +253,6 @@ else:
 
     from django.db import models
     from django.db.models.lookups import Lookup
-    from django.db.models.options import Options
 
     is_dict = dict.__instancecheck__
     is_list = list.__instancecheck__
@@ -269,7 +262,6 @@ else:
     is_abstract_set = AbstractSet.__instancecheck__
     is_concrete_field = models.Field.__instancecheck__
     is_queryset = models.QuerySet.__instancecheck__
-    is_options = Options.__instancecheck__
     is_lookup = Lookup.__instancecheck__
     dict_items = dict.items
     dict_get = dict.get
@@ -326,7 +318,6 @@ __all__ = (
     "is_list_or_tuple",
     "is_lookup",
     "is_mapping",
-    "is_options",
     "is_queryset",
     "is_real_collection",
     "is_real_instance",

@@ -1092,9 +1092,8 @@ class TestIndexCoverage:
 
     def test_inherited_field_indexes_are_not_child_shapes(self) -> None:
         """A multi-table child's shapes are its own table's; the parent's pk and unique are not."""
-        shapes, saw_uninspectable = nested_planner._model_index_shapes(_meta(_IdxMtiChild))
+        shapes = nested_planner._model_index_shapes(_meta(_IdxMtiChild))
         assert shapes == [[("base_id", False)], [("holder_id", False)]]
-        assert not saw_uninspectable
 
     def test_composite_index_covers(self) -> None:
         """The composite index's leading columns satisfy the full shape."""

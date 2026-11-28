@@ -23,7 +23,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils._narrowing import (
     optional_instance,
     read_attr,
@@ -327,10 +326,7 @@ def _target_pk_name(model: type[models.Model] | None) -> str | None:
     """
     if model is None:
         return None
-    meta: object = introspection.mro_attr(model, "_meta")
-    pk: object = getattr(meta, "pk", None) if meta is not None else None
-    pk_name: object = getattr(pk, "name", None) if pk is not None else None
-    return pk_name if isinstance(pk_name, str) else None
+    return model._meta.pk.name
 
 
 def _non_pk_attnames(fields: tuple[ConcreteField, ...]) -> tuple[str, ...]:

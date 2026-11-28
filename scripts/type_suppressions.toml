@@ -270,7 +270,6 @@
 "tests/optimizer/test_extension.py::test_strictness_non_str_lookalikes_raise_typed_valueerror" = { reportArgumentType = 1 }
 "tests/optimizer/test_field_meta.py::_as_field" = { reportReturnType = 1 }
 "tests/optimizer/test_field_meta.py::test_field_meta_is_frozen" = { reportAttributeAccessIssue = 1 }
-"tests/optimizer/test_field_meta.py::test_target_pk_name_resolves_or_answers_none" = { reportArgumentType = 6 }
 "tests/optimizer/test_hints.py::TestFrozenImmutability.test_cannot_mutate_skip" = { reportAttributeAccessIssue = 1 }
 "tests/optimizer/test_hints.py::TestFrozenImmutability.test_skip_sentinel_cannot_be_mutated" = { reportAttributeAccessIssue = 1 }
 "tests/optimizer/test_hints.py::TestInvalidStatesRejected.test_non_bool_flags_raise" = { reportArgumentType = 1 }
@@ -289,7 +288,6 @@
 "tests/optimizer/test_nested_index_advisory.py::_IdxMtiGrandchild.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/optimizer/test_nested_index_advisory.py::_IdxMtiNote.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/optimizer/test_nested_index_advisory.py::_IdxMtiTag.Meta" = { reportIncompatibleVariableOverride = 1 }
-"tests/optimizer/test_plans.py::TestDeterministicOrder.test_ends_in_unique_column_defensive_for_non_model" = { reportArgumentType = 2 }
 "tests/optimizer/test_walker.py::_as_definitionless_django_type" = { reportReturnType = 1 }
 "tests/optimizer/test_walker.py::test_child_builder_spends_the_passed_definition_not_a_class_reread" = { reportAssignmentType = 1 }
 "tests/optimizer/test_walker.py::test_prefetch_hint_for_path_rejects_prefetch_without_lookup" = { reportArgumentType = 1 }

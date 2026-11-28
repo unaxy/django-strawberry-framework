@@ -10,7 +10,6 @@ and ``first``/``last`` refusals live in
 import dataclasses
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import cast
 
 import pytest
@@ -32,7 +31,6 @@ from django_strawberry_framework.utils.connections import (
     WindowRangePlan,
     assert_relay_pagination_bound,
     assert_window_fetch_mode,
-    assert_window_fetch_mode_for,
     connection_sidecar_inputs_from_kwargs,
     decode_offset_cursor,
     derive_connection_window_bounds,
@@ -60,17 +58,6 @@ _MAX = 100
 
 #: The stock edge class's offset cursor prefix, the one every generated connection uses.
 _PREFIX = relay.Edge.CURSOR_PREFIX
-
-
-@dataclass(frozen=True)
-class _Window:
-    """The raw window arguments ``assert_window_fetch_mode_for`` reads."""
-
-    offset: int
-    limit: int | None
-    reverse: bool
-    with_total_count: bool
-    next_page_probe: bool
 
 
 def test_last_only_window_limit_is_literal_last_not_expected() -> None:
@@ -886,37 +873,6 @@ def test_assert_window_fetch_mode_allows_count_without_probe() -> None:
     plain = window_range_plan(offset=0, limit=3, reverse=False)
     assert plain.next_page_probe is False
     assert_window_fetch_mode(plain, with_total_count=True)
-
-
-def test_assert_window_fetch_mode_for_allows_inert_off_shape_probe_with_count() -> None:
-    """The RAW-flag pair is fine off any probe-eligible shape (the probe is inert).
-
-    ``window_range_plan`` drops ``next_page_probe`` off the probe-eligible shapes
-    (plain first page and bounded forward offset page), so an unbounded offset
-    window (``after`` with no ``first``) passed both flags never overfetches and
-    must not be rejected - the contract keys on the EFFECTIVE probe, not the raw
-    request flags.
-    """
-    assert_window_fetch_mode_for(
-        _Window(
-            offset=2,
-            limit=None,
-            reverse=False,
-            with_total_count=True,
-            next_page_probe=True,
-        ),
-    )
-    # The same params on the bounded offset page DO engage the probe -> reject.
-    with pytest.raises(OptimizerError, match="mutually exclusive"):
-        assert_window_fetch_mode_for(
-            _Window(
-                offset=2,
-                limit=3,
-                reverse=False,
-                with_total_count=True,
-                next_page_probe=True,
-            ),
-        )
 
 
 @dataclasses.dataclass(frozen=True)
