@@ -94,7 +94,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _ = _write(root / PACKAGE / "core.py", "CORE = 2\n")
     _ = _write(root / "examples" / "fakeshop" / "db.sqlite3", "tracked db\n")
     _ = _write(root / "gone.txt", "to delete\n")
-    _ = _write(root / ".gitignore", ".work/\n.python-version\n.venv/\n")
+    _ = _write(root / ".gitignore", ".work/\n.python-version\n.venv/\n__pycache__/\n")
     _ = _write(root / ".python-version", "3.14\n")
     _ = _git_out(root, "init", "-q", "-b", "main")
     _ = _git_out(root, "add", "-A")
