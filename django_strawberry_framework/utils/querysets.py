@@ -1318,11 +1318,12 @@ class VisibleRowExists(Exists):
 def _type_is_genuinely_django(node_type: type[object]) -> bool:
     """Return whether ``node_type`` is a genuine Django class by IDENTITY, not ``__module__``.
 
-    The ``DjangoListField`` offset guard reads an ordering's nodes through it, and
-    ``filters/sets.py::_lookups_for_field`` leaves a lookup class it answers ``False``
-    for out of ``"__all__"``. A ``type(node).__module__.startswith("django.")`` check
-    would not do: ``__module__`` is a plain writable string, so a class declaring
-    ``__module__ = "django.evil"`` passes it. Provenance is therefore proven by OBJECT
+    The ``DjangoListField`` offset guard reads the output field class of a ``Value`` or
+    ``Cast`` ordering node through it, and ``filters/sets.py::_lookups_for_field`` leaves
+    a lookup class it answers ``False`` for out of ``"__all__"``. A
+    ``type(node).__module__.startswith("django.")`` check would not do: ``__module__``
+    is a plain writable string, so a class declaring ``__module__ = "django.evil"``
+    passes it. Provenance is therefore proven by OBJECT
     IDENTITY: the type must be the exact object Django itself exposes at
     ``sys.modules[module].<qualname>``. A subclass, or a ``__module__`` /
     ``__qualname__`` pointing at a genuine name, cannot make
@@ -1513,6 +1514,8 @@ def _routing_hints_equal(cand_hints: object, orig_hints: object) -> bool:
     identity, so semantic equality cannot prove equal routing without running
     the router. Identity is the only comparison that proves it without dispatch.
     """
+    if cand_hints is orig_hints:
+        return True
     if not is_exact_dict(cand_hints) or not is_exact_dict(orig_hints):
         return False
     if cand_hints.keys() != orig_hints.keys():
@@ -1552,9 +1555,12 @@ def _snapshot_routing_intent(queryset: models.QuerySet[models.Model]) -> _Routin
     baseline, and the baseline has to be taken before the public ``apply_*``
     call: the override is handed the very same queryset object, so reading its
     routing afterwards would read whatever the override left there. The hints
-    dictionary is copied, so an in-place ``_hints`` edit on the source cannot
-    rewrite the expectation either; the seal compares a candidate's hints to
-    the copy with ``==``, keeping absent (``None``) apart from empty (``{}``).
+    dictionary is copied when it is an exact ``dict``, so an in-place ``_hints``
+    edit on the source cannot rewrite the expectation either; any other hints
+    object is held as the object itself. The seal accepts a candidate whose
+    hints are that same object, or an exact ``dict`` with the same keys whose
+    every value is the same object (``_routing_hints_equal``), keeping absent
+    (``None``) apart from empty (``{}``).
 
     The effective alias is then RESOLVED here, through the same
     ``ConnectionRouter`` method Django's own ``QuerySet.db`` property would use

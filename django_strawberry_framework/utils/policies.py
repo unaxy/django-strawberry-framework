@@ -6,14 +6,14 @@ learned how one schema-construction policy is configured has learned both -
 so that shape lives here once: an explicit policy instance is used, an absent
 one falls back to the configured setting and then to the fail-closed package
 default, a non-mapping override is rejected, unknown keys are rejected naming the valid vocabulary, and
-a mapping is applied over the dataclass defaults. A mapping override is
-MATERIALIZED ONCE into a plain ``dict`` before
-anything reads it, so validation and construction see the same keys even when
-the mapping is stateful or one-shot; whatever the mapping's own iteration
-raises propagates as the deployment's error. A value or key is classified by
-its real class, never a ``__class__`` read, so one whose ``__class__`` raises or
-lies still reaches the typed rejection, and a ``str`` subclass key is compared
-and joined as its base ``str`` copy. Domain validation stays with the policy
+a mapping is applied over the dataclass defaults. A mapping override is read
+once, through its own ``items()``, into a plain ``dict`` that validation and
+construction both read, so they see the same keys even when the mapping is
+stateful or one-shot; whatever the mapping's own iteration raises propagates as
+the deployment's error. A value or key is classified by its real class, never a
+``__class__`` read, so one whose ``__class__`` raises or lies still reaches the
+typed rejection; a ``str`` subclass key is kept as the mapping holds it and
+compared, sorted and passed to the constructor as itself. Domain validation stays with the policy
 classes themselves (``__post_init__``), so an instance from any path was
 validated on the same terms.
 """

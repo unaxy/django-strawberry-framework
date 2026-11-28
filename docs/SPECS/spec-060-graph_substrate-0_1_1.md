@@ -397,8 +397,9 @@ of the first foundation card.
     relation keyed by columns other than the related pk on the link's carrier / target
     pairs, or for rows lacking a target column on the related row those carriers name,
     which adds no join (its exact type,
-    `utils/querysets.py::VisibleRowExists`, is admitted by the visibility
-    seal by identity); `optimizer/predicates.py::visible_value` reads a
+    `utils/querysets.py::VisibleRowExists`, is admitted by the
+    `DjangoListField` offset guard in `list_field.py::_READABLE_ORDER_LEAVES`);
+    `optimizer/predicates.py::visible_value` reads a
     field path as `NULL` wherever any such test fails
     (`orders/sets.py::OrderSet._resolve_order_expressions`);
     `optimizer/predicates.py::visible_value_path` finds that guarded path

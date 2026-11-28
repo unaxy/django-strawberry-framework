@@ -104,7 +104,7 @@ from django_strawberry_framework.conf import django_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import introspection
-from ._narrowing import read_attr, require_instance
+from ._narrowing import is_str, read_attr, require_instance
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -175,13 +175,18 @@ def session_store_class() -> type[SessionBase]:
     The ONE expression that reads the deployment's session engine for both
     callers named in the module docstring: the one Django's
     ``SessionMiddleware.__init__`` uses (``import_module(SESSION_ENGINE).SessionStore``),
-    so a consumer-authored engine resolves exactly as Django resolves it.
-    ``settings`` is read at CALL time, never captured, so
-    ``override_settings(SESSION_ENGINE=...)`` is honored.
+    so a consumer-authored engine resolves exactly as Django resolves it. An
+    engine whose real class is not ``str`` (a lazy proxy of one included) is
+    refused before any import. ``settings`` is read at CALL time, never
+    captured, so ``override_settings(SESSION_ENGINE=...)`` is honored.
     """
     engine = django_setting("SESSION_ENGINE")
+    if not is_str(engine):
+        raise ConfigurationError(
+            f"SESSION_ENGINE must be a string; got {introspection.describe(engine)}.",
+        )
     try:
-        store = read_attr(import_module(str(engine)), "SessionStore")
+        store = read_attr(import_module(engine), "SessionStore")
     except (
         ImportError,
         AttributeError,

@@ -4115,6 +4115,47 @@ def test_holder_branches_a_malformed_apply_sync_result_names_its_own_defect(
     assert len(branch_sql) == resolver_queries, branch_sql
 
 
+class _InstanceHints(dict[str, models.Model]):
+    """A ``dict`` subclass a project hands ``Manager.db_manager(using, hints=...)``."""
+
+
+@pytest.mark.django_db
+def test_holder_branches_order_by_keeps_a_dict_subclass_hints_object_the_source_carries() -> None:
+    """An ordered source keeps the very hints object ``db_manager(hints=...)`` gave it.
+
+    ``QuerySet._clone`` hands a non-empty hints object on as the same object, so the
+    shipped ``BranchOrder`` returns a queryset whose hints ARE the source's. The
+    post-``OrderSet`` seal holds a hints object that is not an exact ``dict`` by
+    reference, and the same object is the same routing intent, so the request is
+    served in the requested order.
+    """
+    bravo = library_models.Branch.objects.create(name="Bravo", city="Denver")
+    library_models.Branch.objects.create(name="Alpha", city="Austin")
+
+    def _hinted_branches(_root: object, _info: object) -> models.QuerySet[library_models.Branch]:
+        manager = library_models.Branch.objects.db_manager(
+            "default",
+            hints=_InstanceHints(instance=bravo),
+        )
+        return manager.all()
+
+    @strawberry.type
+    class _HintedQuery:
+        branches: list[library_schema.BranchType] = DjangoListField(
+            library_schema.BranchType,
+            resolver=_list_resolver(_hinted_branches),
+        )
+
+    schema = DjangoSchema(query=_HintedQuery, config=strawberry_config())
+    payload = _post_sync(
+        schema,
+        "{ branches(orderBy: [{ city: DESC }]) { name } }",
+        extra_settings=_ERROR_POLICY_PASS_THROUGH,
+    )
+
+    assert payload == {"data": {"branches": [{"name": "Bravo"}, {"name": "Alpha"}]}}, payload
+
+
 class _UpperConverter(NameConverter):
     """Publishes every schema name upper-cased, so no wire name matches its default spelling."""
 

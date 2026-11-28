@@ -321,7 +321,7 @@ def test_signed_cookie_detection_follows_a_subclassed_engine() -> None:
     ``logout_supported`` resolves the engine's ``SessionStore`` and tests
     it with ``issubclass``, so a custom engine whose store subclasses the signed-
     cookie store is recognized (and its WebSocket logout is therefore unsupported).
-    The stub engine module is registered in ``sys.modules`` for ``import_string`` to
+    The stub engine module is registered in ``sys.modules`` for ``import_module`` to
     resolve, then removed so no global state leaks.
     """
     module_name = "tests.auth._stub_signed_cookie_engine"
@@ -348,7 +348,7 @@ def test_a_custom_client_side_engine_outside_the_signed_cookie_hierarchy_reads_a
     from ``SessionBase`` directly is treated as server-side and its WebSocket logout
     reads as supported - the behaviour the README's transport-support section
     documents and warns against relying on. The stub engine module is registered in
-    ``sys.modules`` for ``import_string`` to resolve, then removed so no global
+    ``sys.modules`` for ``import_module`` to resolve, then removed so no global
     state leaks.
     """
     module_name = "tests.auth._stub_client_side_engine"

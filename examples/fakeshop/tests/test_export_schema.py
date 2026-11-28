@@ -1,4 +1,4 @@
-"""Fakeshop project command tests for export_schema against the configured schema."""
+"""Fakeshop project command tests for export_schema and the committed SDL snapshot."""
 
 from io import StringIO
 from pathlib import Path
@@ -142,10 +142,11 @@ def test_export_schema_raises_command_error_when_path_contains_embedded_null() -
 def test_fakeshop_sdl_matches_the_committed_snapshot() -> None:
     """The shipped schema's SDL equals ``examples/fakeshop/schema.graphql``.
 
-    A schema change is a reviewed diff of that file. Regenerate it with
-    ``manage.py export_schema config.schema --path examples/fakeshop/schema.graphql``,
-    then ``scripts/check_trailing_commas.py --fix`` on it. Both sides are re-printed
-    by graphql-core, so the file's layout is the repo's and not the printer's.
+    A schema change is a reviewed diff of that file. Regenerate it from the repo root
+    with ``python examples/fakeshop/manage.py export_schema config.schema --path
+    examples/fakeshop/schema.graphql``, then ``python scripts/check_trailing_commas.py
+    --fix examples/fakeshop/schema.graphql``. Both sides are re-printed by graphql-core,
+    so the file's layout is the repo's and not the printer's.
     """
     snapshot = Path(__file__).resolve().parents[1] / "schema.graphql"
     assert print_ast(parse(print_schema(config_schema.schema))) == print_ast(

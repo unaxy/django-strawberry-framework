@@ -4903,7 +4903,8 @@ async def test_strictness_reaches_every_subscription_event(
     Strawberry's ``executing`` hook wraps only the ``subscribe()`` call, so every
     event resolves after ``on_execute`` has reset the per-execution strictness
     ``ContextVar``; the strictness the extension stashes on the request context is
-    what arms the guard there.
+    what arms the guard there. Every event the subscription yields is consumed and
+    checked on its own, so a guard armed for the first event alone fails.
     """
     await sync_to_async(services.seed_data)(1)
 
@@ -4924,7 +4925,8 @@ async def test_strictness_reaches_every_subscription_event(
             return "hello"
 
     async def _projected_items() -> AsyncGenerator[QuerySet[Item], None]:
-        yield Item.objects.order_by("id").only("name")
+        for _ in range(3):
+            yield Item.objects.order_by("id").only("name")
 
     @strawberry.type
     class Subscription:
@@ -4943,15 +4945,25 @@ async def test_strictness_reaches_every_subscription_event(
         context_value=SimpleNamespace(),
     )
     assert isinstance(stream, AsyncIterator)
-    event = await anext(stream)
-    await stream.aclose()
+    outcomes: list[tuple[list[str], bool]] = []
+    seen = 0
+    async for event in stream:
+        records = caplog.records[seen:]
+        seen = len(caplog.records)
+        outcomes.append(
+            (
+                [error.message for error in event.errors or ()],
+                any("Potential N+1 on category" in r.message for r in records),
+            ),
+        )
 
-    messages = [error.message for error in event.errors or ()]
-    if strictness == "raise":
-        assert messages == ["Unplanned N+1: category"]
-    else:
-        assert "Unplanned N+1: category" not in messages
-        assert any("Potential N+1 on category" in r.message for r in caplog.records)
+    assert len(outcomes) == 3
+    for messages, warned in outcomes:
+        if strictness == "raise":
+            assert messages == ["Unplanned N+1: category"]
+        else:
+            assert "Unplanned N+1: category" not in messages
+            assert warned
 
 
 def test_optimizer_unadapted_non_queryset_passthrough() -> None:
