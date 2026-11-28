@@ -7526,29 +7526,15 @@ def test_a_datetime_stamp_through_a_declared_date_transform_is_no_valid_date(
     }
 
 
-#: UTC offsets PostgreSQL refuses: 16:00 or more either way, and (bound as text, as Django's
+#: UTC offsets PostgreSQL refuses: 16:00 or more, and (bound as text, as Django's
 #: default psycopg cursor binds) a fraction of a second.
 _PLUS_SIXTEEN = datetime.timezone(datetime.timedelta(hours=16))
-
-
-_MINUS_SIXTEEN = datetime.timezone(datetime.timedelta(hours=-16))
 
 
 _HALF_SECOND_OFFSET = datetime.timezone(datetime.timedelta(hours=1, microseconds=500_000))
 
 
 _AT_PLUS_SIXTEEN = datetime.datetime(2021, 6, 16, 1, 30, tzinfo=_PLUS_SIXTEEN)
-
-
-_AT_MINUS_SIXTEEN = datetime.datetime(2021, 6, 14, 17, 30, tzinfo=_MINUS_SIXTEEN)
-
-
-_AT_HALF_SECOND_OFFSET = datetime.datetime(2021, 6, 15, 10, 30, tzinfo=_HALF_SECOND_OFFSET)
-
-
-#: An hour past ``_BINDABLE_DATETIME``: Django's ``In`` drops a member equal to an earlier one,
-#: so an ``in`` list's refused member must name its own instant to reach the database.
-_HOUR_LATER_AT_PLUS_SIXTEEN = datetime.datetime(2021, 6, 16, 2, 30, tzinfo=_PLUS_SIXTEEN)
 
 
 class _RefusingOperations(SQLiteOperations):

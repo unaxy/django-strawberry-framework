@@ -101,7 +101,7 @@ from django_strawberry_framework.utils.inputs import (
     SCALAR,
 )
 from django_strawberry_framework.utils.typing import call_forwarded
-from tests._idioms import ModelSerializerBase, bind_unparented
+from tests._idioms import ModelSerializerBase, bind_unparented, register_products_types
 from tests._postgres_fields import FakeArrayField, patch_array_field
 
 if TYPE_CHECKING:
@@ -162,24 +162,6 @@ def _concrete_field(model: type[models.Model], name: str) -> ConcreteField:
     field = model._meta.get_field(name)
     assert isinstance(field, models.Field)
     return field
-
-
-def _register_products_types() -> None:
-    """Register non-Relay ``DjangoType``s for products ``Item`` / ``Category``."""
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = product_models.Category
-            fields = ("id", "name")
-
-    assert registry.get(product_models.Category) is CategoryType
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = product_models.Item
-            fields = ("id", "name", "category")
-
-    assert registry.get(product_models.Item) is ItemType
 
 
 def _make_relay_target() -> tuple[type[library_models.Genre], type[DjangoType]]:
@@ -289,7 +271,7 @@ def test_multiple_choice_field_maps_to_list_str() -> None:
 
 def test_list_field_relation_child_raises() -> None:
     """A ``ListField`` whose child is a relation raises (only a scalar child is supported)."""
-    _register_products_types()
+    register_products_types()
     field = bind_unparented(
         serializers.ListField(
             child=serializers.PrimaryKeyRelatedField(
@@ -443,7 +425,7 @@ def test_resolve_serializer_field_rejects_nested_over_relation_column() -> None:
 
 def test_primary_key_related_field_is_relation_single() -> None:
     """``PrimaryKeyRelatedField`` -> kind ``relation_single`` (annotation finalized at build site)."""
-    _register_products_types()
+    register_products_types()
     field: _PkRelation[product_models.Category] = bind_unparented(
         serializers.PrimaryKeyRelatedField(queryset=product_models.Category.objects.all()),
         "category",
@@ -455,7 +437,7 @@ def test_primary_key_related_field_is_relation_single() -> None:
 
 def test_many_related_field_is_relation_multi() -> None:
     """``PrimaryKeyRelatedField(many=True)`` (a ``ManyRelatedField``) -> kind ``relation_multi``."""
-    _register_products_types()
+    register_products_types()
     field: _PkRelation[product_models.Category] = bind_unparented(
         serializers.PrimaryKeyRelatedField(
             many=True,
@@ -474,7 +456,7 @@ def test_slug_related_field_raises_non_pk_relation() -> None:
     Only ``PrimaryKeyRelatedField`` decodes to a primary key; a slug-expecting field has
     no pk-based input shape, so it raises rather than silently misdecoding a pk.
     """
-    _register_products_types()
+    register_products_types()
     field: _SlugRelation[product_models.Category] = bind_unparented(
         serializers.SlugRelatedField(
             slug_field="name",
@@ -488,7 +470,7 @@ def test_slug_related_field_raises_non_pk_relation() -> None:
 
 def test_many_related_field_non_pk_child_raises() -> None:
     """A ``ManyRelatedField`` wrapping a non-PK child (``SlugRelatedField(many=True)``) fails loud."""
-    _register_products_types()
+    register_products_types()
     field: _SlugRelation[product_models.Category] = bind_unparented(
         serializers.SlugRelatedField(
             many=True,
@@ -567,7 +549,7 @@ def test_multi_relation_keeps_plain_name() -> None:
 
 def test_renamed_scalar_resolves_backing_column_via_source() -> None:
     """``full_name = CharField(source="name")`` resolves the ``name`` column, keeps the declared name."""
-    _register_products_types()
+    register_products_types()
 
     class RenamedSer(ModelSerializerBase[product_models.Item]):
         full_name = serializers.CharField(source="name")
@@ -591,7 +573,7 @@ def test_renamed_scalar_resolves_backing_column_via_source() -> None:
 
 def test_renamed_relation_resolves_backing_column_and_id_like_name() -> None:
     """``category_pk = PrimaryKeyRelatedField(source="category")`` -> ``categoryPk``, column via source."""
-    _register_products_types()
+    register_products_types()
 
     class RenamedSer(ModelSerializerBase[product_models.Item]):
         category_pk: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
@@ -616,7 +598,7 @@ def test_renamed_relation_resolves_backing_column_and_id_like_name() -> None:
 
 def test_model_backed_relation_cardinality_mismatch_raises() -> None:
     """A DRF ``many=True`` relation cannot masquerade as a scalar FK input."""
-    _register_products_types()
+    register_products_types()
 
     class MismatchedSer(ModelSerializerBase[product_models.Item]):
         category_ids: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
@@ -1028,7 +1010,7 @@ def test_field_whose_kind_disagrees_with_its_column_is_refused(
     scalar primary key by its name or the ``pk`` alias, a file field over a scalar column, and
     any field but a ``FileField`` over a file column.
     """
-    _register_products_types()
+    register_products_types()
     field = bound_fields(_relation_field_serializer(product_models.Item, name, make_field())())[
         name
     ]
@@ -1122,7 +1104,7 @@ def test_undeclared_field_whose_kind_disagrees_with_its_column_is_refused(
     override can build a file field for a scalar column; neither is in ``_declared_fields``,
     yet DRF writes what it validates the field to into the column all the same.
     """
-    _register_products_types()
+    register_products_types()
     field = bound_fields(make_serializer()())[name]
     message = _kind_mismatch_message(name, field_class, source, column, kinds)
 
@@ -1194,7 +1176,7 @@ def test_field_whose_kind_matches_its_column_builds(
     annotation: object,
 ) -> None:
     """A file field over a file column and a scalar over a scalar column both build."""
-    _register_products_types()
+    register_products_types()
     field = bound_fields(_relation_field_serializer(product_models.Item, "probe", make_field())())[
         "probe"
     ]
@@ -1206,7 +1188,7 @@ def test_field_whose_kind_matches_its_column_builds(
 
 def test_pk_relation_over_a_relation_column_passes_the_kind_check() -> None:
     """A ``PrimaryKeyRelatedField`` over a foreign key builds its relation input."""
-    _register_products_types()
+    register_products_types()
     field = bound_fields(
         _relation_field_serializer(product_models.Item, "cat", _pk_relation(source="category"))(),
     )["cat"]
@@ -1222,7 +1204,7 @@ def test_pk_relation_over_a_relation_column_passes_the_kind_check() -> None:
 
 def test_slug_relation_over_a_scalar_column_keeps_the_pk_relation_refusal() -> None:
     """A ``SlugRelatedField`` over a scalar column keeps the conversion's own refusal text."""
-    _register_products_types()
+    register_products_types()
     field = bound_fields(
         _relation_field_serializer(
             product_models.Item,
@@ -1254,7 +1236,7 @@ def test_relation_bound_by_name_keeps_its_graphql_name(
     graphql_name: str,
 ) -> None:
     """The remedy ``source="category"`` builds, and the declared name keeps its GraphQL name."""
-    _register_products_types()
+    register_products_types()
     relation_field: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
         queryset=product_models.Category.objects.all(),
         source="category",
@@ -1495,7 +1477,7 @@ def test_model_backed_slug_related_field_raises() -> None:
     field as a pk-decoding GlobalID / raw-pk input, silently misdecoding a pk into a
     slug-expecting field. It fails loud instead.
     """
-    _register_products_types()
+    register_products_types()
 
     class SlugSer(ModelSerializerBase[product_models.Item]):
         category: _SlugRelation[product_models.Category] = serializers.SlugRelatedField(
@@ -1514,7 +1496,7 @@ def test_model_backed_slug_related_field_raises() -> None:
 
 def test_dotted_source_on_model_column_field_raises() -> None:
     """A dotted ``source`` on a model-column-converting field raises ``ConfigurationError``."""
-    _register_products_types()
+    register_products_types()
 
     class DottedSer(ModelSerializerBase[product_models.Item]):
         nm = serializers.CharField(source="category.name")
@@ -1530,7 +1512,7 @@ def test_dotted_source_on_model_column_field_raises() -> None:
 
 def test_star_source_on_model_column_field_raises() -> None:
     """A ``source="*"`` on a model-column-converting field raises ``ConfigurationError``."""
-    _register_products_types()
+    register_products_types()
     field = bind_unparented(serializers.CharField(source="*"), "whole")
     with pytest.raises(ConfigurationError, match="dotted source"):
         backing_model_field(product_models.Item, field)
@@ -1586,7 +1568,7 @@ def test_normalize_serializer_source_records_explicit_source_else_none() -> None
 
 def test_serializer_only_relation_resolves_target_from_queryset_model() -> None:
     """A plain-``Serializer`` relation resolves its target from ``field.queryset.model``."""
-    _register_products_types()
+    register_products_types()
 
     class PlainSer(serializers.Serializer[object]):
         cat: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
@@ -1621,7 +1603,7 @@ def test_relation_with_no_backing_column_and_no_queryset_raises() -> None:
     A ``read_only=True`` relation carries no queryset; routed through the
     column-less path (no model) it cannot resolve a target and raises.
     """
-    _register_products_types()
+    register_products_types()
 
     class PlainSer(serializers.Serializer[object]):
         rel: _PkRelation[models.Model] = serializers.PrimaryKeyRelatedField(read_only=True)
@@ -2900,7 +2882,7 @@ def test_serializer_only_choice_enum_name_collision_with_diverging_members_raise
 
 def test_consumer_declared_scalar_disagreeing_with_column_raises() -> None:
     """A consumer-declared field whose scalar disagrees with the model column fails loud."""
-    _register_products_types()
+    register_products_types()
 
     class MismatchSer(ModelSerializerBase[product_models.Item]):
         name = serializers.IntegerField()  # column is TextField -> str; declared int -> disagree.
@@ -2940,7 +2922,7 @@ def test_consumer_declared_list_field_over_json_column_names_both_scalars() -> N
 
 def test_consumer_declared_scalar_agreeing_with_column_ok() -> None:
     """A benign rename (``CharField`` over a text column) AGREES and resolves to the model scalar."""
-    _register_products_types()
+    register_products_types()
 
     class AgreeSer(ModelSerializerBase[product_models.Item]):
         display_name = serializers.CharField(source="name")
@@ -2957,7 +2939,7 @@ def test_consumer_declared_scalar_agreeing_with_column_ok() -> None:
 
 def test_unbound_model_backed_field_is_treated_as_auto_generated() -> None:
     """An unbound field has no serializer parent, so it is not treated as consumer-declared."""
-    _register_products_types()
+    register_products_types()
     field = serializers.CharField(source="name")
     field.field_name = "name"
     _attr, annotation, spec = resolve_serializer_field(field, product_models.Item, "X")
@@ -2972,7 +2954,7 @@ def test_declared_model_backed_scalar_without_an_annotation_takes_the_column_typ
     The field is a scalar, so it passes the kind check; with no declared scalar to compare,
     the column's own annotation types the input.
     """
-    _register_products_types()
+    register_products_types()
     register_serializer_field_converter(
         _CustomHexField,
         lambda field: SerializerFieldConversion(annotation=None, required=field.required),
@@ -2988,7 +2970,7 @@ def test_declared_model_backed_scalar_without_an_annotation_takes_the_column_typ
 
 def test_auto_generated_model_field_is_not_conflict_checked() -> None:
     """An AUTO-generated ModelSerializer field routes through the model converter (no conflict check)."""
-    _register_products_types()
+    register_products_types()
 
     class AutoSer(ModelSerializerBase[product_models.Item]):
         class Meta:
@@ -3052,7 +3034,7 @@ def test_declared_choicefield_over_model_column_emits_serializer_enum() -> None:
     plain non-choice model column, the field emits the GENERATED enum from its declared choices,
     never collapsing back to the column's ``String`` scalar.
     """
-    _register_products_types()
+    register_products_types()
 
     class ChoiceOverColumnSer(ModelSerializerBase[product_models.Item]):
         status = serializers.ChoiceField(source="name", choices=[("a", "A"), ("b", "B")])
@@ -3074,7 +3056,7 @@ def test_non_relation_field_over_relation_column_fails_loud() -> None:
 
     The explicit mapping raises ``ConfigurationError``.
     """
-    _register_products_types()
+    register_products_types()
 
     class BadRelSer(ModelSerializerBase[product_models.Item]):
         category = serializers.CharField()
@@ -3090,7 +3072,7 @@ def test_non_relation_field_over_relation_column_fails_loud() -> None:
 
 def test_consumer_declared_scalar_disagreeing_with_choices_column_fails_loud() -> None:
     """A consumer-declared field whose scalar disagrees with a choices column fails loud."""
-    _register_products_types()
+    register_products_types()
 
     class BookStatusSer(ModelSerializerBase[Book]):
         circulation_status = serializers.IntegerField()

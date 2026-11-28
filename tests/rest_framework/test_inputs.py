@@ -104,6 +104,7 @@ from tests._idioms import (
     canonical_order,
     definition_raises,
     module_binding,
+    register_products_types,
     scrambled,
 )
 from tests._relation_fixtures import RpCompositeParent
@@ -224,24 +225,6 @@ def _build_serializer_inputs(
     ]
     (create_cls, create_shape), (partial_cls, partial_shape) = built
     return create_cls, create_shape, partial_cls, partial_shape
-
-
-def _register_products_types() -> None:
-    """Register non-Relay ``DjangoType``s for products ``Item`` / ``Category``."""
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = product_models.Category
-            fields = ("id", "name")
-
-    assert registry.get(product_models.Category) is CategoryType
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = product_models.Item
-            fields = ("id", "name", "category")
-
-    assert registry.get(product_models.Item) is ItemType
 
 
 def _make_relay_target() -> tuple[type[models.Model], type[DjangoType]]:
@@ -379,7 +362,7 @@ def test_build_serializer_inputs_materializes_one_shot_narrowing(
     expected: set[str],
 ) -> None:
     """One-shot public Meta selectors survive class validation and finalization for each write."""
-    _register_products_types()
+    register_products_types()
     serializer_cls = _item_serializer()
     selected_fields = iter(("name",)) if selector == "fields" else None
     selected_exclude = iter(("category",)) if selector == "exclude" else None
@@ -406,7 +389,7 @@ def test_build_serializer_inputs_materializes_one_shot_narrowing(
 
 def test_create_input_required_and_optional_shapes() -> None:
     """``<Serializer>Input``: required fields non-optional, optional fields ``| None`` + UNSET."""
-    _register_products_types()
+    register_products_types()
     cre, cshape, _, _ = _build_serializer_inputs(_item_serializer())
     assert cre.__name__ == "ItemSerInput"
     fields = _field_map(cre)
@@ -436,7 +419,7 @@ def test_create_input_required_and_optional_shapes() -> None:
 )
 def test_partial_input_all_fields_optional(name: str) -> None:
     """``<Serializer>PartialInput``: every field optional + UNSET."""
-    _register_products_types()
+    register_products_types()
     _, _, par, _ = _build_serializer_inputs(_item_serializer())
     assert par.__name__ == "ItemSerPartialInput"
     fields = _field_map(par)
@@ -465,7 +448,7 @@ def test_serializer_only_field_included() -> None:
 
 def test_fk_to_non_relay_products_target_uses_raw_pk_id() -> None:
     """The products ``Item.category`` FK (non-Relay) becomes a raw pk id; reverse map preserved."""
-    _register_products_types()
+    register_products_types()
     cre, cshape, _, _ = _build_serializer_inputs(_item_serializer())
     fields = _field_map(cre)
     assert _inner_type(fields["category_id"]) is int
@@ -589,7 +572,7 @@ def test_read_only_and_hidden_fields_dropped() -> None:
 @pytest.mark.parametrize("selector", ["fields", "exclude"])
 def test_fields_narrowing_omits_dropped_field(selector: str) -> None:
     """Either selection spelling actually drops privacy while keeping the required name and FK."""
-    _register_products_types()
+    register_products_types()
     cre, _, _, _ = _build_serializer_inputs(
         _item_serializer(),
         fields=("name", "category") if selector == "fields" else None,
@@ -840,7 +823,7 @@ def test_descriptor_name_distinguishes_relation_target_model() -> None:
 
 def test_identical_descriptor_dedupes_via_ledger() -> None:
     """Materializing the same class twice under one name is a no-op (identical descriptors dedupe)."""
-    _register_products_types()
+    register_products_types()
     cre, _, _, _ = _build_serializer_inputs(_item_serializer())
     materialize_serializer_input_class("ItemSerInput", cre)
     materialize_serializer_input_class("ItemSerInput", cre)  # idempotent, no raise
@@ -849,7 +832,7 @@ def test_identical_descriptor_dedupes_via_ledger() -> None:
 
 def test_distinct_descriptors_colliding_on_one_name_raise() -> None:
     """Two DISTINCT classes under one name raise ``ConfigurationError`` (the collision raise)."""
-    _register_products_types()
+    register_products_types()
     cre_a, _ = build_serializer_input_class(_item_serializer(), operation_kind="create")
 
     class OtherSer(serializers.Serializer[object]):
@@ -872,7 +855,7 @@ def test_dedupe_serializer_input_shape_is_sole_cache_protocol() -> None:
     the frozen descriptor's identity, so two independently declared but textually
     identical serializers are two distinct descriptors and never share a cache entry.
     """
-    _register_products_types()
+    register_products_types()
     clear_serializer_shape_build_cache()
     serializer_cls = _item_serializer()
     cre_a, shape_a = build_serializer_input_class(serializer_cls, operation_kind="create")
@@ -910,7 +893,7 @@ def test_create_guard_rejects_dropping_required_scalar() -> None:
 
 def test_create_guard_rejects_dropping_required_relation() -> None:
     """A create ``Meta.exclude`` dropping a required relation raises naming it."""
-    _register_products_types()
+    register_products_types()
     with pytest.raises(ConfigurationError, match="category"):
         _build_serializer_inputs(_item_serializer(), exclude=("category",))
 
@@ -1001,7 +984,7 @@ def test_field_with_default_is_optional_no_fabricated_default() -> None:
 
 def test_relation_id_attr_collision_is_fail_loud() -> None:
     """A relation ``category`` (-> ``category_id``) colliding with a literal ``category_id`` raises."""
-    _register_products_types()
+    register_products_types()
 
     class CollidingSer(serializers.Serializer[object]):
         category: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
@@ -1291,7 +1274,7 @@ def test_relation_over_a_scalar_key_builds_on_update_and_is_refused_on_create(
     input builds without it; the create converts it and refuses the kind mismatch, prefixed
     with the field's name by the walk.
     """
-    _register_products_types()
+    register_products_types()
     ref: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
         queryset=product_models.Category.objects.all(),
         **declared,
@@ -1428,7 +1411,7 @@ def test_two_writable_fields_sharing_one_source_raise(
     relation bound to its ``attname`` first (class creation reports the collision instead,
     ``test_sets.py``).
     """
-    _register_products_types()
+    register_products_types()
 
     with pytest.raises(ConfigurationError, match=re.escape(message)):
         _build_serializer_inputs(serializer_factory(), guard_required=False)
@@ -1436,7 +1419,7 @@ def test_two_writable_fields_sharing_one_source_raise(
 
 def test_read_only_field_sharing_source_with_writable_is_accepted() -> None:
     """A ``read_only`` field sharing a ``source`` with a writable one is accepted (read-only dropped)."""
-    _register_products_types()
+    register_products_types()
 
     class MixedSer(ModelSerializerBase[product_models.Item]):
         name = serializers.CharField()
@@ -1453,7 +1436,7 @@ def test_read_only_field_sharing_source_with_writable_is_accepted() -> None:
 
 def test_read_only_relation_bound_to_its_attname_is_accepted() -> None:
     """A ``read_only`` relation over an FK ``attname`` builds: it is dropped before the converter."""
-    _register_products_types()
+    register_products_types()
 
     class AttnameEchoSer(ModelSerializerBase[product_models.Item]):
         cat: _PkRelation[product_models.Category] = serializers.PrimaryKeyRelatedField(
@@ -1484,7 +1467,7 @@ def test_read_only_relation_bound_to_its_attname_is_accepted() -> None:
 
 def test_materialized_input_is_module_global() -> None:
     """A materialized input class is a real global of ``rest_framework.inputs`` (the lazy-ref contract)."""
-    _register_products_types()
+    register_products_types()
     cre, _, _, _ = _build_serializer_inputs(_item_serializer())
     materialize_serializer_input_class("ItemSerInput", cre)
     assert module_binding(sys.modules[SERIALIZER_INPUTS_MODULE_PATH], "ItemSerInput") is cre
@@ -1497,7 +1480,7 @@ def test_materialized_input_is_module_global() -> None:
 
 def test_scalar_reverse_map_is_identity() -> None:
     """A plain scalar field's reverse map is identity (``name`` -> ``name``, kind scalar)."""
-    _register_products_types()
+    register_products_types()
     _, cshape, _, _ = _build_serializer_inputs(_item_serializer())
     name_spec = next(s for s in cshape.field_specs if s.target_name == "name")
     assert name_spec.input_attr == "name"
@@ -1513,7 +1496,7 @@ def test_scalar_reverse_map_is_identity() -> None:
 
 def test_multiple_schema_time_problems_aggregate_into_one_error() -> None:
     """Several bad fields surface in ONE ConfigurationError (not one-fix-rerun-per-field)."""
-    _register_products_types()
+    register_products_types()
 
     class CustomField(serializers.Field[object, object, object, object]):
         @override
@@ -1548,7 +1531,7 @@ def test_multiple_schema_time_problems_aggregate_into_one_error() -> None:
 
 def test_single_schema_time_problem_raises_verbatim() -> None:
     """A SINGLE problem is raised verbatim (no aggregate header), preserving the precise message."""
-    _register_products_types()
+    register_products_types()
 
     class OneBadSer(ModelSerializerBase[product_models.Item]):
         slug_rel: _SlugRelation[product_models.Category] = serializers.SlugRelatedField(
@@ -1630,7 +1613,7 @@ def test_describe_serializer_input_reports_shape() -> None:
 
 def test_materialize_collision_message_enriched_with_shape_description() -> None:
     """A distinct-class materialize collision enriches the error with the registered shape."""
-    _register_products_types()
+    register_products_types()
     cre, shape = build_serializer_input_class(_item_serializer(), operation_kind="create")
     materialize_serializer_input_class(shape.type_name, cre)  # first: ok
 
@@ -1932,7 +1915,7 @@ def test_nested_config_narrows_nested_fields() -> None:
 @pytest.mark.parametrize("operation", ["create", "update"])
 def test_build_serializer_inputs_materializes_one_shot_nested_selectors(operation: str) -> None:
     """A nested public Meta selector survives fingerprinting and the final input build."""
-    _register_products_types()
+    register_products_types()
     child = _nested_child_serializer()
 
     class Parent(ModelSerializerBase[product_models.Category]):
@@ -2511,7 +2494,7 @@ def test_build_serializer_inputs_preserves_optional_fields_one_shot_iterator(
     operation: str,
 ) -> None:
     """A one-shot public optional_fields declaration survives validation and finalization."""
-    _register_products_types()
+    register_products_types()
     serializer_cls = _item_serializer()
     selected_operation = operation
 
@@ -2661,7 +2644,7 @@ def test_set_valued_meta_fields_fail_loud_at_class_creation() -> None:
     was not reproducible and the materialize ledger could not be relied on
     across processes.
     """
-    _register_products_types()
+    register_products_types()
     serializer_cls = _item_serializer()
 
     with pytest.raises(ConfigurationError, match="ordered sequence of field name strings"):
@@ -2676,7 +2659,7 @@ def test_set_valued_meta_fields_fail_loud_at_class_creation() -> None:
 
 def test_set_valued_builder_fields_fail_loud() -> None:
     """The isolated builder entry rejects a set-valued ``fields=`` for the same reason."""
-    _register_products_types()
+    register_products_types()
     serializer_class = _item_serializer()
 
     with pytest.raises(ConfigurationError, match="ordered sequence of field name strings"):

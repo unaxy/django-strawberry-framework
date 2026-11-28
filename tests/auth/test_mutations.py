@@ -121,6 +121,9 @@ from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter
 from django_strawberry_framework.utils.querysets import SyncMisuseError
 from django_strawberry_framework.utils.sessions import connection_actor_state
 from tests._idioms import (
+    InheritingModelPermission,
+    OverridingModelPermission,
+    PingQuery,
     json_at,
     json_list,
     json_loads,
@@ -241,14 +244,7 @@ def _declare_user_type(fields: tuple[str, ...] = ("id", "username", "email")) ->
     )
 
 
-@strawberry.type
-class _Query:
-    @strawberry.field
-    def ping(self) -> int:
-        return 1
-
-
-def _finalize_schema(mutation_type: type, *, query_type: type = _Query) -> strawberry.Schema:
+def _finalize_schema(mutation_type: type, *, query_type: type = PingQuery) -> strawberry.Schema:
     """Finalize and return this suite's probe schema, with response-boundary masking OFF.
 
     Every schema in this file exists to prove that the AUTH pipeline does not
@@ -274,7 +270,7 @@ def _finalize_schema(mutation_type: type, *, query_type: type = _Query) -> straw
 def _login_logout_schema(
     *,
     declare: Callable[[], object] = _declare_user_type,
-    query_type: type = _Query,
+    query_type: type = PingQuery,
     permission_classes: Iterable[type[object]] | None = None,
 ) -> strawberry.Schema:
     """Declare the user type + a login/logout Mutation; return the finalized schema.
@@ -373,25 +369,6 @@ def test_conflicting_permission_classes_second_call_raises() -> None:
         login_mutation(permission_classes=[_AllowAll])
 
 
-class _InheritingModelPermission(DjangoModelPermission):
-    """A ``DjangoModelPermission`` subclass that keeps the base ``has_permission``."""
-
-
-class _OverridingModelPermission(DjangoModelPermission):
-    """A ``DjangoModelPermission`` subclass whose ``has_permission`` reads no model."""
-
-    @override
-    def has_permission(
-        self,
-        info: object,
-        mutation: object,
-        operation: str,
-        data: object,
-        instance: object = None,
-    ) -> bool:
-        return True
-
-
 # The model-less fixed auth factories, each with the site its refusals open with.
 _MODEL_LESS_AUTH_FACTORIES: dict[str, tuple[Callable[..., object], str]] = {
     "login": (login_mutation, r"login_mutation\(\)"),
@@ -405,7 +382,7 @@ _MODEL_LESS_AUTH_FACTORIES: dict[str, tuple[Callable[..., object], str]] = {
     "offending",
     [
         pytest.param(DjangoModelPermission, id="bare"),
-        pytest.param(_InheritingModelPermission, id="inheriting-subclass"),
+        pytest.param(InheritingModelPermission, id="inheriting-subclass"),
     ],
 )
 def test_model_less_auth_field_refuses_an_unoverridden_model_permission(
@@ -438,9 +415,9 @@ def test_model_less_auth_field_admits_a_model_permission_overriding_has_permissi
 ) -> None:
     """A ``DjangoModelPermission`` subclass overriding ``has_permission`` is admitted."""
     factory, _site = _MODEL_LESS_AUTH_FACTORIES[surface]
-    factory(permission_classes=[_OverridingModelPermission])
+    factory(permission_classes=[OverridingModelPermission])
     holder = _declared_holder(surface)
-    assert holder._mutation_meta.permission_classes == (_OverridingModelPermission,)
+    assert holder._mutation_meta.permission_classes == (OverridingModelPermission,)
 
 
 def test_register_admits_model_permission() -> None:

@@ -1399,13 +1399,6 @@ def _innermost_frame(error: BaseException) -> FrameType:
     return trace.tb_frame
 
 
-def _caught_refusal() -> IntegrityError:
-    try:
-        _refuse()
-    except IntegrityError as exc:
-        return exc
-
-
 def _refuse_as_django_does() -> NoReturn:
     """Raise the ``IntegrityError`` Django raises: translated ``from`` the driver's error."""
     msg = "refused"

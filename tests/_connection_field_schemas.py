@@ -38,7 +38,6 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils._queryset_private import (
     set_queryset_hints,
 )
-from tests._catalog_data import categories_from_seed
 from tests._idioms import declare_django_type, json_at, json_list, json_object
 from tests._info import make_info
 
@@ -484,16 +483,6 @@ def _make_cascading_item_node(name: str) -> type[DjangoType]:
             "get_queryset": classmethod(get_queryset),
         },
     )
-
-
-def _seed_public_private_categories() -> list[str]:
-    """Create two public + one private ``Category``; return the ordered public names."""
-    public_a, public_b, _private = categories_from_seed(
-        ("public_a", False),
-        ("public_b", False),
-        ("private_x", True),
-    )
-    return [public_a.name, public_b.name]
 
 
 class _ListManager(models.Manager[Category]):

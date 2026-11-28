@@ -108,6 +108,7 @@ from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._idioms import (
     ClassReadRaises,
     ModelSerializerBase,
+    PingQuery,
     bind_unparented,
     canonical_order,
     definition_raises,
@@ -3011,18 +3012,12 @@ def test_nested_fields_stored_on_snapshot_and_builds() -> None:
     assert set(snapshot.nested_fields) == {"items"}
 
     @_sb.type
-    class Query:
-        @_sb.field
-        def ping(self) -> int:
-            return 1
-
-    @_sb.type
     class Mutation:
         create_category_with_items = DjangoMutationField(CreateCategoryWithItems)
 
     del CategoryT
     finalize_django_types()
-    sdl = str(_sb.Schema(query=Query, mutation=Mutation))
+    sdl = str(_sb.Schema(query=PingQuery, mutation=Mutation))
     # The nested input type is generated (canonical nested name, ItemInline full shape).
     assert "ItemInlineInput" in sdl
 
@@ -3125,19 +3120,13 @@ def test_read_only_nested_serializer_narrowed_away_does_not_break_class_creation
             permission_classes = []
 
     @_sb.type
-    class Query:
-        @_sb.field
-        def ping(self) -> int:
-            return 1
-
-    @_sb.type
     class Mutation:
         create_item_narrowed = DjangoMutationField(CreateItemNarrowed)
 
     del ItemT
     # No RuntimeError at class creation OR at the bind (the fingerprint never read child.fields).
     finalize_django_types()
-    sdl = str(_sb.Schema(query=Query, mutation=Mutation))
+    sdl = str(_sb.Schema(query=PingQuery, mutation=Mutation))
     assert "createItemNarrowed" in sdl
 
 
@@ -3348,19 +3337,13 @@ def test_data_reference_survives_finalization_making_the_target_relay(
     mutation = _relay_item_mutation(shape)
 
     @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
     class Mutation:
         create_via_relay_target = DjangoMutationField(mutation)
 
     if target_declared == "after_root":
         _relay_interfaces_category()
     finalize_django_types()
-    sdl = DjangoSchema(query=Query, mutation=Mutation).as_str()
+    sdl = DjangoSchema(query=PingQuery, mutation=Mutation).as_str()
 
     bound = mutation._input_class
     assert bound is not None
@@ -3401,18 +3384,12 @@ def test_rebuild_resolves_the_current_bind_not_a_parked_input() -> None:
         mutation = _relay_item_mutation("fields")
 
         @strawberry.type
-        class Query:
-            @strawberry.field
-            def ping(self) -> int:
-                return 1
-
-        @strawberry.type
         class Mutation:
             create_via_relay_target = DjangoMutationField(mutation)
 
         finalize_django_types()
         assert ItemT is registry.get(product_models.Item)
-        return DjangoSchema(query=Query, mutation=Mutation).as_str()
+        return DjangoSchema(query=PingQuery, mutation=Mutation).as_str()
 
     assert "categoryId: Int" in build(category_relay=False)
     registry.clear()

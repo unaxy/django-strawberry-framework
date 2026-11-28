@@ -62,6 +62,7 @@ from django_strawberry_framework.write_mixins import (
     require_subclass,
     validate_select_for_update,
 )
+from tests._idioms import InheritingModelPermission, OverridingModelPermission
 
 
 @pytest.fixture(autouse=True)
@@ -486,32 +487,13 @@ def test_validate_permission_classes_messages_open_with_the_site() -> None:
         )
 
 
-class _InheritingModelPermission(DjangoModelPermission):
-    """A ``DjangoModelPermission`` subclass that keeps the base ``has_permission``."""
-
-
-class _OverridingModelPermission(DjangoModelPermission):
-    """A ``DjangoModelPermission`` subclass whose ``has_permission`` reads no model."""
-
-    @override
-    def has_permission(
-        self,
-        info: object,
-        mutation: object,
-        operation: str,
-        data: object,
-        instance: object = None,
-    ) -> bool:
-        return True
-
-
 @pytest.mark.parametrize("model_less", [True, False], ids=["model-less", "model-backed"])
 @pytest.mark.parametrize(
     ("entry", "refused_when_model_less"),
     [
         pytest.param(DjangoModelPermission, True, id="bare"),
-        pytest.param(_InheritingModelPermission, True, id="inheriting-subclass"),
-        pytest.param(_OverridingModelPermission, False, id="overriding-subclass"),
+        pytest.param(InheritingModelPermission, True, id="inheriting-subclass"),
+        pytest.param(OverridingModelPermission, False, id="overriding-subclass"),
     ],
 )
 def test_validate_permission_classes_model_less_refuses_an_unoverridden_model_permission(

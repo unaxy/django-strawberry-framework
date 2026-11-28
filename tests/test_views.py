@@ -2222,11 +2222,6 @@ _DERIVED_BOUNDARY_MIDDLEWARE_PATH = "tests.test_views._DerivedBoundaryMiddleware
 _CSRF_MIDDLEWARE_PATH = "tests.test_views._RejectingCsrfMiddleware"
 _PASSTHROUGH_MIDDLEWARE_PATH = "tests.test_views._passthrough_middleware"
 
-#: Django's own class, for the rows whose witness is the ``request.POST`` read
-#: itself: :class:`_RejectingCsrfMiddleware` refuses before performing one, so it
-#: can prove which class the chain reached but never whether a body was parsed.
-_STOCK_CSRF_MIDDLEWARE_PATH = "django.middleware.csrf.CsrfViewMiddleware"
-
 _ORDERED_CHAIN = [_PASSTHROUGH_MIDDLEWARE_PATH, _BOUNDARY_MIDDLEWARE_PATH, _CSRF_MIDDLEWARE_PATH]
 
 #: The mount cap the over-limit rows are refused by. Small enough that an ordinary

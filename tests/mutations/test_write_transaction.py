@@ -117,6 +117,8 @@ from django_strawberry_framework.utils.write_transaction import (
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._idioms import (
     TEST_ASYNC_RECOURSE,
+    AllowAll,
+    PingQuery,
     definition_raises,
     is_object_dict,
     is_object_list,
@@ -165,27 +167,6 @@ def _category_name() -> str:
     return f"WTCat-{next(_category_name_counter)}"
 
 
-class _AllowAll:
-    """Authorize every write (these tests pin the transaction, not the auth seam)."""
-
-    def has_permission(
-        self,
-        _info: object,
-        _mutation: type[object],
-        _operation: str,
-        _data: object,
-        _instance: object = None,
-    ) -> bool:
-        return True
-
-
-@strawberry.type
-class _Query:
-    @strawberry.field
-    def ping(self) -> int:
-        return 1
-
-
 def _declare_item_types() -> tuple[type, type]:
     """Declare the Item/Category primaries."""
 
@@ -212,7 +193,7 @@ def _declare_update_mutation() -> type[DjangoMutation]:
         class Meta:
             model = product_models.Item
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     return UpdateItem
 
@@ -238,7 +219,7 @@ def _mutation_schema(*mutations: type[DjangoMutation]) -> strawberry.Schema:
     finalize_django_types()
     optimizer = DjangoOptimizerExtension()
     return DjangoSchema(
-        query=_Query,
+        query=PingQuery,
         mutation=Mutation,
         extensions=[lambda: optimizer],
         error_policy={"enabled": False},
@@ -495,7 +476,7 @@ def _category_create_schema(*, touched: Callable[..., object] | None = None) -> 
     meta_attrs = {
         "model": product_models.Category,
         "operation": "create",
-        "permission_classes": [_AllowAll],
+        "permission_classes": [AllowAll],
     }
     CreateCategory = type(
         "CreateCategory",
@@ -1496,7 +1477,7 @@ def test_model_flavor_meta_select_for_update_defaults_true_and_rejects_non_bool(
         class Meta:
             model = product_models.Item
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     assert DefaultLocked._mutation_meta.select_for_update is True
 
@@ -1507,7 +1488,7 @@ def test_model_flavor_meta_select_for_update_defaults_true_and_rejects_non_bool(
             class Meta:
                 model = product_models.Item
                 operation = "update"
-                permission_classes = [_AllowAll]
+                permission_classes = [AllowAll]
                 select_for_update = "yes"
 
 
@@ -1521,7 +1502,7 @@ def test_modelform_flavor_meta_select_for_update_defaults_true() -> None:
         class Meta:
             form_class = ItemForm
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     assert FormUpdate._mutation_meta.select_for_update is True
 
@@ -1542,7 +1523,7 @@ def test_has_perm_returning_non_bool_is_a_configuration_error() -> None:
         class Meta:
             model = product_models.Item
             operation = "update"
-            permission_classes = [_AllowAll]
+            permission_classes = [AllowAll]
 
     request = SimpleNamespace(user=_WeirdUser())
     info = make_info(context=SimpleNamespace(request=request))

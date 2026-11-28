@@ -1984,18 +1984,6 @@ def test_djangolistfield_accepts_and_captures_the_registrys_exact_object() -> No
     assert definition is CanonicalTargetType.__django_strawberry_definition__
 
 
-class _ArmedHashMeta(type):
-    """A metaclass whose ``__hash__`` raises only while armed, so the class can be created."""
-
-    armed = False
-
-    @override
-    def __hash__(cls) -> int:
-        if _ArmedHashMeta.armed:
-            raise RuntimeError("hostile __hash__")
-        return type.__hash__(cls)
-
-
 # ---------------------------------------------------------------------------
 # Executor mode versus the ambient event loop
 

@@ -77,15 +77,6 @@ hash-keyed stores keep finding the class by identity. ``against`` narrows the ho
 to comparisons with that one class (any other comparison is ``NotImplemented`` and unrecorded),
 for a row whose class also passes through a standard-library equality test it cannot avoid.
 
-``HostileNameMeta`` is a metaclass whose classes answer every ``__name__`` read with
-``RuntimeError``, the hostile shape a rejection that names the received value's type must
-survive: a guard that reads ``type(value).__name__`` raises the consumer's error instead of its
-own, while one that asks the interpreter (``introspection.kind``) still names the class. A row declares
-its own ``class Evil(metaclass=HostileNameMeta)`` and instantiates it. The hostility lives in
-``__getattribute__`` rather than a ``__name__`` property, so the metaclass keeps typeshed's
-contract for ``type.__name__`` (a writable ``str``): a read may raise and a write still stores,
-where a read-only property would break that contract and the checker would rightly reject it.
-
 ``str_subclass_name`` spells a field name through one of the ``str`` subclass kinds a
 consumer can hand a declaration (``STR_SUBCLASS_KINDS``): an honest subclass, one whose
 ``__eq__`` / ``__ne__`` answer "never equal", one whose comparisons raise, a ``(str, Enum)``
@@ -176,12 +167,12 @@ import strawberry
 from apps.products import models as product_models
 from django.db.models import Model, QuerySet
 from django.test.testcases import SimpleTestCase
-from django_filters.filters import Filter
 from rest_framework import serializers
 from strawberry import relay
 from typing_extensions import override
 
-from django_strawberry_framework import DjangoType
+from django_strawberry_framework import DjangoModelPermission, DjangoType
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._narrowing import (
     instance_state,
     is_awaitable,
@@ -275,16 +266,6 @@ def comparing_metaclass(
     assert isinstance(meta, type)
     assert issubclass(meta, base)
     return meta
-
-
-class HostileNameMeta(type):
-    """A metaclass whose classes answer every ``__name__`` read with ``RuntimeError``."""
-
-    @override
-    def __getattribute__(cls, name: str, /) -> object:
-        if name == "__name__":
-            raise RuntimeError("hostile __name__ read")
-        return object_result(super().__getattribute__, name)
 
 
 #: The ``SyncMisuseError`` recourse a test hands the visibility helpers, which require one
@@ -790,6 +771,25 @@ class AllowAll:
         return True
 
 
+class InheritingModelPermission(DjangoModelPermission):
+    """A ``DjangoModelPermission`` subclass that keeps the base ``has_permission``."""
+
+
+class OverridingModelPermission(DjangoModelPermission):
+    """A ``DjangoModelPermission`` subclass whose ``has_permission`` reads no model."""
+
+    @override
+    def has_permission(
+        self,
+        info: object,
+        mutation: object,
+        operation: str,
+        data: object,
+        instance: object = None,
+    ) -> bool:
+        return True
+
+
 @strawberry.type(name="Query")
 class PingQuery:
     """A root ``Query`` with one ``ping`` field, for schemas that exercise only mutations."""
@@ -799,15 +799,22 @@ class PingQuery:
         return 1
 
 
-def respelled(filter_instance: Filter, **values: object) -> Filter:
-    """``filter_instance`` with each of ``values`` set on it as a consumer may set a lazy value.
+def register_products_types() -> None:
+    """Register non-Relay ``DjangoType``s for products ``Item`` / ``Category``."""
 
-    The stubs type ``field_name`` and ``lookup_expr`` as ``str``; a project hands Django's lazy
-    text (``gettext_lazy``, ``SimpleLazyObject``) where a ``str`` is read.
-    """
-    for name, value in values.items():
-        setattr(filter_instance, name, value)
-    return filter_instance
+    class CategoryType(DjangoType):
+        class Meta:
+            model = product_models.Category
+            fields = ("id", "name")
+
+    assert registry.get(product_models.Category) is CategoryType
+
+    class ItemType(DjangoType):
+        class Meta:
+            model = product_models.Item
+            fields = ("id", "name", "category")
+
+    assert registry.get(product_models.Item) is ItemType
 
 
 def declare_products_primaries() -> tuple[type[DjangoType], type[DjangoType]]:

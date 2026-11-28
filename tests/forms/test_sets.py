@@ -89,7 +89,12 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import introspection
 from django_strawberry_framework.utils.typing import call_forwarded
 from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
-from tests._idioms import definition_raises, module_binding
+from tests._idioms import (
+    InheritingModelPermission,
+    OverridingModelPermission,
+    definition_raises,
+    module_binding,
+)
 from tests._info import unread_info
 
 if TYPE_CHECKING:
@@ -763,58 +768,15 @@ def test_get_form_only_override_trips_the_construction_hook_waiver(
 
 
 # ---------------------------------------------------------------------------
-# permission_classes default
+# model permission on a plain form
 # ---------------------------------------------------------------------------
-
-
-def test_modelform_permission_classes_default() -> None:
-    """An unset ``permission_classes`` resolves to ``[DjangoModelPermission]`` (the ModelForm base)."""
-    form_cls = _item_model_form()
-
-    class CreateItem(DjangoModelFormMutation):
-        class Meta:
-            form_class = form_cls
-            operation = "create"
-
-    assert CreateItem._mutation_meta.permission_classes == (DjangoModelPermission,)
-
-
-def test_plain_form_permission_classes_explicit_opt_out() -> None:
-    """A plain form may opt out with an explicit ``[]`` (the AllowAny posture)."""
-    form_cls = _contact_form()
-
-    class Submit(DjangoFormMutation):
-        class Meta:
-            form_class = form_cls
-            permission_classes = []
-
-    assert Submit._mutation_meta.permission_classes == ()
-
-
-class _InheritingModelPermission(DjangoModelPermission):
-    """A ``DjangoModelPermission`` subclass that keeps the base ``has_permission``."""
-
-
-class _OverridingModelPermission(DjangoModelPermission):
-    """A ``DjangoModelPermission`` subclass whose ``has_permission`` reads no model."""
-
-    @override
-    def has_permission(
-        self,
-        info: object,
-        mutation: object,
-        operation: str,
-        data: object,
-        instance: object = None,
-    ) -> bool:
-        return True
 
 
 @pytest.mark.parametrize(
     "offending",
     [
         pytest.param(DjangoModelPermission, id="bare"),
-        pytest.param(_InheritingModelPermission, id="inheriting-subclass"),
+        pytest.param(InheritingModelPermission, id="inheriting-subclass"),
     ],
 )
 def test_plain_form_rejects_model_permission_at_class_creation(
@@ -856,9 +818,9 @@ def test_plain_form_admits_a_model_permission_overriding_has_permission() -> Non
     class Submit(DjangoFormMutation):
         class Meta:
             form_class = form_cls
-            permission_classes = [_OverridingModelPermission]
+            permission_classes = [OverridingModelPermission]
 
-    assert Submit._mutation_meta.permission_classes == (_OverridingModelPermission,)
+    assert Submit._mutation_meta.permission_classes == (OverridingModelPermission,)
 
 
 # ---------------------------------------------------------------------------

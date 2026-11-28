@@ -264,10 +264,6 @@ _CREATE = (
     "mutation($d: ItemInput!){ createItem(data:$d){ "
     "node{ id name category{ name } } errors{ field messages } } }"
 )
-_DELETE = (
-    "mutation($id: ID!){ deleteItem(id:$id){ "
-    "node{ id name category{ name } } errors{ field messages } } }"
-)
 
 
 # ---------------------------------------------------------------------------
