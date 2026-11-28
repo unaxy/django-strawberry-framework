@@ -949,8 +949,8 @@ selection (`FilterSet._upstream_filter_for_field` and the ownership oracle
 filter operand walk
 (`django_strawberry_framework/filters/base.py::_lookup_operand`, which answers
 an output that is the `output_field` instance as the computed column), the
-text-pattern test of `FilterSet.filter_for_lookup`
-(`django_strawberry_framework/filters/sets.py::_is_text_pattern_on_non_text`)
+text-pattern test of
+`django_strawberry_framework/filters/sets.py::FilterSet.filter_for_lookup`
 and the target-less GlobalID filter's lookup test
 (`django_strawberry_framework/filters/base.py::_unresolved_target_node_id`).
 A registration on the `GeneratedField` class or instance reaches neither

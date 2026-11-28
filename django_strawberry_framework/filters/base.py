@@ -40,7 +40,6 @@ from itertools import takewhile
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
 from django.core.exceptions import FieldError, ValidationError
-from django.core.files.uploadedfile import UploadedFile
 from django.db import connections, models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.json import HasKeys as JSONHasKeys
@@ -200,7 +199,6 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from django.forms.boundfield import BoundField
-    from django.utils.datastructures import MultiValueDict
     from django_stubs_ext import StrPromise
     from strawberry.schema import Schema
 
@@ -233,11 +231,6 @@ if TYPE_CHECKING:
     _FilterSetTarget: TypeAlias = (
         str | type[FilterSet] | Callable[[], type[FilterSet] | None] | None
     )
-    #: Any ``UploadedFile``, binary or text.
-    _UploadedFileAny: TypeAlias = UploadedFile[bytes] | UploadedFile[str]
-else:
-    # ``UploadedFile`` has no ``__class_getitem__`` at runtime: the hint stays the class.
-    _UploadedFileAny = UploadedFile
 
 _M = TypeVar("_M", bound=models.Model)
 
@@ -666,8 +659,8 @@ def _bound_model_field(filter_instance: Filter, query: Query | None = None) -> M
     return None if resolved is None else resolved.field
 
 
-def _reads_integer_transform(filter_instance: Filter, query: Query) -> bool:
-    """Whether a per-request filter compares an integer transform output.
+def _integer_transform_output(filter_instance: Filter, query: Query) -> ModelField | None:
+    """Return the integer transform output a per-request filter compares, else ``None``.
 
     A generated ``<column>__year__in``, an ``ArrayField``'s ``len``, or a transform a
     project registers on a column (``Field.register_lookup``) with an ``IntegerField``
@@ -694,15 +687,15 @@ def _reads_integer_transform(filter_instance: Filter, query: Query) -> bool:
     )
     operand = _query_lookup_operand(query, field_name, lookup_expr)
     if operand is None:
-        return False
+        return None
     value_field = operand.field
     if not isinstance(value_field, models.IntegerField):
-        return False
+        return None
     if any(issubclass(node_type, Transform) for node_type in operand.node_types):
-        return True
+        return value_field
     # The split ``_query_lookup_operand`` just accepted: the same path over the same query.
     _names, start, _leftover = split_lookup(query, LOOKUP_SEP.join((field_name, lookup_expr)))
-    return isinstance(start, Transform)
+    return value_field if isinstance(start, Transform) else None
 
 
 class _LookupOperand(NamedTuple):
@@ -1970,7 +1963,7 @@ def _integer_in_column(filter_instance: Filter, query: Query) -> ModelField | No
     """
     if _bound_lookup_expr(filter_instance) != "in":
         return None
-    if _reads_integer_transform(filter_instance, query):
+    if _integer_transform_output(filter_instance, query) is not None:
         return None
     model_field = _bound_model_field(filter_instance)
     if model_field is None:
@@ -2217,7 +2210,7 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
     A lookup through an integer transform (a generated `<column>__year__in`, `iso_year`,
     `month`, an `ArrayField`'s `len`, a transform a project registers with an
     `IntegerField` output) compares the transform's output, a value no column stores
-    (`_reads_integer_transform`), so its members are not coerced through the column: each
+    (`_integer_transform_output`), so its members are not coerced through the column: each
     binds as Django's lookup prepares it for that output, and the filter form's bind ask
     (`filters/sets.py::_unbindable_value_errors`) refuses an integer transform's member
     past the integer range the queryset's database stores for it, as it does for a
@@ -2234,17 +2227,12 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
         if value is None:
             return super().filter(qs, value)
         value = list(_list_value(value, "Invalid filter value: expected a list of integers."))
-        if _reads_integer_transform(self, qs.query):
+        output = _integer_transform_output(self, qs.query)
+        if output is not None:
             # A transform's output names no stored column: each member binds as the
             # lookup prepares it, so one past the integer range the database stores for
             # the output is refused by the filter form's bind ask, never dropped. A
             # fractional member equals no integer output and is dropped.
-            operand = _query_lookup_operand(
-                qs.query,
-                _bound_field_name(self),
-                _bound_lookup_expr(self),
-            )
-            output = None if operand is None else operand.field
             kept = [member for member in value if not truncates_to_integer(output, member)]
             if not kept:
                 return _match_none_queryset(self, qs)
@@ -2630,18 +2618,17 @@ def _resolve_globalid_target(
 
 
 def _accepted_globalid_type_names(
-    definition: DjangoTypeDefinition | None,
+    definition: DjangoTypeDefinition,
     schema: Schema | None = None,
-) -> set[str] | None:
+) -> set[str]:
     """Return the accepted ``type_name`` payload(s) for a resolved definition's strategy.
 
     Strategy-aware target validation keyed on the resolved owner/target
     definition's recorded ``effective_globalid_strategy`` (spec-031 Decision 13) -
     the same field decode reads, so encode, decode, and filter validation all
     agree on one contract. The set is what a matching id of the target carries
-    (the ``expected`` side of the mismatch error, and ``None`` when no guard
-    applies); whether a received slot names the target is ``_slot_names_target``,
-    which resolves a type-name slot the way decode does:
+    (the ``expected`` side of the mismatch error); whether a received slot names the
+    target is ``_slot_names_target``, which resolves a type-name slot the way decode does:
 
     - ``model`` -> the model label only (``definition.model._meta.label_lower``).
     - ``type`` -> the type name only: the name the executing ``schema`` published
@@ -2652,19 +2639,13 @@ def _accepted_globalid_type_names(
       the target (no id of this schema can name it, so only its own spelling
       remains).
     - ``type+model`` -> either the model label or that type name.
-    - ``definition is None`` (no owner, an unbound set's own key, or no target
-      type) -> ``None``
-      (node-id-only fallback; the ``type_name`` guard is skipped).
 
     ``_decode_and_validate_global_id`` calls this only after it has fail-closed
     on the encode-only (``callable`` / ``custom``) and lifecycle-defect
-    (``effective_globalid_strategy is None`` on a known definition) cases, so a
-    non-``None`` definition passed here always carries a framework strategy and
-    always yields a non-empty accepted set. The ``accepted or None`` collapse is
-    kept as a defensive belt only.
+    (``effective_globalid_strategy is None`` on a known definition) cases, so the
+    definition passed here always carries a framework strategy and always yields a
+    non-empty accepted set.
     """
-    if definition is None:
-        return None
     strategy = definition.effective_globalid_strategy
     accepted: set[str] = set()
     if strategy in MODEL_LABEL_STRATEGIES:
@@ -2672,7 +2653,7 @@ def _accepted_globalid_type_names(
     if strategy in TYPE_NAME_STRATEGIES:
         published = None if schema is None else published_node_type_name(schema, definition.origin)
         accepted.add(definition.graphql_type_name if published is None else published)
-    return accepted or None
+    return accepted
 
 
 def _slot_names_target(
@@ -2878,12 +2859,8 @@ def _decode_and_validate_global_id(
             extensions=coded_error_extensions(GLOBALID_UNVALIDATABLE_ERROR_CODE),
         )
     schema = _filter_schema(filter_instance)
-    accepted = _accepted_globalid_type_names(definition, schema)
-    if (
-        accepted is not None
-        and definition is not None
-        and not _slot_names_target(definition, decoded.type_name, schema)
-    ):
+    if definition is not None and not _slot_names_target(definition, decoded.type_name, schema):
+        accepted = _accepted_globalid_type_names(definition, schema)
         expected = " or ".join(sorted(accepted))
         # An accepted spelling refused anyway names a different type in this schema.
         shadowed = (
@@ -3097,7 +3074,7 @@ class _AbsentGlobalIDMultipleChoiceWidget(SelectMultiple):
     def value_from_datadict(
         self,
         data: Mapping[str, object],
-        files: MultiValueDict[str, _UploadedFileAny],
+        files: Mapping[str, object],
         name: str,
     ) -> object:
         """Return ``None`` for an absent key; defer to ``SelectMultiple`` otherwise."""
@@ -3117,9 +3094,9 @@ class _GlobalIDMultipleChoiceField(MultipleChoiceField):
     filter's own decode/validate could run. GlobalID list elements are
     decoded and type-checked in `GlobalIDMultipleChoiceFilter.filter`
     (per spec-027 #"validates every element of the list independently"), not against a
-    fixed set, so this field accepts any submitted value and defers
-    validation to the filter. Same contract as
-    ``graphene_django/forms/forms.py::GlobalIDMultipleChoiceField`` minus its
+    fixed set, so this field's `validate` runs only `Field.validate` (the `required`
+    check), never the per-member `valid_value`, and defers validation to the filter.
+    Same contract as ``graphene_django/forms/forms.py::GlobalIDMultipleChoiceField`` minus its
     per-value GlobalID check.
 
     The custom widget and field overrides preserve ``None`` for an omitted key:
@@ -3130,11 +3107,6 @@ class _GlobalIDMultipleChoiceField(MultipleChoiceField):
     """
 
     widget = _AbsentGlobalIDMultipleChoiceWidget
-
-    @override
-    def valid_value(self, value: object) -> bool:
-        """Accept any value; GlobalID validation happens in the filter."""
-        return True
 
     # basedpyright: upstream's list-only return cannot express the preserved omission; it rejects
     # the ``None`` arm against the ``list[str]`` return
@@ -3147,11 +3119,8 @@ class _GlobalIDMultipleChoiceField(MultipleChoiceField):
 
     @override
     def validate(self, value: object) -> None:
-        """Validate omitted values through ``Field`` and lists through the parent."""
-        if value is None:
-            Field.validate(self, value)
-            return
-        super().validate(value)
+        """Validate only ``required``; GlobalID validation happens in the filter."""
+        Field.validate(self, value)
 
 
 class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
@@ -4232,7 +4201,7 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
         flat: bool = True,
         **kwargs: object,
     ) -> None:
-        """Bind the target `filterset` and record explicit-queryset intent.
+        """Bind the target `filterset`.
 
         ``flat`` is keyword-only, so a positional extra stays django-filter's;
         anything but an exact ``bool`` raises ``ConfigurationError``, the
@@ -4257,7 +4226,6 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
             raise ConfigurationError(
                 f"RelatedFilter flat must be a bool; got {introspection.kind(flat)} {flat!r}.",
             )
-        self._has_explicit_queryset: bool = kwargs.get("queryset") is not None
         # basedpyright: the kwargs are forwarded verbatim and ``ModelChoiceFilter.__init__`` owns
         # their validation; it rejects ``object`` kwargs for the ``str | None`` params
         super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]

@@ -2487,7 +2487,7 @@ def test_related_filter_get_queryset_auto_derives_from_target_model() -> None:
 
 
 def test_related_filter_get_queryset_honors_explicit_queryset() -> None:
-    """The explicit-queryset ledger preserves the consumer's exact queryset object.
+    """An explicit queryset is answered as the consumer's exact queryset object.
 
     HTTP serializes rows and cannot expose this identity. Native explicit-queryset
     behavior lives in
@@ -2495,14 +2495,7 @@ def test_related_filter_get_queryset_honors_explicit_queryset() -> None:
     """
     explicit_qs = models.Shelf.objects.filter(code="topic-A")
     f = RelatedFilter(ShelfFilter, queryset=explicit_qs)
-    # Constructor records the explicit-queryset ledger entry.
-    assert f._has_explicit_queryset is True
     assert f.get_queryset(request=None) is explicit_qs
-
-
-def test_related_filter_explicit_queryset_ledger_defaults_false_when_absent() -> None:
-    f = RelatedFilter("ShelfFilter")
-    assert f._has_explicit_queryset is False
 
 
 def test_related_filter_rejects_lookups_kwarg() -> None:
@@ -2800,11 +2793,6 @@ def test_globalid_target_relation_branch_unresolved_target() -> None:
     assert _globalid_target(f) is None
 
 
-def test_accepted_globalid_type_names_none_definition() -> None:
-    """No definition -> `None` (node-id-only fallback)."""
-    assert _accepted_globalid_type_names(None) is None
-
-
 def test_accepted_globalid_type_names_per_strategy() -> None:
     """Each framework strategy maps to its accepted `type_name` payload set."""
     model_owner = _owner("model")
@@ -2842,18 +2830,6 @@ def test_filter_schema_is_none_outside_the_apply_pipeline() -> None:
     f = _global_id_filter_with_owner("id", _owner("type"))
     assert _filter_schema(f) is None
     assert _filter_schema(GlobalIDFilter(field_name="id")) is None
-
-
-@pytest.mark.parametrize("strategy", ["callable", "custom", None])
-def test_accepted_globalid_type_names_non_framework_strategies(strategy: str | None) -> None:
-    """`callable` / `custom` / absent strategy -> `None` accepted set (defensive belt).
-
-    Runtime decoding rejects these states before consulting this metadata
-    helper. The refusal verdicts have separate live and runtime-backstop coverage;
-    this test observes only the metadata helper's Python return value.
-    """
-    owner = _owner(strategy)
-    assert _accepted_globalid_type_names(owner) is None
 
 
 def test_globalid_decoder_returns_the_targets_integer_python_key() -> None:

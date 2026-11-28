@@ -191,7 +191,6 @@ from django_strawberry_framework.utils.querysets import (
     run_in_one_sync_boundary,
 )
 from django_strawberry_framework.utils.relations import (
-    ClassifiedPath,
     classify_path,
     generated_column,
     is_many_side_relation_kind,
@@ -243,11 +242,11 @@ from .base import (
     _filterset_lookup_operand,
     _filterset_walked_lookup,
     _integer_compared_column,
+    _integer_transform_output,
     _KeyLeaf,
     _own_filter,
     _query_aliases,
     _query_lookup_operand,
-    _reads_integer_transform,
     _RelationView,
     _runs_shipped_filter,
     _through_filter_predicate,
@@ -289,10 +288,6 @@ from .inputs import (
     refuse_joinless_relation,
     refuse_unannotated_joinless_relation,
 )
-
-# Python-attr tokens of the logical operator keys (``and_`` / ``or_`` / ``not_``),
-# excluded from the active-permission field walk (they recurse separately).
-_LOGIC_PYTHON_ATTRS: frozenset[str] = frozenset(op.python_attr for op in LOGIC_OPERATORS)
 
 #: The ``SyncMisuseError`` recourse a filter's sync visibility read appends when a
 #: target type's ``get_queryset`` is ``async def``: a declared hop a nested branch or
@@ -560,25 +555,6 @@ def _is_text_column(field_class: type[ModelField]) -> bool:
     entry = _entry_by_mro({**filterset.BaseFilterSet.FILTER_DEFAULTS}, field_class)
     filter_class = entry.get("filter_class") if entry is not None else None
     return isinstance(filter_class, type) and issubclass(filter_class, CharFilter)
-
-
-def _is_text_pattern_on_non_text(field: ModelField, lookup_type: str) -> bool:
-    """Return whether ``lookup_type`` is a text-pattern lookup ``field`` registers, on a non-text field.
-
-    ``field`` is the non-relation field the lookup applies to (a transform's output
-    field when the expression names one) and ``lookup_type`` one terminal lookup
-    name, the pair django-filter hands ``filter_for_lookup``. A ``GeneratedField`` is
-    classified as the column it computes (``utils/relations.py::generated_column``)
-    and its lookup is read off the registry Django's query resolves it on, its
-    ``output_field`` instance (``utils/relations.py::lookup_registry``), never the copy of
-    the output class's lookups the generated field files on itself: a registration on that
-    instance, or on the output class after the model was built, that replaces a text
-    pattern (Django's ``Exact`` as ``contains``) takes the column's own value.
-    """
-    column = generated_column(field) or field
-    return not _is_text_column(type(column)) and _is_text_pattern_lookup(
-        lookup_registry(field).get_lookup(lookup_type),
-    )
 
 
 # Constructor kwargs that only make sense on django-filter's model-choice
@@ -1054,19 +1030,11 @@ class CandidateFilterMetadata:
 
     Fields:
 
-    - ``path_plan`` -- the strict ``ClassifiedPath`` of the leaf's model-field
-      ``field_name`` rooted at the owning ``FilterSet._meta.model`` (via
-      ``utils/relations.py::classify_path``).
-      Because rows exist ONLY for proven framework-generated leaves, this is
-      never ``None``; a ``PathResolutionError`` while classifying such a leaf is
-      a framework/configuration defect and is allowed to RAISE (never caught).
-    - ``provenance`` -- the frozen ``FilterGenerationProvenance`` record stamped
-      on the leaf at generation (origin + framework-added-``distinct`` bit).
     - ``eligible`` -- the LEAF-INTRINSIC half of the verdict: whether THIS leaf's own
       shape admits the row-preserving rewrite. ``True`` requires: a
       framework-generated origin (guaranteed here by construction, since only such
-      leaves get a row), the ORM path crosses a many-side hop
-      (``path_plan.first_many_index is not None``), the leaf carries no
+      leaves get a row), the leaf's model-field ``field_name`` crosses a many-side hop
+      (``utils/relations.py::classify_path`` from the owning model), the leaf carries no
       consumer ``method``, AND its filter class resolves to an audited supported
       family (``_is_audited_family``). The last conjunct is the
       executable fail-closed boundary: an unaudited family placed behind a
@@ -1105,8 +1073,6 @@ class CandidateFilterMetadata:
     package protects the DOCUMENTED extension points above.
     """
 
-    path_plan: ClassifiedPath
-    provenance: FilterGenerationProvenance
     eligible: bool
     routable: bool = False
 
@@ -1251,7 +1217,7 @@ def _candidate_metadata_for(
     path, so a ``PathResolutionError`` there is a genuine
     framework/configuration defect and PROPAGATES (never caught).
 
-    Eligibility is read off the plan + instance per
+    Eligibility is read off the classified path + instance per
     ``CandidateFilterMetadata.eligible``: a many-side path, no consumer ``method``,
     AND an audited supported family (``_is_audited_family``). An
     unaudited / ambiguous family is ineligible -- so a
@@ -1268,17 +1234,12 @@ def _candidate_metadata_for(
         return None
     if _expansion_record(filter_instance) is not None:
         return None
-    path_plan = classify_path(model, _declared_field_name(filter_instance))
     eligible = (
-        path_plan.first_many_index is not None
+        classify_path(model, _declared_field_name(filter_instance)).first_many_index is not None
         and getattr(filter_instance, "method", None) is None
         and _is_audited_family(filter_instance)
     )
-    return CandidateFilterMetadata(
-        path_plan=path_plan,
-        provenance=provenance,
-        eligible=eligible,
-    )
+    return CandidateFilterMetadata(eligible=eligible)
 
 
 if TYPE_CHECKING:
@@ -1324,8 +1285,18 @@ class FilterSetMetaclass(_FilterSetMetaclassBase):
         @override
         def __call__(self, *args: object, **kwargs: object) -> object:
             # Transparent dispatch preserves inherited constructor inference, including
-            # consumer __new__ factories whose result is another class.
-            return _construct_filterset(super().__call__, self, args, kwargs)
+            # consumer __new__ factories whose result is another class. Each call runs in its
+            # own construction frame, nested calls included.
+            pending = _pipeline_build_var.get()
+            current = None
+            if pending is not None and pending.owner is self:
+                _ = _pipeline_build_var.set(None)
+                current = pending
+            token = _active_construction_var.set(current)
+            try:
+                return super().__call__(*args, **kwargs)
+            finally:
+                _active_construction_var.reset(token)
 
     def __new__(  # noqa: PYI034 - a metaclass; ruff cannot resolve the django-filter base
         cls,
@@ -2008,10 +1979,10 @@ def _admitted_rows(
     (spec-045 Decision 4), where Django would refuse the ``IN`` subquery only once the
     request's query compiles (``django/db/models/lookups.py::In.process_rhs``).
     """
-    # ``_has_explicit_queryset`` records that ``queryset=`` was passed; without it
-    # ``RelatedFilter.get_queryset`` answers the target's default rows instead.
+    # Without an explicit ``queryset=``, ``RelatedFilter.get_queryset`` answers the target's
+    # default rows instead.
     explicit = (
-        related_filter.get_queryset(request) if related_filter._has_explicit_queryset else None
+        related_filter.get_queryset(request) if related_filter.queryset is not None else None
     )
     # Django refuses a subquery whose explicit ``_db`` is not the compiling connection's
     # alias, and only then (``In.process_rhs``): an unpinned queryset follows the request,
@@ -2858,26 +2829,6 @@ _active_construction_var: ContextVar[_PipelineConstruction | None] = ContextVar(
 )
 
 
-def _construct_filterset(
-    constructor: Callable[..., object],
-    owner: type[object],
-    args: tuple[object, ...],
-    kwargs: Mapping[str, object],
-) -> object:
-    """Run the ordinary metaclass constructor in its own frame, including nested calls."""
-    pending = _pipeline_build_var.get()
-    if pending is not None and pending.owner is owner:
-        _ = _pipeline_build_var.set(None)
-        current = pending
-    else:
-        current = None
-    token = _active_construction_var.set(current)
-    try:
-        return constructor(*args, **kwargs)
-    finally:
-        _active_construction_var.reset(token)
-
-
 @contextmanager
 def _pipeline_built(
     owner: type[object],
@@ -2930,19 +2881,6 @@ _publishing_var: ContextVar[Mapping[int, Mapping[str, Filter]] | None] = Context
     "_publishing_var",
     default=None,
 )
-
-
-@contextmanager
-def _publishing(
-    filterset: type[FilterSet],
-    table: Mapping[str, Filter],
-) -> Generator[None, None, None]:
-    """Serve ``table`` as ``filterset``'s table to every read while the block publishes it."""
-    token = _publishing_var.set({**(_publishing_var.get() or {}), id(filterset): table})
-    try:
-        yield
-    finally:
-        _publishing_var.reset(token)
 
 
 @contextmanager
@@ -3435,7 +3373,7 @@ def _unbindable_value_errors(
     (``year``, ``month``) binds integers, and a duration binds its microsecond count on a
     backend without a native interval, so the integers those leaves bind are asked too, and
     so is every leaf whose lookup reads an integer transform's output whatever its column
-    (``filters/base.py::_reads_integer_transform``: an ``ArrayField``'s ``len``, a transform
+    (``filters/base.py::_integer_transform_output``: an ``ArrayField``'s ``len``, a transform
     a project registers with an ``IntegerField`` output). Every filter family also asks a
     named queryset ``Transform`` alias such as ``ExtractYear`` or ``ExtractMonth`` through
     that transform's actual output; a ``Count`` or ``F`` alias keeps its ordinary integer
@@ -3507,7 +3445,7 @@ def _unbindable_value_errors(
                     for column in lookup_target_fields(source.query, _bound_field_name(terminal))
                 )
             )
-            or _reads_integer_transform(terminal, source.query)
+            or _integer_transform_output(terminal, source.query) is not None
         ):
             continue
         if not _runs_shipped_filter(terminal):
@@ -3771,7 +3709,7 @@ class FilterSet(
         traversal=SetInputTraversal(
             field_specs=_field_specs,
             related_attr="related_filters",
-            logic_keys=_LOGIC_PYTHON_ATTRS,
+            logic_keys=frozenset(LOGIC_OPERATORS_BY_PYTHON_ATTR),
         ),
     )
 
@@ -4763,9 +4701,12 @@ class FilterSet(
         filters = MappingProxyType(table)
         # A copy's form field may read this set's table back (a projected copy around
         # a cycle reads its child's, whose own copies read this one's): it reads the
-        # table being published (``_publishing``), never publishes it again inside.
-        with _publishing(cls, filters):
+        # table being published (``_publishing_var``), never publishes it again inside.
+        token = _publishing_var.set({**(_publishing_var.get() or {}), id(cls): filters})
+        try:
             copy_keys = _copy_form_keys(table, deferred)
+        finally:
+            _publishing_var.reset(token)
         required_own = frozenset(
             name
             for name, f in table.items()
@@ -4820,7 +4761,7 @@ class FilterSet(
         target is still a lazy string) answers its ``get_filters()`` result,
         unpublished, each name read as the published table reads it
         (``_declared_as_text``); a read while the set publishes answers the
-        table being published (``_publishing``).
+        table being published (``_publishing_var``).
         """
         snapshot = cls._expansion_snapshot()
         if snapshot is None:
@@ -5101,11 +5042,7 @@ class FilterSet(
         options.exclude = cast("Sequence[str] | None", plain_set_meta_fields(options.exclude))
         meta_fields = options.fields
         listed: list[str] = []
-        if (
-            meta_fields is not None
-            and not isinstance(meta_fields, str)
-            and not isinstance(meta_fields, Promise)
-        ):
+        if meta_fields is not None and not isinstance(meta_fields, str | Promise):
             # Text is exempt here (unlike the order family): the top-level
             # ``"__all__"`` shorthand IS a string declaration, and any other
             # string is upstream's to reject. A lazy translation string is text
@@ -5903,7 +5840,10 @@ class FilterSet(
             if (
                 default_class is not None
                 and isinstance(column, models.Field)
-                and _is_text_pattern_on_non_text(field, lookup_type)
+                and not _is_text_column(type(column))
+                # Read off the registry Django's query resolves the lookup on
+                # (``utils/relations.py::lookup_registry``), never a generated field's copy.
+                and _is_text_pattern_lookup(lookup_registry(field).get_lookup(lookup_type))
                 and cls._origin_for_selection_class(type(cls._selected_column(field)))
                 == "framework_default"
             ):

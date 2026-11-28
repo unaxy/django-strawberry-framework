@@ -11519,16 +11519,18 @@ def test_candidate_snapshot_rows_cover_direct_leaves_only() -> None:
 
     to_many_row = snapshot.candidates["genres__name__icontains"]
     assert to_many_row.eligible is True
-    assert to_many_row.path_plan.first_many_index is not None
     # Classified against the ROOT model (Book), on the model-field path.
-    assert to_many_row.path_plan.model is library_models.Book
-    assert to_many_row.path_plan.path == "genres__name"
-    assert to_many_row.provenance.origin == "framework_default"
+    assert classify_path(library_models.Book, "genres__name").first_many_index is not None
+    to_many = filter_generation_provenance(snapshot.filters["genres__name__icontains"])
+    assert to_many is not None
+    assert to_many.origin == "framework_default"
 
     to_one_row = snapshot.candidates["title__icontains"]
     assert to_one_row.eligible is False
-    assert to_one_row.path_plan.first_many_index is None
-    assert to_one_row.provenance.origin == "framework_default"
+    assert classify_path(library_models.Book, "title").first_many_index is None
+    to_one = filter_generation_provenance(snapshot.filters["title__icontains"])
+    assert to_one is not None
+    assert to_one.origin == "framework_default"
     assert _expansion_record(snapshot.filters["title__icontains"]) is None
 
     # The expansion is a framework-generated leaf of the child set, and still rowless.
@@ -11621,10 +11623,12 @@ def test_candidate_snapshot_includes_package_replacement_global_id_leaf() -> Non
     snapshot = GenreFilter._expansion_snapshot()
     assert snapshot is not None
     id_row = snapshot.candidates["id"]
-    assert id_row.provenance.origin == "package_replacement"
+    id_provenance = filter_generation_provenance(snapshot.filters["id"])
+    assert id_provenance is not None
+    assert id_provenance.origin == "package_replacement"
     # The own PK is a local column (no many-side hop), so it is ineligible.
     assert id_row.eligible is False
-    assert id_row.path_plan.first_many_index is None
+    assert classify_path(library_models.Genre, "id").first_many_index is None
 
 
 def test_candidate_metadata_helper_raises_on_unclassifiable_framework_leaf() -> None:
@@ -12366,7 +12370,7 @@ def test_method_owned_leaf_is_ineligible_on_framework_many_side_path() -> None:
     assert _is_audited_family(leaf)  # CharFilter IS a registered family
     row = _candidate_metadata_for(library_models.Book, leaf)
     assert isinstance(row, CandidateFilterMetadata)
-    assert row.path_plan.first_many_index is not None  # genuinely many-side
+    assert classify_path(library_models.Book, "genres").first_many_index is not None
     assert getattr(leaf, "method", None) is not None  # method IS set
     assert row.eligible is False  # ...ineligible SOLELY because a method is set
 
@@ -13318,7 +13322,7 @@ def test_unknown_family_leaf_is_ineligible_on_framework_many_side_path() -> None
     assert not _is_audited_family(leaf)
     row = _candidate_metadata_for(library_models.Book, leaf)
     assert isinstance(row, CandidateFilterMetadata)
-    assert row.path_plan.first_many_index is not None  # genuinely many-side
+    assert classify_path(library_models.Book, "genres").first_many_index is not None
     assert getattr(leaf, "method", None) is None  # not disqualified by a method
     assert row.eligible is False  # ...ineligible SOLELY because the family is unknown
 
