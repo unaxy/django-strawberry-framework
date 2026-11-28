@@ -5,7 +5,8 @@ entries binding a value under them; the form flavors bind through them
 (``tests/forms/test_resolvers.py`` drives that end to end, on PostgreSQL for the real
 ``SplitArrayField``). These rows pin the recursion, the ``decompress`` split (an answer
 that is no list or tuple is a ``ConfigurationError``, any other exception it raises kept, its
-``OverflowError`` over an aware datetime the value's ``invalid`` ``ValidationError``), the padding and the
+``OverflowError`` the value's ``invalid`` ``ValidationError`` only when native current-zone
+presentation also overflows), the padding and the
 ``size`` refusal on their own, PostgreSQL's ``SplitArrayWidget`` through its
 driver-free double (``tests/_postgres_fields.py::FakeSplitArrayWidget``) and, on the
 Postgres tier, as itself. ``multi_widget_keys`` is pinned by the filter rows that read it
@@ -20,6 +21,7 @@ import pytest
 from django import forms
 from django.core.exceptions import ValidationError
 from django.test import override_settings
+from django.utils import timezone
 from django_filters.widgets import RangeWidget
 from typing_extensions import override
 
@@ -151,10 +153,7 @@ def test_a_decompress_answering_no_list_or_tuple_raises() -> None:
 
 
 def test_a_widgets_own_overflow_is_a_configuration_error_chained_to_it() -> None:
-    """An ``OverflowError`` is the value's refusal only where it splits an aware ``datetime``.
-
-    A widget's own overflow on another value (the day after ``9999-12-31``) is its own.
-    """
+    """A widget's date arithmetic overflow is its own configuration error."""
     with pytest.raises(ConfigurationError) as caught:
         widget_entries(_DayPairWidget(), "f", datetime.date(9999, 12, 31))
 
@@ -162,8 +161,41 @@ def test_a_widgets_own_overflow_is_a_configuration_error_chained_to_it() -> None
     assert type(caught.value.__cause__) is OverflowError
 
 
+@pytest.mark.parametrize(
+    ("value", "use_tz"),
+    [
+        pytest.param(_STAMP.replace(year=9999, month=12, day=31), True, id="aware"),
+        pytest.param(_STAMP.replace(year=9999, month=12, day=31, tzinfo=None), True, id="naive"),
+        pytest.param(
+            datetime.datetime(9999, 12, 31, 23, tzinfo=datetime.timezone.utc),
+            False,
+            id="timezone-conversion-disabled",
+        ),
+    ],
+)
+def test_a_datetime_widgets_own_overflow_is_a_configuration_error(
+    value: datetime.datetime,
+    *,
+    use_tz: bool,
+) -> None:
+    """Native presentation accepts these values; only the widget's next day overflows.
+
+    The aware value under ``USE_TZ=False`` would overflow in Tokyo if converted, but
+    Django disables that conversion, so the failure still belongs to the widget.
+    """
+    with (
+        override_settings(USE_TZ=use_tz),
+        timezone.override("Asia/Tokyo"),
+        pytest.raises(ConfigurationError) as caught,
+    ):
+        widget_entries(_DayPairWidget(), "f", value)
+
+    assert "('f_0', 'f_1'): it raised OverflowError" in str(caught.value), caught.value
+    assert type(caught.value.__cause__) is OverflowError
+
+
 def test_an_overflow_from_decompress_is_the_value_s_invalid_refusal() -> None:
-    """``decompress`` overflowing an aware datetime is the value's ``invalid`` ``ValidationError``.
+    """Native current-zone presentation overflow is the value's ``invalid`` refusal.
 
     ``SplitDateTimeWidget.decompress`` converts an aware datetime to the current time zone's
     wall clock, which falls in year 0 for ``0001-01-01T00:30:00+00:00`` under

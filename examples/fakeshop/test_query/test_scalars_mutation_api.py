@@ -139,9 +139,12 @@ from zoneinfo import ZoneInfo
 
 import django
 import pytest
+import strawberry
 from apps.scalars import models
+from apps.scalars.forms import ScalarSpecimenTemporalForm
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
+from django import forms
 from django.db import DataError, connection, transaction
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
@@ -154,7 +157,17 @@ from graphql_client import (
     post_graphql,
     response_json,
 )
+from typing_extensions import override
 
+from django_strawberry_framework import (
+    DjangoModelFormMutation,
+    DjangoMutationField,
+    DjangoSchema,
+    DjangoType,
+    finalize_django_types,
+    strawberry_config,
+)
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import is_dict, is_list_or_tuple
 from django_strawberry_framework.utils.typing import object_result
@@ -647,7 +660,7 @@ def test_decimal_sqlite_cannot_read_back_is_the_field_error(
     assert rows == [(label, stored)]
 
 
-_MOUNT = SchemaMount(__name__, async_route="graphql-async/")
+_MOUNT = SchemaMount(__name__, "graphql/", async_route="graphql-async/")
 urlpatterns = _MOUNT.urlpatterns
 
 
@@ -845,6 +858,109 @@ def test_split_datetime_the_current_time_zone_cannot_present_is_the_field_error(
         assert rows == ([(label, sent_at)] if stored else []), rows
     else:
         assert rows == [(label, sent_at if stored else _STORED_AT)], rows
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.parametrize("year", [2024, 2050])
+def test_a_custom_widget_overflow_on_a_representable_datetime_is_a_configuration_error(
+    year: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A consumer's signed 32-bit epoch widget can overflow on a valid current-zone datetime."""
+    stamp = _SENT_AT.replace(year=year)
+    decompressed: list[datetime.datetime] = []
+    widget_errors: list[OverflowError] = []
+
+    class EpochWidget(forms.SplitDateTimeWidget):
+        @override
+        def decompress(self, value: object) -> tuple[datetime.date | None, datetime.time | None]:
+            if value is None:
+                return (None, None)
+            assert isinstance(value, datetime.datetime)
+            decompressed.append(value)
+            try:
+                seconds = int(value.timestamp())
+                packed = seconds.to_bytes(4, "little", signed=True)
+            except OverflowError as error:
+                widget_errors.append(error)
+                raise
+            normalized = datetime.datetime.fromtimestamp(
+                int.from_bytes(packed, "little", signed=True),
+                value.tzinfo,
+            )
+            date_part, time_part = super().decompress(normalized)
+            return date_part, time_part
+
+    class EpochForm(ScalarSpecimenTemporalForm):
+        occurred_at = forms.SplitDateTimeField(widget=EpochWidget())
+
+    class EpochNode(DjangoType):
+        class Meta:
+            model = models.ScalarSpecimen
+            fields = ("label", "occurred_at")
+
+    class CreateEpoch(DjangoModelFormMutation):
+        class Meta:
+            form_class = EpochForm
+            operation = "create"
+            permission_classes = []
+
+    @strawberry.type
+    class Mutation:
+        create_epoch = DjangoMutationField(CreateEpoch)
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> str:
+            return "ok"
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        mutation=Mutation,
+        types=[EpochNode],
+        config=strawberry_config(),
+    )
+    document = (
+        "mutation Write($data: EpochFormInput!) { createEpoch(data: $data) "
+        "{ result { label occurredAt } errors { field messages codes path } } }"
+    )
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+    with _MOUNT.serving(schema, USE_TZ=True, TIME_ZONE="UTC"), timezone.override("UTC"):
+        payload = response_json(
+            post_graphql(
+                document,
+                variables={"data": {**_CREATE_DATA, "occurredAt": stamp.isoformat()}},
+            ),
+        )
+
+    assert decompressed == [stamp]
+    rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_at"))
+    if year == 2024:
+        assert payload == {
+            "data": {
+                "createEpoch": {
+                    "result": {"label": "written", "occurredAt": stamp.isoformat()},
+                    "errors": [],
+                },
+            },
+        }
+        assert rows == [("written", stamp)]
+        assert widget_errors == []
+    else:
+        assert rows == []
+        assert payload["data"] is None
+        assert json_at(payload, "errors", 0, "message") == "An unexpected error occurred."
+        [logged] = [
+            record.exc_info[1]
+            for record in caplog.records
+            if record.name == "django_strawberry_framework" and record.exc_info is not None
+        ]
+        assert isinstance(logged, ConfigurationError), logged
+        assert logged.__cause__ is widget_errors[0]
+        assert "'occurred_at_0', 'occurred_at_1'" in str(logged)
 
 
 _YEAR_ONE_IN_UTC = datetime.datetime(1, 1, 1, 0, 30, tzinfo=datetime.timezone.utc)

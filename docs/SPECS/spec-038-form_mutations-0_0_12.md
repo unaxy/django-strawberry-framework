@@ -3206,8 +3206,13 @@ behavior reachable through `/graphql/`, package tests own internals.
     `::test_disabled_split_widget_field_keeps_its_stored_value_past_size`,
     `::test_omitted_initial_binds_under_the_split_widget_keys`), and the key and entry
     walk on its own in `tests/utils/test_widgets.py` (with a `decompress` that answers
-    no list, a `decompress` `ValidationError` kept, its `OverflowError` over an aware datetime the value's `invalid`
-    refusal and over any other value the `ConfigurationError`); a value refused before
+    no list, a `decompress` `ValidationError` kept, its `OverflowError` the value's `invalid`
+    refusal only when Django's native `to_current_timezone` also overflows, otherwise a
+    chained `ConfigurationError`, including a naive datetime and `USE_TZ=False`);
+    a consumer signed-32-bit epoch widget's overflow on a representable aware datetime is
+    a chained `ConfigurationError`, masked over HTTP with nothing written, while an
+    in-range epoch writes the datetime, with one widget call in either case
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_a_custom_widget_overflow_on_a_representable_datetime_is_a_configuration_error`); a value refused before
     model validation inside `is_valid()` converts or binds it: a `clean_<field>`'s beside
     a form error, a bounded decimal past `numeric` under a two-field and a conditional
     `UniqueConstraint` and `unique_together` through the PostgreSQL stand-in, a model's own
