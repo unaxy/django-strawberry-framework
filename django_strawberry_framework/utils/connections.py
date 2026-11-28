@@ -783,7 +783,7 @@ def derive_connection_window_bounds(
     after: str | None,
     first: int | None,
     last: int | None,
-    max_results: int | None,
+    max_results: int | None = None,
     prefix: str,
 ) -> ConnectionWindowBounds:
     """Derive the window ``(offset, limit, reverse)`` from pagination arguments.
@@ -791,10 +791,11 @@ def derive_connection_window_bounds(
     Owns the ``reverse`` predicate and the ``limit`` rule (the cursor-parity
     contract), running the arguments through Strawberry's
     ``SliceMetadata.from_arguments`` - the same engine both the plan-time walker
-    and the resolve-time pipeline use. ``max_results`` is passed EXPLICITLY (the
-    walker's graphql-core ``info.schema`` has no ``.config`` for the engine to
-    read), and is narrowed through the request policy first, so plan-time and
-    resolve-time caps include the same ``max_page_size`` ceiling. The arguments
+    and the resolve-time pipeline use. ``max_results`` is the caller's resolved
+    cap, or ``None`` to read the schema config through ``resolve_relay_max_results``
+    (the walker's graphql-core ``info.schema`` has no ``.config`` for the engine
+    to read); either way it is narrowed through the request policy, so plan-time
+    and resolve-time caps include the same ``max_page_size`` ceiling. The arguments
     handed to the engine go through ``page_arguments``, so a ``before`` cursor
     with no page argument is bounded by that same cap and ``last: 0`` is the
     ``first: 0`` window. ``prefix`` is the connection's edge-class
@@ -989,12 +990,11 @@ def relay_max_results_from_info(info: EitherInfo | None) -> int | None:
     Strawberry ``Info`` that ``SliceMetadata.from_arguments`` expects, and the
     plan-time raw graphql-core ``GraphQLResolveInfo`` whose ``.schema`` is a bare
     ``GraphQLSchema`` with no ``.config`` (the optimizer walker's middleware
-    layer). Neither caller dereferences ``info.schema.config`` itself.
+    layer). No caller dereferences ``info.schema.config`` itself.
 
-    Returning ``None`` rather than a default is deliberate and is the whole
-    difference from :func:`resolve_relay_max_results`: the planner needs "no
-    cap configured" to stay distinguishable so the engine default applies
-    downstream, while the resolver must land on a concrete number.
+    Returning ``None`` rather than a default is deliberate: it keeps "no cap
+    configured" distinguishable, so :func:`resolve_relay_max_results` can fall
+    back to ``StrawberryConfig``'s own default and land on a concrete number.
     """
     return getattr(schema_config_from_info(info), "relay_max_results", None)
 
@@ -1029,7 +1029,7 @@ def derive_keyset_window_bounds(
     after: object,
     first: int | None,
     last: object,
-    max_results: int | None,
+    max_results: int | None = None,
 ) -> ConnectionWindowBounds:
     """Derive the window bounds for a KEYSET (``cursor_field``) connection.
 

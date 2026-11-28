@@ -81,7 +81,6 @@
 "django_strawberry_framework/optimizer/predicates.py::_correlation_steps" = { cast = 1 }
 "django_strawberry_framework/optimizer/selections.py::convert_selections" = { reportUnknownVariableType = 2 }
 "django_strawberry_framework/optimizer/selections.py::included_field_selections" = { cast = 2 }
-"django_strawberry_framework/optimizer/selections.py::named_children" = { cast = 1 }
 "django_strawberry_framework/optimizer/selections.py::with_runtime_prefix" = { cast = 1 }
 "django_strawberry_framework/orders/base.py::RelatedOrder.orderset" = { reportPropertyTypeMismatch = 1 }
 "django_strawberry_framework/resource_policy.py::ResourceLimitExceeded" = { reportUnsafeMultipleInheritance = 1 }

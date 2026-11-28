@@ -97,7 +97,6 @@ def test_from_django_field_forward_fk() -> None:
     assert fm.is_relation is True
     assert fm.related_model is Category
     assert fm.attname == "category_id"
-    assert fm.target_field_name == "id"
     assert fm.target_pk_name == "id"
     assert fm.fk_id_elision_eligible is True
     assert fm.many_to_many is False
@@ -285,7 +284,7 @@ def test_from_django_field_generic_relation() -> None:
 
 
 def test_from_django_field_one_to_one() -> None:
-    """Forward OneToOne sets one_to_one=True with attname and target field."""
+    """Forward OneToOne sets one_to_one=True with attname and target pk."""
     patron_field = MembershipCard._meta.get_field("patron")
     fm = FieldMeta.from_django_field(patron_field)
     assert fm.name == "patron"
@@ -293,8 +292,6 @@ def test_from_django_field_one_to_one() -> None:
     assert fm.one_to_one is True
     assert fm.related_model is Patron
     assert fm.attname == "patron_id"
-    assert fm.target_field_name == "id"
-    assert fm.target_field_attname == "id"
     assert fm.target_pk_name == "id"
     assert fm.fk_id_elision_eligible is True
     # Forward OneToOne (``MembershipCard.patron``) declares no ``null=True``,
@@ -354,7 +351,6 @@ def test_field_meta_slots_hashing_and_copy() -> None:
         is_relation=True,
         related_model=Category,
         attname="category_id",
-        target_field_name="id",
         target_pk_name="id",
         fk_id_elision_eligible=True,
     )
@@ -367,7 +363,6 @@ def test_field_meta_slots_hashing_and_copy() -> None:
         is_relation=True,
         related_model=Category,
         attname="category_id",
-        target_field_name="id",
         target_pk_name="id",
         fk_id_elision_eligible=True,
     )
@@ -393,7 +388,6 @@ def test_fk_id_elision_edge_cases() -> None:
 
     # Non-PK to_field: not eligible
     fm_to_field = FieldMeta.from_django_field(PatronProfile._meta.get_field("favorite_genre"))
-    assert fm_to_field.target_field_name == "name"
     assert fm_to_field.target_pk_name == "id"
     assert fm_to_field.fk_id_elision_eligible is False
 
@@ -796,13 +790,11 @@ def test_from_django_field_multi_column_forward_foreign_object_has_no_single_tar
 
     Its target columns come from ``utils/relations.py::relation_link`` (Django's
     single-target ``target_field`` accessor raises for it): several targets
-    leave ``target_field_name`` / ``target_field_attname`` ``None``, the
-    carriers still stamp, and FK-id elision stays off.
+    name no single target column, the carriers still stamp, and FK-id
+    elision stays off.
     """
     meta = FieldMeta.from_django_field(LnkPairChild._meta.get_field("parent"))
     assert meta.relation_kind == "forward_single"
-    assert meta.target_field_name is None
-    assert meta.target_field_attname is None
     assert meta.attname is None
     assert meta.fk_id_elision_eligible is False
     assert meta.link_carrier_attnames == ("p_tenant", "p_code")

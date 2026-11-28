@@ -707,15 +707,6 @@ def append_prefetch_unique(values: Sequence[PrefetchLookup], prefetch: PrefetchL
     _append_to_mutable(values, prefetch)
 
 
-def _consumer_prefetch_lookups(queryset: QuerySet[models.Model, object]) -> list[PrefetchLookup]:
-    """Return the ``prefetch_related`` lookups already attached to ``queryset``, as a list.
-
-    Reads through ``utils/_queryset_private.py::queryset_prefetch_lookups``, which
-    owns the ``QuerySet._prefetch_related_lookups`` spelling.
-    """
-    return list(queryset_prefetch_lookups(queryset))
-
-
 def _select_mask(model: type[models.Model], names: Iterable[str]) -> dict[object, object]:
     """Django's select mask for ``.only(*names)`` on ``model`` (``Query.get_select_mask``).
 
@@ -923,7 +914,7 @@ def _prefetch_carrier_attnames(queryset: QuerySet[_M, _RowT]) -> list[str]:
     """
     model = queryset.model
     attnames: list[str] = []
-    for entry in _consumer_prefetch_lookups(queryset):
+    for entry in queryset_prefetch_lookups(queryset):
         # A ``Prefetch`` walks ``prefetch_through``; a string is its own path.
         lookup = entry if isinstance(entry, str) else entry.prefetch_through
         first = lookup.split("__", 1)[0]
@@ -1996,7 +1987,7 @@ def seals_consumer_prefetch(
         return False
     return any(
         path == sealed or path.startswith(f"{sealed}{LOOKUP_SEP}")
-        for path in (_lookup_path(entry) for entry in _consumer_prefetch_lookups(queryset))
+        for path in (_lookup_path(entry) for entry in queryset_prefetch_lookups(queryset))
         for sealed in plan.prefetch_path_seals
     )
 
@@ -2022,7 +2013,7 @@ def _consumer_owned_paths(queryset: QuerySet[models.Model]) -> frozenset[str]:
         path
         for path in (
             _query_spelled(queryset.model, _lookup_path(entry))
-            for entry in _consumer_prefetch_lookups(queryset)
+            for entry in queryset_prefetch_lookups(queryset)
             if not isinstance(entry, str) and entry.queryset is not None
         )
         if path not in joined
@@ -2091,7 +2082,7 @@ def _diff_prefetch_related(
     the target type's hook in place of the optimizer entry - callers keep the
     relation's own keys and strip the rest.
     """
-    consumer_pf = _consumer_prefetch_lookups(queryset)
+    consumer_pf = queryset_prefetch_lookups(queryset)
     # Preserve EVERY entry on a path. Django accepts a custom ``Prefetch``
     # followed by a redundant string lookup for the same path, and the custom
     # queryset remains authoritative. A one-value dict silently kept only the
@@ -2191,13 +2182,6 @@ def _sealed_consumer_prefetch(
     return Prefetch(path, queryset=seal.seal(seed, info))
 
 
-def lookup_paths(plan: OptimizationPlan) -> set[str]:
-    """Return Django relation lookup paths covered by ``plan`` (the strictness stash's set)."""
-    if plan.finalized_lookup_paths is not None:
-        return set(plan.finalized_lookup_paths)
-    return _lookup_paths_from_parts(plan.select_related, plan.prefetch_related)
-
-
 def _lookup_paths_from_parts(
     select_related: Iterable[str],
     prefetch_related: Iterable[PrefetchLookup],
@@ -2225,7 +2209,7 @@ def _prefetch_lookup_paths(entries: Iterable[PrefetchLookup], prefix: str = "") 
         path = f"{prefix}__{entry.prefetch_to}" if prefix else entry.prefetch_to
         paths.add(path)
         inner = entry.queryset
-        inner_lookups = _consumer_prefetch_lookups(inner) if inner is not None else []
+        inner_lookups = queryset_prefetch_lookups(inner) if inner is not None else ()
         if inner_lookups:
             paths.update(_prefetch_lookup_paths(inner_lookups, path))
     return paths

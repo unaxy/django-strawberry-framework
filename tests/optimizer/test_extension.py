@@ -108,7 +108,6 @@ from django_strawberry_framework.optimizer.extension import (
     _collect_schema_reachable_types,
     _hashable_variable_value,
     _resolve_model_from_return_type,
-    _stash_on_context,
     _walk_cache_relevant_vars,
     apply_connection_optimization,
     clear_document_key_cache,
@@ -1116,7 +1115,7 @@ def test_optimize_returns_original_queryset_for_empty_plan(
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
 
     def _empty_plan(*_args: object, **_kwargs: object) -> OptimizationPlan:
-        return OptimizationPlan()
+        return OptimizationPlan().finalize()
 
     monkeypatch.setattr(extension_module, "plan_optimizations", _empty_plan)
     ctx = SimpleNamespace()
@@ -3085,34 +3084,6 @@ def test_publish_plan_to_context_reuses_finalized_metadata() -> None:
     assert _stashed_keys(ctx, DST_OPTIMIZER_LOOKUP_PATHS) is plan.finalized_lookup_paths
 
 
-def test_publish_plan_to_context_rebuilds_metadata_for_unfinalized_plan() -> None:
-    """An unfinalized plan published under strictness rebuilds the sentinel sets.
-
-    Production plans are always finalized, but the publish path keeps a
-    defensive fallback: when ``finalized_*`` is ``None`` it recomputes the
-    frozensets from the live directive lists rather than stashing ``None``.
-    """
-    ext = DjangoOptimizerExtension(strictness="raise")
-    plan = OptimizationPlan(
-        select_related=["category"],
-        fk_id_elisions=["ItemType.category@allItems.category"],
-        planned_resolver_keys=["ItemType.category@allItems.category"],
-    )
-    assert plan.finalized_planned_resolver_keys is None
-    assert plan.finalized_lookup_paths is None
-    ctx = SimpleNamespace()
-
-    ext._publish_plan_to_context(plan, raw_info_of(make_info(context=ctx)))
-
-    assert _stashed_keys(ctx, DST_OPTIMIZER_FK_ID_ELISIONS) == frozenset(
-        {"ItemType.category@allItems.category"},
-    )
-    assert _stashed_keys(ctx, DST_OPTIMIZER_PLANNED) == frozenset(
-        {"ItemType.category@allItems.category"},
-    )
-    assert _stashed_keys(ctx, DST_OPTIMIZER_LOOKUP_PATHS) == frozenset({"category"})
-
-
 def test_named_children_skips_excluded_and_recurses_through_fragments() -> None:
     """Connection extraction: ``@skip`` children are dropped and fragments inlined."""
     edges = {PYTHON_NAME_ATTR: "edges"}
@@ -3245,7 +3216,6 @@ def test_clear_optimizer_context_locked_querydict_is_noop() -> None:
 
 def test_optimizer_context_all_exports() -> None:
     """All public constants and functions in ``optimizer/_context.py`` are listed in ``__all__``."""
-    assert _stash_on_context is stash_on_context
     expected = {
         "DST_OPTIMIZER_FK_ID_ELISIONS",
         "DST_OPTIMIZER_KEYS",

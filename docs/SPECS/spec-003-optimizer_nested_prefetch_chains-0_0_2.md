@@ -200,7 +200,7 @@ O4 is complete when:
 - Prefetch boundaries carry child queryset optimization without pushing invalid child `only()` paths onto the root queryset, and the link's connector columns (child carriers, non-pk parent targets) are injected automatically.
 - O6 custom `get_queryset` branches compose with nested child plans and correctly mark plans uncacheable.
 - B2 and B3 context sentinels use branch-sensitive resolver identities (parent type + field + runtime response path, or an equivalent scheme) and do not leak across siblings, parent types, aliases, or root fields.
-- The `lookup_paths` flattening helper exists on `plans.py` for B8/debugging, recurses through nested `Prefetch` objects to arbitrary depth, and is kept separate from resolver strictness keys.
+- The lookup-path flattening in `plans.py` (published as `OptimizationPlan.finalized_lookup_paths`) serves B8/debugging, recurses through nested `Prefetch` objects to arbitrary depth, and is kept separate from resolver strictness keys.
 - The walker, extension, live, and resolver tests above pass.
 
 <!-- LINK DEFINITIONS -->

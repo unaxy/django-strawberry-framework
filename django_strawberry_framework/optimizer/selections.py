@@ -74,7 +74,7 @@ from django_strawberry_framework.utils.typing import (
 from ._context import converted_selections_memo
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from typing import TypeAlias
 
     from graphql.language.ast import (
@@ -498,37 +498,16 @@ def included_field_selections(
     return result
 
 
-def _direct_children_named(
-    members: Iterable[ConvertedSelection],
-    name: str,
-) -> Iterator[ConvertedSelection]:
-    """Yield the included members Python-named ``name``, descending fragment wrappers only.
-
-    The one direct-child walk ``named_children`` and ``direct_child_selected``
-    share. A member matches by ``selection_python_name``: the name the selected
-    field was declared under, whatever wire name the schema's ``NameConverter``
-    published it as. Recursion enters fragment wrappers (``is_fragment``) and
-    never a field's own sub-selections, so a same-named field deeper in the tree
-    does not match. Every member is gated on ``should_include``: converted
-    selections carry live, already-evaluated ``@skip`` / ``@include`` args, so a
-    directive-excluded field never matches and an excluded fragment shell prunes
-    its whole subtree. Lazy, so a caller asking only whether a match exists stops
-    at the first one.
-    """
-    for member in members:
-        if not should_include(member):
-            continue
-        if is_fragment(member):
-            yield from _direct_children_named(getattr(member, "selections", None) or [], name)
-        elif selection_python_name(member) == name:
-            yield member
-
-
 def named_children(selection: ConvertedSelection, name: str) -> list[FieldSelection]:
-    """Return included direct children selecting the field Python-named ``name``, through fragments."""
+    """Return included direct children selecting the field Python-named ``name``, through fragments.
+
+    A member matches by ``selection_python_name``: the name the selected field
+    was declared under, whatever wire name the schema's ``NameConverter``
+    published it as. ``included_field_selections`` enters fragment wrappers and
+    never a field's own sub-selections, and drops every directive-excluded member.
+    """
     members: Iterable[ConvertedSelection] = getattr(selection, "selections", None) or []
-    # ``_direct_children_named`` yields only members ``is_fragment`` rejected: field selections.
-    return cast("list[FieldSelection]", list(_direct_children_named(members, name)))
+    return [s for s in included_field_selections(members) if selection_python_name(s) == name]
 
 
 #: Attribute naming the runtime-path prefixes a walker clone carries:
@@ -635,9 +614,11 @@ def direct_child_selected(selection_roots: Iterable[ConvertedSelection], name: s
     A same-named field deep inside ``edges { node { ... } }`` (a nested
     connection's ``totalCount``) does not trip the outer connection's predicate,
     and a ``totalCount @skip(if: true)`` (or a ``@skip``-ped fragment wrapping it)
-    does not fire the connection ``COUNT`` (``_direct_children_named``).
+    does not fire the connection ``COUNT`` (``included_field_selections``).
     """
-    return next(_direct_children_named(selection_roots, name), None) is not None
+    return any(
+        selection_python_name(s) == name for s in included_field_selections(selection_roots)
+    )
 
 
 def connection_total_count_selected(selection: ConvertedSelection) -> bool:

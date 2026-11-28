@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -358,32 +359,11 @@ def _build_child_queryset(
     return queryset
 
 
-def _build_connection_child_queryset(
-    field: FieldMeta,
-    target_type: type[DjangoType] | None,
-    info: GraphQLResolveInfo[object] | None,
-    *,
-    target_definition: DjangoTypeDefinition | None = None,
-) -> QuerySet[models.Model]:
-    """Build a nested-connection child queryset under ``_PREFETCH_CHILD_POLICY``.
-
-    The nested-connection planner reaches the shared child builder through this
-    seam, so the slice licence is spent at the one call site whose premise holds:
-    the planner classifies the value it gets back with
-    ``nested_fetch.py::unwindowable_child_queryset_reason`` and degrades a sliced
-    child to the per-parent fallback. The plain list relation, which has no such
-    gate, takes the builder's default seal. The seal choice stays on this seam -
-    the planner takes the fixed-policy callable and holds no seal-policy
-    vocabulary of its own; a future child path whose seal needs planner-local
-    state moves the choice into the planner with a ``policy`` argument.
-    """
-    return _build_child_queryset(
-        field,
-        target_type,
-        info,
-        target_definition=target_definition,
-        policy=_PREFETCH_CHILD_POLICY,
-    )
+#: The nested-connection planner's child builder. The slice licence is spent at
+#: the one call site whose premise holds: the planner classifies the child with
+#: ``nested_fetch.py::unwindowable_child_queryset_reason`` and degrades a sliced
+#: child to the per-parent fallback, so the planner holds no seal-policy vocabulary.
+_build_connection_child_queryset = partial(_build_child_queryset, policy=_PREFETCH_CHILD_POLICY)
 
 
 def _relay_id_field(node_type: type[_RelayDjangoType]) -> ConcreteField | None:

@@ -79,16 +79,6 @@ class FieldMeta:
             ``GenericRelation``, ``GenericForeignKey`` - Django fills their
             ``attname`` with the relation name, which the stamp drops so
             every non-``None`` value is a real column).
-        target_field_name: The target model field name a FK or forward
-            M2M points at (Django's ``ManyToManyField`` descriptor
-            exposes ``target_field`` pointing at the target model's PK,
-            so forward M2M resolves to ``"id"`` here, not ``None``), or
-            ``None`` for descriptors whose ``target_field`` attribute is
-            absent (most reverse-relation descriptors).
-        target_field_attname: The target model column attname a FK or
-            forward M2M points at, preserving non-PK ``to_field``
-            connector rules; ``None`` for descriptors whose
-            ``target_field`` attribute is absent.
         target_pk_name: The related model's concrete primary-key field
             name, or ``None`` for non-relations / unresolved relation
             targets.
@@ -163,8 +153,6 @@ class FieldMeta:
     nullable: bool = False
     related_model: type[models.Model] | None = None
     attname: str | None = None
-    target_field_name: str | None = None
-    target_field_attname: str | None = None
     target_pk_name: str | None = None
     fk_id_elision_eligible: bool = False
     link_carrier_attnames: tuple[str, ...] = ()
@@ -254,7 +242,6 @@ class FieldMeta:
         related_model = cast("type[models.Model] | None", read_attr(field, "related_model", None))
         target_pk_name = _target_pk_name(related_model)
         target_field_name = optional_instance(read_attr(target_field, "name", None), str)
-        target_field_attname = optional_instance(read_attr(target_field, "attname", None), str)
         is_m2m = relation_bool(field, "many_to_many")
         is_o2m = relation_bool(field, "one_to_many")
         is_o2o = relation_bool(field, "one_to_one")
@@ -310,8 +297,6 @@ class FieldMeta:
             nullable=nullable,
             related_model=related_model,
             attname=attname,
-            target_field_name=target_field_name,
-            target_field_attname=target_field_attname,
             target_pk_name=target_pk_name,
             fk_id_elision_eligible=(
                 attname is not None

@@ -71,6 +71,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_set_or_frozenset,
     is_str,
     read_attr,
+    require,
     require_instance,
 )
 from django_strawberry_framework.utils.connections import resolve_relay_max_results
@@ -108,14 +109,10 @@ from ._context import (
     publish_scoped_relations,
     stash_for_optimizer,
 )
-from ._context import (
-    stash_on_context as _stash_on_context,
-)
 from .hints import hint_is_skip
 from .nested_fetch import NestedConnectionStrategy, StrategySelection, resolve_strategy
 from .plans import (
     diff_plan_for_queryset,
-    lookup_paths,
     runtime_path_from_info,
     seals_consumer_prefetch,
 )
@@ -132,6 +129,7 @@ from .selections import (
 from .walker import plan_optimizations
 
 if TYPE_CHECKING:
+    from collections.abc import Set as AbstractSet
     from types import SimpleNamespace
     from typing import TypeAlias
 
@@ -141,6 +139,7 @@ if TYPE_CHECKING:
     from strawberry.types.nodes import Selection
 
     from django_strawberry_framework.types.base import DjangoType
+    from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.typing import EitherInfo
 
     from ._context import FrozenVariableValue, PlanCacheKey
@@ -232,14 +231,9 @@ def _schema_cache_record(schema: "GraphQLSchema") -> _SchemaCacheRecord:
     )
 
 
-# ``_stash_on_context`` is ``utils/context.py::stash_on_context`` (re-exported
-# through ``optimizer/_context.py``) under an underscore-prefixed name. The
-# shared read / write / delete dispatch lives in ``utils/context.py``; resolvers
-# read the optimizer's stash through ``optimizer/_context.py::optimizer_value``.
 __all__ = (
     "CacheInfo",
     "DjangoOptimizerExtension",
-    "_stash_on_context",
     "apply_connection_optimization",
     "apply_connection_optimization_async",
 )
@@ -674,32 +668,17 @@ def _collect_schema_reachable_types(schema: object) -> "set[type[DjangoType]]":
     return reachable
 
 
-class _OriginAndModel(NamedTuple):
-    """Pair of resolved Strawberry origin type and underlying Django model.
-
-    Returned by :func:`_resolve_model_from_return_type` so the extension's
-    ``_optimize`` hook can feed the origin into ``_get_or_build_plan``
-    (for root field-map lookup and plan-cache identity) while still
-    using the model for the walker's root-level relation traversal.
-
-    Pair-or-``None`` contract: the helper returns ``None`` whenever
-    EITHER origin or model is unresolvable; the pair is returned ONLY
-    when both are resolved. Callers branch on ``resolved is None``
-    rather than dereferencing individual legs.
-    """
-
-    origin: "type[DjangoType]"
-    model: type[models.Model]
-
-
-def _resolve_model_from_return_type(info: "GraphQLResolveInfo[object]") -> _OriginAndModel | None:
-    """Trace ``info.return_type`` through graphql-core wrappers to ``(origin, model)``.
+def _resolve_model_from_return_type(
+    info: "GraphQLResolveInfo[object]",
+) -> "DjangoTypeDefinition | None":
+    """Trace ``info.return_type`` through graphql-core wrappers to its ``DjangoTypeDefinition``.
 
     graphql-core wraps resolver return types in layers of
     ``GraphQLNonNull`` and ``GraphQLList``. This function reads the named
     type under them through graphql-core's ``get_named_type``, then looks
     up the corresponding Strawberry type definition via the schema by its
-    name and reverse-maps to the Django model through the registry.
+    name and reverse-maps to the registered definition, whose ``origin``
+    feeds plan-cache identity and whose ``model`` feeds the walker.
 
     Returns ``None`` when any step fails (non-object leaf, missing
     schema backref, missing schema type, unregistered origin). The
@@ -713,10 +692,7 @@ def _resolve_model_from_return_type(info: "GraphQLResolveInfo[object]") -> _Orig
     definition = strawberry_schema.get_type_by_name(type_name)
     if definition is None:
         return None
-    registered = registry.get_definition(read_attr(definition, "origin", None))
-    if registered is None:
-        return None
-    return _OriginAndModel(origin=registered.origin, model=registered.model)
+    return registry.get_definition(read_attr(definition, "origin", None))
 
 
 class _OptimizerOperationState(OperationState):
@@ -1304,13 +1280,9 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # correctness sentinel - do not union it).
         context = read_attr(info, "context")
         stash_for_optimizer(context, DST_OPTIMIZER_PLAN, plan)
-        fk_id_elisions = plan.finalized_fk_id_elisions
-        if fk_id_elisions is None:
-            fk_id_elisions = frozenset(plan.fk_id_elisions)
+        fk_id_elisions = require(plan.finalized_fk_id_elisions, is_set_or_frozenset)
         self._stash_union(context, DST_OPTIMIZER_FK_ID_ELISIONS, fk_id_elisions)
-        planned_resolver_keys = plan.finalized_planned_resolver_keys
-        if planned_resolver_keys is None:
-            planned_resolver_keys = frozenset(plan.planned_resolver_keys)
+        planned_resolver_keys = require(plan.finalized_planned_resolver_keys, is_set_or_frozenset)
         # Published on EVERY execution, and to the execution frame rather than
         # the request context: the generated relation resolvers' visibility
         # attribution is live under the default strictness and must also survive
@@ -1322,15 +1294,13 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # not strictness sentinels.
         publish_planned_windows(plan.planned_windows)
         if self.strictness != "off":
-            plan_lookup_paths = plan.finalized_lookup_paths
-            if plan_lookup_paths is None:
-                plan_lookup_paths = frozenset(lookup_paths(plan))
+            plan_lookup_paths = require(plan.finalized_lookup_paths, is_set_or_frozenset)
             self._stash_union(context, DST_OPTIMIZER_PLANNED, planned_resolver_keys)
             self._stash_union(context, DST_OPTIMIZER_LOOKUP_PATHS, plan_lookup_paths)
             stash_for_optimizer(context, DST_OPTIMIZER_STRICTNESS, self.strictness)
 
     @staticmethod
-    def _stash_union(context: object, key: str, new: frozenset[str]) -> None:
+    def _stash_union(context: object, key: str, new: "AbstractSet[object]") -> None:
         """Stash ``new`` unioned with any existing frozenset under ``key``.
 
         Reads the current stash via the read-side ``get_context_value`` helper

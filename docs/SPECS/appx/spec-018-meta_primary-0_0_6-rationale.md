@@ -52,7 +52,7 @@ The field is a per-type denormalization for introspection. Routing decisions rea
 - **`source_type` enters at `plan_optimizations`, not deeper.** `plan_optimizations` is the walker's public entry point; a caller reaching past it to `_walk_selections` would have to re-derive the root-walk arguments the entry point derives once (the plan's operation-scoped `introduce_projection`, the runtime prefixes, the plan `finalize()` handoff).
 - **No `source_type` on `_selected_scalar_names`.** It is reached only from `_plan_select_relation`, whose model argument is `django_field.related_model` for nested FK-id elision; a root origin there would make a nested step plan against the root's field map.
 - **No nested extension-cache path.** `_plan_cache` is root-only and `_get_or_build_plan` is its sole insertion site, so the `origin` slot always holds the concrete root origin in production; `None` is for direct or test-only callers.
-- **`_resolve_model_from_return_type` returns `None` when either half is unresolvable.** A pair with a `None` model would be truthy, and `_optimize`'s guard would hand the walker a `None` model to dereference. `_OriginAndModel` is a `NamedTuple` so call sites read `resolved.origin` / `resolved.model`.
+- **`_resolve_model_from_return_type` returns `None` when either half is unresolvable.** A pair with a `None` model would be truthy, and `_optimize`'s guard would hand the walker a `None` model to dereference. It returns the registered `DjangoTypeDefinition`, so call sites read `resolved.origin` / `resolved.model`.
 - **The plan-cache key is per-process** and re-populates on first use, so the origin slot needs no invalidation step.
 
 <!-- LINK DEFINITIONS -->

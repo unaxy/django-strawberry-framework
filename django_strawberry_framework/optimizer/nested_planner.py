@@ -46,7 +46,6 @@ from django_strawberry_framework.utils.connections import (
     derive_keyset_window_bounds,
     has_connection_sidecar_kwargs,
     relation_connection_to_attr,
-    relay_max_results_from_info,
     window_range_plan,
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
@@ -175,19 +174,6 @@ def _every_backend_supports_index_column_ordering() -> bool:
         return False
 
 
-def _order_entry_field_name(entry: object) -> str | None:
-    """Return the field name an ``order_by`` entry references, or ``None``.
-
-    A thin shim over the shared entry parser
-    (``plans.py::order_entry_name_and_direction`` - one dash rule, one
-    expression unwrap for every consumer of the ``deterministic_order``
-    entry vocabulary), kept under this name for its caller and
-    test pins; this projection needs only the name half.
-    """
-    parsed = order_entry_name_and_direction(entry)
-    return parsed[0] if parsed is not None else None
-
-
 def _concrete_order_columns(order_by: Sequence[object], model: type[models.Model]) -> list[str]:
     """Return the LOCAL concrete column attnames referenced by ``order_by``.
 
@@ -203,9 +189,10 @@ def _concrete_order_columns(order_by: Sequence[object], model: type[models.Model
     attnames = set(by_name.values())
     columns: list[str] = []
     for entry in order_by:
-        name = _order_entry_field_name(entry)
-        if name is None or "__" in name:
+        parsed = order_entry_name_and_direction(entry)
+        if parsed is None or "__" in parsed[0]:
             continue
+        name = parsed[0]
         if name in by_name:
             append_unique(columns, by_name[name])
         elif name in attnames:
@@ -942,11 +929,9 @@ def _connection_window_slice_from_arguments(
     iterate this: the shared-window scheme with one payload, the per-key
     scheme with each response key's recorded payload
     (``_optimizer_response_key_arguments``). Reads the payload by Python name
-    (graphql-core coerced it, ``selections.py::python_arguments``), resolves
-    ``max_results`` from the Strawberry schema config via
-    ``relay_max_results_from_info`` (the walker's graphql-core ``info.schema``
-    has no ``.config`` the engine could read), and hands those to the shared
-    helper, which owns the ``reverse`` / ``limit`` rule.
+    (graphql-core coerced it, ``selections.py::python_arguments``) and hands it
+    to the shared helper, which reads the cap from the Strawberry schema config
+    and owns the ``reverse`` / ``limit`` rule.
 
     Returns ``None`` when the shared helper raises ``PaginationArgumentError``
     (negative / over-max ``first`` / ``last``, malformed cursor) so
@@ -973,7 +958,6 @@ def _connection_window_slice_from_arguments(
             after=_cursor_argument(arguments, "after"),
             first=_int_argument(arguments, "first"),
             last=_int_argument(arguments, "last"),
-            max_results=relay_max_results_from_info(info),
             # Only generated connections are planned, and each inherits the stock edge class.
             prefix=relay.Edge.CURSOR_PREFIX,
         )
@@ -1036,7 +1020,6 @@ def _keyset_window_slice_from_arguments(
             after=after,
             first=first,
             last=last,
-            max_results=relay_max_results_from_info(info),
         )
     except (GraphQLError, ValueError, TypeError):
         return None

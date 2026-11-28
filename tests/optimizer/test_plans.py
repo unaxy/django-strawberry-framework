@@ -38,7 +38,6 @@ from django_strawberry_framework.optimizer.plans import (
     OptimizationPlan,
     PlannedWindow,
     PrefetchSeal,
-    _consumer_prefetch_lookups,
     _flatten_select_related,
     _IndexedList,
     _loads,
@@ -56,10 +55,8 @@ from django_strawberry_framework.optimizer.plans import (
     effective_cursor_state,
     ends_in_unique_column,
     local_cursor_attnames,
-    lookup_paths,
     normalize_order_direction,
     order_entry_has_explicit_nulls,
-    resolver_key,
     runtime_path_from_info,
     seals_consumer_prefetch,
 )
@@ -104,54 +101,30 @@ class TestOptimizationPlanIsEmpty:
         assert plan.is_empty is True
 
 
-class TestLookupPaths:
-    """``lookup_paths`` flattens Django lookup paths for the strictness stash."""
+class TestFinalizedLookupPaths:
+    """``finalize()`` flattens Django lookup paths for the strictness stash."""
 
     def test_flatten_select_related_paths(self) -> None:
-        plan = OptimizationPlan(select_related=["item", "item__category"])
-        assert lookup_paths(plan) == {"item", "item__category"}
+        plan = OptimizationPlan(select_related=["item", "item__category"]).finalize()
+        assert plan.finalized_lookup_paths == {"item", "item__category"}
 
     def test_flatten_plain_prefetch_string(self) -> None:
-        plan = OptimizationPlan(prefetch_related=["items"])
-        assert lookup_paths(plan) == {"items"}
+        plan = OptimizationPlan(prefetch_related=["items"]).finalize()
+        assert plan.finalized_lookup_paths == {"items"}
 
     def test_flatten_nested_prefetch_objects_recursively(self) -> None:
         inner = Prefetch("entries", queryset=Entry.objects.only("value", "item_id"))
         outer = Prefetch("items", queryset=Item.objects.prefetch_related(inner))
-        plan = OptimizationPlan(prefetch_related=[outer])
-        assert lookup_paths(plan) == {"items", "items__entries"}
+        plan = OptimizationPlan(prefetch_related=[outer]).finalize()
+        assert plan.finalized_lookup_paths == {"items", "items__entries"}
 
     def test_does_not_include_resolver_keys(self) -> None:
         plan = OptimizationPlan(
             select_related=["category"],
             planned_resolver_keys=["ItemType.category@allItems.category"],
             fk_id_elisions=["ItemType.owner@allItems.owner"],
-        )
-        assert lookup_paths(plan) == {"category"}
-
-    def test_uses_finalized_lookup_paths_after_finalize(self) -> None:
-        """After ``finalize()``, ``lookup_paths`` reuses the frozen path set."""
-        plan = OptimizationPlan(
-            select_related=["category"],
-            prefetch_related=["items"],
         ).finalize()
-        # The frozen set is populated and is what ``lookup_paths`` returns.
-        assert plan.finalized_lookup_paths == frozenset({"category", "items"})
-        result = lookup_paths(plan)
-        assert result == {"category", "items"}
-        # A fresh ``set`` copy, not the frozenset itself.
-        assert isinstance(result, set)
-        assert not isinstance(result, frozenset)
-
-
-def test_resolver_key_includes_parent_type_and_runtime_path() -> None:
-    class ItemType:
-        pass
-
-    assert (
-        resolver_key(ItemType, "category", ("allItems", "category"))
-        == "ItemType.category@allItems.category"
-    )
+        assert plan.finalized_lookup_paths == {"category"}
 
 
 class TestOptimizationPlanApply:
@@ -511,21 +484,6 @@ class TestFlattenSelectRelated:
         assert _flatten_select_related("invalid") == set()
         assert _flatten_select_related(123) == set()
         assert _flatten_select_related([1, 2]) == set()
-
-
-class TestConsumerPrefetchLookups:
-    """``_consumer_prefetch_lookups`` returns a queryset's attached lookups as a list.
-
-    It reads through the shared ``queryset_prefetch_lookups`` owner, which holds
-    the one spelling of the Django-private attribute.
-    """
-
-    def test_attached_lookups_come_back_as_a_list(self) -> None:
-        qs = Item.objects.prefetch_related("entries")
-        assert _consumer_prefetch_lookups(qs) == ["entries"]
-
-    def test_queryset_without_prefetches_gives_an_empty_list(self) -> None:
-        assert _consumer_prefetch_lookups(Item.objects.all()) == []
 
 
 class TestDiffPlanForQueryset:

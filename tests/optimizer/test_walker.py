@@ -3236,7 +3236,7 @@ def test_concrete_order_columns_resolves_expression_relspan_and_attname_entries(
     """``_concrete_order_columns`` handles all three order-entry shapes against a real model.
 
     One pass over ``Book`` exercises every branch: an ``OrderBy(F("title"))``
-    resolves through ``_order_entry_field_name``'s expression arm to the local
+    resolves through ``order_entry_name_and_direction``'s expression arm to the local
     ``title`` column; a related-span ``"shelf__code"`` is skipped (its column is
     referenced in SQL regardless of the ``.only()`` projection, so a scalar-only
     selection never needs it loaded); and a raw FK attname ``"shelf_id"`` (an

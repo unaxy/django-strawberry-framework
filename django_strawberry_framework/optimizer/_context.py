@@ -198,7 +198,7 @@ class _ExecutionFrame:
     optimizer: DjangoOptimizerExtension | None
     strategy: NestedConnectionStrategy | None
     strictness: str | None
-    scoped_relations: set[str] = field(default_factory=set)
+    scoped_relations: set[object] = field(default_factory=set)
     planned_windows: dict[str, PlannedWindow] = field(default_factory=dict)
     plans: dict[PlanCacheKey, OptimizationPlan] = field(default_factory=dict)
     key_parts: dict[int, CacheKeyParts] = field(default_factory=dict)
@@ -317,7 +317,7 @@ def converted_selections_memo() -> dict[ConvertedMemoKey, list[Selection]] | Non
     return None if frame is None else frame.converted
 
 
-def publish_scoped_relations(keys: Iterable[str]) -> None:
+def publish_scoped_relations(keys: Iterable[object]) -> None:
     """Record ``keys`` as optimizer-planned for this execution (idempotent union)."""
     frame = _active_frame()
     if frame is not None:

@@ -33,7 +33,7 @@ fact the fetch strategies need:
 - ``parent_join_columns`` - the child columns a prefetch ``.only()`` must
   load so Django can attach prefetched rows to parents (the window's
   ``PARTITION BY`` column is ``partition_expr``, not this slot).
-- ``through_model`` + ``lateral_shape`` - the Postgres LATERAL strategy's
+- ``lateral_shape`` - the Postgres LATERAL strategy's
   join-SQL selector (``optimizer/lateral_fetch.py``: a ``DIRECT_FK`` shape
   correlates the child table directly; a ``THROUGH_TABLE`` shape joins the
   M2M through table inside the lateral subquery; ``UNSUPPORTED`` never

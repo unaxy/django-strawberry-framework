@@ -58,7 +58,8 @@ convert/normalize pair walks one `convert_with_mro` table in
 `filters/inputs.py`), C5 (`bind_write_declarations`), C6
 (`_consume_fallback`), C11 (the orphan formatter's family words passed per
 `types/finalizer.py::_SidecarBindingSpec`), C13 (`editable_input_fields` on
-`resolve_effective_fields`), B1 (as `ActiveInputPermissionMixin` +
+`resolve_effective_fields`), C12 (no underscore alias re-exports in
+`optimizer/`), B1 (as `ActiveInputPermissionMixin` +
 `SetInputTraversal`), B3 (`relation_id_scalar`, `name_set_input_type_name`),
 B4's `open_write_pipeline`, B5's `require_subclass` / `_target_pk_name` /
 `resolve_unvisited_fragment` / `_validate_set_sidecar`, and D1–D3.
@@ -67,8 +68,7 @@ extras block), `PermissionClassesMixin`, `coerce_pks`,
 `strawberry_schema_config`, `validate_relay_page_bound`,
 `keyset_context_for`, `slot_child_selections`, `iter_relation_path`,
 `install_input_namespace`, `_graphql_surface_names`, `_relay_node_gate`,
-`_attach_generated_resolvers`, and C12 (`optimizer/extension.py` still
-re-exports `_stash_on_context`). Slice 1 A0's re-baseline covers the
+and `_attach_generated_resolvers`. Slice 1 A0's re-baseline covers the
 checklist itself, not only the line totals.
 Five slices: Slice 1 (**boundary hardening**: optimizer surface promotion,
 `import-linter` contracts wired into CI/pre-commit, packaging extras),
