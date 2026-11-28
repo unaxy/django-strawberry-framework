@@ -20,7 +20,7 @@ from typing_extensions import override
 
 from django_strawberry_framework.testing import safe_wrap_connection_method
 from django_strawberry_framework.utils._narrowing import read_attr
-from tests._idioms import call_remove_databases_failures
+from tests._idioms import call_add_databases_failures, call_remove_databases_failures
 
 
 def _database_failure(wrapped: object) -> object:
@@ -95,9 +95,7 @@ def test_safe_wrap_connection_method_works_on_arbitrary_method_names() -> None:
         connection.chunked_cursor = original
 
 
-def test_safe_wrap_connection_method_leaves_djangos_teardown_a_clean_unwrap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_safe_wrap_connection_method_leaves_djangos_teardown_a_clean_unwrap() -> None:
     """End-to-end composition of the helper with Django's setup/teardown pair.
 
     When a consumer uses :func:`safe_wrap_connection_method` while Django's
@@ -105,45 +103,40 @@ def test_safe_wrap_connection_method_leaves_djangos_teardown_a_clean_unwrap(
     ``_remove_databases_failures`` still finds its wrapper and restores the
     original method without any work from the consumer.
 
-    The test wires up the full sequence: install a ``_DatabaseFailure`` on
-    every method Django disallows (simulating ``_add_databases_failures``), have
-    the consumer call ``safe_wrap_connection_method`` (which declines because
-    the ``_DatabaseFailure`` is in place), then run Django's teardown method,
-    which unwraps every one of them.
+    The test runs Django's own ``_add_databases_failures`` for a test class that
+    disallows ``default`` (Django picks the methods it wraps on every supported
+    release), has the consumer call ``safe_wrap_connection_method`` (which declines
+    because the ``_DatabaseFailure`` is in place), then runs Django's teardown
+    method, which unwraps every one of them.
     """
     connection = connections["default"]
     original_cursor = connection.cursor
 
-    sentinel_original = read_attr(mock.sentinel, "untouched_original")
-
-    # Simulate Django's setUpClass installing its ``_DatabaseFailure`` wrappers.
-    for name, _ in connection.features.disallowed_simple_test_case_connection_methods:
-        if name != "cursor":
-            monkeypatch.setattr(connection, name, _database_failure(read_attr(connection, name)))
-    django_wrapper = _database_failure(sentinel_original)
-    monkeypatch.setattr(connection, "cursor", django_wrapper)
-
-    # The consumer attempts to wrap and is correctly declined - Django
-    # already wrapped first.
-    installed = safe_wrap_connection_method(
-        connection,
-        "cursor",
-        mock.Mock(name="consumer_wrapper"),
-    )
-    assert installed is False
-    assert connection.cursor is django_wrapper  # Django's wrapper intact
-
-    # Now run Django's ``_remove_databases_failures`` against a synthetic
-    # test class that disallows only ``default``. It restores the original
-    # cursor cleanly.
     class _NarrowTest(TransactionTestCase):
         databases = set(connections) - {"default"}
 
     try:
+        call_add_databases_failures(_NarrowTest)
+        django_wrapper = connection.cursor
+        assert isinstance(django_wrapper, _DatabaseFailure)
+
+        # The consumer attempts to wrap and is correctly declined - Django
+        # already wrapped first.
+        installed = safe_wrap_connection_method(
+            connection,
+            "cursor",
+            mock.Mock(name="consumer_wrapper"),
+        )
+        assert installed is False
+        assert connection.cursor is django_wrapper  # Django's wrapper intact
+
         call_remove_databases_failures(_NarrowTest)
-        # Wrapper unwrapped to the sentinel original.
-        assert connection.cursor is sentinel_original
+        # Wrapper unwrapped to the method Django wrapped.
+        assert connection.cursor is read_attr(django_wrapper, "wrapped")
     finally:
+        if isinstance(connection.cursor, _DatabaseFailure):
+            call_remove_databases_failures(_NarrowTest)
+        _NarrowTest.doClassCleanups()
         connection.cursor = original_cursor
 
 

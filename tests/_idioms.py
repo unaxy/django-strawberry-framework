@@ -587,16 +587,17 @@ def consumer_query(namespace: Mapping[str, object]) -> type:
     return query
 
 
-def _remove_databases_failures_descriptor(
+def _test_case_classmethod(
     cls: type[SimpleTestCase],
+    name: str,
 ) -> "classmethod[SimpleTestCase, ..., object]":
-    """``cls``'s ``_remove_databases_failures`` descriptor, found along the MRO unbound.
+    """``cls``'s private classmethod descriptor ``name``, found along the MRO unbound.
 
-    django-stubs omits this private classmethod, so a test cannot name it on the class.
-    ``inspect.getattr_static`` fetches the descriptor without binding it and the
-    ``isinstance`` check makes the read assert the shape the callers use.
+    django-stubs omits ``SimpleTestCase``'s private database-failure classmethods, so a test
+    cannot name them on the class. ``inspect.getattr_static`` fetches the descriptor without
+    binding it and the ``isinstance`` check makes the read assert the shape the callers use.
     """
-    descriptor = object_result(inspect.getattr_static, cls, "_remove_databases_failures")
+    descriptor = object_result(inspect.getattr_static, cls, name)
     assert _is_test_case_classmethod(descriptor)
     return descriptor
 
@@ -608,9 +609,14 @@ def _is_test_case_classmethod(
     return isinstance(value, classmethod)
 
 
+def call_add_databases_failures(cls: type[SimpleTestCase]) -> None:
+    """Run ``cls._add_databases_failures()``: the descriptor's function called with ``cls``."""
+    _test_case_classmethod(cls, "_add_databases_failures").__func__(cls)
+
+
 def call_remove_databases_failures(cls: type[SimpleTestCase]) -> None:
     """Run ``cls._remove_databases_failures()``: the descriptor's function called with ``cls``."""
-    _remove_databases_failures_descriptor(cls).__func__(cls)
+    _test_case_classmethod(cls, "_remove_databases_failures").__func__(cls)
 
 
 class RelayNodeHooks(Protocol[_ModelT]):
