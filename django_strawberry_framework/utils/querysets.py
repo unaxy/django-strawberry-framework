@@ -1388,10 +1388,10 @@ def _prefetch_relation_target_or_none(
     reverse-relation target of ``entries`` on the child model, not the first
     relation's model.
     """
-    if type(path) is not str:
+    if not is_str(path):
         return None
     current: type[models.Model] = parent_model
-    for part in path.split(LOOKUP_SEP):
+    for part in str.split(path, LOOKUP_SEP):
         field: object = reverse_relation_by_accessor(current, part)
         if field is None:
             try:

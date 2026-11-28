@@ -38,7 +38,7 @@ from django.core.exceptions import SynchronousOnlyOperation
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import connection, transaction
 from django.db.backends.utils import CursorWrapper
-from django.db.models import F, Model, Prefetch, QuerySet, TextField, Value, Window
+from django.db.models import F, Model, Prefetch, QuerySet, TextChoices, TextField, Value, Window
 from django.db.models.functions import RowNumber, Upper
 from django.db.models.signals import post_init, pre_save
 from django.http import HttpRequest
@@ -24171,6 +24171,41 @@ def test_library_consumer_prefetch_onto_a_hooked_target_is_sealed_through_its_ho
     ]
     assert "hidden" in related_sql, related_sql
     assert "hidden" not in json.dumps(payload), payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("text_choice", [False, True], ids=["string", "text-choice"])
+def test_library_carried_prefetch_lookup_serves_its_target_on_the_parent_alias(
+    *,
+    text_choice: bool,
+) -> None:
+    """A native lookup string carries its target rows with both querysets left unrouted."""
+    _seed_sealed_relation("rfk", 2)
+
+    class RelationLookup(TextChoices):
+        LOANS = "loans"
+
+    lookup = RelationLookup.LOANS if text_choice else "loans"
+    payload, sql = _post_owned(
+        "{ allBooks { title loans { note } } }",
+        lambda: _owned_prefetch_schema(
+            books=lambda queryset: queryset.order_by("pk").prefetch_related(
+                Prefetch(lookup, queryset=models.Loan.objects.order_by("pk")),
+            ),
+            loans=lambda queryset: queryset.exclude(note="hidden"),
+            strictness="raise",
+        ),
+    )
+
+    assert payload == {
+        "data": {
+            "allBooks": [
+                {"title": "b0", "loans": [{"note": "n0"}]},
+                {"title": "b1", "loans": [{"note": "n1"}]},
+            ],
+        },
+    }
+    assert len(sql) == 2, sql
 
 
 async def _post_owned_async(

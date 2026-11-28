@@ -3051,6 +3051,24 @@ def test_prefetch_relation_target_unresolvable_paths_fail_open() -> None:
     assert _prefetch_relation_target_or_none(Branch, "nope") is None
 
 
+def test_prefetch_relation_target_resolves_native_text_choices_lookups() -> None:
+    """Django retains genuine string members; metadata resolves their full lookup paths."""
+
+    class RelationLookup(models.TextChoices):
+        BRANCH = "branch"
+        SPONSORS = "venuesponsor_set"
+        SPONSOR_VENUES = "venuesponsor_set__venues"
+
+    for parent, lookup, target in (
+        (Shelf, RelationLookup.BRANCH, Branch),
+        (Venue, RelationLookup.SPONSORS, VenueSponsor),
+        (Venue, RelationLookup.SPONSOR_VENUES, Venue),
+    ):
+        prefetch = Prefetch(lookup)
+        assert prefetch.prefetch_through is lookup
+        assert _prefetch_relation_target_or_none(parent, prefetch.prefetch_through) is target
+
+
 @pytest.mark.django_db
 def test_prefetch_relation_target_default_accessors_resolve() -> None:
     """The reverse-accessor map resolves every spelling Django's prefetch accepts.
