@@ -1541,7 +1541,6 @@ def test_hook_manager_return_is_coerced() -> None:
     ``Model.objects`` composes exactly like ``Model.objects.all()``. Pure
     composition, so no tables are needed.
     """
-    registry.clear()
     parent_type = _register_ct_pair(lambda _cls, _qs, _info: _CtTarget.objects)
     result = apply_cascade_permissions(parent_type, _CtParent.objects.all(), _INFO)
     assert "IN (SELECT" in str(result.query).upper()
@@ -1559,7 +1558,6 @@ def test_unpinned_hook_return_is_repinned_to_root_alias() -> None:
     the rejection battery). Alias-state only - the alias never resolves a
     connection, so no secondary database (and no table) is needed.
     """
-    registry.clear()
     parent_type = _register_ct_pair(
         lambda _cls, _qs, _info: _CtTarget.objects.filter(name="visible"),
     )
@@ -1681,7 +1679,6 @@ def test_nested_application_off_root_alias_fails_closed(
     ) -> models.QuerySet[models.Model]:
         return apply_cascade_permissions(cls, qs.using(nested_alias), info)
 
-    registry.clear()
     parent_type = _register_ct_pair(_realiasing_hook)
     with pytest.raises(ConfigurationError, match=match):
         apply_cascade_permissions(parent_type, _CtParent.objects.using(root_alias), _INFO)
@@ -1697,7 +1694,6 @@ def test_routed_hook_return_under_unrouted_root_fails_closed() -> None:
     cross-database subquery the moment the outer query is bound to another alias.
     The cascade refuses it at composition, naming the edge, instead.
     """
-    registry.clear()
     parent_type = _register_ct_pair(
         lambda _cls, _qs, _info: _CtTarget.objects.using("default").filter(name="visible"),
     )
@@ -1727,7 +1723,6 @@ def test_unrouted_root_composes_unrouted_subqueries() -> None:
         received.append(queryset_db(qs))
         return qs.filter(name="visible")
 
-    registry.clear()
     parent_type = _register_ct_pair(_record_hook)
     result = apply_cascade_permissions(parent_type, _CtParent.objects.all(), _INFO)
     assert received == [None]

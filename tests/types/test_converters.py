@@ -1145,13 +1145,11 @@ def test_convert_choices_to_enum_raises_on_sanitized_member_collision(
     assert isinstance(field, models.Field)
     original = field.choices
     field.choices = choices
-    registry.clear()
     try:
         with pytest.raises(ConfigurationError, match="sanitize to the same enum member"):
             convert_choices_to_enum(field, "FixtureType")
     finally:
         field.choices = original
-        registry.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -2211,7 +2209,6 @@ def test_convert_scalar_force_nullable_on_choice_field(
     nullable ``nullable_status`` column yields a bare ``EnumType`` - the enum
     members are untouched in both directions.
     """
-    registry.clear()
     status = _concrete_field(choice_fixture_model, "status")
     widened = convert_scalar(status, "FixtureType", force_nullable=True)
     enum_cls = registry.get_enum(choice_fixture_model, "status")

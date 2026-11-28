@@ -556,16 +556,10 @@ def test_plan_relay_id_projects_the_id_column_meta_fields_does_not_name(shape: s
     type's field map, so Strawberry's ``resolve_id`` finds it loaded on every row.
     """
     model, fields, node_id_attr, expected = _RELAY_ID_COLUMN_SHAPES[shape]
-    registry.clear()
-    try:
-        namespace = (
-            {"__annotations__": {node_id_attr: relay.NodeID[str]}} if node_id_attr else None
-        )
-        make_django_type("RelayIdColumnType", model, fields, namespace_extra=namespace)
-        finalize_django_types()
-        plan = plan_optimizations([_global_id()], model)
-    finally:
-        registry.clear()
+    namespace = {"__annotations__": {node_id_attr: relay.NodeID[str]}} if node_id_attr else None
+    make_django_type("RelayIdColumnType", model, fields, namespace_extra=namespace)
+    finalize_django_types()
+    plan = plan_optimizations([_global_id()], model)
 
     assert plan.only_fields == expected
 
@@ -577,27 +571,23 @@ def test_plan_relay_id_of_a_reverse_key_child_projects_its_node_id_column() -> N
     a column the type's ``Meta.fields`` leaves out: the child queryset projects
     it beside the key that attaches each printing to its publisher.
     """
-    registry.clear()
-    try:
-        make_django_type(
-            "RunSizePrintingType",
-            Printing,
-            ("id",),
-            namespace_extra={"__annotations__": {"run_size": relay.NodeID[str]}},
-        )
-        make_django_type(
-            "PrintingsPublisherType",
-            Publisher,
-            ("id", "printings_2"),
-            meta_extra={"relation_shapes": {"printings_2": "list"}},
-        )
-        finalize_django_types()
-        plan = plan_optimizations(
-            [_sel("printings2", selections=[_global_id()], python_name="printings_2")],
-            Publisher,
-        )
-    finally:
-        registry.clear()
+    make_django_type(
+        "RunSizePrintingType",
+        Printing,
+        ("id",),
+        namespace_extra={"__annotations__": {"run_size": relay.NodeID[str]}},
+    )
+    make_django_type(
+        "PrintingsPublisherType",
+        Publisher,
+        ("id", "printings_2"),
+        meta_extra={"relation_shapes": {"printings_2": "list"}},
+    )
+    finalize_django_types()
+    plan = plan_optimizations(
+        [_sel("printings2", selections=[_global_id()], python_name="printings_2")],
+        Publisher,
+    )
 
     (lookup,) = plan.prefetch_related
     assert isinstance(lookup, Prefetch)
@@ -640,13 +630,9 @@ def test_plan_relay_id_no_column_holds_resolves_through_the_field_map(
             raising=False,
         )
         namespace = {"__annotations__": {"slug": relay.NodeID[str]}}
-    registry.clear()
-    try:
-        make_django_type("NoColumnIdType", Publisher, ("name",), namespace_extra=namespace)
-        finalize_django_types()
-        plan = plan_optimizations([_global_id()], Publisher)
-    finally:
-        registry.clear()
+    make_django_type("NoColumnIdType", Publisher, ("name",), namespace_extra=namespace)
+    finalize_django_types()
+    plan = plan_optimizations([_global_id()], Publisher)
 
     assert plan.only_fields == ()
 
@@ -659,30 +645,26 @@ def test_plan_relay_id_projects_attname_when_pk_is_relation() -> None:
     ``patron_id``. The id projection names the column, the key
     Strawberry's ``resolve_id`` reads from the row.
     """
-    registry.clear()
-    try:
 
-        class PatronNode(DjangoType):
-            class Meta:
-                model = Patron
-                fields = ("name",)
+    class PatronNode(DjangoType):
+        class Meta:
+            model = Patron
+            fields = ("name",)
 
-        assert registry.get(Patron) is PatronNode
+    assert registry.get(Patron) is PatronNode
 
-        class PatronProfileNode(DjangoType):
-            class Meta:
-                model = PatronProfile
-                fields = ("patron", "postal_code")
-                interfaces = (relay.Node,)
+    class PatronProfileNode(DjangoType):
+        class Meta:
+            model = PatronProfile
+            fields = ("patron", "postal_code")
+            interfaces = (relay.Node,)
 
-        assert registry.get(PatronProfile) is PatronProfileNode
+    assert registry.get(PatronProfile) is PatronProfileNode
 
-        finalize_django_types()
-        plan = plan_optimizations([_global_id()], PatronProfile)
+    finalize_django_types()
+    plan = plan_optimizations([_global_id()], PatronProfile)
 
-        assert "patron_id" in plan.only_fields
-    finally:
-        registry.clear()
+    assert "patron_id" in plan.only_fields
 
 
 def _relation_plan_shape(plan: OptimizationPlan) -> dict[str, object]:
@@ -856,7 +838,6 @@ def test_unregistered_field_map_stamps_a_multi_column_forward_foreign_object() -
     model no ``DjangoType`` registers; the multi-column forward link stamps
     without raising, so planning the model's scalars still succeeds.
     """
-    registry.clear()
     plan = plan_optimizations([_sel("name")], LnkPairChild)
     assert plan.only_fields == ("name",)
 
@@ -1278,31 +1259,27 @@ def test_plan_does_not_elide_when_fragment_contains_relation_selection() -> None
 
 def test_plan_does_not_elide_forward_fk_when_target_has_custom_get_queryset() -> None:
     """Visibility hooks win over FK-id elision."""
-    registry.clear()
-    try:
 
-        class FilteredCategoryType(DjangoType):
-            class Meta:
-                model = Category
-                fields = ("id", "name")
+    class FilteredCategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
 
-            @override
-            @classmethod
-            def get_queryset(
-                cls,
-                queryset: QuerySet[Category],
-                info: strawberry.Info,
-            ) -> QuerySet[Category]:
-                return queryset
+        @override
+        @classmethod
+        def get_queryset(
+            cls,
+            queryset: QuerySet[Category],
+            info: strawberry.Info,
+        ) -> QuerySet[Category]:
+            return queryset
 
-        del FilteredCategoryType
-        plan = plan_optimizations(
-            [_sel("category", selections=[_sel("id")])],
-            Item,
-            info=raw_info_of(make_info()),
-        )
-    finally:
-        registry.clear()
+    del FilteredCategoryType
+    plan = plan_optimizations(
+        [_sel("category", selections=[_sel("id")])],
+        Item,
+        info=raw_info_of(make_info()),
+    )
 
     assert plan.select_related == ()
     assert plan.fk_id_elisions == ()
@@ -1555,32 +1532,28 @@ def test_plan_does_not_elide_when_target_type_has_custom_id_resolver() -> None:
     column does not carry the house code, so an ``{ id }``-only child selection
     keeps its join, and the join loads ``house_code``, the column the id reads.
     """
-    registry.clear()
-    try:
 
-        class PublisherType(DjangoType):
-            house_code: relay.NodeID[str]
+    class PublisherType(DjangoType):
+        house_code: relay.NodeID[str]
 
-            class Meta:
-                model = Publisher
-                fields = ("id", "name", "house_code")
-                interfaces = (relay.Node,)
+        class Meta:
+            model = Publisher
+            fields = ("id", "name", "house_code")
+            interfaces = (relay.Node,)
 
-        assert registry.get(Publisher) is PublisherType
+    assert registry.get(Publisher) is PublisherType
 
-        class EditionType(DjangoType):
-            class Meta:
-                model = Edition
-                fields = ("isbn_13", "publisher")
+    class EditionType(DjangoType):
+        class Meta:
+            model = Edition
+            fields = ("isbn_13", "publisher")
 
-        finalize_django_types()
-        plan = plan_optimizations(
-            [_sel("publisher", selections=[_global_id()])],
-            Edition,
-            source_type=EditionType,
-        )
-    finally:
-        registry.clear()
+    finalize_django_types()
+    plan = plan_optimizations(
+        [_sel("publisher", selections=[_global_id()])],
+        Edition,
+        source_type=EditionType,
+    )
 
     assert plan.select_related == ("publisher",)
     assert plan.fk_id_elisions == ()
@@ -1595,7 +1568,6 @@ def test_plan_uses_definition_custom_id_resolver_cache(monkeypatch: pytest.Monke
         def has_custom_get_queryset(cls) -> bool:
             return False
 
-    registry.clear()
     _register_type_definition(Publisher, PublisherType)
     definition = registry.get_definition(PublisherType)
     assert definition is not None
@@ -1606,13 +1578,10 @@ def test_plan_uses_definition_custom_id_resolver_cache(monkeypatch: pytest.Monke
         return True
 
     monkeypatch.setattr(definition, "has_custom_id_resolver_for", has_custom_id_resolver_for)
-    try:
-        plan = plan_optimizations(
-            [_sel("publisher", selections=[_sel("id")])],
-            Edition,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("publisher", selections=[_sel("id")])],
+        Edition,
+    )
 
     assert calls == [("id", False)]
     assert plan.select_related == ("publisher",)
@@ -1639,7 +1608,6 @@ def test_has_custom_id_resolver_fallback_matches_definition_path() -> None:
     class FrameworkDefaultTarget(relay.Node):
         pass
 
-    registry.clear()
     assert registry.get_definition(PlainCustomTarget) is None
     assert registry.get_definition(FrameworkDefaultTarget) is None
 
@@ -1657,7 +1625,6 @@ def test_has_custom_id_resolver_fallback_matches_definition_path() -> None:
 
 def test_plan_downgrades_select_related_when_target_has_custom_get_queryset() -> None:
     """A custom target ``get_queryset`` downgrades forward FK joins to ``Prefetch``."""
-    registry.clear()
     info = raw_info_of(make_info())
     seen_querysets: list[QuerySet[Category]] = []
     seen_infos: list[object] = []
@@ -1679,14 +1646,11 @@ def test_plan_downgrades_select_related_when_target_has_custom_get_queryset() ->
             return queryset.filter(is_private=False)
 
     del FilteredCategoryType
-    try:
-        plan = plan_optimizations(
-            [_sel("category", selections=[_sel("name")])],
-            Item,
-            info=info,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("category", selections=[_sel("name")])],
+        Item,
+        info=info,
+    )
 
     assert plan.select_related == ()
     assert plan.only_fields == ("category_id",)
@@ -1706,7 +1670,6 @@ def test_plan_downgrades_select_related_when_target_has_custom_get_queryset() ->
 
 def test_plan_keeps_select_related_when_target_uses_default_get_queryset() -> None:
     """Registered target types without custom ``get_queryset`` still use joins."""
-    registry.clear()
 
     class DefaultCategoryType(DjangoType):
         class Meta:
@@ -1714,13 +1677,10 @@ def test_plan_keeps_select_related_when_target_uses_default_get_queryset() -> No
             fields = ("id", "name")
 
     del DefaultCategoryType
-    try:
-        plan = plan_optimizations(
-            [_sel("category", selections=[_sel("name")])],
-            Item,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("category", selections=[_sel("name")])],
+        Item,
+    )
 
     assert plan.select_related == ("category",)
     assert plan.prefetch_related == ()
@@ -1730,7 +1690,6 @@ def test_plan_keeps_select_related_when_target_uses_default_get_queryset() -> No
 
 def test_plan_prefetches_many_side_with_custom_target_get_queryset() -> None:
     """many-side relations use filtered ``Prefetch`` when the target has visibility logic."""
-    registry.clear()
     calls: dict[str, QuerySet[Item]] = {}
 
     class FilteredItemType(DjangoType):
@@ -1745,14 +1704,11 @@ def test_plan_prefetches_many_side_with_custom_target_get_queryset() -> None:
             return queryset.filter(is_private=False)
 
     del FilteredItemType
-    try:
-        plan = plan_optimizations(
-            [_sel("items", selections=[_sel("name")])],
-            Category,
-            info=raw_info_of(make_info()),
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("items", selections=[_sel("name")])],
+        Category,
+        info=raw_info_of(make_info()),
+    )
 
     assert plan.select_related == ()
     assert plan.cacheable is False
@@ -1775,7 +1731,6 @@ def test_plan_refuses_sliced_hook_result_for_plain_list_relation() -> None:
     nested-connection child does not hold here: the seal refuses the shape while it
     is still a configuration question, naming the hook.
     """
-    registry.clear()
 
     class SlicedItemType(DjangoType):
         class Meta:
@@ -1788,15 +1743,12 @@ def test_plan_refuses_sliced_hook_result_for_plain_list_relation() -> None:
             return queryset.order_by("pk")[:1]
 
     del SlicedItemType
-    try:
-        with pytest.raises(ConfigurationError) as excinfo:
-            plan_optimizations(
-                [_sel("items", selections=[_sel("name")])],
-                Category,
-                info=raw_info_of(make_info()),
-            )
-    finally:
-        registry.clear()
+    with pytest.raises(ConfigurationError) as excinfo:
+        plan_optimizations(
+            [_sel("items", selections=[_sel("name")])],
+            Category,
+            info=raw_info_of(make_info()),
+        )
 
     message = str(excinfo.value)
     assert "SlicedItemType.get_queryset returned a sliced queryset (rows 0:1)" in message
@@ -2040,7 +1992,6 @@ def test_plan_combines_prefetch_boundary_with_inner_select_related() -> None:
 
 def test_plan_propagates_uncacheable_nested_custom_get_queryset() -> None:
     """A nested custom ``get_queryset`` makes the root plan uncacheable."""
-    registry.clear()
 
     class FilteredEntryType(DjangoType):
         class Meta:
@@ -2053,14 +2004,11 @@ def test_plan_propagates_uncacheable_nested_custom_get_queryset() -> None:
             return queryset.filter(is_private=False)
 
     del FilteredEntryType
-    try:
-        plan = plan_optimizations(
-            [_sel("items", selections=[_sel("entries", selections=[_sel("value")])])],
-            Category,
-            info=raw_info_of(make_info()),
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("items", selections=[_sel("entries", selections=[_sel("value")])])],
+        Category,
+        info=raw_info_of(make_info()),
+    )
 
     assert plan.cacheable is False
     outer = _prefetch_entry(plan)
@@ -2072,7 +2020,6 @@ def test_plan_propagates_uncacheable_nested_custom_get_queryset() -> None:
 
 def test_plan_honors_optimizer_hints_at_nested_depth() -> None:
     """Nested ``OptimizerHint.SKIP`` suppresses that branch."""
-    registry.clear()
 
     class ItemType:
         @classmethod
@@ -2080,13 +2027,10 @@ def test_plan_honors_optimizer_hints_at_nested_depth() -> None:
             return False
 
     _register_type_definition(Item, ItemType, optimizer_hints={"entries": OptimizerHint.SKIP})
-    try:
-        plan = plan_optimizations(
-            [_sel("items", selections=[_sel("entries", selections=[_sel("value")])])],
-            Category,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("items", selections=[_sel("entries", selections=[_sel("value")])])],
+        Category,
+    )
 
     prefetch = _prefetch_entry(plan)
     assert prefetch.prefetch_to == "items"
@@ -2096,7 +2040,6 @@ def test_plan_honors_optimizer_hints_at_nested_depth() -> None:
 
 def test_plan_refuses_a_hint_without_a_registered_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """A hints map answered beside no registered type is a defect the walk names."""
-    registry.clear()
 
     class CategoryType:
         @classmethod
@@ -2121,16 +2064,12 @@ def test_plan_refuses_a_hint_without_a_registered_type(monkeypatch: pytest.Monke
         "django_strawberry_framework.optimizer.walker._resolve_field_map",
         unregistered,
     )
-    try:
-        with pytest.raises(TypeError, match="optimizer hint on 'items' without a registered"):
-            plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
-    finally:
-        registry.clear()
+    with pytest.raises(TypeError, match="optimizer hint on 'items' without a registered"):
+        plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
 
 
 def test_plan_honors_prefetch_obj_hint_does_not_walk_inner_selections() -> None:
     """Explicit ``Prefetch`` hints are leaf operations."""
-    registry.clear()
     explicit = Prefetch("items", queryset=Item.objects.only("name"))
 
     class CategoryType:
@@ -2143,13 +2082,10 @@ def test_plan_honors_prefetch_obj_hint_does_not_walk_inner_selections() -> None:
         CategoryType,
         optimizer_hints={"items": OptimizerHint.prefetch(explicit)},
     )
-    try:
-        plan = plan_optimizations(
-            [_sel("items", selections=[_sel("entries", selections=[_sel("value")])])],
-            Category,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("items", selections=[_sel("entries", selections=[_sel("value")])])],
+        Category,
+    )
 
     assert plan.prefetch_related == (explicit,)
 
@@ -2186,7 +2122,6 @@ def test_plan_rewrites_a_combined_prefetch_obj_hint_to_its_primary_key_set(
     the subquery.
     """
     seed_data(1)
-    registry.clear()
     first, second, third = Item.objects.order_by("pk")[:3]
     combined = build(
         Item.objects.using("default").prefetch_related("entries"),
@@ -2204,10 +2139,7 @@ def test_plan_rewrites_a_combined_prefetch_obj_hint_to_its_primary_key_set(
         CategoryType,
         optimizer_hints={"items": OptimizerHint.prefetch(explicit)},
     )
-    try:
-        plan = plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
-    finally:
-        registry.clear()
+    plan = plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
 
     (planned,) = plan.prefetch_related
     assert isinstance(planned, Prefetch)
@@ -2251,7 +2183,6 @@ def test_plan_refuses_a_combined_prefetch_obj_hint_the_primary_key_set_cannot_ca
     detail: str,
 ) -> None:
     """A hinted ``Prefetch`` its primary-key set cannot carry fails at plan time, typed."""
-    registry.clear()
     explicit = Prefetch("items", queryset=combined())
 
     class CategoryType:
@@ -2264,11 +2195,8 @@ def test_plan_refuses_a_combined_prefetch_obj_hint_the_primary_key_set_cannot_ca
         CategoryType,
         optimizer_hints={"items": OptimizerHint.prefetch(explicit)},
     )
-    try:
-        with pytest.raises(ConfigurationError) as excinfo:
-            plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
-    finally:
-        registry.clear()
+    with pytest.raises(ConfigurationError) as excinfo:
+        plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
     assert str(excinfo.value) == (
         f"OptimizerHint.prefetch(obj) on CategoryType.items: the hinted Prefetch queryset is "
         f"combined ({detail}); " + _COMBINED_WHAT.format(model="Item", detail=detail)
@@ -2277,7 +2205,6 @@ def test_plan_refuses_a_combined_prefetch_obj_hint_the_primary_key_set_cannot_ca
 
 def test_plan_prefetch_obj_hint_on_forward_fk_adds_connector_column() -> None:
     """Explicit ``Prefetch`` hints on forward FKs keep the source FK column."""
-    registry.clear()
     explicit = Prefetch("category", queryset=Category.objects.only("name"))
 
     class ItemType:
@@ -2290,10 +2217,7 @@ def test_plan_prefetch_obj_hint_on_forward_fk_adds_connector_column() -> None:
         ItemType,
         optimizer_hints={"category": OptimizerHint.prefetch(explicit)},
     )
-    try:
-        plan = plan_optimizations([_sel("category", selections=[_sel("name")])], Item)
-    finally:
-        registry.clear()
+    plan = plan_optimizations([_sel("category", selections=[_sel("name")])], Item)
 
     assert plan.prefetch_related == (explicit,)
     assert plan.only_fields == ("category_id",)
@@ -2302,7 +2226,6 @@ def test_plan_prefetch_obj_hint_on_forward_fk_adds_connector_column() -> None:
 
 def test_plan_prefetch_obj_hint_adapts_nested_selected_parent_prefix() -> None:
     """type-relative explicit ``Prefetch`` hints are rooted at the current path."""
-    registry.clear()
     explicit = Prefetch("items", queryset=Item.objects.only("name"))
 
     class CategoryType:
@@ -2315,13 +2238,10 @@ def test_plan_prefetch_obj_hint_adapts_nested_selected_parent_prefix() -> None:
         CategoryType,
         optimizer_hints={"items": OptimizerHint.prefetch(explicit)},
     )
-    try:
-        plan = plan_optimizations(
-            [_sel("category", selections=[_sel("items", selections=[_sel("name")])])],
-            Item,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("category", selections=[_sel("items", selections=[_sel("name")])])],
+        Item,
+    )
 
     assert plan.select_related == ("category",)
     assert plan.only_fields == ("category_id",)
@@ -2337,7 +2257,6 @@ def test_plan_prefetch_obj_hint_adapts_nested_selected_parent_prefix() -> None:
 
 def test_plan_force_select_hint_uses_select_recursion() -> None:
     """``select_related`` hints flow through same-query recursion."""
-    registry.clear()
 
     class ItemType:
         @classmethod
@@ -2349,18 +2268,15 @@ def test_plan_force_select_hint_uses_select_recursion() -> None:
         ItemType,
         optimizer_hints={"category": OptimizerHint.select_related()},
     )
-    try:
-        plan = plan_optimizations(
-            [
-                _sel(
-                    "category",
-                    selections=[_sel("name"), _sel("items", selections=[_sel("name")])],
-                ),
-            ],
-            Item,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [
+            _sel(
+                "category",
+                selections=[_sel("name"), _sel("items", selections=[_sel("name")])],
+            ),
+        ],
+        Item,
+    )
 
     assert plan.select_related == ("category",)
     assert plan.only_fields == ("category_id", "category__name")
@@ -2375,7 +2291,6 @@ def test_plan_force_select_hint_uses_select_recursion() -> None:
 
 def test_plan_force_select_hint_downgrades_for_custom_target_get_queryset() -> None:
     """``force_select`` cannot override target visibility hooks."""
-    registry.clear()
     calls: list[strawberry.Info] = []
 
     class CategoryType(DjangoType):
@@ -2401,14 +2316,11 @@ def test_plan_force_select_hint_downgrades_for_custom_target_get_queryset() -> N
 
     del CategoryType, ItemType
     info = raw_info_of(make_info())
-    try:
-        plan = plan_optimizations(
-            [_sel("category", selections=[_sel("name")])],
-            Item,
-            info=info,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("category", selections=[_sel("name")])],
+        Item,
+        info=info,
+    )
 
     assert [raw_info_of(hook_info) for hook_info in calls] == [info]
     assert plan.select_related == ()
@@ -2429,7 +2341,6 @@ def test_plan_force_select_hint_raises_for_many_side_relation() -> None:
     a typed error naming ``OptimizerHint.select_related()`` and the offending field
     instead of a deep Django ``FieldError`` stack trace.
     """
-    registry.clear()
 
     class CategoryType:
         @classmethod
@@ -2441,14 +2352,11 @@ def test_plan_force_select_hint_raises_for_many_side_relation() -> None:
         CategoryType,
         optimizer_hints={"items": OptimizerHint.select_related()},
     )
-    try:
-        with pytest.raises(
-            ConfigurationError,
-            match=r"OptimizerHint\.select_related\(\) on CategoryType\.items",
-        ):
-            plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
-    finally:
-        registry.clear()
+    with pytest.raises(
+        ConfigurationError,
+        match=r"OptimizerHint\.select_related\(\) on CategoryType\.items",
+    ):
+        plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
 
 
 def test_plan_no_flag_hint_falls_through_to_default_dispatch() -> None:
@@ -2461,7 +2369,6 @@ def test_plan_no_flag_hint_falls_through_to_default_dispatch() -> None:
     must treat it as if no hint were present, not silently skip the
     field or do something unexpected.
     """
-    registry.clear()
 
     class ItemType:
         @classmethod
@@ -2469,10 +2376,7 @@ def test_plan_no_flag_hint_falls_through_to_default_dispatch() -> None:
             return False
 
     _register_type_definition(Item, ItemType, optimizer_hints={"category": OptimizerHint()})
-    try:
-        plan = plan_optimizations([_sel("category", selections=[_sel("name")])], Item)
-    finally:
-        registry.clear()
+    plan = plan_optimizations([_sel("category", selections=[_sel("name")])], Item)
 
     # Forward FK with non-id-only child -> default dispatch picks select_related.
     assert plan.select_related == ("category",)
@@ -2604,7 +2508,6 @@ def test_plan_prefetch_obj_hint_marks_plan_non_cacheable() -> None:
     the cached Prefetch across requests would leak the first request's state.
     Mirrors the has_custom_get_queryset cache-safety flip in _plan_prefetch_relation.
     """
-    registry.clear()
     explicit = Prefetch("items", queryset=Item.objects.only("name"))
 
     class CategoryType:
@@ -2617,13 +2520,10 @@ def test_plan_prefetch_obj_hint_marks_plan_non_cacheable() -> None:
         CategoryType,
         optimizer_hints={"items": OptimizerHint.prefetch(explicit)},
     )
-    try:
-        plan = plan_optimizations(
-            [_sel("items", selections=[_sel("name")])],
-            Category,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("items", selections=[_sel("name")])],
+        Category,
+    )
 
     assert plan.cacheable is False
     assert plan.prefetch_related == (explicit,)
@@ -2637,7 +2537,6 @@ def test_plan_prefetch_obj_hint_dedupes_repeat_lookups() -> None:
     entries for the same lookup path; Django's later attach replaces the first
     and silently drops the consumer's queryset depending on order.
     """
-    registry.clear()
     explicit = Prefetch("items", queryset=Item.objects.only("name"))
 
     class CategoryType:
@@ -2650,23 +2549,19 @@ def test_plan_prefetch_obj_hint_dedupes_repeat_lookups() -> None:
         CategoryType,
         optimizer_hints={"items": OptimizerHint.prefetch(explicit)},
     )
-    try:
-        # Two sibling selections of the same field; _merge_aliased_selections
-        # collapses them, but the dedupe guard is the load-bearing invariant
-        # here - assert there is exactly one prefetch entry on the plan.
-        plan = plan_optimizations(
-            [_sel("items", selections=[_sel("name")]), _sel("items", selections=[_sel("name")])],
-            Category,
-        )
-    finally:
-        registry.clear()
+    # Two sibling selections of the same field; _merge_aliased_selections
+    # collapses them, but the dedupe guard is the load-bearing invariant
+    # here - assert there is exactly one prefetch entry on the plan.
+    plan = plan_optimizations(
+        [_sel("items", selections=[_sel("name")]), _sel("items", selections=[_sel("name")])],
+        Category,
+    )
 
     assert plan.prefetch_related == (explicit,)
 
 
 def test_plan_tolerates_registered_type_without_definition() -> None:
     """Shape guard: a stale registered type without definition metadata has no hints."""
-    registry.clear()
 
     @_as_definitionless_django_type
     class ItemType:
@@ -2675,10 +2570,7 @@ def test_plan_tolerates_registered_type_without_definition() -> None:
             return False
 
     registry.register(Item, ItemType)
-    try:
-        plan = plan_optimizations([_sel("category", selections=[_sel("name")])], Item)
-    finally:
-        registry.clear()
+    plan = plan_optimizations([_sel("category", selections=[_sel("name")])], Item)
 
     assert plan.select_related == ("category",)
 
@@ -2777,7 +2669,6 @@ def test_apply_hint_prefetch_obj_misconfigured_lookup_leaves_plan_clean() -> Non
     ``only_fields``, or ``cacheable=False`` for a relation that was
     never actually planned.
     """
-    registry.clear()
 
     class ItemType(DjangoType):
         class Meta:
@@ -2858,32 +2749,28 @@ def test_generic_connection_node_selection_projects_content_type_column() -> Non
     child plan and ``_ensure_connector_only_fields``. Both paths must include
     ``content_type_id`` or prefetch attach deferred-refetches once per edge.
     """
-    registry.clear()
-    try:
-        types = _generic_connection_types()
-        branch_model, branch_type = types["Branch"]
-        tagged_model = types["TaggedItem"][0]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "tagsConnection",
-                    node_selections=[_sel("tag")],
-                    arguments={"first": 2},
-                ),
-            ],
-            branch_model,
-            info=_fake_info(),
-            source_type=branch_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        only_fields, defer = prefetch.queryset.query.deferred_loading
-        assert defer is False
-        object_id = _attname(tagged_model, "object_id")
-        content_type_id = _attname(tagged_model, "content_type")
-        assert {"tag", object_id, content_type_id} <= set(only_fields)
-    finally:
-        registry.clear()
+    types = _generic_connection_types()
+    branch_model, branch_type = types["Branch"]
+    tagged_model = types["TaggedItem"][0]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "tagsConnection",
+                node_selections=[_sel("tag")],
+                arguments={"first": 2},
+            ),
+        ],
+        branch_model,
+        info=_fake_info(),
+        source_type=branch_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    only_fields, defer = prefetch.queryset.query.deferred_loading
+    assert defer is False
+    object_id = _attname(tagged_model, "object_id")
+    content_type_id = _attname(tagged_model, "content_type")
+    assert {"tag", object_id, content_type_id} <= set(only_fields)
 
 
 # ---------------------------------------------------------------------------
@@ -2903,7 +2790,6 @@ def test_optimizer_walker_plans_root_from_resolver_return_type_when_secondary() 
     ``registry.get(Item)`` -> ``ItemType``, and the SKIP would suppress
     the relation entirely.
     """
-    registry.clear()
 
     class ItemType(DjangoType):
         class Meta:
@@ -2919,14 +2805,11 @@ def test_optimizer_walker_plans_root_from_resolver_return_type_when_secondary() 
             optimizer_hints = {"category": OptimizerHint.prefetch_related()}
 
     del ItemType
-    try:
-        plan = plan_optimizations(
-            [_sel("category", selections=[_sel("name")])],
-            Item,
-            source_type=AdminItemType,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("category", selections=[_sel("name")])],
+        Item,
+        source_type=AdminItemType,
+    )
 
     # AdminItemType's force_prefetch wins; the prefetch_related bag is populated
     # and select_related stays empty.
@@ -2943,7 +2826,6 @@ def test_scalar_only_secondary_resolver_uses_secondary_field_map() -> None:
     the secondary's field_map; without it the primary's lookup would
     treat ``name`` as unknown and drop the only-field projection.
     """
-    registry.clear()
 
     # Primary's field_map omits ``name``.
     class ItemType(DjangoType):
@@ -2959,14 +2841,11 @@ def test_scalar_only_secondary_resolver_uses_secondary_field_map() -> None:
             fields = ("id", "name", "category")
 
     del ItemType
-    try:
-        plan = plan_optimizations(
-            [_sel("name")],
-            Item,
-            source_type=AdminItemType,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("name")],
+        Item,
+        source_type=AdminItemType,
+    )
 
     # Secondary's field_map includes ``name`` so the only-field projection lands.
     assert "name" in plan.only_fields
@@ -2984,7 +2863,6 @@ def test_optimizer_walker_uses_primary_for_nested_relation_target() -> None:
     only_fields projection, confirming the nested target picks the
     primary and not the secondary.
     """
-    registry.clear()
 
     class ItemType:
         @classmethod
@@ -3010,13 +2888,10 @@ def test_optimizer_walker_uses_primary_for_nested_relation_target() -> None:
     _register_type_definition(Item, ItemType, field_map=primary_field_map, primary=True)
     _register_type_definition(Item, AdminItemType)
     _register_type_definition(Category, CategoryType)
-    try:
-        plan = plan_optimizations(
-            [_sel("items", selections=[_sel("name"), _sel("id")])],
-            Category,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("items", selections=[_sel("name"), _sel("id")])],
+        Category,
+    )
 
     # The nested step uses ItemType's field_map (primary), which omits
     # ``name``. So the prefetch's child queryset only_fields excludes
@@ -3037,7 +2912,6 @@ def test_walker_resolves_relation_targets_through_definition_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Registered relation targets route through ``DjangoTypeDefinition.related_target_for``."""
-    registry.clear()
 
     class CategoryType(DjangoType):
         class Meta:
@@ -3062,14 +2936,11 @@ def test_walker_resolves_relation_targets_through_definition_metadata(
         return real_related_target_for(field_name)
 
     monkeypatch.setattr(definition, "related_target_for", spy_related_target_for)
-    try:
-        plan = plan_optimizations(
-            [_sel("category", selections=[_sel("name")])],
-            Item,
-            source_type=ItemType,
-        )
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [_sel("category", selections=[_sel("name")])],
+        Item,
+        source_type=ItemType,
+    )
 
     assert calls == ["category"]
     assert plan.select_related == ("category",)
@@ -3176,27 +3047,23 @@ def test_windowed_prefetch_queryset_carries_non_pk_deterministic_order() -> None
     this pins that a real ``Meta.ordering`` column propagates to the queryset's
     own ``ORDER BY`` (spec-033 Decision 4, cursor-parity).
     """
-    registry.clear()
-    try:
-        types = _ordered_connection_types()
-        card_model, card_type = types["Card"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "decisionsConnection",
-                    node_selections=[_sel("decidedAt")],
-                    arguments={"first": 3},
-                ),
-            ],
-            card_model,
-            info=_fake_info(),
-            source_type=card_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        assert tuple(prefetch.queryset.query.order_by) == ("decided_at", "id")
-    finally:
-        registry.clear()
+    types = _ordered_connection_types()
+    card_model, card_type = types["Card"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "decisionsConnection",
+                node_selections=[_sel("decidedAt")],
+                arguments={"first": 3},
+            ),
+        ],
+        card_model,
+        info=_fake_info(),
+        source_type=card_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    assert tuple(prefetch.queryset.query.order_by) == ("decided_at", "id")
 
 
 def test_scalar_only_window_projects_non_pk_order_column() -> None:
@@ -3206,30 +3073,26 @@ def test_scalar_only_window_projects_non_pk_order_column() -> None:
     the projection must carry pk + reverse-FK connector + the ``decided_at``
     order column, not the full row (spec-033 Decision 6).
     """
-    registry.clear()
-    try:
-        types = _ordered_connection_types()
-        card_model, card_type = types["Card"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "decisionsConnection",
-                    scalar_children=["totalCount"],
-                    arguments={"first": 3},
-                ),
-            ],
-            card_model,
-            info=_fake_info(),
-            source_type=card_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        only_fields, defer = prefetch.queryset.query.deferred_loading
-        assert defer is False
-        # pk + reverse-FK connector (card_id) + the non-pk ORDER column (decided_at).
-        assert {"id", "card_id", "decided_at"} <= set(only_fields)
-    finally:
-        registry.clear()
+    types = _ordered_connection_types()
+    card_model, card_type = types["Card"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "decisionsConnection",
+                scalar_children=["totalCount"],
+                arguments={"first": 3},
+            ),
+        ],
+        card_model,
+        info=_fake_info(),
+        source_type=card_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    only_fields, defer = prefetch.queryset.query.deferred_loading
+    assert defer is False
+    # pk + reverse-FK connector (card_id) + the non-pk ORDER column (decided_at).
+    assert {"id", "card_id", "decided_at"} <= set(only_fields)
 
 
 def test_concrete_order_columns_resolves_expression_relspan_and_attname_entries() -> None:
@@ -3302,26 +3165,22 @@ def test_plan_connection_relation_non_windowable_partition_is_noop() -> None:
     single-valued kind as not windowable; the planner leaves the selection
     unplanned (spec-033 Decision 6).
     """
-    registry.clear()
-    try:
-        plan = OptimizationPlan()
-        _plan_connection_relation(
-            _conn_sel("categoryConnection", node_selections=[_sel("id")], arguments={"first": 2}),
-            None,
-            relation_field_name="category",
-            field_map={"category": FieldMeta.from_django_field(Item._meta.get_field("category"))},
-            plan=plan,
-            prefix="",
-            lookup_prefix="",
-            info=_fake_info(),
-            runtime_prefixes=((),),
-            type_cls=None,
-            model=Item,
-        )
-        assert not plan.prefetch_related
-        assert not plan.planned_resolver_keys
-    finally:
-        registry.clear()
+    plan = OptimizationPlan()
+    _plan_connection_relation(
+        _conn_sel("categoryConnection", node_selections=[_sel("id")], arguments={"first": 2}),
+        None,
+        relation_field_name="category",
+        field_map={"category": FieldMeta.from_django_field(Item._meta.get_field("category"))},
+        plan=plan,
+        prefix="",
+        lookup_prefix="",
+        info=_fake_info(),
+        runtime_prefixes=((),),
+        type_cls=None,
+        model=Item,
+    )
+    assert not plan.prefetch_related
+    assert not plan.planned_resolver_keys
 
 
 @pytest.mark.parametrize("keyset", [False, True], ids=["offset-target", "keyset-target"])
@@ -3338,41 +3197,37 @@ def test_non_windowable_relation_still_records_a_malformed_pagination_identity(
     Both record the relation's identity, so strictness leaves the pipeline's
     own cursor error to the field.
     """
-    registry.clear()
-    try:
-        meta: dict[str, object] = {"model": Category, "fields": ("id", "name")}
-        if keyset:
-            meta.update(cursor_field=("id",), interfaces=(relay.Node,))
-        type("WalkerGateCategoryType", (DjangoType,), {"Meta": type("Meta", (), meta)})
-        finalize_django_types()
-        minus_id = ("-id",)
-        after = encode_keyset_cursor(
-            cursor_columns_for(Category, minus_id),
-            Category(pk=7),
-            fingerprint=order_fingerprint(minus_id),
-        )
-        plan = OptimizationPlan()
-        _plan_connection_relation(
-            _conn_sel(
-                "categoryConnection",
-                node_selections=[_sel("id")],
-                arguments={"first": 1, "after": after},
-            ),
-            None,
-            relation_field_name="category",
-            field_map={"category": FieldMeta.from_django_field(Item._meta.get_field("category"))},
-            plan=plan,
-            prefix="",
-            lookup_prefix="",
-            info=_fake_info(),
-            runtime_prefixes=((),),
-            type_cls=None,
-            model=Item,
-        )
-        assert not plan.prefetch_related
-        assert list(plan.planned_resolver_keys) == ["category@categoryConnection"]
-    finally:
-        registry.clear()
+    meta: dict[str, object] = {"model": Category, "fields": ("id", "name")}
+    if keyset:
+        meta.update(cursor_field=("id",), interfaces=(relay.Node,))
+    type("WalkerGateCategoryType", (DjangoType,), {"Meta": type("Meta", (), meta)})
+    finalize_django_types()
+    minus_id = ("-id",)
+    after = encode_keyset_cursor(
+        cursor_columns_for(Category, minus_id),
+        Category(pk=7),
+        fingerprint=order_fingerprint(minus_id),
+    )
+    plan = OptimizationPlan()
+    _plan_connection_relation(
+        _conn_sel(
+            "categoryConnection",
+            node_selections=[_sel("id")],
+            arguments={"first": 1, "after": after},
+        ),
+        None,
+        relation_field_name="category",
+        field_map={"category": FieldMeta.from_django_field(Item._meta.get_field("category"))},
+        plan=plan,
+        prefix="",
+        lookup_prefix="",
+        info=_fake_info(),
+        runtime_prefixes=((),),
+        type_cls=None,
+        model=Item,
+    )
+    assert not plan.prefetch_related
+    assert list(plan.planned_resolver_keys) == ["category@categoryConnection"]
 
 
 @pytest.mark.parametrize("divergent", [False, True], ids=["shared", "divergent"])
@@ -3391,47 +3246,39 @@ def test_record_accounted_keys_with_no_keys_records_nothing(*, divergent: bool) 
 
 def test_relation_connections_slot_recorded() -> None:
     """The synthesis records ``{generated: relation_field}`` for attached siblings only."""
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_def = registry.get_definition(types["Genre"][1])
-        # Genre.books (reverse M2M) synthesizes booksConnection.
-        assert genre_def is not None
-        assert genre_def.relation_connections == {"books_connection": "books"}
-        shelf_def = registry.get_definition(types["Shelf"][1])
-        assert shelf_def is not None
-        assert shelf_def.relation_connections == {"books_connection": "books"}
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_def = registry.get_definition(types["Genre"][1])
+    # Genre.books (reverse M2M) synthesizes booksConnection.
+    assert genre_def is not None
+    assert genre_def.relation_connections == {"books_connection": "books"}
+    shelf_def = registry.get_definition(types["Shelf"][1])
+    assert shelf_def is not None
+    assert shelf_def.relation_connections == {"books_connection": "books"}
 
 
 def test_relation_connections_slot_records_nothing_for_suppressed_shapes() -> None:
     """A ``"list"``-narrowed relation records no slot entry (suppressed shape)."""
-    registry.clear()
-    try:
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title")
-                interfaces = (relay.Node,)
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenreType(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
-                interfaces = (relay.Node,)
-                relation_shapes = {"books": "list"}
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
+            interfaces = (relay.Node,)
+            relation_shapes = {"books": "list"}
 
-        finalize_django_types()
-        genre_def = registry.get_definition(GenreType)
-        assert genre_def is not None
-        # The "list" narrowing suppresses synthesis, so nothing is recorded.
-        assert not genre_def.relation_connections
-    finally:
-        registry.clear()
+    finalize_django_types()
+    genre_def = registry.get_definition(GenreType)
+    assert genre_def is not None
+    # The "list" narrowing suppresses synthesis, so nothing is recorded.
+    assert not genre_def.relation_connections
 
 
 def test_record_relation_connection_is_idempotent() -> None:
@@ -3461,50 +3308,46 @@ def test_relation_connections_slot_recorded_on_partial_finalize_rerun(
     re-run takes the ``_SYNTHESIZED_RELATION_CONNECTION_MARKER`` early-``continue``
     branch, which must re-record the slot (spec-033 Decision 3 re-entrancy path).
     """
-    registry.clear()
-    try:
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title")
-                interfaces = (relay.Node,)
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenreType(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
-                interfaces = (relay.Node,)
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
+            interfaces = (relay.Node,)
 
-        real_strawberry_type = strawberry.type
+    real_strawberry_type = strawberry.type
 
-        def boom(cls: object = None, *args: object, **kwargs: object) -> object:
-            # Only the Phase-3 decoration of GenreType raises; synthesis
-            # (Phase 2.5) internally calls ``strawberry.type`` to build the
-            # connection class, which must still succeed.
-            if cls is GenreType:
-                raise RuntimeError("forced Phase 3 failure for re-entrancy test")
-            return _forward(real_strawberry_type, cls, *args, **kwargs)
+    def boom(cls: object = None, *args: object, **kwargs: object) -> object:
+        # Only the Phase-3 decoration of GenreType raises; synthesis
+        # (Phase 2.5) internally calls ``strawberry.type`` to build the
+        # connection class, which must still succeed.
+        if cls is GenreType:
+            raise RuntimeError("forced Phase 3 failure for re-entrancy test")
+        return _forward(real_strawberry_type, cls, *args, **kwargs)
 
-        # Synthesis (Phase 2.5) runs before Phase 3; make Phase 3 raise so the
-        # marker is set but ``finalized`` stays False.
-        monkeypatch.setattr(strawberry, "type", boom)
-        with pytest.raises(RuntimeError, match="forced Phase 3 failure"):
-            finalize_django_types()
-        genre_def = registry.get_definition(GenreType)
-        # The first (raising) finalize already recorded the slot.
-        assert genre_def is not None
-        assert genre_def.relation_connections == {"books_connection": "books"}
-        # Wipe it and re-run with Phase 3 restored: the marker-``continue`` branch
-        # must re-record the slot rather than skip it.
-        genre_def.relation_connections = None
-        monkeypatch.setattr(strawberry, "type", real_strawberry_type)
+    # Synthesis (Phase 2.5) runs before Phase 3; make Phase 3 raise so the
+    # marker is set but ``finalized`` stays False.
+    monkeypatch.setattr(strawberry, "type", boom)
+    with pytest.raises(RuntimeError, match="forced Phase 3 failure"):
         finalize_django_types()
-        assert genre_def.relation_connections == {"books_connection": "books"}
-    finally:
-        registry.clear()
+    genre_def = registry.get_definition(GenreType)
+    # The first (raising) finalize already recorded the slot.
+    assert genre_def is not None
+    assert genre_def.relation_connections == {"books_connection": "books"}
+    # Wipe it and re-run with Phase 3 restored: the marker-``continue`` branch
+    # must re-record the slot rather than skip it.
+    genre_def.relation_connections = None
+    monkeypatch.setattr(strawberry, "type", real_strawberry_type)
+    finalize_django_types()
+    assert genre_def.relation_connections == {"books_connection": "books"}
 
 
 def test_nested_connection_planned_as_windowed_prefetch() -> None:
@@ -3515,33 +3358,29 @@ def test_nested_connection_planned_as_windowed_prefetch() -> None:
     (spec-033 Decision 4) plans the row-number window WITHOUT
     ``_dst_total_count`` - the common cheap-page shape.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        # The window lands on the reserved ``to_attr``, lookup stays the accessor.
-        assert prefetch.to_attr == "_dst_books_connection"
-        assert prefetch.prefetch_through == "books"
-        assert prefetch.queryset is not None
-        annotations = prefetch.queryset.query.annotations
-        assert WINDOW_ROW_NUMBER in annotations
-        # Nothing in the selection observes the count -> not annotated.
-        assert WINDOW_TOTAL_COUNT not in annotations
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    # The window lands on the reserved ``to_attr``, lookup stays the accessor.
+    assert prefetch.to_attr == "_dst_books_connection"
+    assert prefetch.prefetch_through == "books"
+    assert prefetch.queryset is not None
+    annotations = prefetch.queryset.query.annotations
+    assert WINDOW_ROW_NUMBER in annotations
+    # Nothing in the selection observes the count -> not annotated.
+    assert WINDOW_TOTAL_COUNT not in annotations
 
 
 @pytest.mark.parametrize(
@@ -3567,32 +3406,28 @@ def test_nested_connection_total_count_planned_only_when_observable(
     with no ``after`` keeps ``offset == 0`` so the shape itself never forces the
     count.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        connection = _conn_sel(
-            "booksConnection",
-            node_selections=[_sel("title")],
-            arguments={"first": 3},
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    connection = _conn_sel(
+        "booksConnection",
+        node_selections=[_sel("title")],
+        arguments={"first": 3},
+    )
+    if count_observer == "totalCount":
+        _children(connection).append(_sel("totalCount"))
+    elif count_observer is not None:
+        _children(connection).append(
+            _sel("pageInfo", selections=[_sel(count_observer)]),
         )
-        if count_observer == "totalCount":
-            _children(connection).append(_sel("totalCount"))
-        elif count_observer is not None:
-            _children(connection).append(
-                _sel("pageInfo", selections=[_sel(count_observer)]),
-            )
-        plan = plan_optimizations(
-            [connection],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        assert (WINDOW_TOTAL_COUNT in prefetch.queryset.query.annotations) is expected
-    finally:
-        registry.clear()
+    plan = plan_optimizations(
+        [connection],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    assert (WINDOW_TOTAL_COUNT in prefetch.queryset.query.annotations) is expected
 
 
 def test_nested_connection_first_page_has_next_uses_probe_not_count() -> None:
@@ -3605,30 +3440,26 @@ def test_nested_connection_first_page_has_next_uses_probe_not_count() -> None:
     ``_dst_total_count`` annotation, and the forward row-number bound is
     ``limit + 1`` (``<= 4`` for ``first: 3``), not the page's ``<= 3``.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        connection = _conn_sel(
-            "booksConnection",
-            node_selections=[_sel("title")],
-            arguments={"first": 3},
-        )
-        _children(connection).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
-        plan = plan_optimizations(
-            [connection],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        assert WINDOW_TOTAL_COUNT not in prefetch.queryset.query.annotations
-        sql = str(prefetch.queryset.query).upper()
-        assert "<= 4" in sql  # the n+1 overfetch sentinel bound.
-        assert "<= 3" not in sql  # NOT the plain page bound.
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    connection = _conn_sel(
+        "booksConnection",
+        node_selections=[_sel("title")],
+        arguments={"first": 3},
+    )
+    _children(connection).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
+    plan = plan_optimizations(
+        [connection],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    assert WINDOW_TOTAL_COUNT not in prefetch.queryset.query.annotations
+    sql = str(prefetch.queryset.query).upper()
+    assert "<= 4" in sql  # the n+1 overfetch sentinel bound.
+    assert "<= 3" not in sql  # NOT the plain page bound.
 
 
 def test_nested_connection_first_page_total_count_keeps_count_and_skips_probe() -> None:
@@ -3639,31 +3470,27 @@ def test_nested_connection_first_page_total_count_keeps_count_and_skips_probe() 
     the page bound is the plain ``limit`` (``<= 3`` for ``first: 3``), never the
     ``limit + 1`` sentinel bound - even with ``hasNextPage`` also selected.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        connection = _conn_sel(
-            "booksConnection",
-            node_selections=[_sel("title")],
-            arguments={"first": 3},
-        )
-        _children(connection).append(_sel("totalCount"))
-        _children(connection).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
-        plan = plan_optimizations(
-            [connection],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        assert WINDOW_TOTAL_COUNT in prefetch.queryset.query.annotations
-        sql = str(prefetch.queryset.query).upper()
-        assert "<= 3" in sql  # the plain page bound - no overfetch sentinel.
-        assert "<= 4" not in sql
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    connection = _conn_sel(
+        "booksConnection",
+        node_selections=[_sel("title")],
+        arguments={"first": 3},
+    )
+    _children(connection).append(_sel("totalCount"))
+    _children(connection).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
+    plan = plan_optimizations(
+        [connection],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    assert WINDOW_TOTAL_COUNT in prefetch.queryset.query.annotations
+    sql = str(prefetch.queryset.query).upper()
+    assert "<= 3" in sql  # the plain page bound - no overfetch sentinel.
+    assert "<= 4" not in sql
 
 
 def test_nested_connection_offset_window_count_free_unless_total_selected() -> None:
@@ -3679,47 +3506,43 @@ def test_nested_connection_offset_window_count_free_unless_total_selected() -> N
     """
     after_offset_1 = to_base64("arrayconnection", "1")
 
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
 
-        # Edges-only offset page -> count-free (probe + marker composed).
-        edges_only = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3, "after": after_offset_1},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        edges_only_queryset = _prefetch_entry(edges_only).queryset
-        assert edges_only_queryset is not None
-        assert WINDOW_TOTAL_COUNT not in edges_only_queryset.query.annotations
+    # Edges-only offset page -> count-free (probe + marker composed).
+    edges_only = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3, "after": after_offset_1},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    edges_only_queryset = _prefetch_entry(edges_only).queryset
+    assert edges_only_queryset is not None
+    assert WINDOW_TOTAL_COUNT not in edges_only_queryset.query.annotations
 
-        # totalCount selected on the same offset shape -> count kept.
-        with_total = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    scalar_children=["totalCount"],
-                    arguments={"first": 3, "after": after_offset_1},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        with_total_queryset = _prefetch_entry(with_total).queryset
-        assert with_total_queryset is not None
-        assert WINDOW_TOTAL_COUNT in with_total_queryset.query.annotations
-    finally:
-        registry.clear()
+    # totalCount selected on the same offset shape -> count kept.
+    with_total = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                scalar_children=["totalCount"],
+                arguments={"first": 3, "after": after_offset_1},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    with_total_queryset = _prefetch_entry(with_total).queryset
+    assert with_total_queryset is not None
+    assert WINDOW_TOTAL_COUNT in with_total_queryset.query.annotations
 
 
 def test_window_slice_from_first_after_arguments() -> None:
@@ -3728,36 +3551,32 @@ def test_window_slice_from_first_after_arguments() -> None:
     The window bounds to ``offset + first`` rather than the ``relay_max_results``
     cap. The bound is asserted, not just annotation presence.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        # after cursor for offset 1 -> start 2; first 3 -> upper bound 5.
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    # after cursor for offset 1 -> start 2; first 3 -> upper bound 5.
 
-        after = to_base64("arrayconnection", "1")
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3, "after": after},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        sql = str(prefetch.queryset.query).upper()
-        assert "_DST_ROW_NUMBER" in sql
-        # offset 2 (after "1") + first 3 -> the window is bounded to row 5, NOT
-        # the relay_max_results cap of 100. Both the offset and the upper bound
-        # must appear.
-        assert "> 2" in sql
-        assert "<= 5" in sql
-    finally:
-        registry.clear()
+    after = to_base64("arrayconnection", "1")
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3, "after": after},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    sql = str(prefetch.queryset.query).upper()
+    assert "_DST_ROW_NUMBER" in sql
+    # offset 2 (after "1") + first 3 -> the window is bounded to row 5, NOT
+    # the relay_max_results cap of 100. Both the offset and the upper bound
+    # must appear.
+    assert "> 2" in sql
+    assert "<= 5" in sql
 
 
 def test_relay_max_results_from_optimizer_info_shapes() -> None:
@@ -3792,32 +3611,28 @@ def test_window_slice_from_literal_first_argument() -> None:
     The window BOUND is asserted (not just ``to_attr``): ``first: 5`` with no
     ``after`` bounds the window to row 5, NOT the ``relay_max_results`` cap of 100.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 5},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.to_attr == "_dst_books_connection"
-        assert prefetch.queryset is not None
-        sql = str(prefetch.queryset.query).upper()
-        assert "_DST_ROW_NUMBER" in sql
-        # offset 0 + first 5 -> bounded to row 5, NOT the relay_max_results cap.
-        assert "<= 5" in sql
-        assert "<= 100" not in sql
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 5},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.to_attr == "_dst_books_connection"
+    assert prefetch.queryset is not None
+    sql = str(prefetch.queryset.query).upper()
+    assert "_DST_ROW_NUMBER" in sql
+    # offset 0 + first 5 -> bounded to row 5, NOT the relay_max_results cap.
+    assert "<= 5" in sql
+    assert "<= 100" not in sql
 
 
 def test_window_last_only_uses_reversed_row_number() -> None:
@@ -3829,57 +3644,49 @@ def test_window_last_only_uses_reversed_row_number() -> None:
     ``_dst_row_number_reversed__lte`` filter the window would over-fetch every
     child row per parent (spec-033 Decision 4 reversed-row-number branch).
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [_conn_sel("booksConnection", node_selections=[_sel("title")], arguments={"last": 2})],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        query = prefetch.queryset.query
-        assert WINDOW_ROW_NUMBER_REVERSED in query.annotations
-        # The reversed window MUST be bounded to ``last`` rows; assert the
-        # ``__lte`` filter is present (the annotation without the bound is the
-        # over-fetch bug this test guards against).
-        sql = str(query).upper()
-        assert WINDOW_ROW_NUMBER_REVERSED.upper() in sql
-        assert "<= 2" in sql
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [_conn_sel("booksConnection", node_selections=[_sel("title")], arguments={"last": 2})],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    query = prefetch.queryset.query
+    assert WINDOW_ROW_NUMBER_REVERSED in query.annotations
+    # The reversed window MUST be bounded to ``last`` rows; assert the
+    # ``__lte`` filter is present (the annotation without the bound is the
+    # over-fetch bug this test guards against).
+    sql = str(query).upper()
+    assert WINDOW_ROW_NUMBER_REVERSED.upper() in sql
+    assert "<= 2" in sql
 
 
 def test_window_respects_relay_max_results() -> None:
     """An over-cap ``first`` (> ``relay_max_results``) emits no window but records the key."""
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        # relay_max_results=5; first=10 raises PaginationArgumentError in the
-        # shared offset validator ->
-        # the malformed-slice fallback emits no window (error locality: the
-        # pipeline raises the cap error) but records the resolver key so
-        # strictness does not preempt it with a spurious "Unplanned N+1".
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 10},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(relay_max_results=5),
-            source_type=genre_type,
-        )
-        assert plan.prefetch_related == ()
-        assert plan.planned_resolver_keys == ("GenreType.books@field.booksConnection",)
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    # relay_max_results=5; first=10 raises PaginationArgumentError in the
+    # shared offset validator ->
+    # the malformed-slice fallback emits no window (error locality: the
+    # pipeline raises the cap error) but records the resolver key so
+    # strictness does not preempt it with a spurious "Unplanned N+1".
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 10},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(relay_max_results=5),
+        source_type=genre_type,
+    )
+    assert plan.prefetch_related == ()
+    assert plan.planned_resolver_keys == ("GenreType.books@field.booksConnection",)
 
 
 @pytest.mark.django_db
@@ -3904,142 +3711,124 @@ def test_m2m_shared_child_partitions_per_parent(direction: str) -> None:
     # Forward M2M (Book.genres) partitions by the reverse query name.
     assert classify_relation_join(Book._meta.get_field("genres")).partition_expr == "books"
 
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        shelf = Shelf.objects.create(
-            code="shared-child",
-            branch=Branch.objects.create(name="shared-child-branch"),
-        )
-        if direction == "reverse_m2m":
-            # Two GENRES share one BOOK. The shared child is created FIRST so
-            # the window's deterministic pk-terminal order puts it at row 1 of
-            # each partition.
-            parent_model, parent_type = types["Genre"]
-            shared = Book.objects.create(title="shared", shelf=shelf)
-            parents = [
-                Genre.objects.create(name=f"shared-child-{side}") for side in ("left", "right")
-            ]
-            for index, parent in enumerate(parents):
-                parent.books.add(shared, Book.objects.create(title=f"own-{index}", shelf=shelf))
-            connection_field, to_attr, label = "booksConnection", "_dst_books_connection", "title"
-        else:
-            # Two BOOKS share one GENRE - the same scenario read from the
-            # forward side of the same M2M.
-            parent_model, parent_type = types["Book"]
-            shared = Genre.objects.create(name="shared")
-            parents = [
-                Book.objects.create(title=f"shared-child-{side}", shelf=shelf)
-                for side in ("left", "right")
-            ]
-            for index, parent in enumerate(parents):
-                parent.genres.add(shared, Genre.objects.create(name=f"own-{index}"))
-            connection_field, to_attr, label = "genresConnection", "_dst_genres_connection", "name"
-
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    connection_field,
-                    node_selections=[_sel(label)],
-                    arguments={"first": 1},
-                ),
-            ],
-            parent_model,
-            info=_fake_info(),
-            source_type=parent_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.to_attr == to_attr
-
-        rows = list(
-            parent_model._default_manager.filter(pk__in=[saved_pk(parent) for parent in parents])
-            .order_by("pk")
-            .prefetch_related(prefetch),
-        )
-        pages = [
-            [read_attr(child, label) for child in list_of(read_attr(row, to_attr))] for row in rows
+    types = _connection_relay_types()
+    shelf = Shelf.objects.create(
+        code="shared-child",
+        branch=Branch.objects.create(name="shared-child-branch"),
+    )
+    if direction == "reverse_m2m":
+        # Two GENRES share one BOOK. The shared child is created FIRST so
+        # the window's deterministic pk-terminal order puts it at row 1 of
+        # each partition.
+        parent_model, parent_type = types["Genre"]
+        shared = Book.objects.create(title="shared", shelf=shelf)
+        parents = [Genre.objects.create(name=f"shared-child-{side}") for side in ("left", "right")]
+        for index, parent in enumerate(parents):
+            parent.books.add(shared, Book.objects.create(title=f"own-{index}", shelf=shelf))
+        connection_field, to_attr, label = "booksConnection", "_dst_books_connection", "title"
+    else:
+        # Two BOOKS share one GENRE - the same scenario read from the
+        # forward side of the same M2M.
+        parent_model, parent_type = types["Book"]
+        shared = Genre.objects.create(name="shared")
+        parents = [
+            Book.objects.create(title=f"shared-child-{side}", shelf=shelf)
+            for side in ("left", "right")
         ]
-        # Independent per-parent pages: BOTH parents get row 1 of their OWN
-        # partition, which is the shared child for each.
-        assert pages == [["shared"], ["shared"]]
-    finally:
-        registry.clear()
+        for index, parent in enumerate(parents):
+            parent.genres.add(shared, Genre.objects.create(name=f"own-{index}"))
+        connection_field, to_attr, label = "genresConnection", "_dst_genres_connection", "name"
+
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                connection_field,
+                node_selections=[_sel(label)],
+                arguments={"first": 1},
+            ),
+        ],
+        parent_model,
+        info=_fake_info(),
+        source_type=parent_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.to_attr == to_attr
+
+    rows = list(
+        parent_model._default_manager.filter(pk__in=[saved_pk(parent) for parent in parents])
+        .order_by("pk")
+        .prefetch_related(prefetch),
+    )
+    pages = [
+        [read_attr(child, label) for child in list_of(read_attr(row, to_attr))] for row in rows
+    ]
+    # Independent per-parent pages: BOTH parents get row 1 of their OWN
+    # partition, which is the shared child for each.
+    assert pages == [["shared"], ["shared"]]
 
 
 def test_nested_connection_two_level_recursion() -> None:
     """A window inside a window (the cookbook shape) plans both levels."""
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        # Genre { booksConnection { edges { node { genresConnection { edges { node { name } } } } } } }
-        inner = _conn_sel(
-            "genresConnection",
-            node_selections=[_sel("name")],
-            arguments={"first": 2},
-        )
-        plan = plan_optimizations(
-            [_conn_sel("booksConnection", node_selections=[inner], arguments={"first": 3})],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        outer = _prefetch_entry(plan)
-        assert outer.to_attr == "_dst_books_connection"
-        # The outer window's child queryset carries the inner window prefetch.
-        assert outer.queryset is not None
-        inner_prefetches = list(queryset_prefetch_lookups(outer.queryset))
-        inner_to_attrs = [getattr(pf, "to_attr", None) for pf in inner_prefetches]
-        assert "_dst_genres_connection" in inner_to_attrs
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    # Genre { booksConnection { edges { node { genresConnection { edges { node { name } } } } } } }
+    inner = _conn_sel(
+        "genresConnection",
+        node_selections=[_sel("name")],
+        arguments={"first": 2},
+    )
+    plan = plan_optimizations(
+        [_conn_sel("booksConnection", node_selections=[inner], arguments={"first": 3})],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    outer = _prefetch_entry(plan)
+    assert outer.to_attr == "_dst_books_connection"
+    # The outer window's child queryset carries the inner window prefetch.
+    assert outer.queryset is not None
+    inner_prefetches = list(queryset_prefetch_lookups(outer.queryset))
+    inner_to_attrs = [getattr(pf, "to_attr", None) for pf in inner_prefetches]
+    assert "_dst_genres_connection" in inner_to_attrs
 
 
 def test_child_plan_projections_include_connector_and_ordering_columns() -> None:
     """The windowed child ``.only()`` includes the connector column from the edge selection."""
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        shelf_model, shelf_type = types["Shelf"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            shelf_model,
-            info=_fake_info(),
-            source_type=shelf_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        only_clause = set(prefetch.queryset.query.deferred_loading[0])
-        # Reverse FK connector column (shelf_id) is force-included for attach.
-        assert "shelf_id" in only_clause
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    shelf_model, shelf_type = types["Shelf"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        shelf_model,
+        info=_fake_info(),
+        source_type=shelf_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    only_clause = set(prefetch.queryset.query.deferred_loading[0])
+    # Reverse FK connector column (shelf_id) is force-included for attach.
+    assert "shelf_id" in only_clause
 
 
 def test_scalar_only_pageinfo_and_total_count_are_window_planned() -> None:
     """``totalCount``-only / ``pageInfo``-only selections ARE planned (not fallbacks)."""
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [_conn_sel("booksConnection", scalar_children=["totalCount"], arguments={"first": 3})],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.to_attr == "_dst_books_connection"
-        # Planned: resolver identity recorded so strictness stays silent.
-        assert len(plan.planned_resolver_keys) >= 1
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [_conn_sel("booksConnection", scalar_children=["totalCount"], arguments={"first": 3})],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.to_attr == "_dst_books_connection"
+    # Planned: resolver identity recorded so strictness stays silent.
+    assert len(plan.planned_resolver_keys) >= 1
 
 
 def test_scalar_only_window_projects_pk_connector_and_order_columns() -> None:
@@ -4051,25 +3840,21 @@ def test_scalar_only_window_projects_pk_connector_and_order_columns() -> None:
     target pk, the relation connector column (here the reverse-FK ``shelf_id``),
     and the concrete ordering columns (spec-033 Decision 4 / Decision 6 scalar-only contract).
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        shelf_model, shelf_type = types["Shelf"]
-        plan = plan_optimizations(
-            [_conn_sel("booksConnection", scalar_children=["totalCount"], arguments={"first": 3})],
-            shelf_model,
-            info=_fake_info(),
-            source_type=shelf_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        only_fields, defer = prefetch.queryset.query.deferred_loading
-        # An `.only()` projection (defer=False), not full-row loading or `.defer()`.
-        assert defer is False
-        # pk + reverse-FK connector both projected; Book is pk-ordered ("id").
-        assert set(only_fields) == {"id", "shelf_id"}
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    shelf_model, shelf_type = types["Shelf"]
+    plan = plan_optimizations(
+        [_conn_sel("booksConnection", scalar_children=["totalCount"], arguments={"first": 3})],
+        shelf_model,
+        info=_fake_info(),
+        source_type=shelf_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    only_fields, defer = prefetch.queryset.query.deferred_loading
+    # An `.only()` projection (defer=False), not full-row loading or `.defer()`.
+    assert defer is False
+    # pk + reverse-FK connector both projected; Book is pk-ordered ("id").
+    assert set(only_fields) == {"id", "shelf_id"}
 
 
 def test_scalar_only_generic_window_projects_content_type_column() -> None:
@@ -4081,26 +3866,22 @@ def test_scalar_only_generic_window_projects_content_type_column() -> None:
     alongside the object-id connector, or prefetch attach deferred-refetches
     the morph column once per row.
     """
-    registry.clear()
-    try:
-        types = _generic_connection_types()
-        branch_model, branch_type = types["Branch"]
-        tagged_model = types["TaggedItem"][0]
-        plan = plan_optimizations(
-            [_conn_sel("tagsConnection", scalar_children=["totalCount"], arguments={"first": 2})],
-            branch_model,
-            info=_fake_info(),
-            source_type=branch_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        only_fields, defer = prefetch.queryset.query.deferred_loading
-        assert defer is False
-        object_id = _attname(tagged_model, "object_id")
-        content_type_id = _attname(tagged_model, "content_type")
-        assert {tagged_model._meta.pk.attname, object_id, content_type_id} <= set(only_fields)
-    finally:
-        registry.clear()
+    types = _generic_connection_types()
+    branch_model, branch_type = types["Branch"]
+    tagged_model = types["TaggedItem"][0]
+    plan = plan_optimizations(
+        [_conn_sel("tagsConnection", scalar_children=["totalCount"], arguments={"first": 2})],
+        branch_model,
+        info=_fake_info(),
+        source_type=branch_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    only_fields, defer = prefetch.queryset.query.deferred_loading
+    assert defer is False
+    object_id = _attname(tagged_model, "object_id")
+    content_type_id = _attname(tagged_model, "content_type")
+    assert {tagged_model._meta.pk.attname, object_id, content_type_id} <= set(only_fields)
 
 
 def test_windowed_prefetch_queryset_carries_deterministic_order() -> None:
@@ -4112,27 +3893,23 @@ def test_windowed_prefetch_queryset_carries_deterministic_order() -> None:
     the fast path diverges from the pipeline (spec-033 Decision 4, cursor-parity).
     ``Book`` has no ``Meta.ordering``, so the deterministic order is the pk alone.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        shelf_model, shelf_type = types["Shelf"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            shelf_model,
-            info=_fake_info(),
-            source_type=shelf_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        assert tuple(prefetch.queryset.query.order_by) == ("id",)
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    shelf_model, shelf_type = types["Shelf"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        shelf_model,
+        info=_fake_info(),
+        source_type=shelf_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    assert tuple(prefetch.queryset.query.order_by) == ("id",)
 
 
 @pytest.mark.parametrize(
@@ -4161,34 +3938,30 @@ def test_malformed_slice_arguments_emit_no_window_but_record_resolver_key(
     which stay fully unplanned so strictness CAN flag them. The debug log names
     the real response key, never the shared-window ``None`` payload key.
     """
-    registry.clear()
-    try:
-        caplog.set_level("DEBUG", logger=logger.name)
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3, "after": after},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        assert plan.prefetch_related == ()
-        # Recorded so strictness stays silent and the pipeline owns the error.
-        assert len(plan.planned_resolver_keys) >= 1
-        assert any(
-            "response key 'booksConnection'" in record.message
-            and "(malformed pagination)" in record.message
-            for record in caplog.records
-        )
-        assert not any("response key None" in record.message for record in caplog.records)
-    finally:
-        registry.clear()
+    caplog.set_level("DEBUG", logger=logger.name)
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3, "after": after},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    assert plan.prefetch_related == ()
+    # Recorded so strictness stays silent and the pipeline owns the error.
+    assert len(plan.planned_resolver_keys) >= 1
+    assert any(
+        "response key 'booksConnection'" in record.message
+        and "(malformed pagination)" in record.message
+        for record in caplog.records
+    )
+    assert not any("response key None" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize(
@@ -4197,26 +3970,22 @@ def test_malformed_slice_arguments_emit_no_window_but_record_resolver_key(
 )
 def test_fallback_not_planned_sidecar_input(sidecar: dict[str, object]) -> None:
     """A nested connection carrying ``filter:`` / ``orderBy:`` is left unplanned."""
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3, **sidecar},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        assert plan.prefetch_related == ()
-        assert plan.planned_resolver_keys == ()
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3, **sidecar},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    assert plan.prefetch_related == ()
+    assert plan.planned_resolver_keys == ()
 
 
 def test_divergent_key_windows_shared_payload_uses_none_key() -> None:
@@ -4267,34 +4036,30 @@ def test_shared_window_sidecar_logs_response_keys_not_none(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Shared-window sidecar fallback logs the real response keys, never ``None``."""
-    registry.clear()
-    try:
-        caplog.set_level("DEBUG", logger=logger.name)
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3, "filter": object()},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        assert plan.prefetch_related == ()
-        assert plan.planned_resolver_keys == ()
-        assert any(
-            "response key 'booksConnection'" in record.message
-            and "(sidecar arguments)" in record.message
-            for record in caplog.records
-        )
-        assert not any("response key None" in record.message for record in caplog.records)
-        assert not any("response key 'None'" in record.message for record in caplog.records)
-    finally:
-        registry.clear()
+    caplog.set_level("DEBUG", logger=logger.name)
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3, "filter": object()},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    assert plan.prefetch_related == ()
+    assert plan.planned_resolver_keys == ()
+    assert any(
+        "response key 'booksConnection'" in record.message
+        and "(sidecar arguments)" in record.message
+        for record in caplog.records
+    )
+    assert not any("response key None" in record.message for record in caplog.records)
+    assert not any("response key 'None'" in record.message for record in caplog.records)
 
 
 def _prefetch_by_to_attr(plan: OptimizationPlan) -> dict[str, Prefetch[str, QuerySet[Model], str]]:
@@ -4316,42 +4081,38 @@ def test_divergent_aliases_plan_one_window_per_response_key() -> None:
     response keys recorded as planned, and the relation-level shared ``to_attr``
     absent (nothing would read it).
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 2},
-                    alias="a",
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 5},
-                    alias="b",
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        by_attr = _prefetch_by_to_attr(plan)
-        assert set(by_attr) == {"_dst_books$a_connection", "_dst_books$b_connection"}
-        # Each per-key window carries ITS alias's page bound.
-        assert by_attr["_dst_books$a_connection"].queryset is not None
-        assert "<= 2" in str(by_attr["_dst_books$a_connection"].queryset.query)
-        assert by_attr["_dst_books$b_connection"].queryset is not None
-        assert "<= 5" in str(by_attr["_dst_books$b_connection"].queryset.query)
-        # Both keys planned -> both resolver identities recorded (strictness-silent).
-        assert len(plan.planned_resolver_keys) == 2
-        assert any(key.endswith("@field.a") for key in plan.planned_resolver_keys)
-        assert any(key.endswith("@field.b") for key in plan.planned_resolver_keys)
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 2},
+                alias="a",
+            ),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 5},
+                alias="b",
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    by_attr = _prefetch_by_to_attr(plan)
+    assert set(by_attr) == {"_dst_books$a_connection", "_dst_books$b_connection"}
+    # Each per-key window carries ITS alias's page bound.
+    assert by_attr["_dst_books$a_connection"].queryset is not None
+    assert "<= 2" in str(by_attr["_dst_books$a_connection"].queryset.query)
+    assert by_attr["_dst_books$b_connection"].queryset is not None
+    assert "<= 5" in str(by_attr["_dst_books$b_connection"].queryset.query)
+    # Both keys planned -> both resolver identities recorded (strictness-silent).
+    assert len(plan.planned_resolver_keys) == 2
+    assert any(key.endswith("@field.a") for key in plan.planned_resolver_keys)
+    assert any(key.endswith("@field.b") for key in plan.planned_resolver_keys)
 
 
 def test_divergent_duplicate_payloads_still_plan_per_key() -> None:
@@ -4362,44 +4123,40 @@ def test_divergent_duplicate_payloads_still_plan_per_key() -> None:
     are consumed by the connection extension before the resolver runs), so a
     key-to-payload-group map would have nowhere to live at resolve time.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 2},
-                    alias="a",
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 2},
-                    alias="b",
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 5},
-                    alias="c",
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        by_attr = _prefetch_by_to_attr(plan)
-        assert set(by_attr) == {
-            "_dst_books$a_connection",
-            "_dst_books$b_connection",
-            "_dst_books$c_connection",
-        }
-        assert len(plan.planned_resolver_keys) == 3
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 2},
+                alias="a",
+            ),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 2},
+                alias="b",
+            ),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 5},
+                alias="c",
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    by_attr = _prefetch_by_to_attr(plan)
+    assert set(by_attr) == {
+        "_dst_books$a_connection",
+        "_dst_books$b_connection",
+        "_dst_books$c_connection",
+    }
+    assert len(plan.planned_resolver_keys) == 3
 
 
 def test_divergent_mixed_sidecar_plans_only_the_plain_key(
@@ -4412,42 +4169,38 @@ def test_divergent_mixed_sidecar_plans_only_the_plain_key(
     per-key scheme must not let one alias's refusal drag its siblings per-parent.
     The debug diagnostic names only the dropped response key.
     """
-    registry.clear()
-    try:
-        caplog.set_level("DEBUG", logger=logger.name)
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 2, "filter": object()},
-                    alias="a",
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 5},
-                    alias="b",
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        by_attr = _prefetch_by_to_attr(plan)
-        assert set(by_attr) == {"_dst_books$b_connection"}
-        # Only ``b`` accounted-for; the sidecar key stays strictness-visible.
-        assert len(plan.planned_resolver_keys) == 1
-        assert plan.planned_resolver_keys[0].endswith("@field.b")
-        assert any(
-            "response key 'a'" in record.message and "(sidecar arguments)" in record.message
-            for record in caplog.records
-        )
-        assert not any("response key 'b'" in record.message for record in caplog.records)
-    finally:
-        registry.clear()
+    caplog.set_level("DEBUG", logger=logger.name)
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 2, "filter": object()},
+                alias="a",
+            ),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 5},
+                alias="b",
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    by_attr = _prefetch_by_to_attr(plan)
+    assert set(by_attr) == {"_dst_books$b_connection"}
+    # Only ``b`` accounted-for; the sidecar key stays strictness-visible.
+    assert len(plan.planned_resolver_keys) == 1
+    assert plan.planned_resolver_keys[0].endswith("@field.b")
+    assert any(
+        "response key 'a'" in record.message and "(sidecar arguments)" in record.message
+        for record in caplog.records
+    )
+    assert not any("response key 'b'" in record.message for record in caplog.records)
 
 
 def test_divergent_malformed_key_records_only_its_identity() -> None:
@@ -4458,36 +4211,32 @@ def test_divergent_malformed_key_records_only_its_identity() -> None:
     preempt the error under ``"raise"``) but NO window is planned for it;
     ``b`` plans normally under its per-key attr.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 2, "after": "not-a-valid-cursor"},
-                    alias="a",
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 5},
-                    alias="b",
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        by_attr = _prefetch_by_to_attr(plan)
-        assert set(by_attr) == {"_dst_books$b_connection"}
-        # BOTH identities recorded: ``b`` as planned, ``a`` as accounted-for
-        # (error locality - the pipeline owns the cursor error).
-        assert len(plan.planned_resolver_keys) == 2
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 2, "after": "not-a-valid-cursor"},
+                alias="a",
+            ),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 5},
+                alias="b",
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    by_attr = _prefetch_by_to_attr(plan)
+    assert set(by_attr) == {"_dst_books$b_connection"}
+    # BOTH identities recorded: ``b`` as planned, ``a`` as accounted-for
+    # (error locality - the pipeline owns the cursor error).
+    assert len(plan.planned_resolver_keys) == 2
 
 
 def test_divergent_unwindowable_key_falls_back_alone() -> None:
@@ -4497,36 +4246,32 @@ def test_divergent_unwindowable_key_falls_back_alone() -> None:
     pipeline resolves correctly, so that key stays fully unplanned (no
     identity - strictness-visible) without dragging the plain sibling down.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        after = base64.b64encode(b"arrayconnection:1").decode()
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"last": 2, "after": after},
-                    alias="a",
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 5},
-                    alias="b",
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        by_attr = _prefetch_by_to_attr(plan)
-        assert set(by_attr) == {"_dst_books$b_connection"}
-        assert len(plan.planned_resolver_keys) == 1
-        assert plan.planned_resolver_keys[0].endswith("@field.b")
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    after = base64.b64encode(b"arrayconnection:1").decode()
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"last": 2, "after": after},
+                alias="a",
+            ),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 5},
+                alias="b",
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    by_attr = _prefetch_by_to_attr(plan)
+    assert set(by_attr) == {"_dst_books$b_connection"}
+    assert len(plan.planned_resolver_keys) == 1
+    assert plan.planned_resolver_keys[0].endswith("@field.b")
 
 
 def test_divergent_union_observer_keeps_count_on_every_window() -> None:
@@ -4539,44 +4284,40 @@ def test_divergent_union_observer_keeps_count_on_every_window() -> None:
     probe/count mutual-exclusion holds per window (enforced by the
     ``NestedConnectionRequest`` seam).
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        has_next = _conn_sel(
-            "booksConnection",
-            node_selections=[_sel("title")],
-            arguments={"first": 2},
-            alias="a",
-        )
-        _children(has_next).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
-        total = _conn_sel(
-            "booksConnection",
-            node_selections=[_sel("title")],
-            arguments={"first": 5},
-            alias="b",
-        )
-        _children(total).append(_sel("totalCount"))
-        plan = plan_optimizations(
-            [has_next, total],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        by_attr = _prefetch_by_to_attr(plan)
-        assert set(by_attr) == {"_dst_books$a_connection", "_dst_books$b_connection"}
-        for to_attr, page_bound, sentinel_bound in (
-            ("_dst_books$a_connection", "<= 2", "<= 3"),
-            ("_dst_books$b_connection", "<= 5", "<= 6"),
-        ):
-            queryset = by_attr[to_attr].queryset
-            assert queryset is not None
-            assert WINDOW_TOTAL_COUNT in queryset.query.annotations
-            sql = str(queryset.query)
-            assert page_bound in sql  # plain page bound - no overfetch sentinel.
-            assert sentinel_bound not in sql
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    has_next = _conn_sel(
+        "booksConnection",
+        node_selections=[_sel("title")],
+        arguments={"first": 2},
+        alias="a",
+    )
+    _children(has_next).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
+    total = _conn_sel(
+        "booksConnection",
+        node_selections=[_sel("title")],
+        arguments={"first": 5},
+        alias="b",
+    )
+    _children(total).append(_sel("totalCount"))
+    plan = plan_optimizations(
+        [has_next, total],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    by_attr = _prefetch_by_to_attr(plan)
+    assert set(by_attr) == {"_dst_books$a_connection", "_dst_books$b_connection"}
+    for to_attr, page_bound, sentinel_bound in (
+        ("_dst_books$a_connection", "<= 2", "<= 3"),
+        ("_dst_books$b_connection", "<= 5", "<= 6"),
+    ):
+        queryset = by_attr[to_attr].queryset
+        assert queryset is not None
+        assert WINDOW_TOTAL_COUNT in queryset.query.annotations
+        sql = str(queryset.query)
+        assert page_bound in sql  # plain page bound - no overfetch sentinel.
+        assert sentinel_bound not in sql
 
 
 def test_merge_flags_same_key_conflicting_arguments() -> None:
@@ -4615,31 +4356,27 @@ def test_conflicting_same_key_connection_stays_fully_unplanned() -> None:
     resolver identities - the per-parent pipeline is the only resolver that
     applies each alias subtree's own arguments to one shared response key.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 2},
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 5},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        assert plan.prefetch_related == ()
-        assert plan.planned_resolver_keys == ()
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 2},
+            ),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 5},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    assert plan.prefetch_related == ()
+    assert plan.planned_resolver_keys == ()
 
 
 def test_nested_same_key_conflict_leaves_only_the_nested_level_unplanned() -> None:
@@ -4651,129 +4388,117 @@ def test_nested_same_key_conflict_leaves_only_the_nested_level_unplanned() -> No
     (each alias's nested page resolves per-parent with its own arguments),
     while the outer relation keeps one window per response key.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[
-                        _sel("title"),
-                        _conn_sel(
-                            "genresConnection",
-                            node_selections=[_sel("name")],
-                            arguments={"first": 1},
-                        ),
-                    ],
-                    arguments={"first": 1},
-                    alias="a",
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[
-                        _sel("title"),
-                        _conn_sel(
-                            "genresConnection",
-                            node_selections=[_sel("name")],
-                            arguments={"first": 2},
-                        ),
-                    ],
-                    arguments={"first": 3},
-                    alias="b",
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        by_attr = _prefetch_by_to_attr(plan)
-        assert set(by_attr) == {"_dst_books$a_connection", "_dst_books$b_connection"}
-        # The conflicted nested connection planned NO window on either child
-        # queryset (a first-payload-wins window would serve ``b`` a wrong page).
-        for prefetch in by_attr.values():
-            assert prefetch.queryset is not None
-            nested_attrs = [
-                getattr(nested, "to_attr", None)
-                for nested in queryset_prefetch_lookups(prefetch.queryset)
-            ]
-            assert not any("_dst_genres" in str(attr) for attr in nested_attrs)
-        # Outer keys planned; the conflicted nested relation recorded nothing
-        # (strictness-visible per-parent access).
-        assert len(plan.planned_resolver_keys) == 2
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[
+                    _sel("title"),
+                    _conn_sel(
+                        "genresConnection",
+                        node_selections=[_sel("name")],
+                        arguments={"first": 1},
+                    ),
+                ],
+                arguments={"first": 1},
+                alias="a",
+            ),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[
+                    _sel("title"),
+                    _conn_sel(
+                        "genresConnection",
+                        node_selections=[_sel("name")],
+                        arguments={"first": 2},
+                    ),
+                ],
+                arguments={"first": 3},
+                alias="b",
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    by_attr = _prefetch_by_to_attr(plan)
+    assert set(by_attr) == {"_dst_books$a_connection", "_dst_books$b_connection"}
+    # The conflicted nested connection planned NO window on either child
+    # queryset (a first-payload-wins window would serve ``b`` a wrong page).
+    for prefetch in by_attr.values():
+        assert prefetch.queryset is not None
+        nested_attrs = [
+            getattr(nested, "to_attr", None)
+            for nested in queryset_prefetch_lookups(prefetch.queryset)
+        ]
+        assert not any("_dst_genres" in str(attr) for attr in nested_attrs)
+    # Outer keys planned; the conflicted nested relation recorded nothing
+    # (strictness-visible per-parent access).
+    assert len(plan.planned_resolver_keys) == 2
 
 
 def test_divergent_all_keys_fallback_stays_unplanned() -> None:
     """When EVERY divergent alias is a refusal arm, the relation stays unplanned."""
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 2, "filter": object()},
-                    alias="a",
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 5, "filter": object()},
-                    alias="b",
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        assert plan.prefetch_related == ()
-        assert plan.planned_resolver_keys == ()
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 2, "filter": object()},
+                alias="a",
+            ),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 5, "filter": object()},
+                alias="b",
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    assert plan.prefetch_related == ()
+    assert plan.planned_resolver_keys == ()
 
 
 def test_fallback_not_planned_skip_hint() -> None:
     """An ``OptimizerHint.SKIP`` on the relation suppresses window planning."""
-    registry.clear()
-    try:
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title")
-                interfaces = (relay.Node,)
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenreType(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
-                interfaces = (relay.Node,)
-                optimizer_hints = {"books": OptimizerHint.SKIP}
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
+            interfaces = (relay.Node,)
+            optimizer_hints = {"books": OptimizerHint.SKIP}
 
-        finalize_django_types()
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            Genre,
-            info=_fake_info(),
-            source_type=GenreType,
-        )
-        assert plan.prefetch_related == ()
-        assert plan.planned_resolver_keys == ()
-    finally:
-        registry.clear()
+    finalize_django_types()
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        Genre,
+        info=_fake_info(),
+        source_type=GenreType,
+    )
+    assert plan.prefetch_related == ()
+    assert plan.planned_resolver_keys == ()
 
 
 def test_skip_hint_with_sidecar_does_not_log_sidecar(caplog: pytest.LogCaptureFixture) -> None:
@@ -4784,76 +4509,68 @@ def test_skip_hint_with_sidecar_does_not_log_sidecar(caplog: pytest.LogCaptureFi
     log. Plan output is the same unplanned result the sidecar gate returns;
     only the diagnostic differs.
     """
-    registry.clear()
-    try:
-        caplog.set_level("DEBUG", logger=logger.name)
+    caplog.set_level("DEBUG", logger=logger.name)
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title")
-                interfaces = (relay.Node,)
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenreType(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
-                interfaces = (relay.Node,)
-                optimizer_hints = {"books": OptimizerHint.SKIP}
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
+            interfaces = (relay.Node,)
+            optimizer_hints = {"books": OptimizerHint.SKIP}
 
-        finalize_django_types()
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3, "filter": object()},
-                ),
-            ],
-            Genre,
-            info=_fake_info(),
-            source_type=GenreType,
-        )
-        assert plan.prefetch_related == ()
-        assert plan.planned_resolver_keys == ()
-        assert not any("(sidecar arguments)" in record.message for record in caplog.records)
-    finally:
-        registry.clear()
+    finalize_django_types()
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3, "filter": object()},
+            ),
+        ],
+        Genre,
+        info=_fake_info(),
+        source_type=GenreType,
+    )
+    assert plan.prefetch_related == ()
+    assert plan.planned_resolver_keys == ()
+    assert not any("(sidecar arguments)" in record.message for record in caplog.records)
 
 
 def test_identical_alias_args_merge_and_plan() -> None:
     """Identical-argument aliases merge and ARE window-planned together."""
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                    alias="a",
-                ),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                    alias="b",
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.to_attr == "_dst_books_connection"
-        # Both response keys recorded as planned (one resolver identity per key).
-        assert len(plan.planned_resolver_keys) == 2
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+                alias="a",
+            ),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+                alias="b",
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.to_attr == "_dst_books_connection"
+    # Both response keys recorded as planned (one resolver identity per key).
+    assert len(plan.planned_resolver_keys) == 2
 
 
 def test_alias_merge_total_count_observer_keeps_count_and_skips_probe() -> None:
@@ -4867,200 +4584,180 @@ def test_alias_merge_total_count_observer_keeps_count_and_skips_probe() -> None:
     the merged selection, so one alias observing the count is conservative for
     all. Proven by the count annotation surviving on the single planned window.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        has_next = _conn_sel(
-            "booksConnection",
-            node_selections=[_sel("title")],
-            arguments={"first": 2},
-            alias="a",
-        )
-        _children(has_next).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
-        total = _conn_sel(
-            "booksConnection",
-            node_selections=[_sel("title")],
-            arguments={"first": 2},
-            alias="b",
-        )
-        _children(total).append(_sel("totalCount"))
-        plan = plan_optimizations(
-            [has_next, total],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        # One merged window; the count survives (probe skipped).
-        assert prefetch.queryset is not None
-        assert WINDOW_TOTAL_COUNT in prefetch.queryset.query.annotations
-        sql = str(prefetch.queryset.query).upper()
-        assert "<= 2" in sql  # plain page bound - no overfetch sentinel.
-        assert "<= 3" not in sql
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    has_next = _conn_sel(
+        "booksConnection",
+        node_selections=[_sel("title")],
+        arguments={"first": 2},
+        alias="a",
+    )
+    _children(has_next).append(_sel("pageInfo", selections=[_sel("hasNextPage")]))
+    total = _conn_sel(
+        "booksConnection",
+        node_selections=[_sel("title")],
+        arguments={"first": 2},
+        alias="b",
+    )
+    _children(total).append(_sel("totalCount"))
+    plan = plan_optimizations(
+        [has_next, total],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    # One merged window; the count survives (probe skipped).
+    assert prefetch.queryset is not None
+    assert WINDOW_TOTAL_COUNT in prefetch.queryset.query.annotations
+    sql = str(prefetch.queryset.query).upper()
+    assert "<= 2" in sql  # plain page bound - no overfetch sentinel.
+    assert "<= 3" not in sql
 
 
 def test_planned_resolver_keys_include_connection_field() -> None:
     """A planned connection records the field's resolver identity for strictness."""
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        assert len(plan.planned_resolver_keys) == 1
-        key = plan.planned_resolver_keys[0]
-        # The key is built on the relation field name (books), not the generated attr.
-        assert "books@" in key
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    assert len(plan.planned_resolver_keys) == 1
+    key = plan.planned_resolver_keys[0]
+    # The key is built on the relation field name (books), not the generated attr.
+    assert "books@" in key
 
 
 def test_both_shape_connection_to_attr_coexists_with_list_and_consumer_prefetch() -> None:
     """The list sibling, the connection window, and a consumer accessor prefetch coexist."""
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        genre_model, genre_type = types["Genre"]
-        plan = plan_optimizations(
-            [
-                _sel("books", selections=[_sel("title")]),
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        to_attrs = {getattr(pf, "to_attr", None) for pf in plan.prefetch_related}
-        prefetch_throughs = {pf.prefetch_through for pf in _prefetches(plan.prefetch_related)}
-        # List sibling (no to_attr) and the window (to_attr) share lookup "books"
-        # but distinct prefetch_to, so no Django duplicate-lookup error.
-        assert None in to_attrs
-        assert "_dst_books_connection" in to_attrs
-        assert prefetch_throughs == {"books"}
-        # A consumer accessor prefetch on "books" is reconciled against the plan:
-        # the list sibling (a Prefetch carrying a queryset) losslessly absorbs the
-        # consumer's bare "books" string, while the window (prefetch_to
-        # "_dst_books_connection", a distinct lookup) passes through untouched. The
-        # delta must therefore STILL carry both lookups un-merged - the
-        # exact-match/absorption claim the spec-033 Decision 4 ``to_attr``-isolation edge
-        # case makes - not collapse one of them.
-        consumer_qs = Genre.objects.prefetch_related("books")
-        delta, _qs = diff_plan_for_queryset(plan.finalize(), consumer_qs)
-        delta_to_attrs = {getattr(pf, "to_attr", None) for pf in delta.prefetch_related}
-        assert None in delta_to_attrs
-        assert "_dst_books_connection" in delta_to_attrs
-        assert {pf.prefetch_through for pf in _prefetches(delta.prefetch_related)} == {"books"}
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    genre_model, genre_type = types["Genre"]
+    plan = plan_optimizations(
+        [
+            _sel("books", selections=[_sel("title")]),
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    to_attrs = {getattr(pf, "to_attr", None) for pf in plan.prefetch_related}
+    prefetch_throughs = {pf.prefetch_through for pf in _prefetches(plan.prefetch_related)}
+    # List sibling (no to_attr) and the window (to_attr) share lookup "books"
+    # but distinct prefetch_to, so no Django duplicate-lookup error.
+    assert None in to_attrs
+    assert "_dst_books_connection" in to_attrs
+    assert prefetch_throughs == {"books"}
+    # A consumer accessor prefetch on "books" is reconciled against the plan:
+    # the list sibling (a Prefetch carrying a queryset) losslessly absorbs the
+    # consumer's bare "books" string, while the window (prefetch_to
+    # "_dst_books_connection", a distinct lookup) passes through untouched. The
+    # delta must therefore STILL carry both lookups un-merged - the
+    # exact-match/absorption claim the spec-033 Decision 4 ``to_attr``-isolation edge
+    # case makes - not collapse one of them.
+    consumer_qs = Genre.objects.prefetch_related("books")
+    delta, _qs = diff_plan_for_queryset(plan.finalize(), consumer_qs)
+    delta_to_attrs = {getattr(pf, "to_attr", None) for pf in delta.prefetch_related}
+    assert None in delta_to_attrs
+    assert "_dst_books_connection" in delta_to_attrs
+    assert {pf.prefetch_through for pf in _prefetches(delta.prefetch_related)} == {"books"}
 
 
 def test_visibility_target_window_flips_cacheable_false() -> None:
     """A windowed target overriding ``get_queryset`` flips ``plan.cacheable`` False."""
-    registry.clear()
-    try:
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title")
-                interfaces = (relay.Node,)
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
 
-            @classmethod
-            @override
-            def get_queryset(cls, queryset: QuerySet[Book], info: object) -> QuerySet[Book]:
-                return queryset.filter(circulation_status="available")
+        @classmethod
+        @override
+        def get_queryset(cls, queryset: QuerySet[Book], info: object) -> QuerySet[Book]:
+            return queryset.filter(circulation_status="available")
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenreType(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
-                interfaces = (relay.Node,)
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
+            interfaces = (relay.Node,)
 
-        finalize_django_types()
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            Genre,
-            info=raw_info_of(make_info()),
-            source_type=GenreType,
-        )
-        assert plan.cacheable is False
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.to_attr == "_dst_books_connection"
-    finally:
-        registry.clear()
+    finalize_django_types()
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        Genre,
+        info=raw_info_of(make_info()),
+        source_type=GenreType,
+    )
+    assert plan.cacheable is False
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.to_attr == "_dst_books_connection"
 
 
 def test_distinct_child_queryset_left_unplanned_for_correct_total_count() -> None:
     """A ``.distinct()``-ing target ``get_queryset`` leaves the relation unplanned."""
-    registry.clear()
-    try:
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title")
-                interfaces = (relay.Node,)
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
 
-            @classmethod
-            @override
-            def get_queryset(cls, queryset: QuerySet[Book], info: object) -> QuerySet[Book]:
-                # A visibility join that de-duplicates: window Count(1) OVER would
-                # over-count pre-DISTINCT rows, so the window must not be planned.
-                return queryset.distinct()
+        @classmethod
+        @override
+        def get_queryset(cls, queryset: QuerySet[Book], info: object) -> QuerySet[Book]:
+            # A visibility join that de-duplicates: window Count(1) OVER would
+            # over-count pre-DISTINCT rows, so the window must not be planned.
+            return queryset.distinct()
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenreType(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
-                interfaces = (relay.Node,)
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
+            interfaces = (relay.Node,)
 
-        finalize_django_types()
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            Genre,
-            info=raw_info_of(make_info()),
-            source_type=GenreType,
-        )
-        # Distinct target -> per-parent fallback: no window prefetch, no resolver key.
-        assert not any(
-            getattr(pf, "to_attr", None) == "_dst_books_connection" for pf in plan.prefetch_related
-        )
-        assert plan.planned_resolver_keys == ()
-    finally:
-        registry.clear()
+    finalize_django_types()
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        Genre,
+        info=raw_info_of(make_info()),
+        source_type=GenreType,
+    )
+    # Distinct target -> per-parent fallback: no window prefetch, no resolver key.
+    assert not any(
+        getattr(pf, "to_attr", None) == "_dst_books_connection" for pf in plan.prefetch_related
+    )
+    assert plan.planned_resolver_keys == ()
 
 
 def _genre_books_connection_with_nested_relation_types(
@@ -5112,29 +4809,25 @@ def _genre_books_connection_with_nested_relation_types(
 
 def test_distinct_fallback_does_not_leak_child_resolver_keys_into_parent() -> None:
     """A DISTINCT fallback with a nested-relation node child leaks NO parent metadata."""
-    registry.clear()
-    try:
-        genre_model, genre_type = _genre_books_connection_with_nested_relation_types(distinct=True)
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("shelf", selections=[_sel("id")])],
-                    arguments={"first": 3},
-                ),
-            ],
-            genre_model,
-            info=raw_info_of(make_info()),
-            source_type=genre_type,
-        )
-        # Falls back per-parent: no window prefetch and NO child metadata absorbed.
-        assert not any(
-            getattr(pf, "to_attr", None) == "_dst_books_connection" for pf in plan.prefetch_related
-        )
-        assert plan.planned_resolver_keys == ()
-        assert plan.fk_id_elisions == ()
-    finally:
-        registry.clear()
+    genre_model, genre_type = _genre_books_connection_with_nested_relation_types(distinct=True)
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("shelf", selections=[_sel("id")])],
+                arguments={"first": 3},
+            ),
+        ],
+        genre_model,
+        info=raw_info_of(make_info()),
+        source_type=genre_type,
+    )
+    # Falls back per-parent: no window prefetch and NO child metadata absorbed.
+    assert not any(
+        getattr(pf, "to_attr", None) == "_dst_books_connection" for pf in plan.prefetch_related
+    )
+    assert plan.planned_resolver_keys == ()
+    assert plan.fk_id_elisions == ()
 
 
 def test_malformed_slice_fallback_does_not_leak_child_resolver_keys_into_parent() -> None:
@@ -5146,33 +4839,29 @@ def test_malformed_slice_fallback_does_not_leak_child_resolver_keys_into_parent(
     but the nested ``shelf`` child's resolver key and fk-id elisions must NOT
     appear on the parent plan.
     """
-    registry.clear()
-    try:
-        genre_model, genre_type = _genre_books_connection_with_nested_relation_types(
-            distinct=False,
-        )
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("shelf", selections=[_sel("id")])],
-                    arguments={"first": 3, "after": "not-a-valid-cursor"},
-                ),
-            ],
-            genre_model,
-            info=_fake_info(),
-            source_type=genre_type,
-        )
-        assert not any(
-            getattr(pf, "to_attr", None) == "_dst_books_connection" for pf in plan.prefetch_related
-        )
-        # The connection's own key is recorded (error-locality), but no CHILD
-        # (``shelf``) key or fk-id elision leaked from a child build that never ran.
-        assert plan.planned_resolver_keys == ("GenreType.books@field.booksConnection",)
-        assert not any("shelf" in key for key in plan.planned_resolver_keys)
-        assert plan.fk_id_elisions == ()
-    finally:
-        registry.clear()
+    genre_model, genre_type = _genre_books_connection_with_nested_relation_types(
+        distinct=False,
+    )
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("shelf", selections=[_sel("id")])],
+                arguments={"first": 3, "after": "not-a-valid-cursor"},
+            ),
+        ],
+        genre_model,
+        info=_fake_info(),
+        source_type=genre_type,
+    )
+    assert not any(
+        getattr(pf, "to_attr", None) == "_dst_books_connection" for pf in plan.prefetch_related
+    )
+    # The connection's own key is recorded (error-locality), but no CHILD
+    # (``shelf``) key or fk-id elision leaked from a child build that never ran.
+    assert plan.planned_resolver_keys == ("GenreType.books@field.booksConnection",)
+    assert not any("shelf" in key for key in plan.planned_resolver_keys)
+    assert plan.fk_id_elisions == ()
 
 
 def test_secondary_type_relation_shapes_nested_recognition() -> None:
@@ -5183,114 +4872,106 @@ def test_secondary_type_relation_shapes_nested_recognition() -> None:
     routes through the primary) does not window-plan it - it falls back
     per-parent (spec-033 Decision 3 primary-type contract).
     """
-    registry.clear()
-    try:
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title")
-                interfaces = (relay.Node,)
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenrePrimary(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
-                interfaces = (relay.Node,)
-                relation_shapes = {"books": "list"}
-                primary = True
+    class GenrePrimary(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
+            interfaces = (relay.Node,)
+            relation_shapes = {"books": "list"}
+            primary = True
 
-        assert registry.get(Genre) is GenrePrimary
+    assert registry.get(Genre) is GenrePrimary
 
-        class GenreSecondary(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
-                interfaces = (relay.Node,)
-                relation_shapes = {"books": "connection"}
+    class GenreSecondary(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
+            interfaces = (relay.Node,)
+            relation_shapes = {"books": "connection"}
 
-        assert registry.model_for_type(GenreSecondary) is Genre
+    assert registry.model_for_type(GenreSecondary) is Genre
 
-        finalize_django_types()
-        # Nested recognition routes through the primary (which narrowed to list),
-        # so the connection is NOT window-planned at the nested level.
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            Genre,
-            info=_fake_info(),
-        )
-        assert not any(
-            getattr(pf, "to_attr", None) == "_dst_books_connection" for pf in plan.prefetch_related
-        )
-    finally:
-        registry.clear()
+    finalize_django_types()
+    # Nested recognition routes through the primary (which narrowed to list),
+    # so the connection is NOT window-planned at the nested level.
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        Genre,
+        info=_fake_info(),
+    )
+    assert not any(
+        getattr(pf, "to_attr", None) == "_dst_books_connection" for pf in plan.prefetch_related
+    )
 
 
 def test_window_subquery_wrap_preserves_only_mask_and_child_select_related() -> None:
     """Window annotations compose with a child ``.only()`` and a child ``select_related``."""
-    registry.clear()
-    try:
 
-        class ShelfType(DjangoType):
-            class Meta:
-                model = Shelf
-                fields = ("id", "code")
-                interfaces = (relay.Node,)
+    class ShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "code")
+            interfaces = (relay.Node,)
 
-        assert registry.get(Shelf) is ShelfType
+    assert registry.get(Shelf) is ShelfType
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title", "shelf")
-                interfaces = (relay.Node,)
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title", "shelf")
+            interfaces = (relay.Node,)
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenreType(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
-                interfaces = (relay.Node,)
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
+            interfaces = (relay.Node,)
 
-        finalize_django_types()
-        # booksConnection { edges { node { title shelf { code } } } } -> child
-        # plan carries select_related("shelf") + only(); window annotations ride.
-        node_children = [_sel("title"), _sel("shelf", selections=[_sel("code")])]
-        plan = plan_optimizations(
-            [_conn_sel("booksConnection", node_selections=node_children, arguments={"first": 3})],
-            Genre,
-            info=_fake_info(),
-            source_type=GenreType,
-        )
-        prefetch = _prefetch_entry(plan)
-        child_qs = prefetch.queryset
-        assert child_qs is not None
-        assert child_qs.query.select_related == {"shelf": {}}
-        assert child_qs.query.deferred_loading == (
-            frozenset(
-                {
-                    "id",
-                    "title",
-                    "shelf_id",
-                    "shelf__code",
-                },
-            ),
-            False,
-        )
-        # Window annotations are still present alongside the only() mask.
+    finalize_django_types()
+    # booksConnection { edges { node { title shelf { code } } } } -> child
+    # plan carries select_related("shelf") + only(); window annotations ride.
+    node_children = [_sel("title"), _sel("shelf", selections=[_sel("code")])]
+    plan = plan_optimizations(
+        [_conn_sel("booksConnection", node_selections=node_children, arguments={"first": 3})],
+        Genre,
+        info=_fake_info(),
+        source_type=GenreType,
+    )
+    prefetch = _prefetch_entry(plan)
+    child_qs = prefetch.queryset
+    assert child_qs is not None
+    assert child_qs.query.select_related == {"shelf": {}}
+    assert child_qs.query.deferred_loading == (
+        frozenset(
+            {
+                "id",
+                "title",
+                "shelf_id",
+                "shelf__code",
+            },
+        ),
+        False,
+    )
+    # Window annotations are still present alongside the only() mask.
 
-        assert WINDOW_ROW_NUMBER in child_qs.query.annotations
-    finally:
-        registry.clear()
+    assert WINDOW_ROW_NUMBER in child_qs.query.annotations
 
 
 # ---------------------------------------------------------------------------
@@ -5535,22 +5216,18 @@ def test_scalar_only_window_carries_the_operation_flag(
     is restricted to the pk / connector columns. The window annotations and the
     prefetch itself are planned either way.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        shelf_model, shelf_type = types["Shelf"]
-        plan = plan_optimizations(
-            [_conn_sel("booksConnection", scalar_children=["totalCount"], arguments={"first": 3})],
-            shelf_model,
-            info=_op_info(operation),
-            source_type=shelf_type,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        assert (prefetch.queryset.query.deferred_loading != (frozenset(), True)) is projected
-        assert WINDOW_ROW_NUMBER in prefetch.queryset.query.annotations
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    shelf_model, shelf_type = types["Shelf"]
+    plan = plan_optimizations(
+        [_conn_sel("booksConnection", scalar_children=["totalCount"], arguments={"first": 3})],
+        shelf_model,
+        info=_op_info(operation),
+        source_type=shelf_type,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    assert (prefetch.queryset.query.deferred_loading != (frozenset(), True)) is projected
+    assert WINDOW_ROW_NUMBER in prefetch.queryset.query.annotations
 
 
 @pytest.mark.parametrize(
@@ -5569,29 +5246,25 @@ def test_connection_window_child_plan_carries_the_operation_flag(
     with the parent plan's flag, so under a mutation the child rows load whole and
     under a query they are projected to the selection.
     """
-    registry.clear()
-    try:
-        types = _connection_relay_types()
-        shelf_model, shelf_type = types["Shelf"]
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            shelf_model,
-            info=_op_info(operation),
-            source_type=shelf_type,
-        )
-        assert plan.introduce_projection is projected
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        assert (prefetch.queryset.query.deferred_loading != (frozenset(), True)) is projected
-        assert WINDOW_ROW_NUMBER in prefetch.queryset.query.annotations
-    finally:
-        registry.clear()
+    types = _connection_relay_types()
+    shelf_model, shelf_type = types["Shelf"]
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        shelf_model,
+        info=_op_info(operation),
+        source_type=shelf_type,
+    )
+    assert plan.introduce_projection is projected
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    assert (prefetch.queryset.query.deferred_loading != (frozenset(), True)) is projected
+    assert WINDOW_ROW_NUMBER in prefetch.queryset.query.annotations
 
 
 @pytest.mark.parametrize(
@@ -5609,33 +5282,29 @@ def test_connection_parent_link_columns_record_under_every_operation(
     appends it whatever the operation, so a projection the parent queryset carries
     is widened to it under a mutation too.
     """
-    registry.clear()
-    try:
-        make_django_type("LnkSlugChildType", LnkSlugChild, ("id", "name"))
-        parent_type = make_django_type(
-            "LnkParentType",
-            LnkParent,
-            ("id", "label", "slug_children"),
-            meta_extra={"relation_shapes": {"slug_children": "connection"}},
-        )
-        finalize_django_types()
-        plan = plan_optimizations(
-            [
-                _sel("label"),
-                _conn_sel(
-                    "slugChildrenConnection",
-                    node_selections=[_sel("name")],
-                    arguments={"first": 2},
-                ),
-            ],
-            LnkParent,
-            info=_op_info(operation),
-            source_type=parent_type,
-        )
-        assert tuple(plan.only_fields) == ("label", "slug")
-        assert plan.prefetch_related != ()
-    finally:
-        registry.clear()
+    make_django_type("LnkSlugChildType", LnkSlugChild, ("id", "name"))
+    parent_type = make_django_type(
+        "LnkParentType",
+        LnkParent,
+        ("id", "label", "slug_children"),
+        meta_extra={"relation_shapes": {"slug_children": "connection"}},
+    )
+    finalize_django_types()
+    plan = plan_optimizations(
+        [
+            _sel("label"),
+            _conn_sel(
+                "slugChildrenConnection",
+                node_selections=[_sel("name")],
+                arguments={"first": 2},
+            ),
+        ],
+        LnkParent,
+        info=_op_info(operation),
+        source_type=parent_type,
+    )
+    assert tuple(plan.only_fields) == ("label", "slug")
+    assert plan.prefetch_related != ()
 
 
 @pytest.mark.parametrize(
@@ -5752,44 +5421,36 @@ def test_consumer_assigned_relation_left_fully_unplanned() -> None:
     keeps the relation's link columns (``FieldMeta.source_link_attnames``; none
     for this reverse FK over the pk).
     """
-    registry.clear()
-    try:
-        shelf_model, shelf_type = _shelf_types_with_consumer_books()
-        plan = plan_optimizations(
-            [_sel("code"), _sel("books", selections=[_sel("title"), _sel("shelf")])],
-            shelf_model,
-            info=_fake_info(),
-            source_type=shelf_type,
-        )
-        assert list(plan.prefetch_related) == []
-        assert list(plan.select_related) == []
-        assert list(plan.planned_resolver_keys) == []
-        # The consumer field contributes no column of its own; sibling scalars
-        # still project.
-        assert "code" in plan.only_fields
-        assert not any("books" in f for f in plan.only_fields)
-    finally:
-        registry.clear()
+    shelf_model, shelf_type = _shelf_types_with_consumer_books()
+    plan = plan_optimizations(
+        [_sel("code"), _sel("books", selections=[_sel("title"), _sel("shelf")])],
+        shelf_model,
+        info=_fake_info(),
+        source_type=shelf_type,
+    )
+    assert list(plan.prefetch_related) == []
+    assert list(plan.select_related) == []
+    assert list(plan.planned_resolver_keys) == []
+    # The consumer field contributes no column of its own; sibling scalars
+    # still project.
+    assert "code" in plan.only_fields
+    assert not any("books" in f for f in plan.only_fields)
 
 
 def test_consumer_assigned_relation_with_hint_plans_per_the_hint() -> None:
     """An explicit ``OptimizerHint`` is the documented opt-in for delegating resolvers."""
-    registry.clear()
-    try:
-        shelf_model, shelf_type = _shelf_types_with_consumer_books(
-            meta_extra={"optimizer_hints": {"books": OptimizerHint.prefetch_related()}},
-        )
-        plan = plan_optimizations(
-            [_sel("books", selections=[_sel("title")])],
-            shelf_model,
-            info=_fake_info(),
-            source_type=shelf_type,
-        )
-        # The hint dispatch planned the prefetch and recorded the key.
-        assert len(plan.prefetch_related) == 1
-        assert plan.planned_resolver_keys
-    finally:
-        registry.clear()
+    shelf_model, shelf_type = _shelf_types_with_consumer_books(
+        meta_extra={"optimizer_hints": {"books": OptimizerHint.prefetch_related()}},
+    )
+    plan = plan_optimizations(
+        [_sel("books", selections=[_sel("title")])],
+        shelf_model,
+        info=_fake_info(),
+        source_type=shelf_type,
+    )
+    # The hint dispatch planned the prefetch and recorded the key.
+    assert len(plan.prefetch_related) == 1
+    assert plan.planned_resolver_keys
 
 
 def test_default_relations_still_plan_grandchildren_under_resolvers() -> None:
@@ -5804,49 +5465,45 @@ def test_default_relations_still_plan_grandchildren_under_resolvers() -> None:
     This pin names the upstream bug so a future refactor that reintroduces the
     early-return shape fails here.
     """
-    registry.clear()
-    try:
 
-        class ShelfType(DjangoType):
-            class Meta:
-                model = Shelf
-                fields = ("id", "code")
+    class ShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "code")
 
-        assert registry.get(Shelf) is ShelfType
+    assert registry.get(Shelf) is ShelfType
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title", "shelf")
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title", "shelf")
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenreType(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
 
-        finalize_django_types()
-        plan = plan_optimizations(
-            [
-                _sel(
-                    "books",
-                    selections=[_sel("title"), _sel("shelf", selections=[_sel("code")])],
-                ),
-            ],
-            Genre,
-            info=_fake_info(),
-            source_type=GenreType,
-        )
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.queryset is not None
-        child_query = prefetch.queryset.query
-        # The grandchild relation is planned INSIDE the prefetch child queryset.
-        assert isinstance(child_query.select_related, dict)
-        assert "shelf" in child_query.select_related
-        assert plan.planned_resolver_keys
-    finally:
-        registry.clear()
+    finalize_django_types()
+    plan = plan_optimizations(
+        [
+            _sel(
+                "books",
+                selections=[_sel("title"), _sel("shelf", selections=[_sel("code")])],
+            ),
+        ],
+        Genre,
+        info=_fake_info(),
+        source_type=GenreType,
+    )
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.queryset is not None
+    child_query = prefetch.queryset.query
+    # The grandchild relation is planned INSIDE the prefetch child queryset.
+    assert isinstance(child_query.select_related, dict)
+    assert "shelf" in child_query.select_related
+    assert plan.planned_resolver_keys
 
 
 def _candidate_list(field: Sequence[_T]) -> list[_T]:
@@ -5880,7 +5537,6 @@ def test_refusing_nested_fetch_strategy_leaves_selection_unplanned() -> None:
         _mutate_every_plan_field(plan, "leaked")
         return False
 
-    registry.clear()
     refusing = _HookStrategy(name="refuse-all", hook=decline_after_mutation)
     frame = begin_execution_frame({}, nested=False, strategy=refusing)
     try:
@@ -5906,7 +5562,6 @@ def test_refusing_nested_fetch_strategy_leaves_selection_unplanned() -> None:
         assert plan.cacheable is True
     finally:
         end_execution_frame(frame)
-        registry.clear()
 
 
 def test_accepting_nested_fetch_strategy_merges_candidate_exactly_once() -> None:
@@ -5916,7 +5571,6 @@ def test_accepting_nested_fetch_strategy_merges_candidate_exactly_once() -> None
         _mutate_every_plan_field(plan, "accepted")
         return True
 
-    registry.clear()
     accepting = _HookStrategy(name="accept-all", hook=accept_after_mutation)
     frame = begin_execution_frame({}, nested=False, strategy=accepting)
     try:
@@ -5942,7 +5596,6 @@ def test_accepting_nested_fetch_strategy_merges_candidate_exactly_once() -> None
         assert plan.cacheable is False
     finally:
         end_execution_frame(frame)
-        registry.clear()
 
 
 def test_raising_nested_fetch_strategy_leaves_parent_byte_identical() -> None:
@@ -5955,7 +5608,6 @@ def test_raising_nested_fetch_strategy_leaves_parent_byte_identical() -> None:
         _mutate_every_plan_field(plan, "leaked")
         raise RuntimeError("strategy exploded")
 
-    registry.clear()
     raising = _HookStrategy(name="raise-all", hook=raise_after_mutation)
     frame = begin_execution_frame({}, nested=False, strategy=raising)
     try:
@@ -5995,7 +5647,6 @@ def test_raising_nested_fetch_strategy_leaves_parent_byte_identical() -> None:
         assert parent.finalize() == before
     finally:
         end_execution_frame(frame)
-        registry.clear()
 
 
 def test_connection_custom_get_queryset_builds_base_child_queryset_once() -> None:
@@ -6007,49 +5658,45 @@ def test_connection_custom_get_queryset_builds_base_child_queryset_once() -> Non
     gate with one queryset but plan a different one.
     """
     calls = 0
-    registry.clear()
-    try:
 
-        class BookType(DjangoType):
-            class Meta:
-                model = Book
-                fields = ("id", "title")
-                interfaces = (relay.Node,)
+    class BookType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
 
-            @classmethod
-            @override
-            def get_queryset(cls, queryset: QuerySet[Book], info: object) -> QuerySet[Book]:
-                nonlocal calls
-                calls += 1
-                return queryset
+        @classmethod
+        @override
+        def get_queryset(cls, queryset: QuerySet[Book], info: object) -> QuerySet[Book]:
+            nonlocal calls
+            calls += 1
+            return queryset
 
-        assert registry.get(Book) is BookType
+    assert registry.get(Book) is BookType
 
-        class GenreType(DjangoType):
-            class Meta:
-                model = Genre
-                fields = ("id", "name", "books")
-                interfaces = (relay.Node,)
+    class GenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name", "books")
+            interfaces = (relay.Node,)
 
-        finalize_django_types()
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "booksConnection",
-                    node_selections=[_sel("title")],
-                    arguments={"first": 3},
-                ),
-            ],
-            Genre,
-            info=raw_info_of(make_info()),
-            source_type=GenreType,
-        )
-        assert calls == 1
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.to_attr == "_dst_books_connection"
-        assert plan.planned_resolver_keys != ()
-    finally:
-        registry.clear()
+    finalize_django_types()
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "booksConnection",
+                node_selections=[_sel("title")],
+                arguments={"first": 3},
+            ),
+        ],
+        Genre,
+        info=raw_info_of(make_info()),
+        source_type=GenreType,
+    )
+    assert calls == 1
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.to_attr == "_dst_books_connection"
+    assert plan.planned_resolver_keys != ()
 
 
 def test_connection_default_manager_unsafe_queryset_is_left_unplanned() -> None:
@@ -6061,50 +5708,46 @@ def test_connection_default_manager_unsafe_queryset_is_left_unplanned() -> None:
     fall back fully unplanned rather than relying on strategy-specific late
     guards.
     """
-    registry.clear()
-    try:
 
-        class PatronNode(DjangoType):
-            class Meta:
-                model = Patron
-                fields = ("name",)
+    class PatronNode(DjangoType):
+        class Meta:
+            model = Patron
+            fields = ("name",)
 
-        assert registry.get(Patron) is PatronNode
+    assert registry.get(Patron) is PatronNode
 
-        class AnnotationNode(DjangoType):
-            class Meta:
-                model = Annotation
-                fields = ("id", "body")
-                interfaces = (relay.Node,)
+    class AnnotationNode(DjangoType):
+        class Meta:
+            model = Annotation
+            fields = ("id", "body")
+            interfaces = (relay.Node,)
 
-        assert registry.get(Annotation) is AnnotationNode
+    assert registry.get(Annotation) is AnnotationNode
 
-        class PatronProfileNode(DjangoType):
-            class Meta:
-                model = PatronProfile
-                fields = ("patron", "postal_code", "annotations")
-                interfaces = (relay.Node,)
+    class PatronProfileNode(DjangoType):
+        class Meta:
+            model = PatronProfile
+            fields = ("patron", "postal_code", "annotations")
+            interfaces = (relay.Node,)
 
-        finalize_django_types()
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "annotationsConnection",
-                    node_selections=[_sel("body")],
-                    arguments={"first": 3},
-                ),
-            ],
-            PatronProfile,
-            info=_fake_info(),
-            source_type=PatronProfileNode,
-        )
-        assert not any(
-            getattr(pf, "to_attr", None) == "_dst_annotations_connection"
-            for pf in plan.prefetch_related
-        )
-        assert plan.planned_resolver_keys == ()
-    finally:
-        registry.clear()
+    finalize_django_types()
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "annotationsConnection",
+                node_selections=[_sel("body")],
+                arguments={"first": 3},
+            ),
+        ],
+        PatronProfile,
+        info=_fake_info(),
+        source_type=PatronProfileNode,
+    )
+    assert not any(
+        getattr(pf, "to_attr", None) == "_dst_annotations_connection"
+        for pf in plan.prefetch_related
+    )
+    assert plan.planned_resolver_keys == ()
 
 
 def test_lateral_strategy_plans_a_lateral_queryset_through_the_walker() -> None:
@@ -6117,7 +5760,6 @@ def test_lateral_strategy_plans_a_lateral_queryset_through_the_walker() -> None:
     lateral backend attaches its spec-carrying queryset and the plan records
     the resolver identities exactly as the windowed default would.
     """
-    registry.clear()
     frame = begin_execution_frame({}, nested=False, strategy=LATERAL_STRATEGY)
     try:
         types = _connection_relay_types()
@@ -6145,7 +5787,6 @@ def test_lateral_strategy_plans_a_lateral_queryset_through_the_walker() -> None:
         assert plan.planned_resolver_keys == ("GenreType.books@field.booksConnection",)
     finally:
         end_execution_frame(frame)
-        registry.clear()
 
 
 _UNSAFE_CHILD_SHAPES: list[tuple[Callable[[QuerySet[Model]], QuerySet[Model]], str]] = [
@@ -6172,7 +5813,6 @@ def test_unsafe_child_queryset_left_unplanned_under_both_strategies(
     fully-unplanned fallback - no prefetch, no resolver keys, strictness
     sees the per-parent access - identically under both built-in strategies.
     """
-    registry.clear()
     frame = begin_execution_frame({}, nested=False, strategy=resolve_strategy(strategy_name))
     try:
 
@@ -6214,7 +5854,6 @@ def test_unsafe_child_queryset_left_unplanned_under_both_strategies(
         assert plan.planned_resolver_keys == (), reason
     finally:
         end_execution_frame(frame)
-        registry.clear()
 
 
 @pytest.mark.parametrize("strategy_name", ["windowed", "lateral"])
@@ -6226,7 +5865,6 @@ def test_combined_child_queryset_is_planned_as_its_primary_key_set(strategy_name
     combinator cannot, so the nested connection is planned under both built-in
     strategies instead of being left to the per-parent fallback.
     """
-    registry.clear()
     frame = begin_execution_frame({}, nested=False, strategy=resolve_strategy(strategy_name))
     try:
 
@@ -6273,7 +5911,6 @@ def test_combined_child_queryset_is_planned_as_its_primary_key_set(strategy_name
         assert plan.planned_resolver_keys
     finally:
         end_execution_frame(frame)
-        registry.clear()
 
 
 def test_plan_rejects_to_attr_prefetch_hint_on_generated_relation() -> None:
@@ -6286,7 +5923,6 @@ def test_plan_rejects_to_attr_prefetch_hint_on_generated_relation() -> None:
     raises a ``ConfigurationError`` naming the field and the two fixes (drop
     ``to_attr``, or own the resolver).
     """
-    registry.clear()
     explicit = Prefetch("items", queryset=Item.objects.only("name"), to_attr="bucket")
 
     class CategoryType:
@@ -6299,14 +5935,11 @@ def test_plan_rejects_to_attr_prefetch_hint_on_generated_relation() -> None:
         CategoryType,
         optimizer_hints={"items": OptimizerHint.prefetch(explicit)},
     )
-    try:
-        with pytest.raises(
-            ConfigurationError,
-            match=r"to_attr='bucket'.*CategoryType\.items",
-        ):
-            plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
-    finally:
-        registry.clear()
+    with pytest.raises(
+        ConfigurationError,
+        match=r"to_attr='bucket'.*CategoryType\.items",
+    ):
+        plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
 
 
 def test_consumer_assigned_relation_may_hint_prefetch_with_to_attr() -> None:
@@ -6317,27 +5950,23 @@ def test_consumer_assigned_relation_may_hint_prefetch_with_to_attr() -> None:
     reads the attribute - the generated-resolver cache contract is not in
     play. The hint plans verbatim, ``to_attr`` intact.
     """
-    registry.clear()
     explicit = Prefetch(
         "books",
         queryset=Book.objects.only("id", "title", "shelf_id"),
         to_attr="curated_books",
     )
-    try:
-        shelf_model, shelf_type = _shelf_types_with_consumer_books(
-            meta_extra={"optimizer_hints": {"books": OptimizerHint.prefetch(explicit)}},
-        )
-        plan = plan_optimizations(
-            [_sel("books", selections=[_sel("title")])],
-            shelf_model,
-            info=_fake_info(),
-            source_type=shelf_type,
-        )
-        (entry,) = plan.prefetch_related
-        assert isinstance(entry, Prefetch)
-        assert entry.to_attr == "curated_books"
-    finally:
-        registry.clear()
+    shelf_model, shelf_type = _shelf_types_with_consumer_books(
+        meta_extra={"optimizer_hints": {"books": OptimizerHint.prefetch(explicit)}},
+    )
+    plan = plan_optimizations(
+        [_sel("books", selections=[_sel("title")])],
+        shelf_model,
+        info=_fake_info(),
+        source_type=shelf_type,
+    )
+    (entry,) = plan.prefetch_related
+    assert isinstance(entry, Prefetch)
+    assert entry.to_attr == "curated_books"
 
 
 def _generic_connection_types() -> dict[str, tuple[type[Model], type[DjangoType]]]:
@@ -6383,35 +6012,31 @@ async def test_generic_connection_planning_does_no_sync_db_io_under_async() -> N
     would succeed rather than raise, so the planner is driven directly here
     (package tier).
     """
-    registry.clear()
-    try:
-        types = _generic_connection_types()
-        branch_model, branch_type = types["Branch"]
-        # A cold content-type cache: the removed plan-time lookup would have to
-        # hit the DB here (sync I/O), raising ``SynchronousOnlyOperation`` under
-        # the running loop. The alias-late design never touches it.
-        ContentType.objects.clear_cache()
-        plan = plan_optimizations(
-            [
-                _conn_sel(
-                    "tagsConnection",
-                    node_selections=[_sel("tag")],
-                    arguments={"first": 2},
-                ),
-            ],
-            branch_model,
-            info=_fake_info(),
-            source_type=branch_type,
-        )
-        # The generic connection planned a windowed prefetch (no plan-time morph
-        # constant baked in - Django adds it alias-late at fetch time).
-        prefetch = _prefetch_entry(plan)
-        assert prefetch.to_attr == "_dst_tags_connection"
-        assert prefetch.queryset is not None
-        child_where = str(prefetch.queryset.query.where)
-        assert "content_type" not in child_where
-    finally:
-        registry.clear()
+    types = _generic_connection_types()
+    branch_model, branch_type = types["Branch"]
+    # A cold content-type cache: the removed plan-time lookup would have to
+    # hit the DB here (sync I/O), raising ``SynchronousOnlyOperation`` under
+    # the running loop. The alias-late design never touches it.
+    ContentType.objects.clear_cache()
+    plan = plan_optimizations(
+        [
+            _conn_sel(
+                "tagsConnection",
+                node_selections=[_sel("tag")],
+                arguments={"first": 2},
+            ),
+        ],
+        branch_model,
+        info=_fake_info(),
+        source_type=branch_type,
+    )
+    # The generic connection planned a windowed prefetch (no plan-time morph
+    # constant baked in - Django adds it alias-late at fetch time).
+    prefetch = _prefetch_entry(plan)
+    assert prefetch.to_attr == "_dst_tags_connection"
+    assert prefetch.queryset is not None
+    child_where = str(prefetch.queryset.query.where)
+    assert "content_type" not in child_where
 
 
 _ManagerShape = Callable[[type[Model], str, str], AbstractContextManager[type]]

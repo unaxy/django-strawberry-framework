@@ -3369,84 +3369,80 @@ def test_decode_input_object_handles_none() -> None:
 @pytest.mark.django_db
 def test_decode_nested_multi_tolerates_none_item_in_list() -> None:
     """_decode_nested correctly passes None list items to DRF validation instead of raising AttributeError."""
-    registry.clear()
-    try:
 
-        class ShelfItemChildSerializer(ModelSerializerBase[library_models.Shelf]):
-            class Meta:
-                model = library_models.Shelf
-                fields = ("code", "topic")
+    class ShelfItemChildSerializer(ModelSerializerBase[library_models.Shelf]):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("code", "topic")
 
-        class LibraryBookSerializer(ModelSerializerBase[library_models.Book]):
-            shelves = ShelfItemChildSerializer(many=True, required=False)
+    class LibraryBookSerializer(ModelSerializerBase[library_models.Book]):
+        shelves = ShelfItemChildSerializer(many=True, required=False)
 
-            class Meta:
-                model = library_models.Book
-                fields = ("title", "shelves")
+        class Meta:
+            model = library_models.Book
+            fields = ("title", "shelves")
 
-            @override
-            def create(self, validated_data: dict[str, object]) -> library_models.Book:
-                return library_models.Book.objects.create(**validated_data)
+        @override
+        def create(self, validated_data: dict[str, object]) -> library_models.Book:
+            return library_models.Book.objects.create(**validated_data)
 
-        class ShelfT(DjangoType, relay.Node):
-            class Meta:
-                model = library_models.Shelf
-                fields = ("id", "code", "topic")
-                primary = True
+    class ShelfT(DjangoType, relay.Node):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("id", "code", "topic")
+            primary = True
 
-        assert registry.get(library_models.Shelf) is ShelfT
+    assert registry.get(library_models.Shelf) is ShelfT
 
-        class BookT(DjangoType, relay.Node):
-            class Meta:
-                model = library_models.Book
-                fields = ("id", "title")
-                primary = True
+    class BookT(DjangoType, relay.Node):
+        class Meta:
+            model = library_models.Book
+            fields = ("id", "title")
+            primary = True
 
-        assert registry.get(library_models.Book) is BookT
+    assert registry.get(library_models.Book) is BookT
 
-        class CreateBook(SerializerMutation):
-            class Meta:
-                serializer_class = LibraryBookSerializer
-                operation = "create"
-                nested_fields = {"shelves": NestedSerializerConfig()}
-                permission_classes = ()
+    class CreateBook(SerializerMutation):
+        class Meta:
+            serializer_class = LibraryBookSerializer
+            operation = "create"
+            nested_fields = {"shelves": NestedSerializerConfig()}
+            permission_classes = ()
 
-        @strawberry.type
-        class Query:
-            ping: int = 1
+    @strawberry.type
+    class Query:
+        ping: int = 1
 
-        @strawberry.type
-        class Mutation:
-            create_book = DjangoMutationField(CreateBook)
+    @strawberry.type
+    class Mutation:
+        create_book = DjangoMutationField(CreateBook)
 
-        finalize_django_types()
-        DjangoSchema(query=Query, mutation=Mutation)
+    finalize_django_types()
+    DjangoSchema(query=Query, mutation=Mutation)
 
-        req = HttpRequest()
-        req.user = User(username="u")
-        info = make_info(context=SimpleNamespace(request=req))
+    req = HttpRequest()
+    req.user = User(username="u")
+    info = make_info(context=SimpleNamespace(request=req))
 
-        input_cls = CreateBook._input_class
-        assert input_cls is not None
-        input_data = _keyword_constructor(input_cls)(
-            title="Book with None shelf",
-            shelves=[None],
+    input_cls = CreateBook._input_class
+    assert input_cls is not None
+    input_data = _keyword_constructor(input_cls)(
+        title="Book with None shelf",
+        shelves=[None],
+    )
+
+    with managed_write_transaction("default"):
+        result = serializer_resolvers.resolve_serializer_sync(
+            CreateBook,
+            info,
+            data=input_data,
+            id=UNSET,
         )
 
-        with managed_write_transaction("default"):
-            result = serializer_resolvers.resolve_serializer_sync(
-                CreateBook,
-                info,
-                data=input_data,
-                id=UNSET,
-            )
-
-        assert isinstance(result, _ErrorEnvelope)
-        assert result.errors is not None
-        assert len(result.errors) > 0
-        assert any("shelves" in err.field for err in result.errors)
-    finally:
-        registry.clear()
+    assert isinstance(result, _ErrorEnvelope)
+    assert result.errors is not None
+    assert len(result.errors) > 0
+    assert any("shelves" in err.field for err in result.errors)
 
 
 def test_hook_context_invariants() -> None:

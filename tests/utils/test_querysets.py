@@ -99,7 +99,6 @@ from typing_extensions import Self, override
 from django_strawberry_framework import DjangoType
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.orders import Ordering, OrderSet
-from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import querysets as querysets_module
 from django_strawberry_framework.utils._narrowing import (
     call_method,
@@ -1310,45 +1309,41 @@ def test_expand_relation_order_spells_a_related_pk_as_its_key_column(
 def test_relation_write_visibility_boundary_is_controlled_by_type_registration() -> None:
     """Unregistered targets use their default manager; registered targets apply visibility."""
     seed_data(0)
-    registry.clear()
     (category,) = categories_from_seed(("VisibilityBoundary", False))
-    try:
-        assert visible_related_objects(
+    assert visible_related_objects(
+        Category,
+        [saved_pk(category)],
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    ) == {
+        saved_pk(category): saved_pk(category),
+    }
+
+    class CategoryType(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            primary = True
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: models.QuerySet[Category],
+            info: object,
+        ) -> models.QuerySet[Category]:
+            return queryset.exclude(pk=saved_pk(category))
+
+    del CategoryType
+    assert (
+        visible_related_objects(
             Category,
             [saved_pk(category)],
             info=None,
             async_recourse=TEST_ASYNC_RECOURSE,
-        ) == {
-            saved_pk(category): saved_pk(category),
-        }
-
-        class CategoryType(DjangoType):
-            class Meta:
-                model = Category
-                fields = ("id", "name")
-                primary = True
-
-            @classmethod
-            @override
-            def get_queryset(
-                cls,
-                queryset: models.QuerySet[Category],
-                info: object,
-            ) -> models.QuerySet[Category]:
-                return queryset.exclude(pk=saved_pk(category))
-
-        del CategoryType
-        assert (
-            visible_related_objects(
-                Category,
-                [saved_pk(category)],
-                info=None,
-                async_recourse=TEST_ASYNC_RECOURSE,
-            )
-            == {}
         )
-    finally:
-        registry.clear()
+        == {}
+    )
 
 
 @pytest.mark.django_db
@@ -1359,29 +1354,25 @@ def test_visible_related_objects_reads_a_non_pk_key_beside_the_pk_in_one_query()
     stores, read beside the pk in the one ``pk__in`` query. A row whose key is ``NULL``
     cannot be linked by it and is left out, the absence a hidden or missing row has.
     """
-    registry.clear()
     keyed = NullableScalarSpecimen.objects.create(label="Keyed")
     unkeyed = NullableScalarSpecimen.objects.create(label=None)
     pks = [keyed.pk, unkeyed.pk]
-    try:
-        with CaptureQueriesContext(connection) as ctx:
-            present = visible_related_objects(
-                NullableScalarSpecimen,
-                pks,
-                info=None,
-                key_attname="label",
-                async_recourse=TEST_ASYNC_RECOURSE,
-            )
-        assert present == {keyed.pk: "Keyed"}
-        assert len(ctx.captured_queries) == 1
-        assert visible_related_objects(
+    with CaptureQueriesContext(connection) as ctx:
+        present = visible_related_objects(
             NullableScalarSpecimen,
             pks,
             info=None,
+            key_attname="label",
             async_recourse=TEST_ASYNC_RECOURSE,
-        ) == {keyed.pk: keyed.pk, unkeyed.pk: unkeyed.pk}
-    finally:
-        registry.clear()
+        )
+    assert present == {keyed.pk: "Keyed"}
+    assert len(ctx.captured_queries) == 1
+    assert visible_related_objects(
+        NullableScalarSpecimen,
+        pks,
+        info=None,
+        async_recourse=TEST_ASYNC_RECOURSE,
+    ) == {keyed.pk: keyed.pk, unkeyed.pk: unkeyed.pk}
 
 
 @pytest.mark.django_db
@@ -1406,41 +1397,37 @@ def test_visible_related_object_answers_none_for_a_null_key_in_one_query() -> No
     The predicate rides the one visibility query; with no ``key_attname`` the same row
     resolves.
     """
-    registry.clear()
     keyed = NullableScalarSpecimen.objects.create(label="Keyed")
     unkeyed = NullableScalarSpecimen.objects.create(label=None)
-    try:
-        with CaptureQueriesContext(connection) as ctx:
-            refused = visible_related_object(
-                NullableScalarSpecimen,
-                unkeyed.pk,
-                None,
-                key_attname="label",
-                async_recourse=TEST_ASYNC_RECOURSE,
-            )
-        assert refused is None
-        assert len(ctx.captured_queries) == 1
-        assert (
-            visible_related_object(
-                NullableScalarSpecimen,
-                keyed.pk,
-                None,
-                key_attname="label",
-                async_recourse=TEST_ASYNC_RECOURSE,
-            )
-            == keyed
+    with CaptureQueriesContext(connection) as ctx:
+        refused = visible_related_object(
+            NullableScalarSpecimen,
+            unkeyed.pk,
+            None,
+            key_attname="label",
+            async_recourse=TEST_ASYNC_RECOURSE,
         )
-        assert (
-            visible_related_object(
-                NullableScalarSpecimen,
-                unkeyed.pk,
-                None,
-                async_recourse=TEST_ASYNC_RECOURSE,
-            )
-            == unkeyed
+    assert refused is None
+    assert len(ctx.captured_queries) == 1
+    assert (
+        visible_related_object(
+            NullableScalarSpecimen,
+            keyed.pk,
+            None,
+            key_attname="label",
+            async_recourse=TEST_ASYNC_RECOURSE,
         )
-    finally:
-        registry.clear()
+        == keyed
+    )
+    assert (
+        visible_related_object(
+            NullableScalarSpecimen,
+            unkeyed.pk,
+            None,
+            async_recourse=TEST_ASYNC_RECOURSE,
+        )
+        == unkeyed
+    )
 
 
 # ---------------------------------------------------------------------------
