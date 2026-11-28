@@ -3238,6 +3238,7 @@ def test_optimizer_context_all_exports() -> None:
         "publish_scoped_relations",
         "publish_planned_windows",
         "relation_is_optimizer_scoped",
+        "resolver_read_scope",
         "stash_for_optimizer",
         "stash_on_context",
         "stashed_strictness",
