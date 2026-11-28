@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from types import GenericAlias, UnionType
 from typing import TYPE_CHECKING, get_args, get_origin
 
@@ -1001,12 +1002,15 @@ class SerializerInputShape:
       ``InputFieldSpec`` (input_attr / graphql_name / target_name / kind / source, plus
       the emitted ``annotation_repr`` and ``required``, which carry a nested child's
       emitted shape into the parent's key).
-    - ``annotations`` - the ordered tuple of each emitted field's stringified EMITTED
-      annotation (post-nullable-widening), so two hook-returned shapes with
-      the SAME names but a DIFFERENT emitted annotation diverge: a ``CharField`` vs an
-      ``IntegerField`` (different base type) under one name, AND a ``required=True,
-      allow_null=False`` (``str``) vs ``required=True, allow_null=True`` (``str | None``)
-      field under one name (same base type, different generated nullability).
+    - ``emitted_annotations`` - the actual post-widening annotations. Native annotation
+      equality distinguishes distinct scalars, enums and nested inputs even when their
+      printable names coincide. This axis is excluded from hashing: Strawberry scalar
+      definitions and annotation metadata need not be hashable; equal descriptors still
+      have equal hashes from the remaining axes.
+    - ``annotations`` - the stable printable text of each post-widening annotation,
+      used for deterministic name tokens and diagnostics. Different annotations may
+      have the same text; ``emitted_annotations`` keeps those descriptors distinct so
+      an ambiguous generated name reaches the materialization collision refusal.
     - ``descriptions`` - the ordered generated SDL descriptions (``help_text`` plus
       validation constraints), or ``None`` per undescribed field. Descriptions render into
       the generated type, so description-only hook variations must not share a cache entry.
@@ -1027,6 +1031,7 @@ class SerializerInputShape:
     operation_kind: str
     field_specs: tuple[InputFieldSpec, ...]
     annotations: tuple[str, ...]
+    emitted_annotations: tuple[object, ...] = dataclass_field(hash=False)
     descriptions: tuple[str | None, ...]
     required_state: tuple[bool, ...]
     optional_fields: frozenset[str]
@@ -1724,7 +1729,7 @@ def _default_full_shape_identity(
     is_partial: bool,
     operation_kind: str | None = None,
 ) -> (
-    tuple[tuple[InputFieldSpec, ...], tuple[str, ...], tuple[str | None, ...], tuple[bool, ...]]
+    tuple[tuple[InputFieldSpec, ...], tuple[object, ...], tuple[str | None, ...], tuple[bool, ...]]
     | None
 ):
     """Return the per-field identity of the DEFAULT full shape, or ``None``.
@@ -1766,7 +1771,7 @@ def _default_full_shape_identity(
         # The probe's failure IS its answer: no constructible default shape.
         return None
     try:
-        field_specs, annotation_reprs, descriptions, required_state, _triples = (
+        field_specs, _annotation_reprs, descriptions, required_state, triples = (
             _walk_serializer_fields(
                 default_effective,
                 model,
@@ -1780,7 +1785,7 @@ def _default_full_shape_identity(
         return None
     return (
         tuple(field_specs),
-        tuple(annotation_reprs),
+        tuple(annotation for _, annotation, _ in triples),
         tuple(descriptions),
         tuple(required_state),
     )
@@ -1888,9 +1893,13 @@ def build_serializer_input_class(
     # override takes a divergent name even when it happens to reproduce the default
     # identity.) ``descriptions`` is part of the identity so a description-only divergence
     # diverges too.
+    # Keep actual annotations alongside the stable name text. Resolving them here would
+    # evaluate Strawberry lazy references before materialization; their native equality
+    # already retains the scalar / enum / input identity and list / nullable structure.
+    emitted_annotations = tuple(annotation for _, annotation, _ in triples)
     current_identity = (
         tuple(field_specs),
-        tuple(annotation_reprs),
+        emitted_annotations,
         tuple(descriptions),
         tuple(required_state),
     )
@@ -1938,6 +1947,7 @@ def build_serializer_input_class(
         operation_kind=operation_kind,
         field_specs=tuple(field_specs),
         annotations=tuple(annotation_reprs),
+        emitted_annotations=emitted_annotations,
         descriptions=tuple(descriptions),
         required_state=tuple(required_state),
         optional_fields=effective_optional,

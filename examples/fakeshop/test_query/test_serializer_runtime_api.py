@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, NoReturn
+from collections.abc import Callable, Iterator, Mapping
+from typing import TYPE_CHECKING, NewType, NoReturn
 
 import pytest
 import strawberry
+from apps.library.models import Genre
 from apps.products import models as product_models
 from apps.products.services import seed_data
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import connection
 from django.db.models import Model
 from django.test.utils import CaptureQueriesContext
-from graphql_client import JSONObject, SchemaMount, graphql_payload, json_list, json_str
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    graphql_payload,
+    json_list,
+    json_object,
+    json_str,
+)
 from rest_framework import serializers
 from strawberry import relay
 from typing_extensions import override
@@ -27,8 +35,19 @@ from django_strawberry_framework import (
     NestedSerializerConfig,
     SerializerMutation,
     finalize_django_types,
+    strawberry_config,
 )
-from django_strawberry_framework.rest_framework.accessors import base_fields, validated_data_of
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.rest_framework import serializer_converter
+from django_strawberry_framework.rest_framework.accessors import (
+    base_fields,
+    bound_fields,
+    validated_data_of,
+)
+from django_strawberry_framework.rest_framework.serializer_converter import (
+    SerializerFieldConversion,
+    register_serializer_field_converter,
+)
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import dict_of
 from tests._catalog_data import categories_from_seed, items_from_seed
@@ -560,3 +579,157 @@ def test_serializer_field_outside_the_input_may_carry_any_name(
 
     assert payload == {"data": {"write": {"node": {"name": "AnyName"}, "errors": []}}}
     assert list(product_models.Category.objects.values_list("name", flat=True)) == ["AnyName"]
+
+
+@pytest.fixture
+def restore_field_converters() -> Iterator[None]:
+    """Restore only this test's converter registrations after public registration calls."""
+    snapshot = dict(serializer_converter._SERIALIZER_FIELD_CONVERTERS)
+    yield
+    serializer_converter._SERIALIZER_FIELD_CONVERTERS.clear()
+    serializer_converter._SERIALIZER_FIELD_CONVERTERS.update(snapshot)
+
+
+def _code_annotation() -> object:
+    """Each call creates a distinct supported scalar annotation with identical printable text."""
+    return NewType("Code", str)
+
+
+def _code_schema(scalar_mode: str, *, narrowed: bool) -> DjangoSchema:
+    """Bind two public mutations over one serializer with controlled scalar annotation identity."""
+    first_code = _code_annotation()
+    OtherCode = NewType("OtherCode", str)
+    second_code = {
+        "same": first_code,
+        "same_name": _code_annotation(),
+        "different_name": OtherCode,
+    }[scalar_mode]
+    assert (repr(first_code) == repr(second_code)) is (scalar_mode != "different_name")
+    assert (first_code is second_code) is (scalar_mode == "same")
+
+    class FirstField(serializers.CharField):
+        pass
+
+    class SecondField(serializers.CharField):
+        pass
+
+    def first_converter(field: DRFField) -> SerializerFieldConversion:
+        return SerializerFieldConversion(annotation=first_code, required=field.required)
+
+    def second_converter(field: DRFField) -> SerializerFieldConversion:
+        return SerializerFieldConversion(annotation=second_code, required=field.required)
+
+    register_serializer_field_converter(FirstField, first_converter)
+    register_serializer_field_converter(SecondField, second_converter)
+
+    class CodeGenreType(DjangoType):
+        class Meta:
+            model = Genre
+            fields = ("id", "name")
+
+    class CodeSerializer(ModelSerializerBase[Genre]):
+        code = FirstField()
+
+        class Meta:
+            model = Genre
+            fields = ("name", "code")
+
+    selected_fields = ("name", "code") if narrowed else None
+
+    class FirstMutation(SerializerMutation):
+        class Meta:
+            serializer_class = CodeSerializer
+            operation = "create"
+            fields = selected_fields
+            permission_classes = []
+
+    class SecondMutation(SerializerMutation):
+        @classmethod
+        @override
+        def get_serializer_for_schema(cls) -> dict[str, DRFField]:
+            class HookSerializer(ModelSerializerBase[Genre]):
+                code = SecondField()
+
+                class Meta:
+                    model = Genre
+                    fields = ("name", "code")
+
+            return dict(bound_fields(HookSerializer()))
+
+        class Meta:
+            serializer_class = CodeSerializer
+            operation = "create"
+            fields = selected_fields
+            permission_classes = []
+
+    @strawberry.type
+    class Mutation:
+        first = DjangoMutationField(FirstMutation)
+        second = DjangoMutationField(SecondMutation)
+
+    finalize_django_types()
+    scalars = {first_code: strawberry.scalar(name="FirstCode")}
+    if second_code is not first_code:
+        scalars[second_code] = strawberry.scalar(name="SecondCode")
+    return DjangoSchema(
+        query=_Query,
+        mutation=Mutation,
+        types=[CodeGenreType],
+        config=strawberry_config(extra_scalar_map=scalars),
+    )
+
+
+@pytest.mark.usefixtures("restore_field_converters")
+@pytest.mark.parametrize("scalar_mode", ["same", "same_name", "different_name"])
+@pytest.mark.parametrize("narrowed", [False, True], ids=["full", "narrowed"])
+def test_serializer_input_annotation_identity_over_http(
+    scalar_mode: str,
+    *,
+    narrowed: bool,
+) -> None:
+    """Distinct annotations never reuse the first input; indistinguishable names fail loudly."""
+    if narrowed and scalar_mode == "same_name":
+        with pytest.raises(
+            ConfigurationError,
+            match="is materialized by two distinct SerializerMutation input classes",
+        ):
+            _code_schema(scalar_mode, narrowed=narrowed)
+        return
+
+    schema = _code_schema(scalar_mode, narrowed=narrowed)
+    payload = _post(
+        schema,
+        """
+            { __schema { mutationType {
+              fields { name args { name type { ofType {
+                name inputFields { name type { name ofType { name } } }
+              } } } }
+            } } }
+            """,
+    )
+    assert "errors" not in payload, payload
+    data = json_object(payload, "data")
+    inputs: dict[str, tuple[str, str]] = {}
+    for mutation in json_list(data, "__schema", "mutationType", "fields"):
+        argument = next(
+            arg for arg in json_list(mutation, "args") if json_str(arg, "name") == "data"
+        )
+        input_type = json_object(argument, "type", "ofType")
+        code = next(
+            f for f in json_list(input_type, "inputFields") if json_str(f, "name") == "code"
+        )
+        inputs[json_str(mutation, "name")] = (
+            json_str(input_type, "name"),
+            json_str(code, "type", "ofType", "name"),
+        )
+    first_name, first_scalar = inputs["first"]
+    second_name, second_scalar = inputs["second"]
+    assert first_scalar == "FirstCode"
+    if scalar_mode == "same":
+        assert second_name == first_name
+        assert second_scalar == "FirstCode"
+    else:
+        assert second_name != first_name
+        assert second_scalar == "SecondCode"
+    if not narrowed:
+        assert first_name == "CodeSerializerInput"
