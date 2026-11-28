@@ -73,10 +73,8 @@ from .utils.inputs import is_re_readable_field_declaration
 from .utils.permissions import (
     active_permission_targets,
     active_related_branches,
-    extract_branch_value,
     request_from_info,
     run_active_input_permission_checks,
-    verbatim_path,
 )
 from .utils.relations import is_model_class
 from .utils.strings import pascal_case_or_raise
@@ -923,28 +921,9 @@ class ActiveInputPermissionMixin:
     ``OrderBy``. Those contracts do not share a driver.
     """
 
+    # Read off ``cls`` on every walk, never cached, so a subclass override reaches both the
+    # apply path and the gates: both classify through ``_permission.traversal``.
     _permission: ClassVar[ActiveInputPermissionAttrs]
-
-    @classmethod
-    def _input_traversal(cls) -> SetInputTraversal:
-        """Derive the family's canonical active-input traversal config.
-
-        The family's ``_permission`` CONTAINS the ``SetInputTraversal`` that
-        ``utils/input_values.py::iter_active_fields`` consumes, so this is a read
-        rather than a field-for-field copy. Both family
-        normalizers (``FilterSet._normalize_input`` /
-        ``orders/inputs.py::normalize_input_value``) and the permission walkers
-        classify input through this one object, so apply-time and gate-time
-        classification cannot drift apart -- a divergence would let a field be
-        filtered without its permission gate (or gate a field never applied).
-
-        Read off ``cls`` on every call, never cached at module import: that is
-        what lets a subclass's ``_permission`` override reach the apply path at
-        all. ``field_specs`` inside the traversal is the same map the family's
-        ``inputs`` module mutates in place at bind time, so it flows by
-        reference.
-        """
-        return cls._permission.traversal
 
     @classmethod
     def _request_from_info(cls, info: object) -> object:
@@ -955,32 +934,12 @@ class ActiveInputPermissionMixin:
         return request_from_info(info, family_label=cls._permission.family_label)
 
     @classmethod
-    def _extract_branch_value(cls, input_value: object, field_name: str) -> object:
-        """Return the value at ``field_name`` on a dataclass-or-dict input.
-
-        Thin delegate to ``utils/permissions.py::extract_branch_value`` with
-        this family's ``unset_sentinel``.
-        """
-        return extract_branch_value(
-            input_value,
-            field_name,
-            unset_sentinel=cls._permission.traversal.unset_sentinel,
-        )
-
-    @classmethod
     def _iter_active_related_branches(cls, input_value: object) -> list[RelatedBranch]:
         """List ``(field_name, related_obj, child_input)`` for present branches.
 
         Thin delegate to ``utils/permissions.py::active_related_branches``.
         """
-        cfg = cls._permission
-        return active_related_branches(
-            cls,
-            input_value,
-            related_attr=cfg.traversal.related_attr,
-            unset_sentinel=cfg.traversal.unset_sentinel,
-            handle_top_level_list=cfg.traversal.handle_top_level_list,
-        )
+        return active_related_branches(cls, input_value)
 
     @classmethod
     def _permission_fallback_path(cls, python_attr: str) -> str:
@@ -989,7 +948,7 @@ class ActiveInputPermissionMixin:
         Default: the attr IS the path (order side). ``FilterSet`` reads the
         gate path its generated field would carry from its lookup table.
         """
-        return verbatim_path(python_attr)
+        return python_attr
 
     @classmethod
     def _permission_walk_gates(cls, _input_value: object) -> tuple[tuple[type[object], str], ...]:
@@ -1007,7 +966,7 @@ class ActiveInputPermissionMixin:
         """Whether ``gate_path`` is an ORM path whose declared hops fire their gates. Default: yes.
 
         ``utils/permissions.py::run_active_input_permission_checks`` walks each
-        gate path that answers yes (``_fire_flat_relation_path_gates``). An order
+        gate path that answers yes (``relation_path_gates``). An order
         term's source path is its ORM path; ``FilterSet`` answers no for a
         declared head, whose gate path is its name.
         """
@@ -1022,17 +981,7 @@ class ActiveInputPermissionMixin:
 
         Thin delegate to ``utils/permissions.py::active_permission_targets``.
         """
-        cfg = cls._permission
-        return active_permission_targets(
-            cls,
-            input_value,
-            field_specs=cfg.traversal.field_specs,
-            related_attr=cfg.traversal.related_attr,
-            logic_keys=cfg.traversal.logic_keys,
-            fallback_path=cls._permission_fallback_path,
-            unset_sentinel=cfg.traversal.unset_sentinel,
-            handle_top_level_list=cfg.traversal.handle_top_level_list,
-        )
+        return active_permission_targets(cls, input_value)
 
     @classmethod
     def _check_permission_depth(cls, _depth: int) -> None:
@@ -1085,21 +1034,18 @@ class ActiveInputPermissionMixin:
         ``_prepare_permission_input``.
         """
         cls._prepare_permission_input(input_value)
-        if is_inactive_value(input_value, unset_sentinel=cls._permission.traversal.unset_sentinel):
+        if is_inactive_value(input_value):
             return
         cls._check_permission_depth(_depth)
         if _fired is None:
             _fired = {}
         bare = _bare if _bare is not None else object.__new__(cls)
-        cfg = cls._permission
         run_active_input_permission_checks(
             cls,
             input_value,
             request,
             fired=_fired,
             bare=bare,
-            target_attr=cfg.target_attr,
-            related_attr=cfg.traversal.related_attr,
             depth=_depth,
         )
         cls._run_logic_permission_checks(

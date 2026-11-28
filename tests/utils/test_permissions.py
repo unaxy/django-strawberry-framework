@@ -18,27 +18,28 @@ from django.contrib.auth import get_user_model
 from django.db.models import Model
 from django.http import HttpRequest
 from django.test import modify_settings
+from django.utils.functional import SimpleLazyObject
 from graphql import GraphQLError
 from typing_extensions import override
 
 import django_strawberry_framework.utils.permissions as perm
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.sets_mixins import ActiveInputPermissionMixin
-from django_strawberry_framework.utils.input_values import UNSET
+from django_strawberry_framework.sets_mixins import (
+    ActiveInputPermissionAttrs,
+    ActiveInputPermissionMixin,
+)
+from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
 from django_strawberry_framework.utils.permissions import (
     ChannelsRequestAdapter,
     DeclaredHop,
     UndeclaredHop,
-    _channels_request_adapter,
-    _fire_flat_relation_path_gates,
-    _related_declarations,
     _request_from_context,
     _safe_get_model,
     active_permission_targets,
     active_related_branches,
-    auth_aliases_for_permission_classes,
     extract_branch_value,
     invoke_permission_method,
+    relation_path_gates,
     request_from_info,
     resolve_auth_aliases,
     run_active_input_permission_checks,
@@ -47,6 +48,19 @@ from django_strawberry_framework.utils.permissions import (
 )
 from django_strawberry_framework.utils.querysets import SyncMisuseError
 from django_strawberry_framework.utils.typing import object_result
+
+
+def _probe_permission(target_attr: str, related_attr: str) -> ActiveInputPermissionAttrs:
+    """A permission facade config naming a family's target and related-collection attributes."""
+    return ActiveInputPermissionAttrs(
+        family_label="Probe",
+        target_attr=target_attr,
+        traversal=SetInputTraversal(field_specs={}, related_attr=related_attr),
+    )
+
+
+_FILTER_PERMISSION = _probe_permission("filterset", "related_filters")
+_ORDER_PERMISSION = _probe_permission("orderset", "related_orders")
 
 # ---------------------------------------------------------------------------
 # request_from_info -- family-labelled, shape-tolerant
@@ -292,14 +306,13 @@ def test_unresolvable_request_context_message_is_pinned() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_extract_branch_value_collapses_only_the_configured_sentinel() -> None:
-    """The order side (default ``unset_sentinel=None``) leaves UNSET intact; filter collapses it."""
+def test_extract_branch_value_collapses_unset_and_none() -> None:
+    """``UNSET`` collapses to None ("branch not supplied"); a supplied value passes through."""
     holder = {"branch": UNSET, "real": 5}
-    # No sentinel configured (order semantics): UNSET passes through unchanged.
-    assert extract_branch_value(holder, "branch") is UNSET
-    # Filter semantics: UNSET collapses to None ("branch not supplied").
-    assert extract_branch_value(holder, "branch", unset_sentinel=UNSET) is None
-    assert extract_branch_value(holder, "real", unset_sentinel=UNSET) == 5
+    assert extract_branch_value(holder, "branch") is None
+    assert extract_branch_value(holder, "real") == 5
+    assert extract_branch_value(holder, "missing") is None
+    assert extract_branch_value(SimpleNamespace(real=5), "real") == 5
     assert extract_branch_value(None, "branch") is None
 
 
@@ -381,6 +394,7 @@ def test_invoke_permission_method_rejects_a_non_callable_gate_slot() -> None:
         pass
 
     class _Set(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         check_name_permission = "not-a-callable"
 
         @override
@@ -409,8 +423,6 @@ def test_invoke_permission_method_rejects_a_non_callable_gate_slot() -> None:
             HttpRequest(),
             fired={},
             bare=object.__new__(_Set),
-            target_attr="filterset",
-            related_attr="related_filters",
         )
 
 
@@ -495,19 +507,13 @@ def test_flat_relation_path_gate_denies_on_a_false_return() -> None:
         check_name_permission = _returning_gate(result=False, calls=calls)
 
     class Item(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters = {"category": _Rel("category", Category, target_attr="filterset")}
         check_category_permission = _returning_gate(result=True, calls=calls)
 
     fired: dict[type[object], set[str]] = {}
     with pytest.raises(GraphQLError, match="Not authorized to use name on Category"):
-        _fire_flat_relation_path_gates(
-            Item,
-            "category__name",
-            HttpRequest(),
-            fired=fired,
-            related_attr="related_filters",
-            target_attr="filterset",
-        )
+        _fire_flat(Item, "category__name", fired=fired)
     assert calls == [True, False]
     assert fired[Item] == {"check_category_permission"}
     assert fired[Category] == set()
@@ -534,6 +540,8 @@ def test_nested_branch_gate_denies_on_a_false_return() -> None:
     related_obj = type("Rel", (), {"orderset": _Child})()
 
     class _Parent(ActiveInputPermissionMixin):
+        _permission = _ORDER_PERMISSION
+
         @override
         @classmethod
         def _permission_walk_gates(
@@ -566,15 +574,13 @@ def test_nested_branch_gate_denies_on_a_false_return() -> None:
             HttpRequest(),
             fired=fired,
             bare=object.__new__(_Parent),
-            target_attr="orderset",
-            related_attr="related_orders",
         )
     assert calls == ["parent.name", "child._run", "parent.child"]
     assert fired[_Parent] == {"check_name_permission"}
 
 
 # ---------------------------------------------------------------------------
-# _fire_flat_relation_path_gates -- flat traversal leaves are gated like their
+# relation_path_gates -- flat traversal leaves are gated like their
 # nested twins (the shared representational-bypass fix, both families).
 # ---------------------------------------------------------------------------
 
@@ -600,7 +606,18 @@ def _record_gate(store: list[str], label: str) -> Callable[[object, object], Non
     return _check
 
 
-def test_fire_flat_relation_path_gates_fires_the_deep_target_chain() -> None:
+def _fire_flat(
+    owner: type[ActiveInputPermissionMixin],
+    source_path: str,
+    *,
+    fired: dict[type[object], set[str]],
+) -> None:
+    """Fire the gates ``run_active_input_permission_checks`` fires for a flat leaf's ORM path."""
+    for gate_cls, gate_path in relation_path_gates(owner, source_path):
+        perm._fire_gate_on_class(gate_cls, gate_path, HttpRequest(), fired=fired)
+
+
+def test_flat_relation_path_gates_fires_the_deep_target_chain() -> None:
     """A deep flat path fires each parent relation gate plus the terminal field gate.
 
     ``entries__property__category__name`` fires the SAME gates the nested twin
@@ -621,17 +638,11 @@ def test_fire_flat_relation_path_gates_fires_the_deep_target_chain() -> None:
         check_property_permission = _record_gate(calls, "Entry.property")
 
     class Item(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters = {"entries": _Rel("entries", Entry, target_attr="filterset")}
         check_entries_permission = _record_gate(calls, "Item.entries")
 
-    _fire_flat_relation_path_gates(
-        Item,
-        "entries__property__category__name",
-        HttpRequest(),
-        fired={},
-        related_attr="related_filters",
-        target_attr="filterset",
-    )
+    _fire_flat(Item, "entries__property__category__name", fired={})
     assert calls == [
         "Item.entries",
         "Entry.property",
@@ -643,14 +654,13 @@ def test_fire_flat_relation_path_gates_fires_the_deep_target_chain() -> None:
 def test_undeclared_walk_reads_no_relation_of_a_set_with_no_model() -> None:
     """The visibility reading walks undeclared relations off the set's model; a model-less set has none."""
 
-    class Modelless:
+    class Modelless(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters: dict[str, object] = {}
 
     assert walk_declared_relation_path(
         Modelless,
         "shelves__code",
-        related_attr="related_filters",
-        target_attr="filterset",
         undeclared=True,
     ) == ((), ("shelves", "code"))
 
@@ -666,7 +676,8 @@ def test_undeclared_walk_reads_declared_hops_then_one_undeclared_hop_per_relatio
         related_filters: dict[str, object] = {}
         _meta = SimpleNamespace(model=Entry)
 
-    class ItemSet:
+    class ItemSet(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters: dict[str, object] = {
             "entries": _Rel("entries", EntrySet, target_attr="filterset"),
         }
@@ -676,8 +687,6 @@ def test_undeclared_walk_reads_declared_hops_then_one_undeclared_hop_per_relatio
     hops, remainder = walk_declared_relation_path(
         ItemSet,
         path,
-        related_attr="related_filters",
-        target_attr="filterset",
         undeclared=True,
     )
     assert remainder == ("name",)
@@ -699,8 +708,6 @@ def test_undeclared_walk_reads_declared_hops_then_one_undeclared_hop_per_relatio
     declared_only, rest = walk_declared_relation_path(
         ItemSet,
         path,
-        related_attr="related_filters",
-        target_attr="filterset",
     )
     assert declared_only == (declared,)
     assert rest == ("property", "category", "name")
@@ -723,6 +730,7 @@ def test_walk_declared_relation_path_returns_the_hops_and_the_path_left_on_the_l
         related_filters: dict[str, object] = {}
 
     class Item(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters = {
             "category": _Rel("category", Category, target_attr="filterset"),
             "version": _Rel("target_version", Version, target_attr="filterset"),
@@ -736,8 +744,6 @@ def test_walk_declared_relation_path_returns_the_hops_and_the_path_left_on_the_l
         hops, remainder = walk_declared_relation_path(
             Item,
             path,
-            related_attr="related_filters",
-            target_attr="filterset",
         )
         return [(hop.owner, hop.declared_attr, hop.target) for hop in hops], remainder
 
@@ -765,7 +771,8 @@ def test_walk_matches_a_branch_into_a_descendant_set_by_either_spelling() -> Non
         related_filters: dict[str, object] = {}
         _meta = SimpleNamespace(model=SelfServeDesk)
 
-    class TicketSet:
+    class TicketSet(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters: dict[str, object] = {
             "desk": _Rel("venue", KioskSet, target_attr="filterset"),
         }
@@ -777,8 +784,6 @@ def test_walk_matches_a_branch_into_a_descendant_set_by_either_spelling() -> Non
         hops, remainder = walk_declared_relation_path(
             TicketSet,
             path,
-            related_attr="related_filters",
-            target_attr="filterset",
         )
         return [(hop.owner, hop.declared_attr, hop.target) for hop in hops], remainder
 
@@ -789,7 +794,7 @@ def test_walk_matches_a_branch_into_a_descendant_set_by_either_spelling() -> Non
     assert _walk("venue__lendingdesk__window_count") == (hop, ("lendingdesk", "window_count"))
 
 
-def test_fire_flat_relation_path_gates_resolves_a_renamed_branch_by_field_name() -> None:
+def test_flat_relation_path_gates_resolves_a_renamed_branch_by_field_name() -> None:
     """A hop is matched on ``field_name`` (ORM accessor), not the public attr name.
 
     ``visible_shelves = RelatedFilter(ShelfFilter, field_name="shelves")`` has a
@@ -804,23 +809,17 @@ def test_fire_flat_relation_path_gates_resolves_a_renamed_branch_by_field_name()
         check_code_permission = _record_gate(calls, "Shelf.code")
 
     class Book(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters = {
             "visible_shelves": _Rel("shelves", Shelf, target_attr="filterset"),
         }
         check_visible_shelves_permission = _record_gate(calls, "Book.visible_shelves")
 
-    _fire_flat_relation_path_gates(
-        Book,
-        "shelves__code",
-        HttpRequest(),
-        fired={},
-        related_attr="related_filters",
-        target_attr="filterset",
-    )
+    _fire_flat(Book, "shelves__code", fired={})
     assert calls == ["Book.visible_shelves", "Shelf.code"]
 
 
-def test_fire_flat_relation_path_gates_fires_the_branch_gate_of_a_relation_key_leaf() -> None:
+def test_flat_relation_path_gates_fires_the_branch_gate_of_a_relation_key_leaf() -> None:
     """A relation-key leaf (``shelves__isnull``) walks its declared branch, so its gate fires.
 
     The leaf reads the branch's target rows like its nested twin does, so the
@@ -833,23 +832,17 @@ def test_fire_flat_relation_path_gates_fires_the_branch_gate_of_a_relation_key_l
         check_shelves_permission = _record_gate(calls, "Shelf.shelves")
 
     class Book(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters = {
             "visible_shelves": _Rel("shelves", Shelf, target_attr="filterset"),
         }
         check_visible_shelves_permission = _record_gate(calls, "Book.visible_shelves")
 
-    _fire_flat_relation_path_gates(
-        Book,
-        "shelves",
-        HttpRequest(),
-        fired={},
-        related_attr="related_filters",
-        target_attr="filterset",
-    )
+    _fire_flat(Book, "shelves", fired={})
     assert calls == ["Book.visible_shelves"]
 
 
-def test_fire_flat_relation_path_gates_prefers_composite_branch_prefix() -> None:
+def test_flat_relation_path_gates_prefers_composite_branch_prefix() -> None:
     """A multi-hop RelatedFilter branch wins over a shorter overlapping branch.
 
     ``milestone`` can be declared over ``target_version__milestone`` while a
@@ -867,6 +860,7 @@ def test_fire_flat_relation_path_gates_prefers_composite_branch_prefix() -> None
         related_filters: dict[str, object] = {}
 
     class Card(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters = {
             "milestone": _Rel(
                 "target_version__milestone",
@@ -881,40 +875,27 @@ def test_fire_flat_relation_path_gates_prefers_composite_branch_prefix() -> None
         }
         check_milestone_permission = _record_gate(calls, "Card.milestone")
 
-    _fire_flat_relation_path_gates(
-        Card,
-        "target_version__milestone__key",
-        HttpRequest(),
-        fired={},
-        related_attr="related_filters",
-        target_attr="filterset",
-    )
+    _fire_flat(Card, "target_version__milestone__key", fired={})
     assert calls == ["Card.milestone", "Milestone.key"]
 
 
-def test_fire_flat_relation_path_gates_stops_at_an_unresolved_hop() -> None:
+def test_flat_relation_path_gates_stops_at_an_unresolved_hop() -> None:
     """A relation hop with no declared RelatedFilter stops the walk (no guessing)."""
     calls: list[str] = []
 
     class Item(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters: dict[str, object] = {}  # no ``author`` RelatedFilter declared
         check_author_permission = _record_gate(calls, "Item.author")
 
-    _fire_flat_relation_path_gates(
-        Item,
-        "author__name",
-        HttpRequest(),
-        fired={},
-        related_attr="related_filters",
-        target_attr="filterset",
-    )
+    _fire_flat(Item, "author__name", fired={})
     # No declared related object for ``author`` -> no target gate is fired and no
     # FilterSet is guessed. The owner's flat-path gate (fired by the caller,
     # not here) remains the authorization point.
     assert calls == []
 
 
-def test_fire_flat_relation_path_gates_dedupes_against_the_nested_twin() -> None:
+def test_flat_relation_path_gates_dedupes_against_the_nested_twin() -> None:
     """Flat and nested twins share the per-class ``fired`` map: each gate fires once."""
     calls: list[str] = []
 
@@ -922,32 +903,19 @@ def test_fire_flat_relation_path_gates_dedupes_against_the_nested_twin() -> None
         check_name_permission = _record_gate(calls, "Category.name")
 
     class Item(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters = {"category": _Rel("category", Category, target_attr="filterset")}
         check_category_permission = _record_gate(calls, "Item.category")
 
     fired: dict[type, set[str]] = {}
     # First the flat leaf...
-    _fire_flat_relation_path_gates(
-        Item,
-        "category__name",
-        HttpRequest(),
-        fired=fired,
-        related_attr="related_filters",
-        target_attr="filterset",
-    )
+    _fire_flat(Item, "category__name", fired=fired)
     # ...then the same path again (as the nested twin would, sharing ``fired``).
-    _fire_flat_relation_path_gates(
-        Item,
-        "category__name",
-        HttpRequest(),
-        fired=fired,
-        related_attr="related_filters",
-        target_attr="filterset",
-    )
+    _fire_flat(Item, "category__name", fired=fired)
     assert calls == ["Item.category", "Category.name"]
 
 
-def test_fire_flat_relation_path_gates_works_for_the_order_family() -> None:
+def test_flat_relation_path_gates_works_for_the_order_family() -> None:
     """The shared fix covers the order family (``related_orders`` / ``orderset``).
 
     The order side exposes flat relation-traversal order fields via the
@@ -960,21 +928,15 @@ def test_fire_flat_relation_path_gates_works_for_the_order_family() -> None:
         check_name_permission = _record_gate(calls, "CategoryOrder.name")
 
     class ItemOrder(ActiveInputPermissionMixin):
+        _permission = _ORDER_PERMISSION
         related_orders = {"category": _Rel("category", CategoryOrder, target_attr="orderset")}
         check_category_permission = _record_gate(calls, "ItemOrder.category")
 
-    _fire_flat_relation_path_gates(
-        ItemOrder,
-        "category__name",
-        HttpRequest(),
-        fired={},
-        related_attr="related_orders",
-        target_attr="orderset",
-    )
+    _fire_flat(ItemOrder, "category__name", fired={})
     assert calls == ["ItemOrder.category", "CategoryOrder.name"]
 
 
-def test_fire_flat_relation_path_gates_falls_back_to_declared_attribute_when_field_name_is_none() -> (
+def test_flat_relation_path_gates_falls_back_to_declared_attribute_when_field_name_is_none() -> (
     None
 ):
     """When field_name is None or omitted, the declared attribute name is used.
@@ -989,22 +951,16 @@ def test_fire_flat_relation_path_gates_falls_back_to_declared_attribute_when_fie
         check_name_permission = _record_gate(calls, "AuthorOrder.name")
 
     class BookOrder(ActiveInputPermissionMixin):
+        _permission = _ORDER_PERMISSION
         # field_name is None (the default for RelatedOrder(Target))
         related_orders = {"author": _Rel(None, AuthorOrder, target_attr="orderset")}
         check_author_permission = _record_gate(calls, "BookOrder.author")
 
-    _fire_flat_relation_path_gates(
-        BookOrder,
-        "author__name",
-        HttpRequest(),
-        fired={},
-        related_attr="related_orders",
-        target_attr="orderset",
-    )
+    _fire_flat(BookOrder, "author__name", fired={})
     assert calls == ["BookOrder.author", "AuthorOrder.name"]
 
 
-def test_fire_flat_relation_path_gates_stops_when_a_mid_chain_target_is_unresolved() -> None:
+def test_flat_relation_path_gates_stops_when_a_mid_chain_target_is_unresolved() -> None:
     """A hop whose related object's target set resolves to ``None`` stops the walk.
 
     A ``RelatedFilter``/``RelatedOrder`` whose lazy target has not resolved (or is
@@ -1015,38 +971,26 @@ def test_fire_flat_relation_path_gates_stops_when_a_mid_chain_target_is_unresolv
     calls: list[str] = []
 
     class Item(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         # ``category`` matches the hop but its target filterset is unresolved.
         related_filters = {"category": _Rel("category", None, target_attr="filterset")}
         check_category_permission = _record_gate(calls, "Item.category")
 
-    _fire_flat_relation_path_gates(
-        Item,
-        "category__name",
-        HttpRequest(),
-        fired={},
-        related_attr="related_filters",
-        target_attr="filterset",
-    )
+    _fire_flat(Item, "category__name", fired={})
     # The parent branch gate fired; the walk then stopped at the unresolved target.
     assert calls == ["Item.category"]
 
 
-def test_fire_flat_relation_path_gates_is_a_noop_for_a_non_traversal_leaf() -> None:
+def test_flat_relation_path_gates_is_a_noop_for_a_non_traversal_leaf() -> None:
     """A single-segment source path (no relation hop) fires nothing here."""
     calls: list[str] = []
 
     class Item(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters: dict[str, object] = {}
         check_name_permission = _record_gate(calls, "Item.name")
 
-    _fire_flat_relation_path_gates(
-        Item,
-        "name",
-        HttpRequest(),
-        fired={},
-        related_attr="related_filters",
-        target_attr="filterset",
-    )
+    _fire_flat(Item, "name", fired={})
     # The owner's own field gate is fired by the caller's normal leaf loop, not
     # by the relation-chain walk.
     assert calls == []
@@ -1057,17 +1001,11 @@ def test_flat_relation_gate_skips_non_string_branch_names() -> None:
     calls: list[str] = []
 
     class _NonStringSet(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters = {"category": _Rel(123, object(), target_attr="filterset")}
         check_category_permission = _record_gate(calls, "_NonStringSet.category")
 
-    _fire_flat_relation_path_gates(
-        _NonStringSet,
-        "category__name",
-        HttpRequest(),
-        fired={},
-        related_attr="related_filters",
-        target_attr="filterset",
-    )
+    _fire_flat(_NonStringSet, "category__name", fired={})
 
     assert calls == []
 
@@ -1087,22 +1025,26 @@ def test_related_permission_declarations_fail_closed_for_malformed_metadata() ->
             return object_result(super().__getattribute__, name)
 
     class _UnreadableSet(ActiveInputPermissionMixin, metaclass=_HostileMeta):
-        pass
+        _permission = _FILTER_PERMISSION
 
-    class _NoneSet:
+    class _NoneSet(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters = None
 
-    class _InvalidSet:
+    class _InvalidSet(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
         related_filters = []
 
-    assert _related_declarations(_UnreadableSet, "related_filters") == ()
-    assert _related_declarations(_NoneSet, "related_filters") == ()
-    with pytest.raises(ConfigurationError) as excinfo:
-        _related_declarations(_InvalidSet, "related_filters")
-    assert str(excinfo.value) == (
-        "_InvalidSet related permission declarations under 'related_filters' must be a "
-        "mapping; got list."
-    )
+    def walk(owner: type[ActiveInputPermissionMixin]) -> object:
+        return walk_declared_relation_path(
+            owner,
+            "category__name",
+        )
+
+    assert walk(_UnreadableSet) == ((), ("category", "name"))
+    for malformed in (_NoneSet, _InvalidSet):
+        with pytest.raises(TypeError, match="expected the type the source guarantees"):
+            walk(malformed)
 
 
 # ---------------------------------------------------------------------------
@@ -1132,6 +1074,8 @@ def test_run_active_input_permission_checks_double_dispatch_and_dedup() -> None:
     related_obj = type("Rel", (), {"orderset": _Child})()
 
     class _Parent(ActiveInputPermissionMixin):
+        _permission = _ORDER_PERMISSION
+
         @override
         @classmethod
         def _permission_walk_gates(
@@ -1165,8 +1109,6 @@ def test_run_active_input_permission_checks_double_dispatch_and_dedup() -> None:
         HttpRequest(),
         fired=fired,
         bare=bare,
-        target_attr="orderset",
-        related_attr="related_orders",
     )
     # ``name`` gate fires ONCE despite the repeated path; the parent's per-branch
     # ``child`` gate fires once AND the child class recurses once. The shared core
@@ -1178,16 +1120,9 @@ def test_run_active_input_permission_checks_double_dispatch_and_dedup() -> None:
 
 def test_active_related_branches_empty_when_no_related_collection() -> None:
     class _NoRel(ActiveInputPermissionMixin):
-        pass
+        _permission = _ORDER_PERMISSION
 
-    assert (
-        active_related_branches(
-            _NoRel,
-            {"a": 1},
-            related_attr="related_orders",
-        )
-        == []
-    )
+    assert active_related_branches(_NoRel, {"a": 1}) == []
 
 
 def test_run_active_input_permission_checks_caps_related_recursion() -> None:
@@ -1200,6 +1135,7 @@ def test_run_active_input_permission_checks_caps_related_recursion() -> None:
     """
 
     class _SelfRef(ActiveInputPermissionMixin):
+        _permission = _probe_permission("child_set", "related")
         _MAX_LOGIC_DEPTH = 2
 
         @override
@@ -1237,8 +1173,6 @@ def test_run_active_input_permission_checks_caps_related_recursion() -> None:
                 request,
                 fired=_fired if _fired is not None else {},
                 bare=object.__new__(cls),
-                target_attr="child_set",
-                related_attr="related",
                 depth=_depth,
             )
 
@@ -1252,20 +1186,24 @@ def test_active_permission_targets_excludes_logic_and_related_keys_from_the_leaf
     """The LEAF half of the single classification pass drops logic and related keys.
 
     The gate dispatch consumes exactly this half, through ``sets_mixins``' own
-    one-line delegate, which already holds the seven configuration values a
-    caller would otherwise re-pass.
+    one-line delegate.
     """
 
     class _Set(ActiveInputPermissionMixin):
         related_orders = {"shelf": object()}
+        _permission = ActiveInputPermissionAttrs(
+            family_label="Set",
+            target_attr="orderset",
+            traversal=SetInputTraversal(
+                field_specs={},
+                related_attr="related_orders",
+                logic_keys=frozenset({"and_"}),
+            ),
+        )
 
     paths, branches = active_permission_targets(
         _Set,
         {"title": "asc", "shelf": {"code": "x"}, "and_": [{"title": "x"}]},
-        field_specs={},
-        related_attr="related_orders",
-        logic_keys=frozenset({"and_"}),
-        fallback_path=lambda attr: attr,
     )
     # ``shelf`` (related, recognized off ``_Set.related_orders``) and ``and_``
     # (logic) excluded; ``title`` falls back to the python-attr token since
@@ -1277,27 +1215,6 @@ def test_active_permission_targets_excludes_logic_and_related_keys_from_the_leaf
 # ---------------------------------------------------------------------------
 # resolve_auth_aliases (the authorization-phase auth-alias identification)
 # ---------------------------------------------------------------------------
-
-
-def test_auth_aliases_for_permission_classes_gates_alias_resolution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The explicit no-permissions opt-out grants no auth-alias access."""
-    calls: list[None] = []
-
-    def _resolve() -> frozenset[str]:
-        calls.append(None)
-        return frozenset({"auth"})
-
-    monkeypatch.setattr(
-        "django_strawberry_framework.utils.permissions.resolve_auth_aliases",
-        _resolve,
-    )
-
-    assert auth_aliases_for_permission_classes([]) == frozenset()
-    assert calls == []
-    assert auth_aliases_for_permission_classes([object()]) == frozenset({"auth"})
-    assert calls == [None]
 
 
 def test_run_active_input_permission_checks_falls_back_to_default_traversal_depth() -> None:
@@ -1320,6 +1237,8 @@ def test_run_active_input_permission_checks_falls_back_to_default_traversal_dept
     related = type("Related", (), {"child_set": _ChildWithoutDepthCap})()
 
     class _Parent(ActiveInputPermissionMixin):
+        _permission = _probe_permission("child_set", "related")
+
         @override
         @classmethod
         def _permission_walk_gates(
@@ -1347,8 +1266,6 @@ def test_run_active_input_permission_checks_falls_back_to_default_traversal_dept
             HttpRequest(),
             fired={},
             bare=object.__new__(_Parent),
-            target_attr="child_set",
-            related_attr="related",
             depth=8,
         )
 
@@ -1470,6 +1387,8 @@ def test_run_active_input_permission_checks_safely_handles_missing_target_attr()
         pass
 
     class _SampleFilter(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
+
         @override
         @classmethod
         def _permission_walk_gates(
@@ -1496,8 +1415,6 @@ def test_run_active_input_permission_checks_safely_handles_missing_target_attr()
         object(),
         fired=fired,
         bare=object.__new__(_SampleFilter),
-        target_attr="filterset",
-        related_attr="related_filters",
     )
     assert fired.get(_SampleFilter) == {"check_duck_permission"}
 
@@ -1544,6 +1461,8 @@ def test_a_related_target_that_is_not_a_permission_set_is_refused_before_the_bra
     related_obj = type("Rel", (), {"filterset": target})()
 
     class _Parent(ActiveInputPermissionMixin):
+        _permission = _FILTER_PERMISSION
+
         @override
         @classmethod
         def _permission_walk_gates(
@@ -1577,8 +1496,6 @@ def test_a_related_target_that_is_not_a_permission_set_is_refused_before_the_bra
             HttpRequest(),
             fired=fired,
             bare=object.__new__(_Parent),
-            target_attr="filterset",
-            related_attr="related_filters",
         )
     assert calls == ["parent.name"]
     assert fired[_Parent] == {"check_name_permission"}
@@ -1600,13 +1517,16 @@ def test_set_bound_definition_refuses_an_owner_slot_that_is_not_a_definition() -
 
 
 def test_channels_request_adapter_idempotent_wrapping() -> None:
-    """Wrapping an existing ChannelsRequestAdapter returns the adapter directly."""
+    """Wrapping an existing ChannelsRequestAdapter returns the adapter directly.
+
+    A lazy proxy of one in the ``request`` slot is returned as it is, never re-wrapped.
+    """
     scope = {"user": "ada", "type": "websocket"}
     adapter = ChannelsRequestAdapter(HttpRequest(), scope)
+    lazy_adapter = SimpleLazyObject(lambda: adapter)
 
-    assert _channels_request_adapter(adapter) is adapter
-    assert _channels_request_adapter({"request": adapter}) is adapter
-    assert _channels_request_adapter(type("Ctx", (), {"request": adapter})()) is adapter
+    assert _request_from_context({"request": lazy_adapter}) is lazy_adapter
+    assert _request_from_context(type("Ctx", (), {"request": lazy_adapter})()) is lazy_adapter
     assert _request_from_context(adapter) is adapter
     assert _request_from_context({"request": adapter}) is adapter
     assert _request_from_context(type("Ctx", (), {"request": adapter})()) is adapter

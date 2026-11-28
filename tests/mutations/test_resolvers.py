@@ -2590,6 +2590,82 @@ def test_write_pipeline_opens_atomic_on_managed_write_alias(
     assert captured["using"] == "shard_b"
 
 
+@pytest.mark.parametrize(
+    ("permission_classes", "resolved", "granted"),
+    [
+        pytest.param([], [], frozenset[str](), id="opt-out"),
+        pytest.param([AllowAll], [None], frozenset({"auth"}), id="declared"),
+    ],
+)
+def test_write_pipeline_resolves_auth_aliases_only_for_declared_permission_classes(
+    monkeypatch: pytest.MonkeyPatch,
+    permission_classes: list[type[object]],
+    resolved: list[None],
+    granted: frozenset[str],
+) -> None:
+    """The explicit ``permission_classes = []`` opt-out resolves and grants no auth alias."""
+
+    class ItemType(DjangoType):
+        class Meta:
+            model = product_models.Item
+            fields = ("id", "name")
+            primary = True
+
+    del ItemType
+
+    declared = permission_classes
+
+    class CreateItem(DjangoMutation):
+        class Meta:
+            model = product_models.Item
+            operation = "create"
+            permission_classes = declared
+
+    finalize_django_types()
+
+    calls: list[None] = []
+    phases: list[frozenset[str]] = []
+
+    def _resolve() -> frozenset[str]:
+        calls.append(None)
+        return frozenset({"auth"})
+
+    @contextlib.contextmanager
+    def _phase(aliases: frozenset[str]) -> Generator[None]:
+        phases.append(aliases)
+        yield
+
+    def _no_atomic(using: str | None = None) -> contextlib.nullcontext[None]:
+        del using
+        return contextlib.nullcontext()
+
+    monkeypatch.setattr(mutation_resolvers, "resolve_auth_aliases", _resolve)
+    monkeypatch.setattr(mutation_resolvers, "authorization_phase", _phase)
+    monkeypatch.setattr(mutation_resolvers, "model_for", _fresh_mock)
+    monkeypatch.setattr(mutation_resolvers, "payload_object_slot", _returning("node"))
+    monkeypatch.setattr(mutation_resolvers, "payload_cls_for", _fresh_mock)
+    monkeypatch.setattr(mutation_resolvers, "authorize_or_raise", _noop)
+    monkeypatch.setattr(mutation_resolvers, "refetch_optimized", _fresh_mock)
+    monkeypatch.setattr(mutation_resolvers, "build_payload", _returning("ok"))
+
+    with (
+        patch.object(transaction, "atomic", side_effect=_no_atomic),
+        managed_write_transaction("default"),
+    ):
+        result = mutation_resolvers.run_write_pipeline_sync(
+            CreateItem,
+            info=make_info(),
+            data=None,
+            id_=None,
+            decode_step=lambda _instance: ("decoded",),
+            write_step=lambda _instance, _decoded: product_models.Item(pk=7),
+        )
+
+    assert result == "ok"
+    assert calls == resolved
+    assert phases == [granted]
+
+
 def _pipeline_harness(
     monkeypatch: pytest.MonkeyPatch,
     *,

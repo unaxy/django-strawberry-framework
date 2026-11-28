@@ -167,7 +167,7 @@ from django_strawberry_framework.utils.inputs import (
     RELATION_SINGLE,
     published_input_specs,
 )
-from django_strawberry_framework.utils.permissions import auth_aliases_for_permission_classes
+from django_strawberry_framework.utils.permissions import resolve_auth_aliases
 from django_strawberry_framework.utils.query_bind import date_checks_guarded
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_sync,
@@ -498,7 +498,7 @@ def run_write_pipeline_sync(
         # permission classes - the explicit ``permission_classes = []`` opt-out
         # promises the pipeline never resolves the lazy user or touches an auth
         # backend, so it grants no auth-alias access at all.
-        auth_aliases = auth_aliases_for_permission_classes(meta.permission_classes)
+        auth_aliases = resolve_auth_aliases() if meta.permission_classes else frozenset[str]()
         # The alias guard spans EVERY consumer-reachable phase (permission,
         # decode, validation, write, re-fetch): any SQL statement on a
         # non-pinned connection - read or write, signal-ful or signal-less -

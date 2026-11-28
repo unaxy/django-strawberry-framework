@@ -107,7 +107,7 @@ from . import introspection
 from ._narrowing import is_str, read_attr, require_instance
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator
 
     from django.contrib.sessions.backends.base import SessionBase
 
@@ -141,14 +141,8 @@ def scope_key(name: str) -> str:
     return f"__django_strawberry_framework_{name}__"
 
 
-def scope_singleton(
-    scope: MutableChannelsScope,
-    key: str,
-    *,
-    factory: Callable[[], _ScopedT],
-    expect: type[_ScopedT],
-) -> _ScopedT:
-    """Return the scope's singleton under ``key``, creating it on first use.
+def scope_singleton(scope: MutableChannelsScope, key: str, *, factory: type[_ScopedT]) -> _ScopedT:
+    """Return the scope's ``factory`` instance under ``key``, creating it on first use.
 
     The per-scope lazy singleton, once. Nothing the package owns runs early
     enough to seed a scope (it arrives from Channels' middleware stack), and a
@@ -166,7 +160,7 @@ def scope_singleton(
         created = factory()
         scope[key] = created
         return created
-    return require_instance(value, expect)
+    return require_instance(value, factory)
 
 
 def session_store_class() -> type[SessionBase]:
@@ -256,7 +250,6 @@ def connection_actor_state(scope: MutableChannelsScope) -> ConnectionActorState:
         scope,
         _ACTOR_STATE_SCOPE_KEY,
         factory=ConnectionActorState,
-        expect=ConnectionActorState,
     )
 
 

@@ -10,10 +10,6 @@ mechanics are single-sited here.
 This module owns mechanics only; the family-specific shape lives on
 ``sets_mixins.ActiveInputPermissionAttrs`` (one instance per set class):
 
-* both families pass ``unset_sentinel=strawberry.UNSET`` (load-bearing on the
-  filter side, whose operator-bag dataclasses default unsupplied lookups to
-  ``UNSET``; defensive on the order side, whose generated inputs default to
-  ``None``);
 * the filter side's logical ``and`` / ``or`` / ``not`` recursion and depth cap
   stay in ``FilterSet._run_logic_permission_checks`` /
   ``FilterSet._check_permission_depth`` (hooks around
@@ -33,8 +29,7 @@ flat leaf walks.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from functools import lru_cache
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, TypeAlias, overload
 
@@ -51,33 +46,29 @@ from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from . import introspection
 from ._narrowing import (
     class_namespace,
-    dict_items,
+    dict_get,
     is_class,
-    is_dict,
     is_mapping,
     is_real_instance,
     is_str,
     optional_instance,
     read_attr,
     require,
+    require_instance,
 )
 from .input_values import (
     LEAF,
     RELATED,
-    RelatedDeclarationError,
-    SetInputTraversal,
     assert_set_traversal_depth,
-    input_field_value,
     is_inactive_value,
     iter_active_fields,
-    related_declaration_mapping,
 )
 from .querysets import reject_async_in_sync_context, relation_target_type
 from .relations import descendant_relation_path, is_model_class, leading_relation_hops
 from .strings import flatten_lookup_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, MutableMapping
+    from collections.abc import Mapping, MutableMapping
 
     from django.db import models
     from typing_extensions import TypeIs
@@ -85,7 +76,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.sets_mixins import ActiveInputPermissionMixin
     from django_strawberry_framework.types.base import DjangoType
 
-    from .input_values import FieldSpecMap, RelatedBranch
+    from .input_values import RelatedBranch
 
     #: A Channels connection scope as the adapter holds it. A scope its producer typed
     #: is ``str``-keyed (an ASGI scope); one read reflectively off a context object is
@@ -110,30 +101,15 @@ _GATE_ASYNC_RECOURSE = (
 )
 
 
-@lru_cache(maxsize=2048)
-def _check_method_name(field_path: str) -> str:
-    """Map a field path to its ``check_<field>_permission`` method name.
-
-    The transform is request-independent (it depends only on the declared field
-    path), so it is memoized over the bounded set of declared paths; only the
-    bound-instance ``getattr`` / ``callable`` probe in
-    ``invoke_permission_method`` stays per-request. The lookup
-    flatten itself is the shared ``flatten_lookup_path``.
-    """
-    return f"check_{flatten_lookup_path(field_path)}_permission"
-
-
 __all__ = [
     "ChannelsRequestAdapter",
     "active_permission_targets",
     "active_related_branches",
-    "auth_aliases_for_permission_classes",
     "extract_branch_value",
     "invoke_permission_method",
     "request_from_info",
     "resolve_auth_aliases",
     "run_active_input_permission_checks",
-    "verbatim_path",
 ]
 
 
@@ -199,23 +175,6 @@ def _context_request(context: object) -> object:
     return getattr(context, "request", None)
 
 
-def _channels_request_adapter(context: object) -> ChannelsRequestAdapter | None:
-    """Wrap ``context`` or its ``request`` in a ``ChannelsRequestAdapter`` when an ASGI scope is present."""
-    if isinstance(context, ChannelsRequestAdapter):
-        return context
-    scope = _channels_scope(context)
-    if scope is not None:
-        return ChannelsRequestAdapter(context, scope)
-    request = _context_request(context)
-    if isinstance(request, ChannelsRequestAdapter):
-        return request
-    if request is not None:
-        scope = _channels_scope(request)
-        if scope is not None:
-            return ChannelsRequestAdapter(request, scope)
-    return None
-
-
 def _is_request(value: object) -> bool:
     """Whether ``value`` is a Django ``HttpRequest`` or a ``ChannelsRequestAdapter``.
 
@@ -232,24 +191,29 @@ def _is_request(value: object) -> bool:
 
 
 def _request_from_context(context: object) -> object:
-    """Resolve every supported Django or Channels request context shape."""
+    """Resolve every supported Django or Channels request context shape.
+
+    A real request in the ``request`` slot wins; otherwise the context, then its
+    ``request``, is wrapped in a ``ChannelsRequestAdapter`` when it carries an ASGI
+    scope (``_channels_scope``). A mapping context resolves nothing else; an object
+    context falls back to its ``request``, then to itself when it is a request.
+    """
     if isinstance(context, ChannelsRequestAdapter):
         return context
     request = _context_request(context)
-    if is_mapping(context):
-        if _is_request(request):
-            return request
-        return _channels_request_adapter(context)
     if _is_request(request):
         return request
-    adapter = _channels_request_adapter(context)
-    if adapter is not None:
-        return adapter
+    for carrier in (context, request):
+        if isinstance(carrier, ChannelsRequestAdapter):
+            return carrier
+        scope = _channels_scope(carrier)
+        if scope is not None:
+            return ChannelsRequestAdapter(carrier, scope)
+    if is_mapping(context):
+        return None
     if request is not None:
         return request
-    if _is_request(context):
-        return context
-    return None
+    return context if _is_request(context) else None
 
 
 def request_from_info(info: object, *, family_label: str) -> object:
@@ -331,45 +295,22 @@ def resolve_auth_aliases() -> frozenset[str]:
     return frozenset(router.db_for_read(model) for model in candidates if model is not None)
 
 
-def auth_aliases_for_permission_classes(permission_classes: object) -> frozenset[str]:
-    """Resolve auth aliases only when a write surface has permission classes.
-
-    An empty ``permission_classes`` declaration is an explicit authorization
-    opt-out: the write pipeline must not resolve a lazy user, touch an auth
-    backend, or grant auth-alias access. Keeping that security gate beside
-    ``resolve_auth_aliases`` prevents model, delete, and plain-form pipelines
-    from spelling the policy independently.
-    """
-    return resolve_auth_aliases() if permission_classes else frozenset()
-
-
-def extract_branch_value(
-    input_value: object,
-    field_name: str,
-    *,
-    unset_sentinel: object = None,
-) -> object:
+def extract_branch_value(input_value: object, field_name: str) -> object:
     """Return the value at ``field_name`` on a dataclass-or-dict input.
 
-    Collapses ``None`` (and ``unset_sentinel``, when the family supplies one) to
-    "branch not supplied" so the active-branch caller treats absent branches
-    uniformly. The filter side passes ``unset_sentinel=strawberry.UNSET`` because
-    its operator-bag dataclasses default unsupplied fields to ``UNSET``; the
-    order side passes it too, defensively -- its generated inputs default to
-    ``None``, so the sentinel arm is a no-op there.
-
-    Shares the active-value rule with every traversal surface via
-    ``input_values.is_inactive_value``. Used by the filter
-    side's logical-branch walk
-    (``filters/sets.py::FilterSet._iter_logic_branches``) to read ``and_`` / ``or_`` /
-    ``not_`` arms off the raw input. The dict-vs-dataclass single-field read is
-    ``input_values.input_field_value``, so the shape sniff stays
-    single-sited in the traversal-primitives module.
+    Collapses a missing field, ``None`` and ``strawberry.UNSET`` to "branch not
+    supplied" so the active-branch caller treats absent branches uniformly. A real
+    ``dict`` is read through the base ``dict.get`` slot, anything else by
+    ``getattr``. Used by the filter side's logical-branch walk
+    (``filters/sets.py::FilterSet._iter_logic_branches``) to read ``and_`` / ``or_``
+    / ``not_`` arms off the raw input.
     """
-    if input_value is None:
-        return None
-    value = input_field_value(input_value, field_name)
-    return None if is_inactive_value(value, unset_sentinel=unset_sentinel) else value
+    value = (
+        dict_get(input_value, field_name)
+        if is_real_instance(input_value, dict)
+        else getattr(input_value, field_name, None)
+    )
+    return None if is_inactive_value(value) else value
 
 
 def invoke_permission_method(
@@ -408,7 +349,7 @@ def invoke_permission_method(
     propagates. A ``None`` slot stays indistinguishable from an absent one (the
     ``getattr`` default) and remains a silent no-op.
     """
-    method_name = _check_method_name(field_path)
+    method_name = f"check_{flatten_lookup_path(field_path)}_permission"
     if fired is not None and method_name in fired:
         return
     method: object = getattr(bare_instance, method_name, None)
@@ -434,63 +375,27 @@ def invoke_permission_method(
             fired.add(method_name)
 
 
-def verbatim_path(python_attr: str) -> str:
-    """Shared identity ``fallback_path``: the python attr IS its own source path.
-
-    Used wherever a caller has no attr-to-source remapping to apply -- the
-    related-only ``active_related_branches`` discard caller and the order side's
-    ``OrderSet._active_permission_targets`` (whose order attrs map verbatim). The
-    filter side passes its own lookup-table gate path instead. Module-level (not a per-call
-    lambda) so order-side traversals do not allocate a fresh closure each walk.
-    """
-    return python_attr
-
-
 def active_permission_targets(
     cls: type[ActiveInputPermissionMixin],
     input_value: object,
-    *,
-    field_specs: FieldSpecMap,
-    related_attr: str,
-    logic_keys: frozenset[str],
-    fallback_path: Callable[[str], str],
-    unset_sentinel: object = None,
-    handle_top_level_list: bool = False,
 ) -> tuple[list[str], list[RelatedBranch]]:
     """Partition active top-level fields into ``(leaf_paths, related_branches)`` in ONE walk.
 
     ``run_active_input_permission_checks`` needs both the per-field gate paths
     (``LEAF``) and the related branches (``RELATED``) at the same nesting level.
-    Running ``iter_active_fields`` once and partitioning by ``.kind`` removes the
-    second full traversal + re-classification + config rebuild the two separate
-    walkers otherwise pay per level. ``LOGIC`` records are dropped
-    (the logical-branch recursion owns them).
-
-    The single config is the superset of the two callers': ``field_specs`` and
-    ``logic_keys`` are populated. ``RELATED`` classification keys only off
-    ``related_attr`` membership (logic and related names are disjoint, and the
-    branch tuple reads ``related_obj`` / ``raw_value``, never ``spec``), so the
-    ``RELATED`` half is byte-identical to ``active_related_branches``'s
-    field-spec-less, logic-key-less config; the ``LEAF`` half is what the gate
-    dispatch consumes, read straight off this pass by
-    ``run_active_input_permission_checks``.
-    The classification rule therefore stays single-sited here.
+    Running ``iter_active_fields`` once over ``cls._permission.traversal`` and
+    partitioning by ``.kind`` removes a second full traversal per level.
+    ``LOGIC`` records are dropped (the logical-branch recursion owns them). A
+    leaf with no field spec gates on ``cls._permission_fallback_path``.
     """
-    config = SetInputTraversal(
-        field_specs=field_specs,
-        related_attr=related_attr,
-        logic_keys=logic_keys,
-        unset_sentinel=unset_sentinel,
-        handle_top_level_list=handle_top_level_list,
-    )
     leaf_paths: list[str] = []
     branches: list[RelatedBranch] = []
-    for field in iter_active_fields(cls, input_value, config):
+    for field in iter_active_fields(cls, input_value, cls._permission.traversal):
         if field.kind == LEAF:
             leaf_paths.append(
                 field.spec.django_source_path
                 if field.spec is not None
-                else fallback_path(field.python_attr),
+                else cls._permission_fallback_path(field.python_attr),
             )
         elif field.kind == RELATED:
             branches.append((field.python_attr, field.related_obj, field.raw_value))
@@ -500,46 +405,28 @@ def active_permission_targets(
 def active_related_branches(
     cls: type[ActiveInputPermissionMixin],
     input_value: object,
-    *,
-    related_attr: str,
-    unset_sentinel: object = None,
-    handle_top_level_list: bool = False,
 ) -> list[RelatedBranch]:
     """List ``(field_name, related_obj, child_input)`` for present related branches.
 
     Active-branch scoping: a related branch is "active" when its key is present
     in the input, regardless of the inner value's emptiness. Inactive branches
     are skipped end-to-end so an empty branch does not exercise the child's
-    gates. ``related_attr`` names the per-class related-collection
-    (``related_filters`` / ``related_orders``).
+    gates. The order side's top-level list is walked element by element, so the
+    parent gate fires once per active branch occurrence (the caller's ``_fired``
+    dedup collapses repeats per class).
 
-    ``handle_top_level_list`` (order side) walks each dataclass element of a
-    top-level list separately so the parent gate fires once per active branch
-    occurrence (the caller's ``_fired`` dedup collapses repeats per class).
-
-    Consumes the shared ``iter_active_fields`` classifier,
-    keeping the ``RELATED`` records; the yield order is the input-iteration order
-    rather than the declared-collection order, which is immaterial here (the
-    per-class ``_fired`` dedup, the AND-commutative
-    ``_apply_related_constraints`` narrowing, and the field-name-keyed visibility
-    map are all order-independent).
-
-    Thin wrapper over ``active_permission_targets`` (keeps the single-pass
-    classification single-sited): ``RELATED`` records are
-    independent of ``field_specs`` / ``logic_keys``, so the empty/identity values
-    here yield the same branch tuples this always returned.
+    The ``RELATED`` records of ``iter_active_fields`` over the family traversal,
+    in input-iteration order, which is immaterial here (the per-class ``_fired``
+    dedup, the AND-commutative ``_apply_related_constraints`` narrowing, and the
+    field-name-keyed visibility map are all order-independent). Field specs and
+    logic keys never classify a related branch, so the walk reads neither.
     """
-    _leaf_paths, branches = active_permission_targets(
-        cls,
-        input_value,
-        field_specs={},
-        related_attr=related_attr,
-        logic_keys=frozenset(),
-        fallback_path=verbatim_path,
-        unset_sentinel=unset_sentinel,
-        handle_top_level_list=handle_top_level_list,
-    )
-    return branches
+    traversal = replace(cls._permission.traversal, field_specs={}, logic_keys=frozenset())
+    return [
+        (field.python_attr, field.related_obj, field.raw_value)
+        for field in iter_active_fields(cls, input_value, traversal)
+        if field.kind == RELATED
+    ]
 
 
 def _fire_gate_on_class(
@@ -623,11 +510,9 @@ _NO_ALIASES: Mapping[str, str] = MappingProxyType({})
 
 @overload
 def walk_declared_relation_path(
-    owning_cls: type[object],
+    owning_cls: type[ActiveInputPermissionMixin],
     source_path: str,
     *,
-    related_attr: str,
-    target_attr: str,
     undeclared: Literal[False] = False,
     aliases: Mapping[str, str] = ...,
 ) -> tuple[tuple[DeclaredHop, ...], tuple[str, ...]]: ...
@@ -635,22 +520,18 @@ def walk_declared_relation_path(
 
 @overload
 def walk_declared_relation_path(
-    owning_cls: type[object],
+    owning_cls: type[ActiveInputPermissionMixin],
     source_path: str,
     *,
-    related_attr: str,
-    target_attr: str,
     undeclared: bool,
     aliases: Mapping[str, str] = ...,
 ) -> tuple[tuple[RelationHop, ...], tuple[str, ...]]: ...
 
 
 def walk_declared_relation_path(
-    owning_cls: type[object],
+    owning_cls: type[ActiveInputPermissionMixin],
     source_path: str,
     *,
-    related_attr: str,
-    target_attr: str,
     undeclared: bool = False,
     aliases: Mapping[str, str] = _NO_ALIASES,
 ) -> tuple[tuple[RelationHop, ...], tuple[str, ...]]:
@@ -659,12 +540,13 @@ def walk_declared_relation_path(
     The one reading of a flat relation path (``category__name``,
     ``entries__property__category__name``) as its nested twin
     (``category: {name: ...}``): the flat-path permission gates fire along these
-    hops (``_fire_flat_relation_path_gates``) and a flat filter leaf applies each
+    hops (``relation_path_gates``) and a flat filter leaf applies each
     hop's target visibility along them
     (``filters/sets.py::FilterSet._flat_leaf_walk``), so both see the same chain.
 
     Each hop is resolved against the current set's declared related collection
-    (``related_filters`` / ``related_orders``) by matching a declaration's
+    (``related_filters`` / ``related_orders``, the ``related_attr`` of
+    ``owning_cls._permission``; the walk moves only to sets of its family) by matching a declaration's
     ``field_name`` -- the ORM accessor, NOT the public attribute name, read as the
     text it renders so a lazy ``field_name`` matches as its plain spelling does -- so a
     renamed branch (``visible_shelves = RelatedFilter(ShelfFilter,
@@ -703,13 +585,17 @@ def walk_declared_relation_path(
     (``UndeclaredHop.alias``), then on from its target. The gates read the declared
     walk alone: an undeclared hop has no branch gate.
     """
+    related_attr = owning_cls._permission.traversal.related_attr
+    target_attr = owning_cls._permission.target_attr
     segments = tuple(source_path.split(LOOKUP_SEP))
     hops: list[RelationHop] = []
     current_cls: type[object] = owning_cls
     index = 0
     while index < len(segments):
         matches: list[tuple[int, str, object]] = []
-        for declared_attr, related_obj in _related_declarations(current_cls, related_attr):
+        related = require(introspection.mro_attr(current_cls, related_attr, {}), is_mapping)
+        for key, related_obj in related.items():
+            declared_attr = require_instance(key, str)
             declared_name: object = getattr(related_obj, "field_name", None)
             field_name = introspection.text(
                 declared_attr if declared_name is None else declared_name,
@@ -913,11 +799,8 @@ def _alias_hop(
 
 
 def relation_path_gates(
-    owning_cls: type[object],
+    owning_cls: type[ActiveInputPermissionMixin],
     source_path: str,
-    *,
-    related_attr: str,
-    target_attr: str,
 ) -> tuple[tuple[type[object], str], ...]:
     """Return the ``(set class, gate path)`` pairs the nested twin of a flat ``source_path`` fires.
 
@@ -936,12 +819,7 @@ def relation_path_gates(
     first relation segment no declaration claims names no gate here and no
     target set is guessed: the owner's own gate stays the authorization point.
     """
-    hops, remainder = walk_declared_relation_path(
-        owning_cls,
-        source_path,
-        related_attr=related_attr,
-        target_attr=target_attr,
-    )
+    hops, remainder = walk_declared_relation_path(owning_cls, source_path)
     gates = [(hop.owner, hop.declared_attr) for hop in hops]
     target = hops[-1].target if hops else None
     if target is not None:
@@ -957,67 +835,6 @@ def _key_gate_path(target: type[object]) -> str | None:
     pk = getattr(meta, "pk", None)
     name = getattr(pk, "name", None)
     return name if isinstance(name, str) else None
-
-
-def _fire_flat_relation_path_gates(
-    owning_cls: type[ActiveInputPermissionMixin],
-    source_path: str,
-    request: object,
-    *,
-    fired: dict[type[object], set[str]],
-    related_attr: str,
-    target_attr: str,
-) -> None:
-    """Fire the gates the nested twin of a flat ``source_path`` fires (``relation_path_gates``).
-
-    Left alone, a client bypasses a target gate merely by spelling the predicate
-    flat. Dedup rides the shared per-class ``fired`` map, so a flat leaf and its
-    nested twin fire each gate at most once per request.
-    """
-    for gate_cls, gate_path in relation_path_gates(
-        owning_cls,
-        source_path,
-        related_attr=related_attr,
-        target_attr=target_attr,
-    ):
-        _fire_gate_on_class(gate_cls, gate_path, request, fired=fired)
-
-
-def _related_declarations(cls: type[object], related_attr: str) -> tuple[tuple[str, object], ...]:
-    """Read a set's related declarations without trusting mapping overrides.
-
-    The read + ``None`` normalization + mapping proof are the shared front half
-    (``utils/input_values.py::related_declaration_mapping``); what stays here is
-    the authorization-specific tail: a real ``dict`` is materialized through the
-    UNBOUND ``dict.items`` so an ``items`` override on a ``dict`` subclass cannot
-    run inside a permission walk (any other ``Mapping`` answers through its own
-    ``items()``), and every rejection is worded against the declaring class and
-    attribute the consumer actually wrote.
-    """
-    try:
-        related = related_declaration_mapping(cls, related_attr)
-    except RelatedDeclarationError as exc:
-        # The only rejection the shared read raises: the declaration is not a mapping.
-        raise ConfigurationError(
-            f"{introspection.kind(cls)} related permission declarations under "
-            f"{related_attr!r} must be a mapping; got {introspection.kind(exc.value)}.",
-        ) from None
-    # No emptiness short-circuit: an empty mapping already materializes to
-    # ``()`` through the read below.
-    # ``sets_mixins.py::collect_related_declarations`` keys the collection by each
-    # declaration's class-attribute name; a hand-assigned collection is held to the same
-    # shape here, since the key becomes the hop's declared attribute name.
-    items = tuple(dict_items(related)) if is_dict(related) else tuple(related.items())
-    declarations: list[tuple[str, object]] = []
-    for declared_attr, related_obj in items:
-        if not isinstance(declared_attr, str):
-            raise ConfigurationError(
-                f"{introspection.kind(cls)} related permission declarations under "
-                f"{related_attr!r} must be keyed by attribute name strings; got a "
-                f"{introspection.kind(declared_attr)} key.",
-            )
-        declarations.append((declared_attr, related_obj))
-    return tuple(declarations)
 
 
 def _permission_mixin() -> type[ActiveInputPermissionMixin]:
@@ -1047,8 +864,6 @@ def run_active_input_permission_checks(
     *,
     fired: dict[type[object], set[str]],
     bare: ActiveInputPermissionMixin,
-    target_attr: str,
-    related_attr: str,
     depth: int = 0,
 ) -> None:
     """Fire the per-field and per-branch gates for one input level.
@@ -1070,16 +885,15 @@ def run_active_input_permission_checks(
     when the set defines one (``FilterSet``) and ``DEFAULT_SET_INPUT_TRAVERSAL_DEPTH``
     otherwise (``OrderSet``), so both sides share one budget.
 
-    ``target_attr`` names the attribute on each related object that resolves the
-    child set (``filterset`` / ``orderset``); ``related_attr`` names each set's
-    declared related collection (``related_filters`` / ``related_orders``). Both
-    the child-set recursion and the parent branch gate live in DIFFERENT per-class
+    ``cls._permission.target_attr`` names the attribute on each related object
+    that resolves the child set (``filterset`` / ``orderset``). Both the
+    child-set recursion and the parent branch gate live in DIFFERENT per-class
     dedup sets, so both fire once -- the intentional parent-vs-child double
     dispatch.
 
     Flat relation-traversal leaves are gated the same as their nested twins: for
     each active leaf whose source path crosses a relation (``category__name``),
-    ``_fire_flat_relation_path_gates`` fires the target set's gate chain so a
+    the gates ``relation_path_gates`` reads off it fire, so a
     client cannot bypass a target gate by spelling the predicate flat (a gate
     path the set reads as a name, not an ORM path, walks nothing:
     ``_gate_path_spells_relations``), and
@@ -1101,16 +915,9 @@ def run_active_input_permission_checks(
         # the flat spelling silently bypasses the target gate. A gate path that
         # is a declared name, not an ORM path, walks nothing: whatever its leaf's
         # ORM path walks, ``_permission_walk_gates`` fires below.
-        if not cls._gate_path_spells_relations(field_path):
-            continue
-        _fire_flat_relation_path_gates(
-            cls,
-            field_path,
-            request,
-            fired=fired,
-            related_attr=related_attr,
-            target_attr=target_attr,
-        )
+        if cls._gate_path_spells_relations(field_path):
+            for gate_cls, gate_path in relation_path_gates(cls, field_path):
+                _fire_gate_on_class(gate_cls, gate_path, request, fired=fired)
 
     # A leaf whose ORM path walks a declared branch under a name of its own (a
     # declared filter, ``home_branch`` over ``branch``; a projected child filter
@@ -1125,7 +932,7 @@ def run_active_input_permission_checks(
         # (``RelatedSetTargetMixin._validate_target``). A target other than ``None`` that
         # is not a set class carrying the permission facade is a defect: refused before
         # any gate below fires, never skipped as a branch with no child set to check.
-        child_target: object = getattr(related_obj, target_attr, None)
+        child_target: object = getattr(related_obj, cls._permission.target_attr, None)
         if child_target is not None:
             child_set = require(child_target, _is_permission_set)
             # Child set is (usually) a different class; it keys its own per-class

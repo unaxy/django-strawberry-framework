@@ -88,7 +88,6 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.converters import convert_with_mro
 from django_strawberry_framework.utils.input_values import (
-    UNSET,
     is_inactive_value,
     iter_input_items,
 )
@@ -2347,7 +2346,7 @@ def normalize_input_value(
     # caller MUST treat UNSET as "not supplied" - same as ``None`` - so
     # this entry point is the single defensive line every future caller
     # benefits from.
-    if is_inactive_value(raw_value, unset_sentinel=UNSET):
+    if is_inactive_value(raw_value):
         return None
 
     def _list_of(
@@ -2635,9 +2634,9 @@ def _normalize_range_value(
     # ``normalize_input_value``'s entry guard.
     patch = _RangeFormPatch()
     patch.axis_keys = (start_key, end_key)
-    if not is_inactive_value(start, unset_sentinel=UNSET):
+    if not is_inactive_value(start):
         patch[start_key] = _unwrap_enum_member(start)
-    if not is_inactive_value(end, unset_sentinel=UNSET):
+    if not is_inactive_value(end):
         patch[end_key] = _unwrap_enum_member(end)
     return patch
 
@@ -2908,8 +2907,8 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
         _form_key, sample_filter = next(iter(bag.values()))
         # A declared head gates on its own name; so does an expansion of a child's
         # declared filter, whose flat spelling must fire the gates its nested twin
-        # fires (``utils/permissions.py::_fire_flat_relation_path_gates`` walks the
-        # relation hops and fires the child's ``check_<name>_permission``).
+        # fires (``utils/permissions.py::relation_path_gates`` walks the relation
+        # hops to the child's ``check_<name>_permission``).
         gate_paths[head] = head if head in declared_heads else _declared_field_name(sample_filter)
     alias_heads: dict[str, str] = {}
     for head in heads:

@@ -8,8 +8,8 @@ branch, or a logical operator. That classification serves four
 correctness-sensitive call sites -- the filter normalizer
 (``filters/sets.py::FilterSet._normalize_input``), the order normalizer
 (``orders/inputs.py::normalize_input_value``), and the permission walk
-(``utils/permissions.py::active_permission_targets`` and its
-``active_related_branches`` wrapper). A drift between any two of them in the active-input
+(``utils/permissions.py::active_permission_targets`` and
+``active_related_branches``). A drift between any two of them in the active-input
 decision would be a real bug class -- a filter applied without its permission gate, a
 related visibility hook skipped, work done on inactive input -- so the neutral
 mechanics are single-sited here.
@@ -41,7 +41,7 @@ from strawberry.types.unset import UnsetType
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import introspection
-from ._narrowing import dict_get, is_mapping, is_real_instance, is_str, read_attr
+from ._narrowing import is_mapping, is_real_instance, is_str, read_attr, require
 from .canonical import base_container_values
 
 if TYPE_CHECKING:
@@ -120,40 +120,24 @@ def iter_input_items(input_value: object) -> list[tuple[str, object]] | None:
     ]
 
 
-def input_field_value(input_value: object, name: str) -> object:
-    """Read ONE field off a dict-or-dataclass input; ``None`` when absent.
-
-    The single-field sibling of ``iter_input_items``: the dict-vs-dataclass
-    sniff (``.get`` vs ``getattr``) lives in exactly one module - this one,
-    whose charter is the input-shape traversal primitives - so a caller that
-    needs one branch value (``utils/permissions.py::extract_branch_value``)
-    composes this with ``is_inactive_value`` instead of re-spelling the sniff.
-    """
-    field_name = _field_name(name, input_value=input_value)
-    if is_real_instance(input_value, dict):
-        return dict_get(input_value, field_name)
-    return getattr(input_value, field_name, None)
-
-
 #: ``strawberry.UNSET``, typed as the instance it is. Strawberry annotates its sentinel ``Any``
 #: so it can default a field of any type; ``UnsetType()`` hands back that one instance, so
 #: ``value is UNSET`` holds for every ``strawberry.UNSET`` the engine supplies.
 UNSET: Final[UnsetType] = UnsetType()
 
 
-def is_inactive_value(value: object, *, unset_sentinel: object = None) -> bool:
+def is_inactive_value(value: object) -> bool:
     """Return ``True`` when ``value`` should be treated as "not supplied".
 
     The single active-input rule shared by every traversal surface: a value is
-    inactive when it is ``None`` or the family's ``unset_sentinel``. Both shipped
-    families pass ``unset_sentinel=strawberry.UNSET``: load-bearing on the filter
-    side, whose operator-bag dataclasses default unsupplied lookups to ``UNSET``;
-    defensive on the order side, whose generated inputs default unsupplied fields
-    to ``None``, so the sentinel arm is inert there. Defined once so the
-    ``UNSET`` / ``None`` decision cannot drift between the normalizers, the
-    permission walkers, and ``extract_branch_value``.
+    inactive when it is ``None`` or ``strawberry.UNSET``. ``UNSET`` is
+    load-bearing on the filter side, whose operator-bag dataclasses default
+    unsupplied lookups to it; the order side's generated inputs default
+    unsupplied fields to ``None``. Defined once so the ``UNSET`` / ``None``
+    decision cannot drift between the normalizers, the permission walkers, and
+    ``extract_branch_value``.
     """
-    return value is None or value is unset_sentinel
+    return value is None or value is UNSET
 
 
 @dataclass(frozen=True)
@@ -173,9 +157,6 @@ class SetInputTraversal:
     * ``logic_keys`` -- the python-attr tokens of the logical operators (filter
       ``and_`` / ``or_`` / ``not_``); empty for the order side, which has no
       logical operator bag.
-    * ``unset_sentinel`` -- the family's "not supplied" sentinel
-      (``strawberry.UNSET`` on both shipped families); threaded into
-      ``is_inactive_value``.
     * ``handle_top_level_list`` -- the order side's top-level ``list[<T>]`` input
       shape; when set, a list ``input_value`` is flattened element-by-element.
     """
@@ -183,7 +164,6 @@ class SetInputTraversal:
     field_specs: FieldSpecMap
     related_attr: str
     logic_keys: frozenset[str] = frozenset()
-    unset_sentinel: object = None
     handle_top_level_list: bool = False
 
 
@@ -244,49 +224,6 @@ def assert_set_traversal_depth(
     )
 
 
-class RelatedDeclarationError(Exception):
-    """A set's related-declaration attribute is not a mapping.
-
-    An internal signal, never surfaced: :func:`related_declaration_mapping`
-    raises it and every caller translates it into that caller's own
-    ``ConfigurationError`` prose (the permission walker names the declaring
-    class and attribute; the input traversal names the input type). ``kind``
-    is ``"not_mapping"`` and ``value`` carries the rejected declaration.
-    """
-
-    def __init__(self, kind: str, value: object = None) -> None:
-        """Carry the failure ``kind`` and the offending ``value``."""
-        super().__init__(kind)
-        self.kind: str = kind
-        self.value: object = value
-
-
-def related_declaration_mapping(owner: object, related_attr: str) -> Mapping[object, object]:
-    """Read a set's related-declaration attribute and prove it is a mapping.
-
-    The shared front half of every related-branch traversal: read the attribute
-    from the class statically (``utils/introspection.py::mro_attr``), treat an absent or ``None``
-    declaration as "no related fields", and reject anything that is not a
-    ``Mapping`` before a caller starts indexing it. The permission walker and
-    the neutral input traversal both need exactly this and had it written out
-    twice, so a new rule about what a related declaration may BE would have had
-    to be added in both places.
-
-    What stays per-caller is what each does with the mapping - the permission
-    walker materializes it (``utils/permissions.py::_related_declarations``),
-    while the traversal reads membership lazily. Those are different contracts,
-    not a missed merge.
-
-    Raises :class:`RelatedDeclarationError` for the caller to translate.
-    """
-    related: object = introspection.mro_attr(owner, related_attr)
-    if related is None:
-        return {}
-    if not is_mapping(related):
-        raise RelatedDeclarationError("not_mapping", related)
-    return related
-
-
 def iter_active_fields(
     set_cls: type[object],
     input_value: object,
@@ -296,7 +233,7 @@ def iter_active_fields(
 
     Owns the mechanics every consumer would otherwise re-spell:
 
-    * the ``None`` / ``unset_sentinel`` inactive-value skip (via
+    * the ``None`` / ``UNSET`` inactive-value skip (via
       ``is_inactive_value``), applied to the whole input and to each field;
     * the dict-vs-dataclass walk (via ``iter_input_items`` -- a non-walkable
       input yields nothing);
@@ -313,14 +250,13 @@ def iter_active_fields(
     ``_apply_related_constraints`` own it). Leaf shape (operator bags, ranges,
     directions) is the consumer's business too; this walker only marks the kind.
     """
-    unset_sentinel = config.unset_sentinel
     handle_top_level_list = config.handle_top_level_list
-    if is_inactive_value(input_value, unset_sentinel=unset_sentinel):
+    if is_inactive_value(input_value):
         return
     if handle_top_level_list and is_real_instance(input_value, list):
         elements = base_container_values(input_value)
         for element in elements:
-            if is_inactive_value(element, unset_sentinel=unset_sentinel):
+            if is_inactive_value(element):
                 continue
             if is_real_instance(element, list) or iter_input_items(element) is None:
                 raise ConfigurationError(
@@ -332,12 +268,9 @@ def iter_active_fields(
     items = iter_input_items(input_value)
     if items is None:
         return
-    try:
-        related = related_declaration_mapping(set_cls, config.related_attr)
-    except RelatedDeclarationError:
-        raise _walk_error(input_value, "related-field declarations are not a mapping") from None
+    related = require(introspection.mro_attr(set_cls, config.related_attr, {}), is_mapping)
     for python_attr, raw_value in items:
-        if is_inactive_value(raw_value, unset_sentinel=unset_sentinel):
+        if is_inactive_value(raw_value):
             continue
         spec = config.field_specs.get((set_cls, python_attr))
         if python_attr in config.logic_keys:

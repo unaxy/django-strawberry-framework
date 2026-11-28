@@ -22,16 +22,14 @@ from django_strawberry_framework.utils.input_values import (
     LOGIC,
     RELATED,
     UNSET,
-    RelatedDeclarationError,
     SetInputTraversal,
     assert_set_traversal_depth,
-    input_field_value,
     is_inactive_value,
     iter_active_fields,
     iter_input_items,
-    related_declaration_mapping,
 )
 from django_strawberry_framework.utils.inputs import GeneratedInputFieldSpec
+from django_strawberry_framework.utils.permissions import extract_branch_value
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import ClaimsClass, ClassReadRaises
 
@@ -84,17 +82,13 @@ def test_iter_input_items_handles_dict_dataclass_and_non_walkable(
 
 
 def test_is_inactive_value_is_identity_based_not_truthiness() -> None:
-    # ``None`` is always inactive; a configured sentinel collapses too.
+    # ``None`` and ``UNSET`` are inactive.
     assert is_inactive_value(None) is True
-    assert is_inactive_value(None, unset_sentinel=UNSET) is True
-    assert is_inactive_value(UNSET, unset_sentinel=UNSET) is True
+    assert is_inactive_value(UNSET) is True
     # Falsy-but-supplied values stay ACTIVE (identity, not truthiness).
     assert is_inactive_value(0) is False
     assert is_inactive_value("") is False
     assert is_inactive_value(False) is False  # noqa: FBT003 - the bool is the value under test
-    # Order semantics (no sentinel configured): UNSET is a normal active value,
-    # so the order normalizer never needs to reference ``strawberry.UNSET``.
-    assert is_inactive_value(UNSET) is False
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +110,6 @@ def test_iter_active_fields_classifies_and_skips_inactive() -> None:
         field_specs=specs,
         related_attr="related_filters",
         logic_keys=frozenset({"and_"}),
-        unset_sentinel=UNSET,
     )
     fields = list(
         iter_active_fields(
@@ -164,7 +157,6 @@ def test_iter_active_fields_dict_and_dataclass_classify_identically() -> None:
     config = SetInputTraversal(
         field_specs={},
         related_attr="related_filters",
-        unset_sentinel=UNSET,
     )
     dataclass_view = [
         (f.python_attr, f.kind)
@@ -207,7 +199,6 @@ def test_iter_active_fields_inactive_or_non_walkable_top_level_yields_nothing() 
     config = SetInputTraversal(
         field_specs={},
         related_attr="related_orders",
-        unset_sentinel=UNSET,
     )
     assert list(iter_active_fields(_Set, None, config)) == []
     assert list(iter_active_fields(_Set, UNSET, config)) == []
@@ -228,7 +219,7 @@ def test_dict_subclass_overrides_cannot_replace_the_shared_walk() -> None:
 
     value = _HostileDict(name="x")
     assert iter_input_items(value) == [("name", "x")]
-    assert input_field_value(value, "name") == "x"
+    assert extract_branch_value(value, "name") == "x"
 
 
 def test_non_string_input_keys_fail_closed_before_permission_dispatch() -> None:
@@ -307,7 +298,7 @@ def test_dataclass_and_object_field_read_failures_propagate() -> None:
     with pytest.raises(RuntimeError, match="hostile dataclass field"):
         iter_input_items(_UnreadableDataclass())
     with pytest.raises(RuntimeError, match="hostile object field"):
-        input_field_value(_UnreadableObject(), "name")
+        extract_branch_value(_UnreadableObject(), "name")
 
 
 def test_active_field_configuration_reads_propagate_and_related_reads_are_truthful() -> None:
@@ -317,15 +308,6 @@ def test_active_field_configuration_reads_propagate_and_related_reads_are_truthf
         @property
         def handle_top_level_list(self) -> NoReturn:
             raise RuntimeError("hostile traversal config")
-
-        unset_sentinel = None
-
-    class _UnreadableSentinelConfig:
-        @property
-        def unset_sentinel(self) -> NoReturn:
-            raise RuntimeError("hostile unset_sentinel")
-
-        handle_top_level_list = False
 
     class _HostileSetMeta(type):
         @override
@@ -341,32 +323,29 @@ def test_active_field_configuration_reads_propagate_and_related_reads_are_truthf
         # basedpyright: each unreadable traversal config is the hostile input under test;
         # iter_active_fields types the parameter as SetInputTraversal
         list(iter_active_fields(object, {"name": "x"}, _UnreadableConfig()))  # pyright: ignore[reportArgumentType]
-    with pytest.raises(RuntimeError, match="hostile unset_sentinel"):
-        # basedpyright: each unreadable traversal config is the hostile input under test;
-        # iter_active_fields types the parameter as SetInputTraversal
-        list(iter_active_fields(object, {"name": "x"}, _UnreadableSentinelConfig()))  # pyright: ignore[reportArgumentType]
 
     config = SetInputTraversal(field_specs={}, related_attr="related_orders")
     fields = list(iter_active_fields(_UnreadableSet, {"name": "x"}, config))
     assert [(field.python_attr, field.kind) for field in fields] == [("name", LEAF)]
 
 
-def test_active_field_related_declarations_must_be_a_mapping() -> None:
-    """Non-mapping related declarations abort the walk with a typed error."""
+@pytest.mark.parametrize("declared", [[], None], ids=["list", "none"])
+def test_active_field_related_declarations_must_be_a_mapping(declared: object) -> None:
+    """A related collection that is not a mapping aborts the walk."""
 
     class _InvalidSet:
-        related_orders = []
+        related_orders = declared
 
     config = SetInputTraversal(field_specs={}, related_attr="related_orders")
-    with pytest.raises(ConfigurationError, match="declarations are not a mapping"):
-        list(iter_active_fields(_InvalidSet, {"name": "x"}, config))
+    with pytest.raises(TypeError):
+        _ = list(iter_active_fields(_InvalidSet, {"name": "x"}, config))
 
 
-def test_active_field_list_skips_inactive_elements_and_accepts_none_related_mapping() -> None:
+def test_active_field_list_skips_inactive_elements_and_accepts_an_absent_related_mapping() -> None:
     """Inactive list elements are dropped; an absent related mapping leaves every field a leaf."""
 
     class _Set:
-        related_orders = None
+        pass
 
     config = SetInputTraversal(
         field_specs={},
@@ -379,21 +358,6 @@ def test_active_field_list_skips_inactive_elements_and_accepts_none_related_mapp
     assert [(field.python_attr, field.kind) for field in fields] == [("name", LEAF)]
 
 
-def test_input_field_value_reads_dict_and_dataclass_fields() -> None:
-    """``input_field_value`` reads single fields or returns None for missing fields/non-walkable inputs."""
-    assert input_field_value({"a": 10}, "a") == 10
-    assert input_field_value({"a": 10}, "missing") is None
-    assert input_field_value(None, "a") is None
-    assert input_field_value(42, "a") is None
-
-    @strawberry.input
-    class _In:
-        title: str = "item"
-
-    assert input_field_value(_In(), "title") == "item"
-    assert input_field_value(_In(), "missing") is None
-
-
 def test_field_name_bypasses_hostile_str_subclass_str_override() -> None:
     """``_field_name`` safely normalizes string subclass keys without calling overridden __str__."""
 
@@ -404,7 +368,6 @@ def test_field_name_bypasses_hostile_str_subclass_str_override() -> None:
 
     key = _HostileStr("field_name")
     assert iter_input_items({key: "value"}) == [("field_name", "value")]
-    assert input_field_value({key: "value"}, key) == "value"
 
 
 _FIELD_NAME_REFUSAL = (
@@ -427,16 +390,11 @@ def test_field_name_asks_the_real_type_and_refuses_a_key_that_is_not_one(key: ob
 
     ``introspection.text`` copies only a real ``str`` through the base slot, so a
     ``__class__``-based answer would let the key through the check and render it through
-    its own ``__str__`` / raise the key's own exception. Both entry points share the check.
+    its own ``__str__`` / raise the key's own exception.
     """
     with pytest.raises(ConfigurationError) as walk:
         iter_input_items({key: "value"})
     assert str(walk.value) == _FIELD_NAME_REFUSAL
-    with pytest.raises(ConfigurationError) as single:
-        # basedpyright: the key is the hostile non-``str`` input under test; the parameter is typed
-        # ``str``
-        input_field_value({"field_name": "value"}, key)  # pyright: ignore[reportArgumentType]
-    assert str(single.value) == _FIELD_NAME_REFUSAL
 
 
 def test_order_list_elements_reject_primitive_values() -> None:
@@ -469,71 +427,6 @@ def test_default_set_input_traversal_depth() -> None:
     assert FilterSet._MAX_LOGIC_DEPTH == DEFAULT_SET_INPUT_TRAVERSAL_DEPTH
 
 
-# ---------------------------------------------------------------------------
-# related_declaration_mapping -- the shared related-declaration front half
-# ---------------------------------------------------------------------------
-
-
-def test_related_declaration_mapping_treats_absent_and_none_as_no_declarations() -> None:
-    """An absent or explicitly-``None`` declaration is "no related fields", not an error."""
-
-    class _Absent:
-        pass
-
-    class _None:
-        related_orders = None
-
-    marker = {"shelf": object()}
-
-    class _Mapping:
-        related_orders = marker
-
-    assert related_declaration_mapping(_Absent, "related_orders") == {}
-    assert related_declaration_mapping(_None, "related_orders") == {}
-    assert related_declaration_mapping(_Mapping, "related_orders") is marker
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        list[object](),
-        42,
-        "nope",
-        {"a": 1}.keys(),
-        set[object](),
-    ],
-)
-def test_related_declaration_mapping_rejects_non_mappings(bad: object) -> None:
-    """A present declaration that is not a Mapping is rejected before any indexing."""
-
-    class _Set:
-        related_orders = bad
-
-    with pytest.raises(RelatedDeclarationError) as excinfo:
-        related_declaration_mapping(_Set, "related_orders")
-    assert excinfo.value.kind == "not_mapping"
-
-
-def test_related_declaration_mapping_never_runs_a_metaclass_getattribute() -> None:
-    """The declaration is read from the class's real namespaces, so a hostile hook never runs.
-
-    A metaclass ``__getattribute__`` that raises for the attribute is not consulted: the
-    class declares nothing under that name, so it has no related fields.
-    """
-
-    class _HostileMeta(type):
-        @override
-        def __getattribute__(cls, name: str) -> object:
-            if name == "related_orders":
-                raise RuntimeError("hostile class read")
-            return object_result(super().__getattribute__, name)
-
-    class _Set(metaclass=_HostileMeta):
-        pass
-
-    assert related_declaration_mapping(_Set, "related_orders") == {}
-
-
 def test_iter_active_fields_propagates_a_hostile_config_related_attr_read() -> None:
     """The traversal config's attribute NAME read is consumer code; what it raises propagates.
 
@@ -542,7 +435,6 @@ def test_iter_active_fields_propagates_a_hostile_config_related_attr_read() -> N
     """
 
     class _HostileConfig:
-        unset_sentinel = UNSET
         handle_top_level_list = False
 
         @property

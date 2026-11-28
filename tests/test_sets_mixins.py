@@ -8,8 +8,8 @@ express: FilterSet/OrderSet MRO, unbound-method single-sourcing, per-family
 ``_permission`` config, expansion-cache write/reentry gates, related-set
 target bind/validate, metaclass collect/bind (including diamond tombstones),
 ``type_name_for`` suffix rules and empty-path ``ConfigurationError``, lazy
-class-ref resolution, ``Meta.fields`` re-readability, and derived
-``_input_traversal`` identity. Wire-visible filter/order apply, permission
+class-ref resolution, ``Meta.fields`` re-readability, and the family
+``_permission.traversal`` identity. Wire-visible filter/order apply, permission
 denial (active field, inactive quiet, nested/flat related branches,
 ``iContains`` lookup gating), ``and``/``or``/``not``, list ``orderBy``, and
 empty-input no-ops live in ``examples/fakeshop/test_query/test_library_api.py``,
@@ -22,14 +22,13 @@ import ast
 import copy
 import types
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
 import pytest
 from apps.library import models as library_models
 from apps.library.filters import BookFilter
-from apps.library.models import Book
 from django.db.models import Model
 from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy
@@ -58,13 +57,12 @@ from django_strawberry_framework.sets_mixins import (
     should_cache_expansion,
 )
 from django_strawberry_framework.utils._narrowing import read_attr
-from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
+from django_strawberry_framework.utils.input_values import SetInputTraversal
 from django_strawberry_framework.utils.inputs import GeneratedInputFieldSpec
 from tests._idioms import definition_raises
 
 _SHARED_PERMISSION_METHODS = (
     "_request_from_info",
-    "_extract_branch_value",
     "_iter_active_related_branches",
     "_active_permission_targets",
     "_run_permission_checks",
@@ -604,7 +602,6 @@ def test_active_input_permission_mixin_hooks() -> None:
             traversal=SetInputTraversal(
                 related_attr="related_probe",
                 field_specs={},
-                unset_sentinel=None,
             ),
         )
 
@@ -804,7 +801,6 @@ def test_active_input_permission_mixin_field_paths_and_branches() -> None:
                         "sub_field",
                     ),
                 },
-                unset_sentinel=None,
             ),
         )
 
@@ -824,7 +820,6 @@ def test_active_input_permission_mixin_field_paths_and_branches() -> None:
                 field_specs={
                     (_OtherSet, "title"): GeneratedInputFieldSpec("title", "title", "title"),
                 },
-                unset_sentinel=None,
             ),
         )
 
@@ -842,23 +837,21 @@ def test_active_input_permission_mixin_field_paths_and_branches() -> None:
 
 
 def test_family_input_traversal_is_derived_from_the_permission_config() -> None:
-    """``_input_traversal()`` is the family's ``_permission.traversal`` plus field specs.
+    """The family's ``_permission.traversal`` carries its grammar and field specs.
 
     ``and``/``or``/``not`` and list ``orderBy`` are live; ``field_specs is``
     identity is not.
     """
-    filter_traversal = FilterSet._input_traversal()
+    filter_traversal = FilterSet._permission.traversal
     assert isinstance(filter_traversal, SetInputTraversal)
     assert filter_traversal.related_attr == "related_filters"
     assert filter_traversal.logic_keys == frozenset({"and_", "or_", "not_"})
-    assert filter_traversal.unset_sentinel is UNSET
     assert filter_traversal.handle_top_level_list is False
     assert filter_traversal.field_specs is _filter_specs
 
-    order_traversal = OrderSet._input_traversal()
+    order_traversal = OrderSet._permission.traversal
     assert order_traversal.related_attr == "related_orders"
     assert order_traversal.logic_keys == frozenset()
-    assert order_traversal.unset_sentinel is UNSET
     assert order_traversal.handle_top_level_list is True
     assert order_traversal.field_specs is _order_specs
 
@@ -866,12 +859,11 @@ def test_family_input_traversal_is_derived_from_the_permission_config() -> None:
 def test_order_normalizer_consumes_the_family_permission_traversal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``normalize_input_value`` drives ``iter_active_fields`` with ``cls._input_traversal()``.
+    """``normalize_input_value`` drives ``iter_active_fields`` with ``cls._permission.traversal``.
 
     Monkeypatch of the helper; a request cannot observe which config object
     was passed. Order apply itself is live.
     """
-    sentinel = object()
     captured: dict[str, SetInputTraversal] = {}
 
     def _spy(
@@ -894,7 +886,6 @@ def test_order_normalizer_consumes_the_family_permission_traversal(
                 related_attr="related_stub",
                 field_specs={(OrderSet, "a"): spec_a},
                 logic_keys=frozenset({"custom_op"}),
-                unset_sentinel=sentinel,
                 handle_top_level_list=True,
             ),
         )
@@ -902,7 +893,6 @@ def test_order_normalizer_consumes_the_family_permission_traversal(
     assert order_inputs.normalize_input_value(_StubFamily, None) == []
     config = captured["config"]
     assert config.related_attr == "related_stub"
-    assert config.unset_sentinel is sentinel
     assert config.handle_top_level_list is True
     assert config.field_specs == {(OrderSet, "a"): spec_a}
     assert config.logic_keys == frozenset({"custom_op"})
@@ -915,7 +905,7 @@ def test_filter_normalizer_consumes_the_family_permission_traversal(
 
     The filter-side twin of
     ``test_order_normalizer_consumes_the_family_permission_traversal``: the
-    normalizer drives ``iter_active_fields`` with ``cls._input_traversal()``, so
+    normalizer drives ``iter_active_fields`` with ``cls._permission.traversal``, so
     the grammar the apply path reads is the one ``_permission`` declares.
     """
     captured = {}
@@ -931,43 +921,7 @@ def test_filter_normalizer_consumes_the_family_permission_traversal(
     monkeypatch.setattr(filter_sets, "iter_active_fields", _spy)
 
     assert FilterSet._normalize_input({"title": "anything"}) == {}
-    assert captured["config"] == FilterSet._input_traversal()
-
-
-def test_filter_normalizer_honors_a_subclass_unset_sentinel_override() -> None:
-    """An overridden ``_permission.traversal.unset_sentinel`` governs the apply path too.
-
-    ``_normalize_input`` and the permission walkers classify through the same
-    derived config, so a subclass narrowing the sentinel is GATED and FILTERED
-    on one grammar.
-
-    GraphQL omitted fields are always ``UNSET``; a custom Python sentinel
-    cannot appear on the wire.
-    """
-    marker = object()
-
-    class _SentinelOverrideFilter(FilterSet):
-        _permission = replace(
-            FilterSet._permission,
-            traversal=replace(FilterSet._permission.traversal, unset_sentinel=marker),
-        )
-
-        class Meta:
-            model = Book
-            fields = ["title"]
-
-    assert _SentinelOverrideFilter._input_traversal().unset_sentinel is marker
-    # ``marker`` is "not supplied" under the override ...
-    assert _SentinelOverrideFilter._normalize_input({"title": marker}) == {}
-    # ... while ``UNSET`` is an ordinary supplied value, which the default
-    # family (whose sentinel IS ``UNSET``) would have skipped instead.
-    assert "title" in _SentinelOverrideFilter._normalize_input({"title": UNSET})
-    assert FilterSet._normalize_input({"title": UNSET}) == {}
-
-
-# ---------------------------------------------------------------------------
-# The shared ``Meta.fields`` re-readability gate
-# ---------------------------------------------------------------------------
+    assert captured["config"] == FilterSet._permission.traversal
 
 
 def test_re_readable_gate_message_names_the_receipt_and_the_contract() -> None:

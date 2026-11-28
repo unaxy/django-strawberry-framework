@@ -221,7 +221,6 @@ async def scope_session_lock(
         scope,
         _SCOPE_LOCK_KEY,
         factory=asyncio.Lock,
-        expect=asyncio.Lock,
     )
     async with lock:
         yield lock

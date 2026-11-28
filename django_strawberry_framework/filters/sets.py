@@ -151,7 +151,6 @@ from django_strawberry_framework.utils.input_values import (
     LEAF,
     LOGIC,
     RELATED,
-    UNSET,
     SetInputTraversal,
     assert_set_traversal_depth,
     is_inactive_value,
@@ -172,6 +171,7 @@ from django_strawberry_framework.utils.permissions import (
     UndeclaredHop,
     _set_model,
     descendant_relation_path_of,
+    extract_branch_value,
     invoke_permission_method,
     relation_path_gates,
     set_bound_definition,
@@ -3772,7 +3772,6 @@ class FilterSet(
             field_specs=_field_specs,
             related_attr="related_filters",
             logic_keys=_LOGIC_PYTHON_ATTRS,
-            unset_sentinel=UNSET,
         ),
     )
 
@@ -6104,20 +6103,19 @@ class FilterSet(
         - Filters inactive (``None`` / ``UNSET``) elements.
         - Yields ``(operator, active_children)`` for non-empty branches.
 
-        ``_extract_branch_value`` reads an inactive input or branch as ``None``.
+        ``utils/permissions.py::extract_branch_value`` reads an inactive input or branch as
+        ``None``.
         """
         for op in LOGIC_OPERATORS:
-            branch_value = cls._extract_branch_value(input_value, op.python_attr)
+            branch_value = extract_branch_value(input_value, op.python_attr)
             if branch_value is None:
-                branch_value = cls._extract_branch_value(input_value, op.wire_name)
+                branch_value = extract_branch_value(input_value, op.wire_name)
             if branch_value is None:
                 continue
             cls._validate_logic_branch_shape(op.wire_name, branch_value)
             if op.is_sequence:
                 children = [
-                    child
-                    for child in list_of(branch_value)
-                    if not is_inactive_value(child, unset_sentinel=UNSET)
+                    child for child in list_of(branch_value) if not is_inactive_value(child)
                 ]
             else:
                 children = [branch_value]
@@ -6188,7 +6186,7 @@ class FilterSet(
         that would silently drop its predicate AND skip its ``check_*`` gate, so it
         raises a typed ``ConfigurationError``.
         """
-        if is_inactive_value(element, unset_sentinel=UNSET):
+        if is_inactive_value(element):
             return
         if iter_input_items(element) is None:
             raise ConfigurationError(
@@ -6242,7 +6240,7 @@ class FilterSet(
           ``_reject_dict_form_value`` instead of being splatted into
           form-data keys the form silently ignores.
         """
-        if is_inactive_value(input_value, unset_sentinel=UNSET):
+        if is_inactive_value(input_value):
             return {}
         items = iter_input_items(input_value)
         if items is None:
@@ -6278,7 +6276,7 @@ class FilterSet(
         # cannot validate a nested-dict shape), and ``LEAF`` normalizes each
         # active lookup under the form key the lookup table holds for it.
         data: dict[str, object] = {}
-        for field in iter_active_fields(cls, input_value, cls._input_traversal()):
+        for field in iter_active_fields(cls, input_value, cls._permission.traversal):
             if field.kind == LOGIC:
                 wire_key = LOGIC_OPERATORS_BY_PYTHON_ATTR[field.python_attr].wire_name
                 cls._validate_logic_branch_shape(wire_key, field.raw_value)
@@ -6409,7 +6407,7 @@ class FilterSet(
             # A Strawberry input dataclass defaults every unsupplied lookup to
             # ``UNSET`` rather than ``None``, so a partially supplied bag
             # (``title: { exact: UNSET, icontains: "foo" }``) skips the rest.
-            if is_inactive_value(lookup_value, unset_sentinel=UNSET):
+            if is_inactive_value(lookup_value):
                 continue
             entry = lookups.get(lookup_attr)
             if entry is None:
@@ -7124,8 +7122,6 @@ class FilterSet(
         hops, remainder = walk_declared_relation_path(
             cls,
             _filterset_walked_lookup(cls, filter_instance)[0],
-            related_attr=cls._permission.traversal.related_attr,
-            target_attr=cls._permission.target_attr,
             undeclared=True,
             aliases=aliases,
         )
@@ -7339,7 +7335,7 @@ class FilterSet(
         """
         lookups_by_attr = cls._leaf_lookups_by_attr()
         entries: list[tuple[str, Filter, object]] = []
-        for field in iter_active_fields(cls, input_value, cls._input_traversal()):
+        for field in iter_active_fields(cls, input_value, cls._permission.traversal):
             if field.kind == LEAF:
                 entries.extend(
                     cls._leaf_form_entries(lookups_by_attr, field.python_attr, field.raw_value),
@@ -7388,8 +7384,8 @@ class FilterSet(
         """Return the gates the nested twin of a leaf's ORM path fires beyond its gate path's.
 
         The leaf's gate path fires its own gate (and, through
-        ``_fire_flat_relation_path_gates``, the hops it walks when it is an ORM
-        path, ``_gate_path_spells_relations``). What
+        ``utils/permissions.py::relation_path_gates``, the hops it walks when it is
+        an ORM path, ``_gate_path_spells_relations``). What
         remains is the walk of the filter's own path in the set that declares it,
         the gates the nested twin's run of that set fires:
 
@@ -7423,8 +7419,6 @@ class FilterSet(
         return relation_path_gates(
             cls,
             _filterset_walked_lookup(cls, filter_instance)[0],
-            related_attr=cls._permission.traversal.related_attr,
-            target_attr=cls._permission.target_attr,
         )
 
     @classmethod
@@ -7463,15 +7457,13 @@ class FilterSet(
         no ORM path; any other leaf gates on its ``field_name``
         (``inputs.py::leaf_gate_path``), whose hops
         ``utils/permissions.py::relation_path_gates`` reads, the gates
-        ``_fire_flat_relation_path_gates`` fires.
+        ``utils/permissions.py::run_active_input_permission_checks`` fires.
         """
         if _is_declared_head(cls, name, filter_instance):
             return ()
         return relation_path_gates(
             cls,
             leaf_gate_path(cls, name, filter_instance),
-            related_attr=cls._permission.traversal.related_attr,
-            target_attr=cls._permission.target_attr,
         )
 
     @classmethod

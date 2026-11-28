@@ -59,7 +59,7 @@ from django_strawberry_framework.sets_mixins import (
     should_cache_expansion,
 )
 from django_strawberry_framework.utils import introspection
-from django_strawberry_framework.utils.input_values import UNSET, SetInputTraversal
+from django_strawberry_framework.utils.input_values import SetInputTraversal
 from django_strawberry_framework.utils.inputs import (
     plain_set_meta_fields,
     read_set_meta_fields,
@@ -287,7 +287,6 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         traversal=SetInputTraversal(
             field_specs=_field_specs,
             related_attr="related_orders",
-            unset_sentinel=UNSET,
             handle_top_level_list=True,
         ),
     )
@@ -632,8 +631,6 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         declared, _remainder = walk_declared_relation_path(
             cls,
             field_path,
-            related_attr=cls._permission.traversal.related_attr,
-            target_attr=cls._permission.target_attr,
         )
         # The set each join is walked from (its re-entry root) and, for the join a
         # declaration ends on, that declaration, whose target set's bound type the

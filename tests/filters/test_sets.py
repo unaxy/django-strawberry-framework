@@ -9092,17 +9092,6 @@ def test_operator_bag_items_still_returns_none_for_scalars(value: object) -> Non
     assert CategoryFilter._operator_bag_items(value, lookups) is None
 
 
-def test_extract_branch_value_returns_none_for_none_input() -> None:
-    """``_extract_branch_value(None, ...)`` short-circuits to ``None``."""
-
-    class CategoryFilter(FilterSet):
-        class Meta:
-            model = Category
-            fields = {"name": ["exact"]}
-
-    assert CategoryFilter._extract_branch_value(None, "shelves") is None
-
-
 @pytest.mark.parametrize("input_value", [None, UNSET], ids=["none", "unset"])
 def test_run_permission_checks_short_circuits_on_none_and_unset(input_value: object) -> None:
     """An inactive input returns before any gate dispatch."""
@@ -16015,8 +16004,6 @@ def test_a_lookup_crossing_a_relation_walks_the_path_django_walks() -> None:
     assert _CrossingBookFilter._leaf_gates(table["tiers"]) == relation_path_gates(
         _CrossingBookFilter,
         "shelf__tier",
-        related_attr=_CrossingBookFilter._permission.traversal.related_attr,
-        target_attr=_CrossingBookFilter._permission.target_attr,
     )
     assert _CrossingBookFilter._flat_leaf_walk(table["tiers_by_method"]) is None
     assert _filterset_walked_lookup(_CrossingBookFilter, table["tiers_by_method"]) == (

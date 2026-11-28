@@ -61,7 +61,7 @@ from django_strawberry_framework.exceptions import DjangoStrawberryFrameworkErro
 from django_strawberry_framework.resource_policy import effective_bound, policy_from_info
 
 from .errors import PAGINATION_INVALID_ERROR_CODE, coded_error_extensions
-from .input_values import UNSET, is_inactive_value
+from .input_values import is_inactive_value
 from .typing import published_argument_wire_name, schema_config_from_info
 
 if TYPE_CHECKING:
@@ -173,12 +173,10 @@ def is_supplied(value: _SuppliedT | UnsetType | None) -> TypeGuard[_SuppliedT]:
     ``utils/input_values.py::is_inactive_value`` (the exact inverse), so no
     site re-types ``value is not None and value is not strawberry.UNSET``.
 
-    The rule lives in ``input_values.py``, which takes the sentinel as an
-    argument; this passes ``input_values.UNSET``, Strawberry's ``UNSET`` typed
-    ``UnsetType``. A ``True`` answer narrows the value to its declared type minus
+    A ``True`` answer narrows the value to its declared type minus
     ``UnsetType`` / ``None``; a ``False`` answer narrows nothing.
     """
-    return not is_inactive_value(value, unset_sentinel=UNSET)
+    return not is_inactive_value(value)
 
 
 def is_backward_shape(first: object, last: object) -> bool:

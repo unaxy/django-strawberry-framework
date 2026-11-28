@@ -1114,23 +1114,6 @@ def test_orderset_expand_meta_fields_returns_empty_when_meta_has_no_fields_attr(
     assert result == OrderedDict()
 
 
-def test_orderset_extract_branch_value_returns_none_for_none_input() -> None:
-    """Covers ``utils/permissions.py::extract_branch_value`` #"if input_value is None:"."""
-    assert OrderSet._extract_branch_value(None, "anything") is None
-
-
-def test_orderset_extract_branch_value_reads_dict_field() -> None:
-    """Covers ``utils/input_values.py::input_field_value``'s dict branch.
-
-    ``OrderSet._extract_branch_value`` delegates the dict-vs-dataclass sniff
-    to that primitive, whose #"if isinstance(input_value, dict):" arm reads
-    via ``dict.get`` so a missing key collapses to ``None`` rather than
-    raising ``KeyError``.
-    """
-    assert OrderSet._extract_branch_value({"shelf": "value"}, "shelf") == "value"
-    assert OrderSet._extract_branch_value({"shelf": "value"}, "missing") is None
-
-
 def test_orderset_active_permission_leaf_paths_returns_empty_for_none_input() -> None:
     """Covers ``utils/input_values.py::iter_active_fields`` #"is_inactive_value(input_value"."""
     assert OrderSet._active_permission_targets(None)[0] == []
@@ -1172,7 +1155,7 @@ def test_orderset_active_permission_leaf_paths_walks_dict_items() -> None:
 def test_orderset_active_permission_leaf_paths_falls_back_to_python_attr_when_no_field_spec_entry() -> (
     None
 ):
-    """Covers ``utils/permissions.py::active_permission_targets`` #"else fallback_path(field.python_attr)".
+    """Covers ``utils/permissions.py::active_permission_targets`` #"_permission_fallback_path(field".
 
     When ``_field_specs`` has no entry for ``(cls, python_attr)`` (e.g.
     a permission check fired outside the apply pipeline before

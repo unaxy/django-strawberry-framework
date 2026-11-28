@@ -289,9 +289,8 @@ def normalize_input_value(
     ``None`` active-input skip, the ``_field_specs`` lookup, and the
     leaf-vs-related classification are the shared traversal mechanics owned by
     ``utils/input_values.py::iter_active_fields``, driven by the family's ONE
-    canonical traversal config derived from ``OrderSet._permission``
-    (``sets_mixins.ActiveInputPermissionMixin._input_traversal``) -- the same
-    derivation the permission walkers classify through. This function
+    canonical traversal config, ``OrderSet._permission.traversal`` -- the same
+    object the permission walkers classify through. This function
     keeps only the order-side leaf semantics: a ``RelatedOrder`` branch recurses into
     the target orderset with the django source path as a prefix (e.g. ``shelf`` ->
     ``shelf__code``); a leaf appends ``(django_source_path, Ordering | None)``.
@@ -306,7 +305,7 @@ def normalize_input_value(
     _ensure_field_specs(orderset_cls, input_value)
 
     result: list[tuple[str, Ordering | None]] = []
-    for field in iter_active_fields(orderset_cls, input_value, orderset_cls._input_traversal()):
+    for field in iter_active_fields(orderset_cls, input_value, orderset_cls._permission.traversal):
         if field.spec is None:
             continue  # Defensive -- should be impossible after a finalize.
         if field.kind == RELATED:
@@ -338,16 +337,14 @@ def _ensure_field_specs(orderset_cls: type[OrderSet], input_value: object) -> No
     """Populate provenance before direct normalization or permission checks.
 
     The "is anything supplied?" warm-up gate is answered THROUGH the family
-    classifier -- ``orderset_cls._input_traversal()`` drives
+    classifier -- ``orderset_cls._permission.traversal`` drives
     ``iter_active_fields`` here exactly as it drives ``normalize_input_value``
-    and the permission walkers -- so every grammar fact (the sentinel, the
-    top-level-list shape) is read only from ``orderset_cls._permission``.
-    Hardcoding ``strawberry.UNSET`` beside a hand-rolled list flatten made this
-    gate disagree with a consumer subclass overriding
-    ``_permission.unset_sentinel``: a miss skipped spec building, the
-    normalizer silently discarded the very fields the gates fired for.
+    and the permission walkers -- so every grammar fact (the top-level-list
+    shape) is read only from ``orderset_cls._permission``; a gate that
+    disagreed with the normalizer would skip spec building and silently
+    discard the very fields the gates fired for.
     """
-    traversal = orderset_cls._input_traversal()
+    traversal = orderset_cls._permission.traversal
     if not any(iter_active_fields(orderset_cls, input_value, traversal)):
         return
     if callable(getattr(orderset_cls, "get_fields", None)) and orderset_cls not in (
