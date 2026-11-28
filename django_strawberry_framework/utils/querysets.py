@@ -1505,14 +1505,12 @@ _SIDECAR_RESULT_POLICY: _SealPolicy[models.Model] = _SealPolicy(require_unevalua
 
 
 def _routing_hints_equal(cand_hints: object, orig_hints: object) -> bool:
-    """Return True if candidate and original routing hints match without consumer dispatch.
+    """Compare raw routing hints by key set and value identity.
 
-    Preserves the exact distinction between absent (``None``) and empty (``{}``)
-    hints. Keys must match exactly and every value must be the SAME OBJECT the
-    snapshot holds: Django's ``ConnectionRouter`` hands hint values to consumer
-    routers untouched, and a router is free to tell two equal tokens apart by
-    identity, so semantic equality cannot prove equal routing without running
-    the router. Identity is the only comparison that proves it without dispatch.
+    Exact dictionaries match when their key sets match and each value is the
+    same object. Other hints objects match only by identity. Preserve the
+    distinction between absent (``None``) and empty (``{}``) hints. The effective
+    alias is frozen separately before consumer code runs (``_RoutingIntent``).
     """
     if cand_hints is orig_hints:
         return True
