@@ -1632,12 +1632,11 @@ def _routing_repr(value: object) -> str:
 
 
 def _validate_post_orderset_result(
-    target_type: type[DjangoType],
     expected_routing: _RoutingIntent,
     post_order_candidate: object,
     method_name: str,
     *,
-    model: type[models.Model] | None = None,
+    model: type[models.Model],
 ) -> models.QuerySet[models.Model]:
     """Validate and seal a public sidecar ``apply_sync`` / ``apply_async`` return.
 
@@ -1652,11 +1651,10 @@ def _validate_post_orderset_result(
     to the connection the source resolved to and a hint object mutated behind a
     preserved identity cannot re-route the eventual read.
 
-    ``model`` is the caller's captured model (``_captured_model``): the table
-    the ordered result is validated against is the one the field seeded and
-    sealed over, not an answer to a fresh request-time read of the target.
+    ``model`` is the caller's captured model: the table the ordered result is
+    validated against is the one the field seeded and sealed over, not an
+    answer to a fresh request-time read of the target.
     """
-    model = _captured_model(target_type, model)
     sealed, defect = _seal_or_defect(
         post_order_candidate,
         model,
@@ -1728,7 +1726,6 @@ def require_orderset_class(
 
 
 def apply_sidecar_sync(
-    target_type: type[DjangoType],
     set_class: type[FilterSet | OrderSet],
     queryset: models.QuerySet[models.Model],
     input_value: object,
@@ -1767,7 +1764,6 @@ def apply_sidecar_sync(
             f"Make apply_sync synchronous or execute the query asynchronously.",
         )
     return _validate_post_orderset_result(
-        target_type,
         expected_routing,
         candidate,
         method_name,
@@ -1776,7 +1772,6 @@ def apply_sidecar_sync(
 
 
 async def apply_sidecar_async(
-    target_type: type[DjangoType],
     set_class: type[FilterSet | OrderSet],
     queryset: models.QuerySet[models.Model],
     input_value: object,
@@ -1805,7 +1800,6 @@ async def apply_sidecar_async(
             f"({introspection.kind(candidate)}); expected a QuerySet.",
         )
     return _validate_post_orderset_result(
-        target_type,
         expected_routing,
         candidate,
         method_name,

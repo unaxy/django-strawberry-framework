@@ -3445,15 +3445,13 @@ def test_list_relation_child_policy_serves_every_combinator_shape(combinator: st
 
 def test_validate_post_orderset_result_valid() -> None:
     """_validate_post_orderset_result accepts valid, ordered candidate querysets."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     valid_candidate = Category.objects.all().order_by("name")
     sealed = _validate_post_orderset_result(
-        DummyType,
         _snapshot_routing_intent(source_qs),
         valid_candidate,
         "MyOrderSet.apply_sync",
+        model=Category,
     )
     assert type(sealed) is models.QuerySet
     assert sealed.query.order_by == ("name",)
@@ -3462,8 +3460,6 @@ def test_validate_post_orderset_result_valid() -> None:
 
 def test_validate_post_orderset_result_rejects_non_queryset() -> None:
     """_validate_post_orderset_result rejects non-queryset collections."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     with pytest.raises(
         ConfigurationError,
@@ -3473,17 +3469,15 @@ def test_validate_post_orderset_result_rejects_non_queryset() -> None:
         ),
     ):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             [1, 2, 3],
             "MyOrderSet.apply_sync",
+            model=Category,
         )
 
 
 def test_validate_post_orderset_result_rejects_none() -> None:
     """_validate_post_orderset_result rejects None return values."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     with pytest.raises(
         ConfigurationError,
@@ -3493,17 +3487,15 @@ def test_validate_post_orderset_result_rejects_none() -> None:
         ),
     ):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             None,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
 
 
 def test_validate_post_orderset_result_rejects_wrong_model() -> None:
     """_validate_post_orderset_result rejects querysets of an unrelated model."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     wrong_model_qs = Item.objects.all()
     with pytest.raises(
@@ -3514,17 +3506,15 @@ def test_validate_post_orderset_result_rejects_wrong_model() -> None:
         ),
     ):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             wrong_model_qs,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
 
 
 def test_validate_post_orderset_result_rejects_evaluated() -> None:
     """_validate_post_orderset_result rejects querysets with evaluated result cache."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     eval_qs = Category.objects.all()
     eval_qs._result_cache = []
@@ -3536,17 +3526,15 @@ def test_validate_post_orderset_result_rejects_evaluated() -> None:
         ),
     ):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             eval_qs,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
 
 
 def test_validate_post_orderset_result_rejects_sliced() -> None:
     """_validate_post_orderset_result rejects sliced querysets."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     sliced_qs = Category.objects.all()[:5]
     with pytest.raises(
@@ -3557,10 +3545,10 @@ def test_validate_post_orderset_result_rejects_sliced() -> None:
         ),
     ):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             sliced_qs,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
 
 
@@ -3580,8 +3568,6 @@ def test_validate_post_orderset_result_serves_a_combined_result_and_refuses_a_lo
         for name in list_of(Category.objects.values_list("name", flat=True))
     )
 
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     comb_qs = (
         Category.objects.filter(name=names[0])
@@ -3589,10 +3575,10 @@ def test_validate_post_orderset_result_serves_a_combined_result_and_refuses_a_lo
         .order_by("-name")
     )
     sealed = _validate_post_orderset_result(
-        DummyType,
         _snapshot_routing_intent(source_qs),
         comb_qs,
         "MyOrderSet.apply_sync",
+        model=Category,
     )
     assert sealed.query.combinator is None
     assert [row.name for row in _rows_of(Category, sealed)] == [names[1], names[0]]
@@ -3601,10 +3587,10 @@ def test_validate_post_orderset_result_serves_a_combined_result_and_refuses_a_lo
     lost_qs = upper.union(upper).order_by("upper_name")
     with pytest.raises(ConfigurationError) as excinfo:
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             lost_qs,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
     detail = (
         "union: its ordering by 'upper_name' is not a Category column, so the rewritten "
@@ -3647,8 +3633,6 @@ def test_validate_post_orderset_result_refuses_a_combined_result_ordered_through
         },
     )
 
-    DummyType = _declared_type(Book, "DummyType")
-
     class UnionBookOrder(OrderSet):
         class Meta:
             model = Book
@@ -3665,17 +3649,15 @@ def test_validate_post_orderset_result_refuses_a_combined_result_ordered_through
     )
     with pytest.raises(ConfigurationError, match="is not a Book column"):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             ordered,
             "UnionBookOrder.apply_sync",
+            model=Book,
         )
 
 
 def test_validate_post_orderset_result_rejects_projection() -> None:
     """_validate_post_orderset_result rejects values/projection querysets."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     values_qs = Category.objects.values("id")
     with pytest.raises(
@@ -3686,17 +3668,15 @@ def test_validate_post_orderset_result_rejects_projection() -> None:
         ),
     ):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             values_qs,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
 
 
 def test_validate_post_orderset_result_rejects_db_routing_mismatch() -> None:
     """_validate_post_orderset_result rejects querysets routed to a different database."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     diff_db_qs = Category.objects.using("other")
     with pytest.raises(
@@ -3704,17 +3684,15 @@ def test_validate_post_orderset_result_rejects_db_routing_mismatch() -> None:
         match="changed database routing intent",
     ):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             diff_db_qs,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
 
 
 def test_validate_post_orderset_result_rejects_hints_routing_mismatch() -> None:
     """_validate_post_orderset_result rejects querysets with divergent database routing hints."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     diff_hints_qs = Category.objects.all()
     set_queryset_hints(diff_hints_qs, {"instance": 123})
@@ -3723,16 +3701,15 @@ def test_validate_post_orderset_result_rejects_hints_routing_mismatch() -> None:
         match="changed database routing intent",
     ):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             diff_hints_qs,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
 
 
 def test_validate_post_orderset_result_routing_hints_hostile_repr() -> None:
     """_validate_post_orderset_result never calls a consumer __repr__ on routing hints."""
-    DummyType = _declared_type(Category, "DummyType")
 
     class HostileValue:
         @override
@@ -3751,10 +3728,10 @@ def test_validate_post_orderset_result_routing_hints_hostile_repr() -> None:
 
     # The same hint object is the same routing intent.
     sealed = _validate_post_orderset_result(
-        DummyType,
         _snapshot_routing_intent(source_qs),
         cand_same,
         "MyOrderSet.apply_sync",
+        model=Category,
     )
     assert sealed is not None
 
@@ -3768,18 +3745,16 @@ def test_validate_post_orderset_result_routing_hints_hostile_repr() -> None:
         match="changed database routing intent",
     ) as exc_info:
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             cand_diff,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
     assert "HostileValue at 0x" in str(exc_info.value)
 
 
 def test_validate_post_orderset_result_routing_hints_none_vs_empty() -> None:
     """_validate_post_orderset_result preserves distinction between absent (None) and empty ({}) hints."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     # basedpyright: plants a ``None`` ``_hints``, which Django never stores (it writes ``{}``)
     set_queryset_hints(source_qs, None)  # pyright: ignore[reportArgumentType]
@@ -3792,10 +3767,10 @@ def test_validate_post_orderset_result_routing_hints_none_vs_empty() -> None:
         match=r"expected db=None, hints=None, got db=None, hints=\{\}",
     ):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             cand_qs,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
 
 
@@ -3820,8 +3795,6 @@ def test_routing_repr_names_instance_hints_by_class_and_identity() -> None:
 
 def test_routing_rejects_a_renamed_hint_key_at_equal_length() -> None:
     """Same-size hint dicts with different KEYS are a routing change."""
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     set_queryset_hints(source_qs, {"tenant": "a"})
 
@@ -3833,10 +3806,10 @@ def test_routing_rejects_a_renamed_hint_key_at_equal_length() -> None:
         match="changed database routing intent",
     ):
         _validate_post_orderset_result(
-            DummyType,
             _snapshot_routing_intent(source_qs),
             cand_qs,
             "MyOrderSet.apply_sync",
+            model=Category,
         )
 
 
@@ -3847,7 +3820,6 @@ def test_routing_rejects_an_equal_hint_value_that_is_not_the_same_object() -> No
     objects they are, and a router may tell two equal tokens apart by identity,
     so only the SAME object the snapshot holds proves the same route.
     """
-    DummyType = _declared_type(Category, "DummyType")
     source_qs = Category.objects.all()
     set_queryset_hints(source_qs, {"tenant": "shard-a"})
     expected = _snapshot_routing_intent(source_qs)
@@ -3856,15 +3828,15 @@ def test_routing_rejects_an_equal_hint_value_that_is_not_the_same_object() -> No
     set_queryset_hints(cand_qs, {"tenant": "shard-a!"[:-1]})
     assert queryset_hints(cand_qs)["tenant"] is not queryset_hints(source_qs)["tenant"]
     with pytest.raises(ConfigurationError, match="changed database routing intent"):
-        _validate_post_orderset_result(DummyType, expected, cand_qs, "MyOrderSet.apply_sync")
+        _validate_post_orderset_result(expected, cand_qs, "MyOrderSet.apply_sync", model=Category)
 
     same_qs = Category.objects.all()
     set_queryset_hints(same_qs, {"tenant": queryset_hints(source_qs)["tenant"]})
     validated = _validate_post_orderset_result(
-        DummyType,
         expected,
         same_qs,
         "MyOrderSet.apply_sync",
+        model=Category,
     )
     assert validated is not None
 
@@ -3878,8 +3850,6 @@ def test_snapshot_routing_intent_is_frozen_before_consumer_code_can_mutate_the_s
     and holds the alias by value, so both in-place edits are rejected against
     what the source carried when the override was handed it.
     """
-    DummyType = _declared_type(Category, "DummyType")
-
     source_qs = Category.objects.all()
     set_queryset_hints(source_qs, {"tenant": 1})
     expected = _snapshot_routing_intent(source_qs)
@@ -3891,7 +3861,12 @@ def test_snapshot_routing_intent_is_frozen_before_consumer_code_can_mutate_the_s
     queryset_hints(source_qs)["tenant"] = 2
     assert expected.hints == {"tenant": 1}
     with pytest.raises(ConfigurationError, match=r"expected db=None, hints=\{'tenant': 1\}"):
-        _validate_post_orderset_result(DummyType, expected, source_qs, "MyOrderSet.apply_sync")
+        _validate_post_orderset_result(
+            expected,
+            source_qs,
+            "MyOrderSet.apply_sync",
+            model=Category,
+        )
 
     # An in-place alias rewrite on the same object is rejected the same way.
     set_queryset_hints(source_qs, {"tenant": 1})
@@ -3901,7 +3876,12 @@ def test_snapshot_routing_intent_is_frozen_before_consumer_code_can_mutate_the_s
     queryset_hints(source_qs)["tenant"] = tenant
     instance_state(source_qs)["_db"] = "other"
     with pytest.raises(ConfigurationError, match=r"expected db=None, .* got db='other'"):
-        _validate_post_orderset_result(DummyType, expected, source_qs, "MyOrderSet.apply_sync")
+        _validate_post_orderset_result(
+            expected,
+            source_qs,
+            "MyOrderSet.apply_sync",
+            model=Category,
+        )
 
 
 class _NestedAliasRouter:
@@ -3940,8 +3920,6 @@ def test_routing_intent_pins_the_alias_resolved_before_a_hint_could_be_mutated()
     it, so the attestation is about the connection rather than about hint
     contents.
     """
-    DummyType = _declared_type(Category, "DummyType")
-
     token = {"alias": "default"}
     source_qs = Category.objects.all()
     set_queryset_hints(source_qs, {"tenant": token})
@@ -3961,7 +3939,12 @@ def test_routing_intent_pins_the_alias_resolved_before_a_hint_could_be_mutated()
     set_queryset_hints(candidate, {"tenant": token})
     assert queryset_hints(candidate)["tenant"] is queryset_hints(source_qs)["tenant"]
 
-    sealed = _validate_post_orderset_result(DummyType, intent, candidate, "MyOrderSet.apply_sync")
+    sealed = _validate_post_orderset_result(
+        intent,
+        candidate,
+        "MyOrderSet.apply_sync",
+        model=Category,
+    )
     # Validation asks the router nothing; the pin is the frozen answer.
     assert _NestedAliasRouter.calls == ["read"]
     assert queryset_db(sealed) == "default"

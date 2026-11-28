@@ -980,37 +980,20 @@ def offset_engine_arguments(
     return after, _OFFSET_PAGE_END_CEILING - start
 
 
-def relay_max_results_from_info(info: EitherInfo | None) -> int | None:
-    """Read the configured ``relay_max_results``, or ``None`` when none is reachable.
-
-    THE config dig, for both sides of the cursor-parity invariant's keyset leg.
-    ``schema_config_from_info`` handles the two ``info`` shapes: the resolve-time
-    Strawberry ``Info`` that ``SliceMetadata.from_arguments`` expects, and the
-    plan-time raw graphql-core ``GraphQLResolveInfo`` whose ``.schema`` is a bare
-    ``GraphQLSchema`` with no ``.config`` (the optimizer walker's middleware
-    layer). No caller dereferences ``info.schema.config`` itself.
-
-    Returning ``None`` rather than a default is deliberate: it keeps "no cap
-    configured" distinguishable, so :func:`resolve_relay_max_results` can fall
-    back to ``StrawberryConfig``'s own default and land on a concrete number.
-    """
-    return getattr(schema_config_from_info(info), "relay_max_results", None)
-
-
 def resolve_relay_max_results(info: EitherInfo | None, max_results: int | None) -> int:
     """Resolve the effective ``relay_max_results`` cap for a keyset window.
 
     Precedence mirrors ``SliceMetadata.from_arguments``: an explicit
-    ``max_results`` wins; otherwise :func:`relay_max_results_from_info` reads the
-    schema config, and finally ``StrawberryConfig``'s own ``relay_max_results``
-    default (the cap a config built with no arguments carries) applies. The dig
-    itself is shared with the planner so the plan-time and resolve-time caps
-    cannot read different attribute paths.
+    ``max_results`` wins; otherwise the schema config's ``relay_max_results``
+    (``schema_config_from_info``, either ``info`` shape), and finally
+    ``StrawberryConfig``'s own default (the cap a config built with no
+    arguments carries) applies. The dig itself is shared with the planner so
+    the plan-time and resolve-time caps cannot read different attribute paths.
     """
     if is_supplied(max_results):
         cap = max_results
     else:
-        configured = relay_max_results_from_info(info)
+        configured = getattr(schema_config_from_info(info), "relay_max_results", None)
         cap = configured if is_supplied(configured) else StrawberryConfig.relay_max_results
     # The request policy is a CEILING over whichever cap won above, never a
     # replacement for it: a connection can be narrower than the policy and can

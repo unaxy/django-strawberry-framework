@@ -114,19 +114,6 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.typing import ModelField
 
 
-def _serving_field(
-    monkeypatch: pytest.MonkeyPatch,
-    answer: Callable[[str], object],
-) -> type[Model]:
-    """A real model (``Book``) whose ``_meta.get_field`` answers every segment through ``answer``.
-
-    The answer is planted in the ``Options`` instance dict, so the undo deletes
-    it and the class method shows through again.
-    """
-    monkeypatch.setitem(vars(Book._meta), "get_field", answer)
-    return Book
-
-
 @dataclass(frozen=True)
 class _RelationDouble:
     """A relation field's metadata reads, pinned to one Django version's shape."""
@@ -1154,7 +1141,7 @@ def test_lenient_fallback_all_to_one_relation_terminal_returns_false() -> None:
 
 def test_path_traverses_to_many_is_cached() -> None:
     """Repeated checks reuse the bounded metadata cache."""
-    relations_module._path_traverses_to_many_cache_clear()
+    relations_module._path_traverses_to_many_cached.cache_clear()
     try:
         assert path_traverses_to_many(Branch, "shelves__code") is True
         assert path_traverses_to_many(Branch, "shelves__code") is True
@@ -1162,7 +1149,7 @@ def test_path_traverses_to_many_is_cached() -> None:
         assert info.misses == 1
         assert info.hits == 1
     finally:
-        relations_module._path_traverses_to_many_cache_clear()
+        relations_module._path_traverses_to_many_cached.cache_clear()
 
 
 def test_classify_path_cached_wrapper_shares_bounded_cache() -> None:
@@ -1324,56 +1311,6 @@ def test_is_forward_concrete_relation_reads_cardinality_not_the_column_flag() ->
     assert is_forward_concrete_relation(m2m_on_django_52) is False
     assert is_forward_concrete_relation(m2m_on_django_60) is False
     assert is_forward_concrete_relation(forward_fk) is True
-
-
-def test_path_traverses_to_many_cache_clear_reaches_the_classification_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The probe's cache clear invalidates the classifier cache beneath the answer cache.
-
-    The probe's answer is computed from ``_classify_path_cached``; a clear that
-    emptied only the outer answer cache would serve the stale frozen
-    classification after a metadata change under the same ``(model, path)``
-    key, even though the clear had been called.
-    """
-    _classify_path_cached.cache_clear()
-    relations_module._path_traverses_to_many_cache_clear()
-    try:
-
-        class _MutableOpts:
-            fields = {"flag": SimpleNamespace(name="flag", is_relation=False)}
-
-            def get_field(self, name: str) -> SimpleNamespace:
-                try:
-                    return self.fields[name]
-                except KeyError:
-                    raise FieldDoesNotExist(name) from None
-
-        model = _serving_field(monkeypatch, _MutableOpts().get_field)
-        assert path_traverses_to_many(model, "flag") is False
-
-        _MutableOpts.fields = {
-            "flag": SimpleNamespace(
-                name="flag",
-                is_relation=True,
-                many_to_many=True,
-                one_to_many=False,
-                one_to_one=False,
-                auto_created=False,
-                concrete=True,
-                content_type_field_name=None,
-                object_id_field_name=None,
-                path_infos=(SimpleNamespace(m2m=True, to_opts=SimpleNamespace(model=Genre)),),
-            ),
-        }
-        relations_module._path_traverses_to_many_cache_clear()
-
-        # The clear reaches beneath the answer cache: a classifier cache left
-        # warm would answer the stale frozen classification here.
-        assert path_traverses_to_many(model, "flag") is True
-    finally:
-        _classify_path_cached.cache_clear()
-        relations_module._path_traverses_to_many_cache_clear()
 
 
 @pytest.mark.parametrize(

@@ -589,10 +589,11 @@ and returns it; the factory captures the target's model (`definition.model`) and
 `Meta.orderset_class` (`definition.orderset_class`) off it, and those two values are what the default resolver seeds
 (`django_strawberry_framework/utils/querysets.py::base_queryset`, never the type-keyed
 `initial_queryset`), what both visibility seals and the post-sidecar seal validate against
-(the captured-model seam `django_strawberry_framework/utils/querysets.py::_captured_model`,
-which type-keyed callers omit), what the signature builder publishes, and what every resolver
-dispatch runs through. The validator rejects anything that is not the registry's own
-definition. A
+(the visibility seals through the captured-model seam
+`django_strawberry_framework/utils/querysets.py::_captured_model`, which type-keyed callers
+omit; the post-sidecar seal through its required `model=`), what the signature builder
+publishes, and what every resolver dispatch runs through. The validator rejects anything that
+is not the registry's own definition. A
 second read is where a reassigned definition attribute could move the query to another table,
 make the source seal and the result seal disagree about which table this resolution is over,
 or remove `orderBy` from SDL after validation had proved the target declares one.

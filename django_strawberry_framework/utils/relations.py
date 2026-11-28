@@ -576,7 +576,6 @@ def _classify_path_cached(model: type[models.Model], field_path: str) -> Classif
     generation, and ``filters/base.py::_filterset_resolved_field`` on every request with
     a filter's ``(model, field_name)``, fixed when its FilterSet is defined; caching the
     frozen ``ClassifiedPath`` here avoids re-walking model metadata.
-    ``_path_traverses_to_many_cache_clear`` empties it.
     """
     return classify_path(model, field_path)
 
@@ -721,18 +720,6 @@ def path_traverses_to_many(model: type[models.Model], field_path: str) -> bool:
     subsystems.
     """
     return _path_traverses_to_many_cached(model, field_path)
-
-
-def _path_traverses_to_many_cache_clear() -> None:
-    """Invalidate every cache ``path_traverses_to_many`` reads.
-
-    The probe layers a bounded classifier cache beneath its own answer cache;
-    a clear that emptied only the outer layer would leave a metadata change
-    under a warm ``(model, field_path)`` key answering from the stale frozen
-    classification even after the clear was called.
-    """
-    _classify_path_cached.cache_clear()
-    _path_traverses_to_many_cached.cache_clear()
 
 
 @overload

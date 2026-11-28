@@ -771,6 +771,18 @@ def _consume_window(
     path, so the two dispatch outcomes cannot drift in how they thread the
     pagination arguments.
     """
+    fallback = functools.partial(
+        _consume_fallback,
+        cls,
+        info=info,
+        before=before,
+        after=after,
+        first=first,
+        last=last,
+        max_results=max_results,
+        want_count=want_count,
+        **kwargs,
+    )
     if isinstance(nodes, _WindowedConnectionRows):
         # Derive the window through the SHARED contract the walker planned with
         # (``utils/connections.py::derive_connection_window_bounds`` - or its
@@ -846,33 +858,8 @@ def _consume_window(
         # the asynchronous executor the recovery is its coroutine.
         nodes = nodes.fallback()
         if is_awaitable(nodes):
-            return _resolve_awaited_source(
-                nodes,
-                functools.partial(
-                    _consume_fallback,
-                    cls,
-                    info=info,
-                    before=before,
-                    after=after,
-                    first=first,
-                    last=last,
-                    max_results=max_results,
-                    want_count=want_count,
-                    **kwargs,
-                ),
-            )
-    return _consume_fallback(
-        cls,
-        nodes,
-        info=info,
-        before=before,
-        after=after,
-        first=first,
-        last=last,
-        max_results=max_results,
-        want_count=want_count,
-        **kwargs,
-    )
+            return _resolve_awaited_source(nodes, fallback)
+    return fallback(nodes)
 
 
 def _consume_fallback(
@@ -1907,7 +1894,6 @@ def _pipeline_sync(
     )
     for set_class, step_input in steps:
         qs = apply_sidecar_sync(
-            target_type,
             set_class,
             qs,
             step_input,
@@ -1962,7 +1948,6 @@ async def _pipeline_async(
     )
     for set_class, step_input in steps:
         qs = await apply_sidecar_async(
-            target_type,
             set_class,
             qs,
             step_input,

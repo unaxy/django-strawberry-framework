@@ -98,7 +98,7 @@ from ._narrowing import (
     list_of,
     pk_of,
 )
-from ._queryset_private import queryset_db, queryset_fetch_mode, set_queryset_fetch_mode
+from ._queryset_private import queryset_db, queryset_fetch_mode
 from .typing import object_result
 
 if TYPE_CHECKING:
@@ -884,7 +884,7 @@ def base_visible_queryset(
     located = model._base_manager.using(alias).filter(pk__in=visible_queryset.values("pk"))
     fetch_mode = queryset_fetch_mode(visible_queryset)
     if fetch_mode is not None:
-        set_queryset_fetch_mode(located, fetch_mode)
+        located = located.fetch_mode(fetch_mode)
     return located
 
 

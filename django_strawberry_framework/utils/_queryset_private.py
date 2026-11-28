@@ -122,16 +122,6 @@ def queryset_fetch_mode(queryset: models.QuerySet[models.Model, object]) -> Fetc
     return fetch_mode if is_django_fetch_mode(fetch_mode) else None
 
 
-def set_queryset_fetch_mode(
-    queryset: models.QuerySet[models.Model, object],
-    fetch_mode: FetchMode,
-) -> None:
-    """Set the fetch mode ``queryset``'s rows load their deferred fields and relations under."""
-    # django-stubs omits ``QuerySet._fetch_mode``; the base ``object.__setattr__`` writes
-    # the instance attribute the type checker cannot see, as ``QuerySet.fetch_mode`` does.
-    object.__setattr__(queryset, "_fetch_mode", fetch_mode)
-
-
 def model_row_peers(row: models.Model) -> object | None:
     """Return the peers list ``row``'s queryset iteration shares across its rows, or ``None``.
 

@@ -1355,7 +1355,6 @@ def _execute_queryset_pipeline_sync(
     )
     if args_record.order_by_supplied:
         post_order_qs = apply_sidecar_sync(
-            target_type,
             require_orderset_class(target_type, orderset_class),
             post_vis_qs,
             args_record.order_by,
@@ -1391,7 +1390,6 @@ async def _execute_queryset_pipeline_async(
     post_vis_qs = await apply_type_visibility_async(target_type, source, info, model=model)
     if args_record.order_by_supplied:
         post_order_qs = await apply_sidecar_async(
-            target_type,
             require_orderset_class(target_type, orderset_class),
             post_vis_qs,
             args_record.order_by,

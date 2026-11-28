@@ -126,7 +126,6 @@ from django_strawberry_framework.utils._queryset_private import (
 )
 from django_strawberry_framework.utils.connections import (
     ConnectionWindowBounds,
-    relay_max_results_from_info,
 )
 from django_strawberry_framework.utils.querysets import _COMBINED_WHAT
 from tests._definition import make_definition
@@ -213,14 +212,6 @@ def _sel(
 def _global_id() -> SimpleNamespace:
     """A selection of a Relay type's GlobalID: the field ``relay.Node`` declares as ``_id``."""
     return _sel("id", python_name=_RELAY_ID_PYTHON_NAME)
-
-
-def _as_partial_resolve_info(stand_in: object) -> GraphQLResolveInfo[object]:
-    """Hand a partial info to a planner entry point that takes a graphql-core resolve info."""
-    # basedpyright: an info missing slots every real resolve info carries (an operation, a
-    # schema config) is the input under test: the planner's defensive arms must tolerate it;
-    # the planner entry points type info as graphql-core's GraphQLResolveInfo
-    return stand_in  # pyright: ignore[reportReturnType]
 
 
 def _as_definitionless_django_type(cls: type[object]) -> type[DjangoType]:
@@ -3577,27 +3568,6 @@ def test_window_slice_from_first_after_arguments() -> None:
     # must appear.
     assert "> 2" in sql
     assert "<= 5" in sql
-
-
-def test_relay_max_results_from_optimizer_info_shapes() -> None:
-    """``relay_max_results_from_info`` reads the strawberry-wrapped schema config.
-
-    The walker runs at the optimizer middleware layer where ``info.schema`` is a
-    bare graphql-core ``GraphQLSchema`` with NO ``.config``; the config lives on
-    ``schema._strawberry_schema.config``. The helper prefers that path, falls
-    back to a bare ``schema.config`` (a Strawberry ``Info``, whose ``schema`` is the
-    Strawberry ``Schema``), then ``None``.
-    Without it ``SliceMetadata.from_arguments(max_results=None)`` would
-    dereference ``info.schema.config`` and raise ``AttributeError`` in production.
-    """
-    # Production shape: a bare GraphQLSchema with the Strawberry schema filed on it.
-    assert relay_max_results_from_info(_fake_info(relay_max_results=7)) == 7
-    # Resolve-time shape: ``schema.config`` directly on the Strawberry ``Schema``.
-    resolve_time = make_info(config=StrawberryConfig(relay_max_results=42))
-    assert relay_max_results_from_info(resolve_time) == 42
-    # No config anywhere -> None (engine default applies downstream).
-    configless = _as_partial_resolve_info(SimpleNamespace(schema=SimpleNamespace()))
-    assert relay_max_results_from_info(configless) is None
 
 
 def test_window_slice_from_literal_first_argument() -> None:
