@@ -37,7 +37,6 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from functools import cache
 from itertools import takewhile
-from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
 from django.core.exceptions import FieldError, ValidationError
@@ -77,7 +76,7 @@ from django_filters.filters import (
     QuerySetRequestMixin,
 )
 from django_filters.filters import RangeFilter as DjangoFilterRangeFilter
-from django_filters.filterset import BaseFilterSet, FilterSetOptions
+from django_filters.filterset import BaseFilterSet
 from django_filters.utils import get_field_parts, get_model_field
 from django_filters.widgets import BaseCSVWidget
 from graphql import GraphQLError
@@ -137,6 +136,8 @@ from django_strawberry_framework.utils.errors import (
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.permissions import (
+    _NO_ALIASES,
+    _set_model,
     alias_relation_path,
     set_bound_definition,
 )
@@ -415,10 +416,6 @@ def _relation_view_of(filter_instance: Filter) -> _RelationView | None:
     return optional_instance(getattr(filter_instance, _RELATION_VIEW_ATTR, None), _RelationView)
 
 
-#: No ``FilteredRelation`` alias for a filter's path to start at (``_query_aliases``).
-_NO_ALIASES: Mapping[str, str] = MappingProxyType({})
-
-
 def _query_aliases(queryset: models.QuerySet[models.Model, object]) -> Mapping[str, str]:
     """Return each ``FilteredRelation`` alias ``queryset`` holds, to its ``relation_name``.
 
@@ -457,15 +454,6 @@ class _KeyLeaf:
     # A factory, not a default: Python 3.11's dataclasses refuse any unhashable default,
     # and ``mappingproxy`` is hashable only from 3.12.
     aliases: Mapping[str, str] = dataclass_field(default_factory=lambda: _NO_ALIASES)
-
-
-def _key_leaf_of(filter_instance: Filter) -> _KeyLeaf | None:
-    """Return the ``_KeyLeaf`` a copy marked ``_KEY_LEAF_ATTR`` carries, else ``None``.
-
-    The copy is a relation key's re-bound to the target's key, or a leaf's ending on the
-    target's primary key past a declared hop into a set no type wires.
-    """
-    return optional_instance(getattr(filter_instance, _KEY_LEAF_ATTR, None), _KeyLeaf)
 
 
 def _marked_pk_field_name(filter_instance: Filter) -> str | None:
@@ -678,23 +666,12 @@ def _bound_model_field(filter_instance: Filter, query: Query | None = None) -> M
     return None if resolved is None else resolved.field
 
 
-def _bound_value_field(filter_instance: Filter, query: Query | None = None) -> ModelField | None:
-    """Return the field each value a per-request filter applies is a value of.
-
-    The field of ``_bound_lookup_operand``: ``_filterset_value_field`` over the filterset
-    django-filter's ``BaseFilterSet.__init__`` stamps as ``filter_.parent``, and for a path
-    only the queryset that filterset was handed (or ``query``) resolves, the output of the
-    lookup's left-hand side read over it.
-    """
-    return _bound_lookup_operand(filter_instance, query).field
-
-
 def _reads_integer_transform(filter_instance: Filter, query: Query) -> bool:
     """Whether a per-request filter compares an integer transform output.
 
     A generated ``<column>__year__in``, an ``ArrayField``'s ``len``, or a transform a
     project registers on a column (``Field.register_lookup``) with an ``IntegerField``
-    output: its values are integers no column stores (``_bound_value_field``), held to
+    output: its values are integers no column stores (``_bound_lookup_operand``), held to
     their range where the filter form asks the database
     (``filters/sets.py::_unbindable_value_errors``), never coerced through the column.
     A named ``ExtractYear`` / ``ExtractMonth`` alias starts at the actual ``Transform``
@@ -850,9 +827,9 @@ def _filterset_resolved_field(
     names no field, where django-filter would answer a sibling column sharing the next
     part's name (``payload__flag`` is a key of the ``payload`` JSON column, not the
     ``flag`` column); its value is read off the part's transforms
-    (``_filterset_value_field``).
+    (``_filterset_lookup_operand``).
     """
-    model = _filterset_model(filterset)
+    model = _set_model(filterset)
     if model is None:
         return None
     return _model_resolved_field(model, _filterset_walked_lookup(filterset, filter_instance)[0])
@@ -869,7 +846,7 @@ def _filterset_lookup_source_field(
     is read. This source keeps generated-output policy even when the final operand is a
     Boolean null test or a transform's different output field.
     """
-    model = _filterset_model(filterset)
+    model = _set_model(filterset)
     if model is None:
         return None
     path, lookup_expr = _filterset_walked_lookup(filterset, filter_instance)
@@ -910,22 +887,11 @@ def _model_resolved_field(model: type[models.Model], field_path: str) -> _Resolv
     return _ResolvedField(column, LOOKUP_SEP.join((field_path, *links)))
 
 
-def _filterset_model(filterset: object) -> type[models.Model] | None:
-    """Return ``filterset``'s ``Meta.model``; ``None`` for no filterset or one without a model.
-
-    ``filterset`` is a filter set class or instance, or an undeclared hop's face
-    (``filters/sets.py::_UndeclaredHopSet``), which carries its ``_meta`` on itself.
-    """
-    # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
-    meta = optional_instance(introspection.mro_attr(filterset, "_meta", None), FilterSetOptions)
-    return getattr(meta, "model", None)
-
-
-def _filterset_value_field(
+def _filterset_lookup_operand(
     filterset: type[BaseFilterSet] | BaseFilterSet | None,
     filter_instance: Filter,
-) -> ModelField | None:
-    """Return the field each value ``filter_instance`` compares on ``filterset``'s model is a value of.
+) -> _LookupOperand:
+    """Return the field each value ``filter_instance`` compares is a value of, and its lookup.
 
     The value a lookup compares on its right-hand side belongs to the output of the
     transforms between the column and the lookup, wherever they are spelled: in the
@@ -958,15 +924,6 @@ def _filterset_value_field(
     of its own included (it reads its pair as declared). A ``method=`` filter answers
     its model field: its own method, not a lookup, receives the value, so it is published
     and cleaned by the column.
-    """
-    return _filterset_lookup_operand(filterset, filter_instance).field
-
-
-def _filterset_lookup_operand(
-    filterset: type[BaseFilterSet] | BaseFilterSet | None,
-    filter_instance: Filter,
-) -> _LookupOperand:
-    """Return ``_filterset_value_field``'s field with whether its terminal lookup is a null test.
 
     The lookup is the walk's answer past the transforms (``_lookup_operand``), and the
     filter's own ``lookup_expr`` (``isnull`` by name) wherever the field is not read off
@@ -987,7 +944,7 @@ def _filterset_lookup_operand(
             _filterset_model_field(filterset, filter_instance),
             _names_null_test(lookup_expr),
         )
-    model = _filterset_model(filterset)
+    model = _set_model(filterset)
     if model is None:
         return _LookupOperand(None, _names_null_test(lookup_expr))
     return _model_lookup_operand(model, *_filterset_walked_lookup(filterset, filter_instance))
@@ -1048,7 +1005,7 @@ def _filterset_lookup_lhs_path(
     ``pk`` that is a relation, which Django registers no ``range`` lookup on;
     ``RangeFilter.filter`` walks the column the key stores instead).
     """
-    model = _filterset_model(filterset)
+    model = _set_model(filterset)
     if model is None:
         return None
     return _query_lookup_lhs_path(Query(model), field_name, lookup_expr)
@@ -1099,7 +1056,7 @@ def _column_form_field(
     """Return the form field that cleans one value of a bound filter's column for a comparison.
 
     The column is the field each value the filter applies is a value of
-    (``_bound_value_field``): the column itself, or the output of the transforms between
+    (``_bound_lookup_operand``): the column itself, or the output of the transforms between
     it and the lookup (``year``'s ``IntegerField``, ``date``'s ``DateField``, an
     ``ArrayField`` index's ``base_field``), so a value is cleaned as the type it is
     published as. For a path only the queryset the parent was handed resolves (a queryset
@@ -1132,7 +1089,7 @@ def _column_form_field(
     "Select a valid choice" where one the target's ``get_queryset`` hides answers rows, an
     existence oracle the package's own relation keys refuse (``_RelationIdentityListField``).
     A ``lookup_expr`` continuing the path across a relation is cleaned as the column the
-    walk reaches (``_bound_value_field``, over ``_filterset_walked_lookup``), as
+    walk reaches (``_bound_lookup_operand``, over ``_filterset_walked_lookup``), as
     ``field_name="<relation>__<column>"`` cleans it.
     ``None`` for a relation no one column holds a value of: one compared on more than one
     column or on none, one whose ``lookup_expr`` Django does not apply to the relation
@@ -1152,7 +1109,7 @@ def _column_form_field(
     parent = read_attr(filter_instance, "parent", None)
     if not isinstance(parent, BaseFilterSet):
         return None
-    model_field = _bound_value_field(filter_instance, query)
+    model_field = _bound_lookup_operand(filter_instance, query).field
     if model_field is None:
         return None
     if element:
@@ -1187,7 +1144,10 @@ def comparison_form_field(
         )
     if filter_class is None:
         return None
-    return _built_filter(filter_class, field_name, params).field
+    return require_instance(
+        object_result(filter_class, field_name=field_name, **params),
+        Filter,
+    ).field
 
 
 def defers_choices(filter_instance: Filter) -> bool:
@@ -1319,21 +1279,6 @@ def copied_declared_filter(
         ) from exc
 
 
-def _built_filter(
-    filter_class: Callable[..., Filter],
-    field_name: str | None,
-    params: Mapping[str, object],
-) -> Filter:
-    """Build ``filter_class`` on ``field_name`` with django-filter's own ``params`` for it.
-
-    ``params`` are the constructor options ``filter_for_lookup`` pairs with the class
-    (``choices`` for a choice column, ``queryset`` for a relation), forwarded as
-    ``filter_for_field`` forwards them; their values are typed by the class they belong
-    to, which only the call can check.
-    """
-    return filter_class(field_name=field_name, **params)
-
-
 class _ColumnCleanedFilter(TypedFilter):
     """A typed filter whose form field cleans its values as the column's ``gte`` cleans one.
 
@@ -1437,7 +1382,7 @@ class _ElementField(Field):
     value, since Django hands it to that column's ``get_prep_value``: a numeric leaf refuses a
     list with its ``invalid`` error and a text leaf reads it as text (``CharField.to_python``).
     The value is read on the parent's model, or, for a path its model names no field for,
-    over the queryset the parent was handed (``_bound_value_field``: a queryset annotation
+    over the queryset the parent was handed (``_bound_lookup_operand``: a queryset annotation
     or alias, a ``FilteredRelation`` alias and the columns past it, each typed ``String``
     on the wire, since no queryset exists when the schema is built); a path only the queryset
     the package ``FilterSet``'s own ``filter_queryset`` passes on resolves gets its
@@ -2056,7 +2001,7 @@ def _integer_compared_column(
     """Return the integer column whose ``int()`` each number a bound filter compares runs, else ``None``.
 
     The column a value is cleaned as (``_column_form_field``): the field each value is a
-    value of (``_bound_value_field``: the column, or an integer transform's output such as
+    value of (``_bound_lookup_operand``: the column, or an integer transform's output such as
     ``year``'s or ``len``'s), a relation's the target column it compares on
     (``_compared_value_column``), an ``ArrayField``'s its innermost element column
     (``utils/_array_field.py::array_leaf_field``), where the lookup the filter applies is
@@ -2383,9 +2328,9 @@ class _GlobalIDTarget:
     when it carries the primary key. ``foreign_rows`` is whether the rows the filter
     runs over answer for a type other than ``definition`` (an undeclared hop's face
     re-entering the table of the type the walking set is bound to, or a copy carrying its
-    leaf as declared, ``_key_leaf_of``, over a face or set whose rows another type scopes,
-    ``_rows_definition``), so, as across a relation, an id slot only ``definition``'s own
-    ``get_queryset`` annotates is not on them.
+    leaf as declared, a ``_KeyLeaf`` under ``_KEY_LEAF_ATTR``, over a face or set whose
+    rows another type scopes, ``_rows_definition``), so, as across a relation, an id slot
+    only ``definition``'s own ``get_queryset`` annotates is not on them.
     """
 
     definition: DjangoTypeDefinition
@@ -2456,7 +2401,8 @@ def _globalid_target(
     hop's face into one, walk from that model (``_resolve_globalid_target``'s
     ``start_model``). A relation key's copy re-bound to the target's key over the
     target rows, and a copy of a leaf another set declares ending on the target's
-    primary key past a declared hop into a set no type wires (``_key_leaf_of``, both),
+    primary key past a declared hop into a set no type wires (a ``_KeyLeaf`` under
+    ``_KEY_LEAF_ATTR``, both),
     resolves the definition and id slot its leaf as declared resolves, with an empty
     row path (the copy compares those rows' own columns), whichever type the face or
     set it is bound to answers for, so every decode of one relation names one type; its
@@ -2493,7 +2439,7 @@ def _globalid_target(
     acceptance check in ``_decode_and_validate_global_id`` consumes a single
     definition (spec-031 Decision 13).
     """
-    key_leaf = _key_leaf_of(filter_instance)
+    key_leaf = optional_instance(getattr(filter_instance, _KEY_LEAF_ATTR, None), _KeyLeaf)
     if key_leaf is not None:
         declared = _globalid_target(key_leaf.leaf, stable=stable, aliases=key_leaf.aliases)
         if declared is None:
@@ -2517,7 +2463,7 @@ def _globalid_target(
         # A face's ids name the type registered for its model, as the unwalked relation's
         # leaf names them (``related_target_for``), whichever type answers for its rows.
         owner = registry.get_definition(
-            registry.get(require(_filterset_model(parent), is_model_class)),
+            registry.get(require(_set_model(parent), is_model_class)),
         )
         foreign_rows = owner is not _rows_definition(parent)
     else:
@@ -2531,7 +2477,7 @@ def _globalid_target(
         # their relation's model, so they validate from that primary once the registry is
         # stable; an unbound set's own key stays the upstream scalar shape, never a
         # GlobalID of its model's primary.
-        model = _filterset_model(parent)
+        model = _set_model(parent)
         if not (stable or registry.is_finalized()) or not is_model_class(model):
             return None
         start_model = model
@@ -2573,7 +2519,7 @@ def _rows_definition(parent: object) -> DjangoTypeDefinition | None:
     bound = set_bound_definition(type(parent))
     if bound is not None:
         return bound
-    return registry.get_definition(registry.get(require(_filterset_model(parent), is_model_class)))
+    return registry.get_definition(registry.get(require(_set_model(parent), is_model_class)))
 
 
 def _compares_target_annotation(
@@ -3458,7 +3404,7 @@ def model_choice_model(
     if queryset is not None and not callable(queryset):
         model = read_attr(queryset, "model", None)
         return model if is_model_class(model) else None
-    model = _filterset_model(filterset)
+    model = _set_model(filterset)
     if model is None:
         return None
     walked = _filterset_walked_lookup(filterset, filter_instance)[0]
@@ -3568,13 +3514,13 @@ def _coerce_relation_identity(filter_instance: Filter, value: object, alias: str
     still matches a row that holds it. A relation linked by more than one column, or by
     none (``_compared_columns``), has no single column one value can name, so every value
     identifies no row. The relation is the field each value is compared as
-    (``_bound_value_field``), the one ``filters/inputs.py::_relation_identity_annotation``
+    (``_bound_lookup_operand``), the one ``filters/inputs.py::_relation_identity_annotation``
     types the input from: the path's own relation, or the relation a transform between
     the column and the lookup outputs, whose key the value names rather than the
     column's. A filter whose path names no such field (no model to walk, or nothing on
     it) has no column and passes the value through unchanged.
     """
-    field = _bound_value_field(filter_instance)
+    field = _bound_lookup_operand(filter_instance).field
     if field is None:
         return value
     columns = _compared_columns(filter_instance, field)
@@ -3900,7 +3846,7 @@ def refuse_unresolvable_lookup(
     (``types/finalizer.py::_bind_filterset_owner``), and applied unbound it refuses a leaf
     naming the missing ``Meta.model`` (``filters/sets.py::FilterSet._leaf_form_entries``).
     """
-    model = _filterset_model(filterset_cls)
+    model = _set_model(filterset_cls)
     if model is None:
         return
     # django-filter formats the predicate's argument (``Filter.filter``), so a lazy
@@ -4052,7 +3998,7 @@ def _filterset_walked_lookup(
     """
     field_name = _declared_field_name(filter_instance)
     lookup_expr = introspection.text(filter_instance.lookup_expr)
-    model = _filterset_model(filterset)
+    model = _set_model(filterset)
     if model is None:
         return field_name, lookup_expr
     walked = _model_walked_lookup(model, field_name, lookup_expr)
@@ -4401,7 +4347,7 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
         queryset is preserved verbatim.
         """
         if self.queryset is None:
-            model = _filterset_model(self.filterset)
+            model = _set_model(self.filterset)
             if model is not None:
                 return base_queryset(require(model, is_model_class))
         return super().get_queryset(request)

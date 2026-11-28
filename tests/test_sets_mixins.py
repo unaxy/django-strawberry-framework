@@ -54,7 +54,7 @@ from django_strawberry_framework.sets_mixins import (
     SetLifecycleAttrs,
     collect_related_declarations,
     expanded_once,
-    require_re_readable_field_declaration,
+    require_field_names,
     should_cache_expansion,
 )
 from django_strawberry_framework.utils._narrowing import read_attr
@@ -977,7 +977,7 @@ def test_re_readable_gate_message_names_the_receipt_and_the_contract() -> None:
         pass
 
     with pytest.raises(ConfigurationError) as excinfo:
-        require_re_readable_field_declaration(
+        require_field_names(
             _Probe,
             (name for name in ["code"]),
             subject="OrderSet",
@@ -1323,7 +1323,7 @@ def test_re_readable_gate_message_is_pinned() -> None:
 
     one_shot = iter(["code"])
     with pytest.raises(ConfigurationError) as excinfo:
-        require_re_readable_field_declaration(
+        require_field_names(
             _Probe,
             one_shot,
             subject="OrderSet",

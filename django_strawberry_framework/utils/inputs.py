@@ -821,7 +821,7 @@ def is_re_readable_field_declaration(value: object) -> TypeGuard[Collection[obje
     instance-level ``__class__`` is never consulted (a value whose ``__class__``
     read raises is judged by what it really is, never by the raise).
     ``plain_set_meta_fields`` composes it to pick the declarations it copies
-    member by member, and ``sets_mixins.py::require_re_readable_field_declaration``
+    member by member, and ``sets_mixins.py::require_field_names``
     to refuse the rest, so both read one shape the same way.
     """
     return is_real_collection(value) and not is_text_atom(value)

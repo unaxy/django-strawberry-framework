@@ -16465,7 +16465,7 @@ def test_nested_or_related_branch_constrains_parent_live() -> None:
     ``or: [{ shelves: {...} }]`` would silently widen to the whole parent set.
     Here only ``alpha`` owns a shelf matching ``code: "match"``; ``beta`` must
     NOT leak through, driving the real ``allLibraryBranches`` filter pipeline
-    (``apply_sync`` -> ``_evaluate_logic_tree`` -> ``_q_for_branch`` ->
+    (``apply_sync`` -> ``filter_queryset`` -> ``_q_for_branch`` ->
     ``_apply_related_constraints``) end to end over HTTP.
     """
     _seed_branch_with_shelf_codes("alpha", ("match",))
@@ -16725,7 +16725,7 @@ def test_scalar_or_branch_unions_matching_rows_live() -> None:
     EITHER arm appears and a branch matching neither is absent. The existing
     live suite covers ``and`` and ``not`` on branches but not a plain scalar
     ``or`` union, and this drives the real ``BranchFilter`` ->
-    ``_evaluate_logic_tree`` union path over HTTP.
+    ``filter_queryset`` union path over HTTP.
     """
     models.Branch.objects.create(name="x-row", city="Boston")
     models.Branch.objects.create(name="other-name", city="y-row")

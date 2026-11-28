@@ -231,20 +231,13 @@ class _BoundFilterForm(forms.Form):
     def _widget_data_value(self, widget: Widget, html_name: str) -> object:
         # The actual generated/consumer Form class precedes this mixin, so its
         # cooperative override reaches us AFTER its current-data edits.
-        binding = next(
-            (
-                value
-                for name, value in self._filter_bindings.values.items()
-                if name in self.fields and self.add_prefix(name) == html_name
-            ),
-            None,
-        )
         current: Mapping[str, object] = self.data
         reads: Mapping[str, object] = current
         field_name = next(
             (name for name in self.fields if self.add_prefix(name) == html_name),
             None,
         )
+        binding = None if field_name is None else self._filter_bindings.values.get(field_name)
         disabled = field_name is not None and self.fields[field_name].disabled
         if binding is not None and not disabled:
             actual_keys = widget_keys(widget, html_name)

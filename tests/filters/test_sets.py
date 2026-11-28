@@ -6926,7 +6926,7 @@ def test_run_permission_checks_dedups_child_gate_across_sibling_branches() -> No
 
 
 @pytest.mark.django_db
-def test_evaluate_logic_tree_preserves_request_context() -> None:
+def test_logic_arms_preserve_request_context() -> None:
     captured_requests: list[object] = []
 
     class CategoryFilter(FilterSet):
@@ -9139,11 +9139,11 @@ def test_check_permissions_walks_explicit_requested_fields() -> None:
     assert fired == ["name"]
 
 
-def test_evaluate_logic_tree_caps_recursion_depth() -> None:
-    """``_evaluate_logic_tree`` raises past ``_MAX_LOGIC_DEPTH``.
+def test_filter_queryset_caps_logic_recursion_depth() -> None:
+    """``filter_queryset`` raises past ``_MAX_LOGIC_DEPTH`` before composing an arm.
 
     The depth guard is independent of the ``_run_permission_checks``
-    cap; this pins the ``_evaluate_logic_tree`` / ``_q_for_branch`` arm.
+    cap; this pins the ``filter_queryset`` / ``_q_for_branch`` arm.
     """
 
     class CategoryFilter(FilterSet):
@@ -9151,13 +9151,10 @@ def test_evaluate_logic_tree_caps_recursion_depth() -> None:
             model = Category
             fields = {"name": ["exact"]}
 
+    filter_set = CategoryFilter(data={"and": [{"name": "x"}]}, queryset=Category.objects.all())
+    filter_set._logic_depth = CategoryFilter._MAX_LOGIC_DEPTH + 1
     with pytest.raises(ConfigurationError) as excinfo:
-        CategoryFilter._evaluate_logic_tree(
-            Category.objects.all(),
-            {"and": [{"name": "x"}]},
-            _depth=CategoryFilter._MAX_LOGIC_DEPTH + 1,
-            _flat_hop_visibility={},
-        )
+        _ = filter_set.qs
     assert "_MAX_LOGIC_DEPTH" in str(excinfo.value)
 
 
@@ -9179,20 +9176,17 @@ def test_evaluate_logic_tree_caps_a_non_int_knob_at_the_neutral_default() -> Non
             model = Category
             fields = {"name": ["exact"]}
 
+    filter_set = CategoryFilter(data={"and": [{"name": "x"}]}, queryset=Category.objects.all())
+    filter_set._logic_depth = FilterSet._MAX_LOGIC_DEPTH + 1
     with pytest.raises(
         ConfigurationError,
         match=r"nesting exceeded the maximum traversal depth \(8\)\. ",
     ):
-        CategoryFilter._evaluate_logic_tree(
-            Category.objects.all(),
-            {"and": [{"name": "x"}]},
-            _depth=FilterSet._MAX_LOGIC_DEPTH + 1,
-            _flat_hop_visibility={},
-        )
+        _ = filter_set.qs
 
 
-def test_evaluate_logic_tree_treats_inactive_arms_as_identity() -> None:
-    """Inactive AND arms return the identity query."""
+def test_filter_queryset_treats_inactive_arms_as_identity() -> None:
+    """Inactive AND arms leave the queryset as it was handed in."""
 
     class CategoryFilter(FilterSet):
         class Meta:
@@ -9200,10 +9194,9 @@ def test_evaluate_logic_tree_treats_inactive_arms_as_identity() -> None:
             fields = {"name": ["exact"]}
 
     queryset = Category.objects.all()
-    assert (
-        CategoryFilter._evaluate_logic_tree(queryset, {"and": [None]}, _flat_hop_visibility={})
-        == Q()
-    )
+    filter_set = CategoryFilter(data={"and": [None]}, queryset=queryset)
+    assert not filter_set.errors
+    assert filter_set.filter_queryset(queryset) is queryset
 
 
 def test_collect_nested_visibility_querysets_async_caps_recursion_depth() -> None:
@@ -9211,7 +9204,7 @@ def test_collect_nested_visibility_querysets_async_caps_recursion_depth() -> Non
 
     Third site of the shared ``_assert_logic_depth`` binding -- the async
     pre-walker enforces the same depth cap as ``_run_permission_checks`` and
-    ``_evaluate_logic_tree``, surfacing the identical typed error rather than
+    ``filter_queryset``, surfacing the identical typed error rather than
     silently bottoming out into a Python ``RecursionError``.
     """
 
@@ -10374,11 +10367,10 @@ def test_lookups_for_field_returns_concrete_lookups_and_excludes_transforms(kind
 
 
 def test_collect_nested_visibility_querysets_async_returns_empty_for_none_input() -> None:
-    """``_collect_nested_visibility_querysets_async(None, ...)`` short-circuits to ``{}``.
+    """``_collect_nested_visibility_querysets_async(None, ...)`` returns ``{}``.
 
-    The ``input_value is None or input_value is UNSET`` guard returns the
-    empty map before any branch walk -- the apply_async pre-pass over a
-    branch with no nested logical input does no work.
+    An inactive input has no logical branches, so the apply_async pre-pass over a
+    branch with no nested logical input derives nothing.
     """
 
     class BranchFilter(FilterSet):
@@ -10514,13 +10506,10 @@ def test_q_for_branch_falls_back_to_sync_derive_on_stash_miss() -> None:
             fields = {"name": ["exact"]}
 
     child_input = {"shelves": {"code": "A"}}
-    q = BranchFilter._q_for_branch(
-        library_models.Branch.objects.all(),
-        child_input,
-        info=_make_info(),
-        _nested_qs_by_branch_id={},  # present but empty -> stash miss -> sync fallback
-        _flat_hop_visibility={},
-    )
+    filter_set = BranchFilter(data={}, queryset=library_models.Branch.objects.all())
+    filter_set._apply_info = _make_info()
+    filter_set._nested_qs_by_branch_id = {}  # present but empty -> stash miss -> sync fallback
+    q = filter_set._q_for_branch(library_models.Branch.objects.all(), child_input, "and.0", {})
     assert isinstance(q, Q)
 
 
@@ -11155,15 +11144,13 @@ def test_generation_provenance_framework_default_for_generated_leaf() -> None:
 
     leaf = BookFilter.get_filters()["title__icontains"]
     record = filter_generation_provenance(leaf)
-    assert record == FilterGenerationProvenance(
-        origin="framework_default",
-        framework_added_distinct=False,
-    )
+    assert record == FilterGenerationProvenance(origin="framework_default")
+    assert leaf.distinct is False
     assert _expansion_record(leaf) is None
 
 
 def test_generation_provenance_package_replacement_for_own_pk_global_id() -> None:
-    """The own-PK GlobalID branch stamps ``package_replacement`` on the new instance."""
+    """The own-PK GlobalID branch stamps ``package_replacement`` on the returned instance."""
 
     class CategoryType(DjangoType):
         class Meta:
@@ -11185,11 +11172,11 @@ def test_generation_provenance_package_replacement_for_own_pk_global_id() -> Non
     record = filter_generation_provenance(resolved)
     assert record is not None
     assert record.origin == "package_replacement"
-    assert record.framework_added_distinct is False
+    assert resolved.distinct is False
 
 
 def test_generation_provenance_package_replacement_for_relay_relation() -> None:
-    """The Relay-relation branch stamps ``package_replacement`` on the new instance."""
+    """The Relay-relation branch stamps ``package_replacement`` on the returned instance."""
 
     class GenreType(DjangoType):
         class Meta:
@@ -11210,7 +11197,7 @@ def test_generation_provenance_package_replacement_for_relay_relation() -> None:
     assert record is not None
     assert record.origin == "package_replacement"
     # ``genres`` is an M2M (a many-side hop), so the framework adds distinct.
-    assert record.framework_added_distinct is True
+    assert resolved.distinct is True
 
 
 def test_generation_provenance_declared_for_consumer_declared_filter() -> None:
@@ -11263,8 +11250,8 @@ def test_generation_provenance_override_generated_for_meta_filter_overrides() ->
     assert record.origin == "override_generated"
 
 
-def test_generation_provenance_framework_added_distinct_for_to_many_path() -> None:
-    """A generated to-many path leaf records ``framework_added_distinct=True``."""
+def test_generation_provenance_framework_default_distinct_for_to_many_path() -> None:
+    """A generated to-many path leaf is ``framework_default`` and ``distinct``."""
 
     class BookFilter(FilterSet):
         class Meta:
@@ -11275,12 +11262,11 @@ def test_generation_provenance_framework_added_distinct_for_to_many_path() -> No
     record = filter_generation_provenance(leaf)
     assert record is not None
     assert record.origin == "framework_default"
-    assert record.framework_added_distinct is True
     assert leaf.distinct is True
 
 
-def test_generation_provenance_framework_added_distinct_false_for_to_one_path() -> None:
-    """A generated to-one path leaf records ``framework_added_distinct=False``."""
+def test_generation_provenance_framework_default_not_distinct_for_to_one_path() -> None:
+    """A generated to-one path leaf is ``framework_default`` and not ``distinct``."""
 
     class BookFilter(FilterSet):
         class Meta:
@@ -11290,7 +11276,7 @@ def test_generation_provenance_framework_added_distinct_false_for_to_one_path() 
     leaf = BookFilter.get_filters()["shelf__code__icontains"]
     record = filter_generation_provenance(leaf)
     assert record is not None
-    assert record.framework_added_distinct is False
+    assert record.origin == "framework_default"
     assert leaf.distinct is False
 
 
@@ -11403,8 +11389,9 @@ def test_generation_provenance_survives_deepcopy_and_per_request_instance() -> N
     base_leaf = BookFilter.get_filters()["genres__name__icontains"]
     clone = copy.deepcopy(base_leaf)
     clone_record = filter_generation_provenance(clone)
+    assert clone_record == filter_generation_provenance(base_leaf)
     assert clone_record is not None
-    assert clone_record.framework_added_distinct is True
+    assert clone.distinct is True
 
     instance = BookFilter(
         data={},
@@ -11414,7 +11401,7 @@ def test_generation_provenance_survives_deepcopy_and_per_request_instance() -> N
     instance_record = filter_generation_provenance(instance.filters["genres__name__icontains"])
     assert instance_record is not None
     assert instance_record.origin == "framework_default"
-    assert instance_record.framework_added_distinct is True
+    assert instance.filters["genres__name__icontains"].distinct is True
 
 
 def test_generation_provenance_declared_never_restamped_by_later_machinery() -> None:
@@ -11923,7 +11910,7 @@ def test_filter_override_distinct_is_preserved_on_to_many_path() -> None:
 
     The override owns the selection, so the to-many path grants no framework
     ``distinct``: the ``True`` on the leaf can only have come from the consumer's
-    ``extra`` provider, and the provenance record records no framework stamp.
+    ``extra`` provider, and the provenance record is ``override_generated``.
     """
 
     def _override_extra(_field: object) -> dict[str, object]:
@@ -11942,7 +11929,6 @@ def test_filter_override_distinct_is_preserved_on_to_many_path() -> None:
     provenance = filter_generation_provenance(leaf)
     assert provenance is not None
     assert provenance.origin == "override_generated"
-    assert provenance.framework_added_distinct is False
 
 
 def test_filter_for_lookup_override_own_relay_pk_is_preserved() -> None:
@@ -11976,7 +11962,6 @@ def test_filter_for_lookup_override_own_relay_pk_is_preserved() -> None:
     provenance = filter_generation_provenance(leaf)
     assert provenance is not None
     assert provenance.origin == "override_generated"
-    assert provenance.framework_added_distinct is False
 
 
 def test_filter_override_extra_only_does_not_add_distinct_on_to_many_path() -> None:
@@ -11998,7 +11983,6 @@ def test_filter_override_extra_only_does_not_add_distinct_on_to_many_path() -> N
     provenance = filter_generation_provenance(leaf)
     assert provenance is not None
     assert provenance.origin == "override_generated"
-    assert provenance.framework_added_distinct is False
     snapshot = OverrideFilter._expansion_snapshot()
     assert snapshot is not None
     assert "loans__note__icontains" not in snapshot.candidates

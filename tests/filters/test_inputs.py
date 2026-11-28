@@ -4562,7 +4562,7 @@ def test_a_list_filter_through_an_index_or_slice_is_typed_from_the_element_colum
     """A declared path through an array's index or slice is typed from what it reaches.
 
     The path names no model field, so each member is typed from the transform's output
-    (``filters/base.py::_filterset_value_field``), never the declared form field's
+    (``filters/base.py::_filterset_lookup_operand``), never the declared form field's
     ``String``: an index of ``ArrayField(IntegerField())`` is one integer, a slice an
     array of them, and an index of an array of arrays an array of integers.
     """

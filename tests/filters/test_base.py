@@ -90,8 +90,8 @@ from django_strawberry_framework.filters.base import (
     _decode_and_validate_global_id,
     _ElementField,
     _filter_schema,
+    _filterset_lookup_operand,
     _filterset_model_field,
-    _filterset_value_field,
     _globalid_target,
     _held_column_value,
     _integer_compared_column,
@@ -1806,7 +1806,7 @@ def _declared_leaf_value_field(field_name: str, lookup_expr: str = "in") -> Mode
         scalar_models.ScalarSpecimen,
         leaf=ListFilter(field_name=field_name, lookup_expr=lookup_expr),
     )
-    return _filterset_value_field(filterset, filterset.base_filters["leaf"])
+    return _filterset_lookup_operand(filterset, filterset.base_filters["leaf"]).field
 
 
 @pytest.mark.parametrize(
@@ -1820,7 +1820,7 @@ def _declared_leaf_value_field(field_name: str, lookup_expr: str = "in") -> Mode
         pytest.param("occurred_at__date", "gte", db_models.DateField, id="path-date"),
     ],
 )
-def test_filterset_value_field_reads_the_transforms_ahead_of_the_lookup(
+def test_filterset_lookup_operand_field_reads_the_transforms_ahead_of_the_lookup(
     field_name: str,
     lookup_expr: str,
     output: type[db_models.Field[object, object]],
@@ -1842,7 +1842,7 @@ def test_filterset_value_field_reads_the_transforms_ahead_of_the_lookup(
         "gte",
     ],
 )
-def test_filterset_value_field_answers_the_column_for_a_lookup_applied_to_it(
+def test_filterset_lookup_operand_field_answers_the_column_for_a_lookup_applied_to_it(
     lookup_expr: str,
 ) -> None:
     """A lookup applied to the column itself, a text pattern included, answers the column."""
@@ -1860,7 +1860,7 @@ def test_filterset_value_field_answers_the_column_for_a_lookup_applied_to_it(
         pytest.param("tag__year", id="relation-end"),
     ],
 )
-def test_filterset_value_field_is_none_where_django_reads_no_transform(field_name: str) -> None:
+def test_filterset_lookup_operand_field_is_none_where_django_reads_none(field_name: str) -> None:
     """A path Django refuses, or whose remainder is no transform of its column, answers ``None``.
 
     A ``FilteredRelation`` alias exists only on the queryset a filter runs on, and a
@@ -1882,9 +1882,11 @@ def test_a_key_path_named_like_a_sibling_column_names_no_field_and_compares_its_
     assert _declared_leaf_value_field("payload__flag", "exact") is payload
 
 
-def test_filterset_value_field_is_none_without_a_filterset() -> None:
+def test_filterset_lookup_operand_field_is_none_without_a_filterset() -> None:
     """No filterset has no model to walk."""
-    assert _filterset_value_field(None, ListFilter(field_name="occurred_on__year")) is None
+    assert (
+        _filterset_lookup_operand(None, ListFilter(field_name="occurred_on__year")).field is None
+    )
 
 
 @isolate_apps("apps.library")

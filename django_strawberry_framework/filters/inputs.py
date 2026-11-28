@@ -105,6 +105,7 @@ from django_strawberry_framework.utils.inputs import (
     make_set_input_namespace,
     optional_field_kwargs,
 )
+from django_strawberry_framework.utils.permissions import _set_model
 from django_strawberry_framework.utils.querysets import (
     joinless_relation_on,
 )
@@ -138,9 +139,7 @@ from .base import (
     _filterset_lookup_lhs_path,
     _filterset_lookup_operand,
     _filterset_lookup_source_field,
-    _filterset_model,
     _filterset_model_field,
-    _filterset_value_field,
     _filterset_walked_lookup,
     _model_identity_column,
     _related_column_path,
@@ -988,7 +987,7 @@ def _form_cleaned_value_field(
     ``Filter`` or ``TypedFilter``) keeps the column's ``JSON``. A kind the column cannot
     encode is refused when the schema is built (``_refuse_kind_json_cannot_encode``).
 
-    A transform between the column and the lookup (``filters/base.py::_filterset_value_field``)
+    A transform between the column and the lookup (``filters/base.py::_filterset_lookup_operand``)
     types the leaf by its output, because django-filter builds a generated leaf's filter
     from that output (``filters/sets.py::FilterSet.filter_for_field``), so its form cleans that
     kind. A declared filter's form comes from its own class instead: a
@@ -1271,8 +1270,8 @@ def _refuse_form_serving_no_value(
     declaration = _declaration_of(filter_instance, filterset_cls)
     declared = declaration.declared
     owner = declaration.filterset
-    column = _filterset_value_field(owner, declared)
     operand = _filterset_lookup_operand(owner, declared)
+    column = operand.field
     if (
         column is None
         or isinstance(declared, _ColumnCleanedFilter)
@@ -1286,7 +1285,7 @@ def _refuse_form_serving_no_value(
         return
     form_field = _declared_form_field(declared)
     form_fields = _value_fields_of(form_field)
-    model = _filterset_model(owner)
+    model = _set_model(owner)
     if (
         model is None
         or not form_fields
@@ -1692,7 +1691,7 @@ def _array_column_refusal(
     by the column's elements instead (``_array_element_column``). A transform spelled in the
     ``field_name`` (``<column>__len``, an index ``<column>__0``, a slice ``<column>__0_2``) or
     a ``len`` in the ``lookup_expr`` never reaches it: its leaf is typed from the transform's output
-    (``filters/base.py::_filterset_value_field``); an index or slice opening the
+    (``filters/base.py::_filterset_lookup_operand``); an index or slice opening the
     ``lookup_expr`` names no input field (``_unnameable_lookup_refusal``). ``lookup``
     names what the filter applies when its ``lookup_expr`` does not (a ``RangeFilter``'s
     ``range``).
@@ -1742,7 +1741,7 @@ def _array_element_column(
     ``_array_column_refusal`` (``lookup`` names what a range applies). A ``method=`` filter, a
     class-level ``filter`` override or a consumer ``get_filter_predicate`` applies no lookup of
     the filter's: its own code receives the value, which is typed by its column as every such
-    filter's is (``filters/base.py::_filterset_value_field``), so one value, or each member of
+    filter's is (``filters/base.py::_filterset_lookup_operand``), so one value, or each member of
     a list, is one of the column's elements, whatever its ``lookup_expr``.
 
     Each such value is a value of ``base_field`` (``utils/_array_field.py::array_element_field``),
@@ -1778,7 +1777,7 @@ def _element_annotation(
     ``lookup_expr`` (a generated ``year`` / ``year__in`` / ``date`` leaf) or the
     ``field_name`` (``occurred_at__year``, an ``ArrayField`` index ``counts__0``), the
     field is the last transform's output the leaf builder passes
-    (``filters/base.py::_filterset_value_field``). The ``django-filter`` form
+    (``filters/base.py::_filterset_lookup_operand``). The ``django-filter`` form
     field types the value only where the caller passes no field: a custom
     ``method=`` filter with no backing model field, a path that resolves to no
     column of the FilterSet model (a ``FilteredRelation`` alias only the filter's
@@ -1919,7 +1918,7 @@ def _json_publication(filter_instance: Filter, filterset_cls: type[FilterSet]) -
     (``filters/sets.py::FilterSet._published_filter``).
     """
     filter_instance = filterset_cls._published_filter(filter_instance)
-    model_field = _filterset_value_field(filterset_cls, filter_instance)
+    model_field = _filterset_lookup_operand(filterset_cls, filter_instance).field
 
     def _no_json(_filter: Filter) -> object:
         return None
@@ -2041,7 +2040,7 @@ def _refuse_method_without_form_field(
     """Refuse a ``method=`` filter with no model field whose class builds no form field unbound.
 
     ``model_field`` is the field the caller types the leaf from
-    (``filters/base.py::_filterset_value_field``); over one, the arm types the leaf from that
+    (``filters/base.py::_filterset_lookup_operand``); over one, the arm types the leaf from that
     column (a ``method=`` filter keeps its column), whether or not the form field is built
     unbound: an ``AllValuesMultipleFilter`` reads the per-request ``model`` to build its
     field, so unbound it builds none, and over a column its element is the column's while the
@@ -2531,7 +2530,7 @@ def _build_range_input_class(
     field_name = getattr(filter_instance, "field_name", "field") or "field"
     lookup_expr = filter_instance.lookup_expr
     if read_attr(filter_instance, "method", None) is not None:
-        # A ``method=`` filter's bounds are its column's (``_filterset_value_field``).
+        # A ``method=`` filter's bounds are its column's (``_filterset_lookup_operand``).
         value_path = field_name
     else:
         # Where no query of the model walks the path (no model, an alias or annotation only
@@ -3106,7 +3105,7 @@ def _build_input_fields(
             # transform between column and lookup (``year``'s int, an index's element),
             # a flat copy under its declaration's spelling (``FilterSet._published_filter``).
             published = filterset_cls._published_filter(leaf_filter)
-            model_field = _filterset_value_field(filterset_cls, published)
+            model_field = _filterset_lookup_operand(filterset_cls, published).field
             annotation = convert_filter_to_input_annotation(
                 published,
                 model_field,

@@ -29,15 +29,13 @@ metaclass + expansion lifecycle a third time:
 - ``collect_related_declarations`` -- the metaclass collect-and-bind step.
 - ``expanded_once`` -- the class-level expansion cache + reentry-guard skeleton
   shared by ``FilterSet.get_filters`` / ``OrderSet.get_fields``.
-- ``require_re_readable_field_declaration`` -- the ``Meta.fields`` shape gate
-  both families run before their first consumption (and the filter family's
-  ``Meta.exclude`` gate), since both expansions may re-run and a one-shot
-  declaration is exhausted by the first walk.
-- ``require_field_name`` / ``reject_unknown_exclude_names`` /
-  ``require_sweep_model`` -- the ``Meta.fields`` / ``Meta.exclude`` entry gate,
-  the refusal of an exclude name it cannot remove (a declaration or an unknown
-  name) and the model-less sweep refusal, so both families refuse one
-  declaration error in one wording.
+- ``require_field_names`` -- the ``Meta.fields`` / ``Meta.exclude`` shape and
+  entry gate both families run before their first consumption, since both
+  expansions may re-run and a one-shot declaration is exhausted by the first walk.
+- ``reject_unknown_exclude_names`` / ``require_sweep_model`` -- the refusal of an
+  exclude name it cannot remove (a declaration or an unknown name) and the
+  model-less sweep refusal, so both families refuse one declaration error in one
+  wording.
 - ``SetLifecycleAttrs`` -- the per-family binding-state descriptor naming the
   ``registry.clear()`` reset attrs (owner / expansion cache / reentry guard) in
   one place instead of re-spelled tuples.
@@ -88,7 +86,7 @@ from .utils.strings import pascal_case_or_raise
 _import_object: Callable[[str], object] = import_string
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from .filters.sets import FilterSetMetaclass
     from .orders.sets import OrderSetMetaclass
@@ -660,15 +658,15 @@ RE_READABLE_FIELDS_HELP = (
 )
 
 
-def require_re_readable_field_declaration(
+def require_field_names(
     set_cls: type[object],
     value: object,
     *,
     subject: str,
     accepted: str,
     meta_attr: str = "fields",
-) -> Collection[object]:
-    """Return a family's ``Meta.fields`` / ``Meta.exclude`` collection, or fail closed.
+) -> list[str]:
+    """Return a family's ``Meta.fields`` / ``Meta.exclude`` entries as field names, or fail closed.
 
     Fails closed when the declaration cannot be walked twice.
 
@@ -689,6 +687,15 @@ def require_re_readable_field_declaration(
     but it iterates and answers membership as the text it stands for, so it is
     refused with the same message, naming its proxy class.
 
+    Every entry of a re-readable declaration is then held to the field-name gate.
+    Both families read a declaration through
+    ``utils/inputs.py::plain_set_meta_fields`` first, so a ``str`` subclass (a
+    ``StrEnum`` member) arrives as the plain text it spells and the exact-``str``
+    test sees only entries that are not strings at all: a ``None``, bytes, a
+    number or a nested list would otherwise match no field in an exclude (a
+    silent no-op) and reach a raw ``AttributeError`` / ``TypeError`` in a
+    field list.
+
     ``subject`` is the family label, ``accepted`` the family's own list of
     legal spellings for the declaration (the filter family's ``Meta.fields``
     also accepts a lookup-bag dict and both families' ``Meta.fields`` accept
@@ -696,45 +703,25 @@ def require_re_readable_field_declaration(
     the contract sentence itself is shared.
     """
     if is_re_readable_field_declaration(value):
-        return value
+        names: list[str] = []
+        for name in value:
+            if type(name) is not str:
+                raise ConfigurationError(
+                    f"{subject} {set_cls.__qualname__}.Meta.{meta_attr} entries must be "
+                    f"field-name strings; got {introspection.kind(name)} ({name!r}).",
+                )
+            names.append(name)
+        return names
     raise ConfigurationError(
         f"{subject} {set_cls.__qualname__}.Meta.{meta_attr} must be {accepted}; got "
         f"{introspection.kind(value)} ({value!r}). {RE_READABLE_FIELDS_HELP}",
     )
 
 
-def require_field_name(
-    set_cls: type[object],
-    value: object,
-    *,
-    subject: str,
-    meta_attr: str,
-) -> str:
-    """Return one ``Meta.fields`` / ``Meta.exclude`` entry as the field-name string it is.
-
-    The entry gate both set families run over every member of a re-readable
-    declaration (``require_re_readable_field_declaration`` proved the container).
-    Both families read a declaration through
-    ``utils/inputs.py::plain_set_meta_fields`` first, so a ``str`` subclass (a
-    ``StrEnum`` member) arrives as the plain text it spells and the exact-``str``
-    test sees only entries that are not strings at all: a ``None``, bytes, a
-    number or a nested list would otherwise match no field in an exclude (a
-    silent no-op) and reach a raw ``AttributeError`` / ``TypeError`` in a
-    field list. ``subject`` is the family label and ``meta_attr`` the ``Meta``
-    attribute the message names.
-    """
-    if type(value) is str:
-        return value
-    raise ConfigurationError(
-        f"{subject} {set_cls.__qualname__}.Meta.{meta_attr} entries must be field-name "
-        f"strings; got {introspection.kind(value)} ({value!r}).",
-    )
-
-
 def require_lookup_names(set_cls: type[object], field_name: str, lookups: object) -> None:
     """Refuse a lookup-bag ``Meta.fields`` value that is no ``"__all__"`` or lookup-name list.
 
-    The value gate beside ``require_field_name``'s key gate in a FilterSet's dict
+    The value gate beside ``require_field_names``' key gate in a FilterSet's dict
     declaration (``{"name": ["exact", "icontains"]}``). django-filter walks the value
     as the field's lookups, so a bare string is read letter by letter (``"exact"``
     becomes the lookup ``"e"``), ``None`` / a number / bytes or a non-string member
@@ -1137,9 +1124,8 @@ __all__ = (
     "expanded_once",
     "reject_captured_branches",
     "reject_unknown_exclude_names",
-    "require_field_name",
+    "require_field_names",
     "require_lookup_names",
-    "require_re_readable_field_declaration",
     "require_sweep_model",
     "should_cache_expansion",
 )

@@ -54,8 +54,7 @@ from django_strawberry_framework.sets_mixins import (
     expanded_once,
     reject_captured_branches,
     reject_unknown_exclude_names,
-    require_field_name,
-    require_re_readable_field_declaration,
+    require_field_names,
     require_sweep_model,
     should_cache_expansion,
 )
@@ -405,7 +404,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
           ``str`` subclass (a ``StrEnum`` member) is a string: the shared
           reader has already read it as the plain text it spells
           (``utils/inputs.py::plain_set_meta_fields``), so the shared
-          exact-``str`` gate (``sets_mixins.py::require_field_name``) sees only
+          exact-``str`` gate (``sets_mixins.py::require_field_names``) sees only
           the entries that are not strings at all.
         """
         fields: OrderedDict[str, RelatedOrder | None] = OrderedDict()
@@ -424,17 +423,13 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             )
             listed: list[str] = []
         else:
-            names = require_re_readable_field_declaration(
+            listed = require_field_names(
                 cls,
                 meta_fields,
                 subject="OrderSet",
                 accepted="'__all__' or a re-readable collection of field names",
             )
             model = introspection.mro_attr(meta, "model", None)
-            listed = [
-                require_field_name(cls, field_path, subject="OrderSet", meta_attr="fields")
-                for field_path in names
-            ]
         if excluded is not None:
             reject_unknown_exclude_names(
                 cls,
@@ -468,28 +463,25 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         inherits the exclusion. Every name is read as plain ``str`` text
         (``utils/inputs.py::plain_set_meta_fields``), as the filter family
         reads its ``Meta.exclude``. The shape gate is the filter family's
-        (``sets_mixins.py::require_re_readable_field_declaration`` under
-        ``meta_attr="exclude"``): a bare string would exclude by character and
-        a one-shot iterator only on the first of the expansion's re-runs, so
-        both are refused. An entry that is not a field-name string is refused
-        as ``Meta.fields`` entries are (``sets_mixins.py::require_field_name``),
-        instead of silently matching nothing.
+        (``sets_mixins.py::require_field_names`` under ``meta_attr="exclude"``): a bare
+        string would exclude by character and a one-shot iterator only on the first of
+        the expansion's re-runs, so both are refused. An entry that is not a field-name
+        string is refused as ``Meta.fields`` entries are by the same gate, instead of
+        silently matching nothing.
         """
         if meta is None:
             return None
         exclude = plain_set_meta_fields(introspection.mro_attr(meta, "exclude", None))
         if exclude is None:
             return None
-        names = require_re_readable_field_declaration(
-            cls,
-            exclude,
-            subject="OrderSet",
-            accepted="a re-readable collection of field names",
-            meta_attr="exclude",
-        )
         return frozenset(
-            require_field_name(cls, name, subject="OrderSet", meta_attr="exclude")
-            for name in names
+            require_field_names(
+                cls,
+                exclude,
+                subject="OrderSet",
+                accepted="a re-readable collection of field names",
+                meta_attr="exclude",
+            ),
         )
 
     @classmethod

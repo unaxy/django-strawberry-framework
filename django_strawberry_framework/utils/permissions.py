@@ -769,9 +769,9 @@ def descendant_relation_path_of(
     return descendant_relation_path(model, field_name, target)
 
 
-def _set_model(set_cls: type[object]) -> type[models.Model] | None:
-    """Return the ``Meta.model`` a set class carries, ``None`` when it has none."""
-    model: object = getattr(getattr(set_cls, "_meta", None), "model", None)
+def _set_model(holder: object) -> type[models.Model] | None:
+    """Return the ``Meta.model`` a set class, set instance or hop face carries, else ``None``."""
+    model: object = getattr(getattr(holder, "_meta", None), "model", None)
     return model if isinstance(model, type) else None
 
 

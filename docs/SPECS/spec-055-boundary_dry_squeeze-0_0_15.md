@@ -560,7 +560,7 @@ sweeps (and future maintainer-agents) do not re-flag them:
   build/stash seam (documented at `#"build/stash seam is reused only partly here"`).
 - `keyset.py::split_order_ref` vs `plans.py::order_entry_name_and_direction`
   (loud config error vs soft fallback — documented).
-- `filters/sets.py::FilterSet._evaluate_logic_tree`'s three branches (the
+- `filters/sets.py::FilterSet.filter_queryset`'s three logic branches (the
   combinators genuinely differ: `&=`, grouped `|=`, `~`).
 - The `initial_queryset(target_type)` visibility-seed non-candidate
   (defined in `utils/querysets.py`, consumed by `forms/resolvers.py` /

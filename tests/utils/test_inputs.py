@@ -944,7 +944,7 @@ def test_plain_set_meta_fields_never_evaluates_a_lazy_string() -> None:
     """A lazy translation string is a text atom: it comes back as itself, never evaluated.
 
     Its proxy forwards the ``str`` protocol, so a walk would evaluate it and read
-    characters; the family gate (``sets_mixins.py::require_re_readable_field_declaration``)
+    characters; the family gate (``sets_mixins.py::require_field_names``)
     refuses it as a bare string after this read.
     """
     evaluations: list[str] = []

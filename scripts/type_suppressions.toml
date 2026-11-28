@@ -50,7 +50,7 @@
 "django_strawberry_framework/filters/sets.py::FilterSet._routed_leaf_chain" = { cast = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._upstream_filter_for_field" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet._upstream_filter_for_lookup" = { reportArgumentType = 1 }
-"django_strawberry_framework/filters/sets.py::FilterSet.filter_for_field" = { cast = 1, reportArgumentType = 1, reportIncompatibleMethodOverride = 1 }
+"django_strawberry_framework/filters/sets.py::FilterSet.filter_for_field" = { reportIncompatibleMethodOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.filter_for_lookup" = { reportIncompatibleMethodOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.filters" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.get_fields" = { cast = 3, reportIncompatibleMethodOverride = 1 }
