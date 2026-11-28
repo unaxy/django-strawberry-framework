@@ -147,12 +147,16 @@ def test_a_filter_relation_named_like_a_metaclass_attribute_filters_through_a_la
 
 @pytest.mark.django_db
 def test_an_order_relation_named_mro_orders_through_a_later_base() -> None:
-    """``orderBy: [{mro: {code: DESC}}]`` orders branches by their shelf codes, descending."""
+    """``orderBy: [{mro: {code: DESC_NULLS_LAST}}]`` orders branches by their shelf codes, descending.
+
+    ``north`` holds no shelf, so its code is NULL; ``DESC_NULLS_LAST`` places it last on every
+    backend, where a bare ``DESC`` leaves NULL placement to the database.
+    """
     _world()
     schema, _, branch_order = _schema("mro")
     assert list(branch_order.related_orders) == ["mro"]
     assert "mro: ShelfOrderInputType" in str(schema)
-    assert _names(schema, "orderBy: [{ mro: { code: DESC } }, { name: ASC }]") == (
+    assert _names(schema, "orderBy: [{ mro: { code: DESC_NULLS_LAST } }, { name: ASC }]") == (
         _expected(["west", "east", "north"])
     )
 
