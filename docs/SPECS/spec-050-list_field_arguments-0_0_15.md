@@ -865,13 +865,15 @@ For a request carrying any non-null list argument, the color-specific queryset p
    The invariant is therefore stated on the CONNECTION, not on the hint contents. Before the
    public `apply_*` call runs,
    `django_strawberry_framework/utils/querysets.py::_snapshot_routing_intent` freezes a routing
-   record carrying the sealed source's `_db`, a copy of its `_hints`, and the EFFECTIVE ALIAS
-   that state answers to: the source's own `_db` when it is set, otherwise the answer of the
-   same `ConnectionRouter` method Django's own `QuerySet.db` property would use. The accepted
+   record carrying the sealed source's `_db`, its `_hints` (copied for an exact `dict`,
+   otherwise held by identity), and the EFFECTIVE ALIAS that state answers to: the source's
+   own `_db` when it is set, otherwise the answer of the same `ConnectionRouter` method
+   Django's own `QuerySet.db` property would use. The accepted
    result's clone is then PINNED to that frozen alias. Hint comparison remains part of the
    seal (`django_strawberry_framework/utils/querysets.py::_seal_or_defect`: the candidate's
-   `_db` must equal the snapshot's, `None` included, and its hints must equal the snapshot's
-   copy, an absent `None` apart from an empty `{}`), but it is not what carries the
+   `_db` must equal the snapshot's, `None` included, and the two hints must be the same
+   object or both exact `dict` objects with the same keys and values that are the same
+   objects, an absent `None` apart from an empty `{}`), but it is not what carries the
    attestation. It cannot be: a hint value is an arbitrary consumer
    object handed to the router untouched, and a standard `instance` hint is itself mutable, so an
    override can edit state INSIDE a hint it preserves by identity and change the router's answer
@@ -2660,9 +2662,10 @@ routes through:
   hostile `__eq__` / `__repr__`, `None` versus empty hints, and zero consumer dispatch on
   `__getattribute__` (`test_validate_post_orderset_result_*`); the evaluated and combined arms
   assert the message text, not only the exception class;
-- routing intent as a frozen RECORD - `_db`, copied `_hints`, and the effective alias resolved
-  through `ConnectionRouter` - taken before the public apply call: the accepted result is
-  pinned to the alias resolved before a hint could be mutated
+- routing intent as a frozen RECORD - `_db`, `_hints` (copied for an exact `dict`, otherwise
+  held by identity), and the effective alias resolved through `ConnectionRouter` - taken
+  before the public apply call: the accepted result is pinned to the alias resolved before
+  a hint could be mutated
   (`test_routing_intent_pins_the_alias_resolved_before_a_hint_could_be_mutated`), a
   write-marked source resolves through `db_for_write`
   (`test_routing_intent_resolves_a_write_marked_source_through_the_write_router`), a router

@@ -4120,21 +4120,33 @@ class _InstanceHints(dict[str, models.Model]):
 
 
 @pytest.mark.django_db
-def test_holder_branches_order_by_keeps_a_dict_subclass_hints_object_the_source_carries() -> None:
+@pytest.mark.parametrize("using", [None, "default"])
+def test_holder_branches_order_by_keeps_a_dict_subclass_hints_object_the_source_carries(
+    using: str | None,
+) -> None:
     """An ordered source keeps the very hints object ``db_manager(hints=...)`` gave it.
 
     ``QuerySet._clone`` hands a non-empty hints object on as the same object, so the
     shipped ``BranchOrder`` returns a queryset whose hints ARE the source's. The
     post-``OrderSet`` seal holds a hints object that is not an exact ``dict`` by
     reference, and the same object is the same routing intent, so the request is
-    served in the requested order.
+    served in the requested order. An unrouted source passes the exact instance
+    hint to the deployment's router before the result is pinned; an explicit
+    alias needs no router call.
     """
     bravo = library_models.Branch.objects.create(name="Bravo", city="Denver")
     library_models.Branch.objects.create(name="Alpha", city="Austin")
+    routed_instances: list[object] = []
+
+    class _HintRouter:
+        def db_for_read(self, model: type[models.Model], **hints: object) -> str:
+            if model is library_models.Branch:
+                routed_instances.append(hints.get("instance"))
+            return "default"
 
     def _hinted_branches(_root: object, _info: object) -> models.QuerySet[library_models.Branch]:
         manager = library_models.Branch.objects.db_manager(
-            "default",
+            using,
             hints=_InstanceHints(instance=bravo),
         )
         return manager.all()
@@ -4150,10 +4162,15 @@ def test_holder_branches_order_by_keeps_a_dict_subclass_hints_object_the_source_
     payload = _post_sync(
         schema,
         "{ branches(orderBy: [{ city: DESC }]) { name } }",
-        extra_settings=_ERROR_POLICY_PASS_THROUGH,
+        extra_settings={**_ERROR_POLICY_PASS_THROUGH, "DATABASE_ROUTERS": [_HintRouter()]},
     )
 
     assert payload == {"data": {"branches": [{"name": "Bravo"}, {"name": "Alpha"}]}}, payload
+    if using is None:
+        assert len(routed_instances) == 1
+        assert routed_instances[0] is bravo
+    else:
+        assert routed_instances == []
 
 
 class _UpperConverter(NameConverter):

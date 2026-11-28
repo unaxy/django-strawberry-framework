@@ -1590,7 +1590,7 @@ def _snapshot_routing_intent(queryset: models.QuerySet[models.Model]) -> _Routin
     if db is not None:
         return _RoutingIntent(db=db, hints=hints, effective_alias=db)
     resolve = router.db_for_write if for_write else router.db_for_read
-    alias = resolve(model, **(hints if type(hints) is dict else {}))
+    alias = resolve(model, **(hints if hints is not None else {}))
     return _RoutingIntent(db=None, hints=hints, effective_alias=introspection.text(alias))
 
 
