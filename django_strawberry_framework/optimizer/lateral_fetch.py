@@ -93,6 +93,7 @@ from django_strawberry_framework.utils._narrowing import (
     list_of,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.connections import (
     window_range_plan,
@@ -1237,38 +1238,31 @@ def _order_columns(
     return tuple(columns) or None
 
 
-def _selected_cols(queryset: QuerySet[models.Model]) -> tuple[Query, list[Col]] | None:
+def _selected_cols(queryset: QuerySet[models.Model]) -> tuple[Query, list[Col]]:
     """Return Django's selected ``Col``s for ``queryset``'s model and the query that compiled them.
 
     Django computes them: ``Query.get_select_mask`` reads the ``.only()`` /
     ``.defer()`` state and ``SQLCompiler.get_default_columns`` turns the mask
     into the model's selected ``Col``s in concrete-field order (the pk included
     whatever the mask names), joining each multi-table inheritance parent the
-    mask reaches into the returned query's ``alias_map``. ``None`` when a
-    selected expression is not a plain ``Col``; Django's own error propagates
-    for a projection it refuses (an unknown ``.only()`` / ``.defer()`` name).
+    mask reaches into the returned query's ``alias_map``. Django's own error
+    propagates for a projection it refuses (an unknown ``.only()`` / ``.defer()``
+    name).
     """
     query = queryset.query.clone()
     selected = _query_compiler(query, queryset.db).get_default_columns(query.get_select_mask())
-    cols = [column for column in selected if isinstance(column, Col)]
-    if len(cols) != len(selected):
-        return None
-    return query, cols
+    return query, [require_instance(column, Col) for column in selected]
 
 
 def _select_columns(queryset: QuerySet[models.Model]) -> tuple[tuple[str, str], ...] | None:
     """Return the loaded ``(attname, column)`` projection in concrete-field order, or ``None``.
 
     The columns are ``_selected_cols``'s, the ones the windowed body selects for
-    the same queryset. ``None`` when ``_selected_cols`` is or when a
-    selected column lives on a multi-table inheritance parent (its ``Col``
-    carries the parent-link join's alias, which the lateral branch does not
-    join).
+    the same queryset. ``None`` when a selected column lives on a multi-table
+    inheritance parent (its ``Col`` carries the parent-link join's alias, which
+    the lateral branch does not join).
     """
-    compiled = _selected_cols(queryset)
-    if compiled is None:
-        return None
-    query, cols = compiled
+    query, cols = _selected_cols(queryset)
     base_alias = query.get_initial_alias()
     if any(column.alias != base_alias for column in cols):
         return None
@@ -1276,20 +1270,14 @@ def _select_columns(queryset: QuerySet[models.Model]) -> tuple[tuple[str, str], 
     return tuple((column.target.attname, require(column.target.column, is_str)) for column in cols)
 
 
-def _select_projection(
-    queryset: QuerySet[models.Model],
-) -> tuple[tuple[str, str, str], ...] | None:
-    """Return the loaded ``(table, attname, column)`` projection in concrete-field order, or ``None``.
+def _select_projection(queryset: QuerySet[models.Model]) -> tuple[tuple[str, str, str], ...]:
+    """Return the loaded ``(table, attname, column)`` projection in concrete-field order.
 
     The fingerprint of what the windowed body loads for ``queryset``, multi-table
     inheritance parent columns included: each ``Col`` is keyed by the table its
     join alias names, since an alias is per-query state and a table is not.
-    ``None`` only when ``_selected_cols`` is.
     """
-    compiled = _selected_cols(queryset)
-    if compiled is None:
-        return None
-    query, cols = compiled
+    query, cols = _selected_cols(queryset)
     return tuple(
         (
             query.alias_map[column.alias].table_name,

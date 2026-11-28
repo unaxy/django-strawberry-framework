@@ -95,9 +95,8 @@ class SingleParentWindowSpec:
 
     ``select_related`` (the planned child join graph) and ``select_projection``
     (the planned ``(table, attname, column)`` projection Django selects,
-    multi-table inheritance parent columns included, or ``None`` for one Django
-    refuses) freeze the child projection at plan time so
-    ``_fetch_single_parent_rows`` can prove the fetch-time query still loads
+    multi-table inheritance parent columns included) freeze the child projection
+    at plan time so ``_fetch_single_parent_rows`` can prove the fetch-time query still loads
     exactly what the windowed body would before trusting the pristine re-query.
 
     Eligibility pins ``with_total_count`` / ``reverse`` / ``offset`` and the
@@ -112,7 +111,7 @@ class SingleParentWindowSpec:
     parent_link_table: str
     fetch_limit: int
     select_related: bool | dict[str, object]
-    select_projection: tuple[tuple[str, str, str], ...] | None
+    select_projection: tuple[tuple[str, str, str], ...]
 
 
 def single_parent_spec(request: NestedConnectionRequest) -> SingleParentWindowSpec | None:

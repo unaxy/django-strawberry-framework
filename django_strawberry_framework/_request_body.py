@@ -112,7 +112,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING
 
 from . import logger
-from .utils._narrowing import call_method, read_attr
+from .utils._narrowing import call_method, read_attr, require_instance
 
 if TYPE_CHECKING:
     from django.http import HttpRequest
@@ -214,20 +214,17 @@ def _measured_remaining(stream: object) -> int | None:
     ``seek(0, SEEK_END)`` that under-reports (a stream that can report a position
     but not take one) produces it, so ``None`` is returned and the bounded read
     supplies the bound; a genuinely empty body still ends up allowed, by one
-    ``read`` call. A position or end that is not an ``int`` is ``None`` the same
-    way.
+    ``read`` call.
     """
     if hasattr(stream, "seekable") and not call_method(stream, "seekable"):
         return None
     try:
-        position = call_method(stream, "tell")
+        position = require_instance(call_method(stream, "tell"), int)
     except OSError:
         return None
-    if not isinstance(position, int):
-        return None
-    end = call_method(stream, "seek", 0, os.SEEK_END)
+    end = require_instance(call_method(stream, "seek", 0, os.SEEK_END), int)
     _ = call_method(stream, "seek", position)
-    if not isinstance(end, int) or end <= position:
+    if end <= position:
         return None
     return end - position
 

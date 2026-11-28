@@ -352,8 +352,10 @@ def base_queryset(model: type[_ModelT], *, using: str | None = None) -> models.Q
     return manager.using(using).all() if using is not None else manager.all()
 
 
-def _yields_model_rows(value: object) -> TypeGuard[models.QuerySet[models.Model]]:
-    """Whether ``value`` is a ``QuerySet`` whose own ``_iterable_class`` is a ``ModelIterable``.
+def _yields_model_rows(
+    value: models.QuerySet[models.Model, object],
+) -> TypeGuard[models.QuerySet[models.Model]]:
+    """Whether ``value``'s own ``_iterable_class`` is a ``ModelIterable``.
 
     ``QuerySet.__init__`` stores the row iterable on the instance, and a subclass
     ``__init__`` may store another: django-polymorphic's ``PolymorphicModelIterable`` (a
@@ -361,8 +363,6 @@ def _yields_model_rows(value: object) -> TypeGuard[models.QuerySet[models.Model]
     rows). The class alone proves no row type. Read from the instance ``__dict__``, so a
     class-level property dispatches nothing.
     """
-    if not _is_queryset_class(type(value)):
-        return False
     iterable = instance_state(value).get("_iterable_class")
     return is_class(iterable) and issubclass(iterable, ModelIterable)
 
@@ -1311,8 +1311,7 @@ class VisibleRowExists(Exists):
     defines nothing of its own, so every method the compiler dispatches on it is
     Django's ``Exists`` code; it exists as a distinct exact type so the code
     reading an ordering (the ``DjangoListField`` offset guard, the keyset order state)
-    can recognize the framework's test and nothing else. ``_type_is_genuinely_django``
-    admits it by identity beside Django's own classes.
+    can recognize the framework's test and nothing else.
     """
 
 
@@ -1329,12 +1328,8 @@ def _type_is_genuinely_django(node_type: type[object]) -> bool:
     ``__qualname__`` pointing at a genuine name, cannot make
     ``getattr(genuine_django_module, name)`` return another type, so it answers
     ``False``. A dotted (nested) qualname, or a module absent from ``sys.modules``, also
-    answers ``False``. The one framework type admitted beside Django's own is
-    ``VisibleRowExists``, matched by identity: it overrides nothing, so its ``as_sql``
-    is Django's ``Exists`` code. ``__module__`` and ``__qualname__`` are the class's own.
+    answers ``False``. ``__module__`` and ``__qualname__`` are the class's own.
     """
-    if node_type is VisibleRowExists:
-        return True
     module_name = node_type.__module__
     qualname = node_type.__qualname__
     if not module_name.startswith("django."):
@@ -1518,8 +1513,6 @@ def _routing_hints_equal(cand_hints: object, orig_hints: object) -> bool:
     identity, so semantic equality cannot prove equal routing without running
     the router. Identity is the only comparison that proves it without dispatch.
     """
-    if cand_hints is orig_hints:
-        return True
     if not is_exact_dict(cand_hints) or not is_exact_dict(orig_hints):
         return False
     if cand_hints.keys() != orig_hints.keys():
